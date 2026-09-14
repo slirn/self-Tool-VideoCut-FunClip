@@ -1,0 +1,84 @@
+[project]
+name = "funclip"
+version = "0.1.0"
+description = "FunClip fork with private slirn extension for long-video subtitle cleaning pipeline"
+requires-python = ">=3.10,<3.13"
+readme = "README.md"
+dependencies = [
+    "funasr",
+    "moviepy==1.0.3",
+    "torch",
+    "torchaudio",
+    "modelscope",
+    "openai",
+    "g4f",
+    "dashscope",
+    "librosa",
+    "gradio>=4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.1.0",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+extend-exclude = [
+    ".venv",
+    "build",
+    "dist",
+    "*.egg-info",
+    "slirn/output",
+    "slirn/material",
+    # funclip/ 是上游 fork 源码，不在本项目 lint 范围
+    "funclip",
+]
+
+[tool.ruff.lint]
+# 基线规则：覆盖常见错误，但不强制改造旧代码
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+]
+# 兼容 funclip/ 现有风格
+ignore = [
+    "E501",  # line too long
+    "E402",  # module level import not at top (test 用了 sys.path.insert)
+    "F401",  # imported but unused (历史代码)
+]
+
+[tool.ruff.lint.per-file-ignores]
+# 测试文件允许更多灵活性
+"tests/**/*.py" = ["F401"]
+# 旧 skill 脚本暂不强求 except 细化
+"slirn/skill/**/scripts/*.py" = ["E722"]
+# funclip/ 上游代码不强求
+"funclip/**/*.py" = ["F401", "E722", "E501"]
+"funclip/test/*.py" = ["ALL"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["funclip", "slirn"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--tb=short",
+    "--strict-markers",
+    "--disable-warnings",
+]

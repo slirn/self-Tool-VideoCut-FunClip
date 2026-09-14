@@ -21,3 +21,9 @@ slirn/.temp/
 /*.mp4
 /*.srt
 /*.log
+
+# Local skill junctions/symlinks (created by setup-junctions.*, not tracked)
+/.claude/skills/video-*
+/.claude/skills/long-*
+/.claude/skills/course-*
+/.claude/skills/manual-*

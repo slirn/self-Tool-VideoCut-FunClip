@@ -1,0 +1,52 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git:*)",
+      "Bash(python:*)",
+      "Bash(./.venv/Scripts/python.exe:*)",
+      "Bash(./.venv/Scripts/pip.exe:*)",
+      "Bash(ruff:*)",
+      "Bash(./.venv/Scripts/ruff.exe:*)",
+      "Bash(pytest:*)",
+      "Bash(./.venv/Scripts/pytest.exe:*)",
+      "Bash(ffmpeg:*)",
+      "Bash(ffprobe:*)",
+      "Bash(ls:*)",
+      "Bash(dir:*)",
+      "Bash(find:*)",
+      "Bash(grep:*)",
+      "Read(./**)",
+      "Glob(*)",
+      "Grep(*)"
+    ],
+    "deny": [
+      "Bash(rm -rf:*)",
+      "Bash(git push --force:*)",
+      "Bash(git filter-repo:*)",
+      "Bash(git filter-branch:*)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'path=\"$CLAUDE_TOOL_INPUT_FILE_PATH\"; if [[ \"$path\" == *.py ]]; then ./.venv/Scripts/ruff.exe check --quiet \"$path\" 2>&1 || true; fi'"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c './.venv/Scripts/python.exe -m pytest tests/ --tb=line -q 2>&1 || true'"
+          }
+        ]
+      }
+    ]
+  }
+}
