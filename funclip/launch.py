@@ -26,7 +26,30 @@ if __name__ == "__main__":
     parser.add_argument('--share', '-s', action='store_true', help="if to establish gradio share link")
     parser.add_argument('--port', '-p', type=int, default=7860, help='port number')
     parser.add_argument('--listen', action='store_true', help="if to listen to all hosts")
+    parser.add_argument('--home', type=str, default="original", choices=["original", "slirn"], help="which home page to launch: original (upstream FunClip) or slirn (custom home)")
     args = parser.parse_args()
+
+    # ---- Slirn 自定义首页分支（REQ-20260914-001-B）----
+    if args.home == "slirn":
+        import sys
+        from pathlib import Path
+        # 把 funclip-main 仓库根加到 sys.path（slirn_home 在那里）
+        funclip_main_root = Path(__file__).resolve().parent.parent
+        if str(funclip_main_root) not in sys.path:
+            sys.path.insert(0, str(funclip_main_root))
+        from slirn_home import build_app
+        slirn_app = build_app()
+        # slirn 首页默认端口 7861（D6：与上游首页端口分离）
+        slirn_port = args.port if args.port != 7860 else 7861
+        server_name = '0.0.0.0' if args.listen else '127.0.0.1'
+        slirn_app.launch(
+            share=args.share,
+            server_port=slirn_port,
+            server_name=server_name,
+            inbrowser=False if args.listen else True,
+            theme=gr.themes.Soft(),
+        )
+        sys.exit(0)
     
     if args.lang == 'zh':
         if hasattr(args, 'model') and args.model == 'fun-asr-nano':
