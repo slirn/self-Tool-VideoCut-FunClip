@@ -233,7 +233,7 @@ def build_create_task_components(mgr: TaskManager) -> dict:
         gr.Markdown("**📝 任务信息**")
         task_name_box = gr.Textbox(label="任务名（留空 = 用文件名）", placeholder="")
 
-        gr.Markdown("**🔥 任务级热词**（手动输入，**多词用空格或换行分隔**；公共热词库选择见 REQ-D）")
+        gr.Markdown("**🔥 任务级热词**（手动输入 + 可从公共库挑选）")
         hotwords_box = gr.Textbox(
             label="热词",
             placeholder="例如：FunASR 张老师",
@@ -284,3 +284,19 @@ def build_create_task_components(mgr: TaskManager) -> dict:
         "create_btn": create_btn,
         "cancel_btn": cancel_btn,
     }
+
+
+def build_picker_after(mgr: TaskManager, hotwords_box) -> dict:
+    """在 create_task 主组件构造完毕后，由 app.py 调用 — 在 root_col 内插入「从公共库选择」面板。
+
+    Args:
+        mgr: TaskManager
+        hotwords_box: 上面已构造的任务热词 Textbox（用于接收选中词）
+
+    Returns:
+        dict 含 picker 组件 key
+    """
+    from slirn_home.hotword_ui import build_hotword_picker_components
+
+    repo_root = mgr.repo_root
+    return build_hotword_picker_components(repo_root, hotwords_box)

@@ -6,7 +6,8 @@ from pathlib import Path
 
 import gradio as gr
 
-from slirn_home.create_task import build_create_task_components
+from slirn_home.create_task import build_create_task_components, build_picker_after
+from slirn_home.hotword_ui import build_hotword_library_components
 from slirn_home.paths import ensure_tasklib_importable
 from slirn_home.task_list import (
     cancel_delete,
@@ -88,6 +89,12 @@ def build_app(repo_root: Path | None = None) -> gr.Blocks:
             # ===== Tab 2: 新建任务（REQ-C）=====
             with gr.TabItem("➕ 新建任务", id="create"):
                 create_components = build_create_task_components(mgr)
+                # 在 create_task 主组件构造完毕后，插入「从公共库选择」面板（REQ-D）
+                build_picker_after(mgr, create_components["hotwords_box"])
+
+            # ===== Tab 3: 热词库管理（REQ-D）=====
+            with gr.TabItem("📚 热词库管理", id="hotwords"):
+                build_hotword_library_components(repo_root)
 
         # ---------- 事件绑定 ----------
 
