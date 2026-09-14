@@ -1,4 +1,4 @@
-"""Gradio Blocks 构造 — REQ-B §3.1 / §3.2 / §3.5。"""
+"""Gradio Blocks 构造 — REQ-B §3.1 / §3.2 / §3.5 + REQ-C 集成。"""
 
 from __future__ import annotations
 
@@ -6,9 +6,9 @@ from pathlib import Path
 
 import gradio as gr
 
+from slirn_home.create_task import build_create_task_components
 from slirn_home.paths import ensure_tasklib_importable
 from slirn_home.task_list import (
-    arm_delete,
     cancel_delete,
     confirm_delete,
     placeholder_action,
@@ -52,12 +52,14 @@ def build_app(repo_root: Path | None = None) -> gr.Blocks:
 
         status_msg = gr.Markdown("")
 
-        with gr.Row():
-            refresh_btn = gr.Button("🔄 刷新任务列表", variant="secondary")
-            new_task_btn = gr.Button("➕ 新建任务（REQ-C）", variant="primary")
-
-        with gr.Tabs():
+        tabs = gr.Tabs()
+        with tabs:
+            # ===== Tab 1: 任务列表 =====
             with gr.TabItem("📋 任务列表", id="tasks"):
+                with gr.Row():
+                    refresh_btn = gr.Button("🔄 刷新任务列表", variant="secondary")
+                    new_task_btn = gr.Button("➕ 新建任务", variant="primary")
+
                 task_df = gr.Dataframe(
                     headers=["ID", "任务名", "视频", "状态", "创建", "修改"],
                     interactive=False,
@@ -83,6 +85,10 @@ def build_app(repo_root: Path | None = None) -> gr.Blocks:
                 with gr.Accordion("任务详情", open=False, visible=False) as detail_acc:
                     detail_md = gr.Markdown("")
 
+            # ===== Tab 2: 新建任务（REQ-C）=====
+            with gr.TabItem("➕ 新建任务", id="create"):
+                create_components = build_create_task_components(mgr)
+
         # ---------- 事件绑定 ----------
 
         def on_refresh():
@@ -95,16 +101,17 @@ def build_app(repo_root: Path | None = None) -> gr.Blocks:
             outputs=[task_df, task_meta, status_msg],
         )
 
-        def on_new_task():
-            return "⏳ 新建任务功能在 REQ-20260914-001-C 实现"
+        # 「新建任务」按钮（在任务列表 tab）→ 切到 create tab
+        def go_to_create_tab():
+            return gr.Tabs(selected="create")
 
         new_task_btn.click(
-            fn=on_new_task,
+            fn=go_to_create_tab,
             inputs=[],
-            outputs=[status_msg],
+            outputs=[tabs],
         )
 
-        # 查看详情（D4）
+        # 查看详情
         def on_view(task_id: str):
             if not task_id.strip():
                 return gr.update(visible=False), "⚠️ 请先在「选中的任务 ID」中输入 ID"
@@ -117,11 +124,9 @@ def build_app(repo_root: Path | None = None) -> gr.Blocks:
             outputs=[detail_acc, detail_md],
         )
 
-        # 删除（D5：单一绑定 + 状态判断 — 双步确认）
+        # 删除（双步确认）
         def on_delete_click(task_id: str, current_btn_text: str):
-            """第一次点击 → arm；第二次点击（按钮文字变成 _DELETE_ARMED）→ 确认。"""
             if current_btn_text == _DELETE_ARMED:
-                # 确认删除
                 if not task_id.strip():
                     rows, meta = render_task_list(mgr)
                     return (
@@ -137,7 +142,6 @@ def build_app(repo_root: Path | None = None) -> gr.Blocks:
                     gr.update(value="", visible=not cancel_vis),
                 )
             else:
-                # 第一次点击：arm
                 return (
                     *render_task_list(mgr)[0:2],
                     "",
@@ -151,7 +155,6 @@ def build_app(repo_root: Path | None = None) -> gr.Blocks:
             outputs=[task_df, task_meta, status_msg, delete_btn, cancel_btn],
         )
 
-        # 取消删除
         def on_cancel_delete():
             return (
                 gr.update(value=_DELETE_IDLE),
@@ -165,7 +168,7 @@ def build_app(repo_root: Path | None = None) -> gr.Blocks:
             outputs=[delete_btn, cancel_btn, status_msg],
         )
 
-        # 占位按钮（REQ-C/D 实现）
+        # 占位按钮
         for btn, feature in [
             (start_btn, "开始剪辑"),
             (pause_btn, "暂停剪辑"),
@@ -177,6 +180,56 @@ def build_app(repo_root: Path | None = None) -> gr.Blocks:
                 inputs=[],
                 outputs=[status_msg],
             )
+
+        # 新建任务 tab 内的事件
+        cc = create_components
+        create_btn = cc["create_btn"]
+        cancel_create_btn = cc["cancel_btn"]
+
+        def on_create_and_return_to_list(
+            fp, tn, s, e, pv, hw,
+        ):
+            """创建任务 + 自动切回任务列表 + 刷新。"""
+            from slirn_home.create_task import on_create_task
+
+            rows, meta, msg = on_create_task(fp, tn, s, e, pv, hw, repo_root)
+            return rows, meta, msg, gr.Tabs(selected="tasks")
+
+        create_btn.click(
+            fn=on_create_and_return_to_list,
+            inputs=[
+                cc["file_input"], cc["task_name_box"], cc["start_box"], cc["end_box"],
+                cc["preview_video"], cc["hotwords_box"],
+            ],
+            outputs=[task_df, task_meta, status_msg, tabs],
+        )
+
+        def on_cancel_create():
+            """取消并清空表单 + 切回任务列表。"""
+            rows, meta = render_task_list(mgr)
+            return (
+                rows, meta,
+                None,      # file_input
+                "",        # task_name
+                "",        # start
+                "",        # end
+                None,      # preview_video
+                "",        # hotwords
+                "",        # file_info
+                "已取消",
+                gr.Tabs(selected="tasks"),
+            )
+
+        cancel_create_btn.click(
+            fn=on_cancel_create,
+            inputs=[],
+            outputs=[
+                task_df, task_meta,
+                cc["file_input"], cc["task_name_box"], cc["start_box"], cc["end_box"],
+                cc["preview_video"], cc["hotwords_box"],
+                cc["file_info"], status_msg, tabs,
+            ],
+        )
 
         # 初始加载
         app.load(
