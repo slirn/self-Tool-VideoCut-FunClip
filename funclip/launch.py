@@ -158,8 +158,21 @@ if __name__ == "__main__":
             add_sub=True, dest_spk=video_spk_input, output_dir=output_dir
             )
         
-    def llm_inference(system_content, user_content, srt_text, model, apikey):
+    def llm_inference(system_content, user_content, srt_text, model, apikey, video_state=None, audio_state=None):
         SUPPORT_LLM_PREFIX = ['qwen', 'gpt', 'g4f', 'moonshot', 'deepseek']
+        # Dynamically calculate video/audio duration from state
+        duration_minutes = 0
+        if video_state is not None and 'video' in video_state:
+            duration_minutes = round(video_state['video'].duration / 60, 1)
+        elif audio_state is not None and 'audio_input' in audio_state:
+            sr, data = audio_state['audio_input']
+            duration_minutes = round(len(data) / sr / 60, 1)
+
+        # Append actual video duration to prompt
+        if duration_minutes > 0:
+            duration_note = f"\n\n【重要】当前视频的实际时长为 {duration_minutes} 分钟，请根据此实际时长生成符合要求的输出（要求不低于 {int(duration_minutes * 0.5)} 分钟）。"
+            system_content = system_content + duration_note
+
         if model.startswith('qwen'):
             return call_qwen_model(apikey, model, user_content+'\n'+srt_text, system_content)
         if model.startswith('gpt') or model.startswith('moonshot') or model.startswith('deepseek'):
@@ -325,7 +338,7 @@ if __name__ == "__main__":
                                    ], 
                            outputs=[video_output, clip_message, srt_clipped])
         llm_button.click(llm_inference,
-                         inputs=[prompt_head, prompt_head2, video_srt_output, llm_model, apikey_input],
+                         inputs=[prompt_head, prompt_head2, video_srt_output, llm_model, apikey_input, video_state, audio_state],
                          outputs=[llm_result])
         llm_clip_button.click(AI_clip, 
                            inputs=[llm_result,
