@@ -1,6 +1,23 @@
+# Python
 *.pyc
 **/.DS_Store
-ClipVideo/clipvideo/output
 **/__pycache__/
 *.spec
+
+# Virtual env
 .venv
+
+# Gradio runtime artifacts
+.gradio/
+*.pem
+
+# Output directories (generated pipeline artifacts)
+ClipVideo/clipvideo/output
+slirn/output/
+slirn/.temp/
+
+# Root-level generated artifacts (moviepy temp cuts, ffmpeg temp)
+# Source materials under slirn/material/ are NOT excluded.
+/*.mp4
+/*.srt
+/*.log
