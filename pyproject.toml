@@ -32,8 +32,9 @@ extend-exclude = [
     "build",
     "dist",
     "*.egg-info",
-    "slirn/output",
-    "slirn/material",
+    # slirn/ 是独立仓库（submodule），不在本项目 lint 范围
+    # 该仓库有自己的代码规范；要去那里改
+    "slirn",
     # funclip/ 是上游 fork 源码，不在本项目 lint 范围
     "funclip",
 ]
