@@ -1,0 +1,3 @@
+[submodule "slirn"]
+	path = slirn
+	url = D:/Slirn/WorkSpaces/WaytoAGI/ALI/slirn-standalone
