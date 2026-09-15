@@ -269,9 +269,11 @@ footer { display: none !important; }
 }
 
 /* ============ 任务列表（卡片视图，非 Dataframe） ============ */
+/* 最小宽度 340px：保证底部 4 个操作按钮（详情/编辑/剪辑/删除）一行放下不折行
+   （REQ-20260915-009，实测按钮行 ~290px + 卡片左右 padding 32px） */
 .slirn-task-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
   gap: 16px;
 }
 .slirn-task-card {
@@ -357,6 +359,11 @@ footer { display: none !important; }
   margin-top: 12px;
   padding-top: 12px;
   border-top: 1px solid var(--border);
+  flex-wrap: nowrap;  /* 按钮一行放下（REQ-20260915-009） */
+}
+.slirn-task-actions .slirn-btn {
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 /* ============ 工具栏（搜索 + 筛选 + 操作） ============ */
