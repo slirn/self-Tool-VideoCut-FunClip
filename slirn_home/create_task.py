@@ -9,15 +9,17 @@ from pathlib import Path
 
 import gradio as gr
 
+# 确保 tasklib 可导入（必须在 from slirn_home.task_list import 之前调用，
+# 因为 task_list.py 顶层有 from tasklib import ...）
 from slirn_home.paths import ensure_tasklib_importable
-from slirn_home.task_list import render_task_list
 
-# 在 tasklib/video import 前确保 path 就位
-_ensure = ensure_tasklib_importable
+ensure_tasklib_importable()
 
 from tasklib import TaskManager, TimeSegment, VideoProcessingError  # noqa: E402
 from tasklib.time_utils import segment_filename  # noqa: E402
 from tasklib.video import get_video_duration  # noqa: E402
+
+from slirn_home.task_list import render_task_list
 
 log = logging.getLogger(__name__)
 
@@ -217,6 +219,26 @@ def build_create_task_components(mgr: TaskManager) -> dict:
         )
         file_info = gr.Markdown("")
 
+        # 视频播放器 + 时间标尺
+        gr.Markdown("**🎥 视频预览**（拖动下方滑块定位到要截取的位置）")
+        player_video = gr.Video(
+            label="源视频",
+            visible=False,
+            interactive=False,
+        )
+        with gr.Row():
+            set_start_btn = gr.Button("⏱ 设为开始", variant="secondary")
+            set_end_btn = gr.Button("⏱ 设为结束", variant="secondary")
+            seek_slider = gr.Slider(
+                minimum=0,
+                maximum=600,
+                step=0.1,
+                value=0,
+                label="当前时间（秒）",
+                interactive=True,
+            )
+        time_msg = gr.Markdown("")
+
         # 时间截取
         gr.Markdown("**⏱ 时间截取**（留空 = 不截取，使用完整视频）")
         with gr.Row():
@@ -225,8 +247,8 @@ def build_create_task_components(mgr: TaskManager) -> dict:
         with gr.Row():
             cut_btn = gr.Button("🎬 截取预览", variant="secondary")
 
-        gr.Markdown("**🎥 预览**（截取后显示）")
-        preview_video = gr.Video(label="截取预览", visible=False)
+        gr.Markdown("**🎬 截取预览**（截取后显示）")
+        preview_video = gr.Video(label="截取段预览", visible=False)
         cut_msg = gr.Markdown("")
 
         # 任务元数据
@@ -246,16 +268,51 @@ def build_create_task_components(mgr: TaskManager) -> dict:
 
     # ---------- 事件绑定 ----------
 
-    file_input.upload(
-        fn=lambda fp: on_upload_video(fp, repo_root),
-        inputs=[file_input],
-        outputs=[file_info, cut_msg],
-    )
+    def on_file_selected(fp):
+        """上传后：显示文件信息 + 加载播放器 + 把 slider 最大值设为视频时长。"""
+        info, msg = on_upload_video(fp, repo_root)
+        duration = get_video_duration(Path(fp)) if fp else 0
+        max_t = max(duration, 0.1) if duration else 600
+        # 把 duration 缓存到 gr.State 由 time_msg 显示
+        dur_str = f"视频时长：{int(duration // 60):02d}:{int(duration % 60):02d}" if duration else ""
+        # player_video 显式赋值（Gradio 6 需要这样触发加载）
+        return (
+            info,
+            gr.update(value=fp, visible=True) if fp else gr.update(visible=False),
+            gr.update(maximum=max_t, value=0),
+            dur_str,
+            msg,
+        )
 
     file_input.change(
-        fn=lambda fp: on_upload_video(fp, repo_root),
+        fn=on_file_selected,
         inputs=[file_input],
-        outputs=[file_info, cut_msg],
+        outputs=[file_info, player_video, seek_slider, time_msg, cut_msg],
+    )
+
+    file_input.upload(
+        fn=on_file_selected,
+        inputs=[file_input],
+        outputs=[file_info, player_video, seek_slider, time_msg, cut_msg],
+    )
+
+    def on_set_start(seconds: float):
+        """把滑块当前秒数格式化为 HH:MM:SS.mmm 填到开始时间框。"""
+        return _seconds_to_hms(seconds), f"✅ 开始时间已设为 {_seconds_to_hms(seconds)}"
+
+    def on_set_end(seconds: float):
+        return _seconds_to_hms(seconds), f"✅ 结束时间已设为 {_seconds_to_hms(seconds)}"
+
+    set_start_btn.click(
+        fn=on_set_start,
+        inputs=[seek_slider],
+        outputs=[start_box, time_msg],
+    )
+
+    set_end_btn.click(
+        fn=on_set_end,
+        inputs=[seek_slider],
+        outputs=[end_box, time_msg],
     )
 
     cut_btn.click(
@@ -264,16 +321,18 @@ def build_create_task_components(mgr: TaskManager) -> dict:
         outputs=[preview_video, cut_msg, start_box, end_box],
     )
 
-    create_btn.click(
-        fn=lambda fp, tn, s, e, pv, hw: on_create_task(fp, tn, s, e, pv, hw, repo_root),
-        inputs=[file_input, task_name_box, start_box, end_box, preview_video, hotwords_box],
-        outputs=[],  # 由 app.py 在 switch tab 时重新拉取列表
-    )
+    # 注意：create_btn 的事件不在这里绑定（app.py 已绑定 on_create_and_return_to_list）
+    # 这里绑定会导致事件覆盖，且 app.py 的 outputs 不会被填充
 
     return {
         "root_col": root_col,
         "file_input": file_input,
         "file_info": file_info,
+        "player_video": player_video,
+        "seek_slider": seek_slider,
+        "set_start_btn": set_start_btn,
+        "set_end_btn": set_end_btn,
+        "time_msg": time_msg,
         "start_box": start_box,
         "end_box": end_box,
         "cut_btn": cut_btn,
@@ -284,6 +343,18 @@ def build_create_task_components(mgr: TaskManager) -> dict:
         "create_btn": create_btn,
         "cancel_btn": cancel_btn,
     }
+
+
+def _seconds_to_hms(seconds: float) -> str:
+    """把秒数格式化为 HH:MM:SS.mmm（与 time_utils 一致）。"""
+    if seconds is None or seconds < 0:
+        return ""
+    # 用整数毫秒避免浮点误差
+    ms_total = int(round(seconds * 1000))
+    hh, rem = divmod(ms_total, 3600 * 1000)
+    mm, rem = divmod(rem, 60 * 1000)
+    ss, ms = divmod(rem, 1000)
+    return f"{hh:02d}:{mm:02d}:{ss:02d}.{ms:03d}"
 
 
 def build_picker_after(mgr: TaskManager, hotwords_box) -> dict:

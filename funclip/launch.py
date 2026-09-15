@@ -37,18 +37,64 @@ if __name__ == "__main__":
         funclip_main_root = Path(__file__).resolve().parent.parent
         if str(funclip_main_root) not in sys.path:
             sys.path.insert(0, str(funclip_main_root))
-        from slirn_home import build_app
+        from slirn_home import build_app, slirn_home_static_css, _register_slirn_api
+        # Monkey-patch httpx.get — Gradio 6 在 launch() 末尾做 startup-events 自检，
+        # Windows 上 httpx 连自己 (127.0.0.1) 会偶发失败并 timeout=None 永久阻塞。
+        # 用假响应绕过这个自检，让 launch(prevent_thread_lock=True) 能正常返回。
+        import httpx as _httpx
+        _orig_get = _httpx.get
+        class _FakeResp:
+            is_success = True
+            status_code = 200
+            url = "http://127.0.0.1/startup-events"
+        def _patched_get(url, *a, **kw):
+            if "startup-events" in str(url):
+                return _FakeResp()
+            return _orig_get(url, *a, **kw)
+        _httpx.get = _patched_get
+
         slirn_app = build_app()
         # slirn 首页默认端口 7861（D6：与上游首页端口分离）
         slirn_port = args.port if args.port != 7860 else 7861
         server_name = '0.0.0.0' if args.listen else '127.0.0.1'
-        slirn_app.launch(
-            share=args.share,
-            server_port=slirn_port,
-            server_name=server_name,
-            inbrowser=False if args.listen else True,
-            theme=gr.themes.Soft(),
-        )
+        # Gradio 6 在 launch() 内部会用 App.create_app(...) 重建 self.app，
+        # build_app() 里注册的 /slirn/api/* 路由会被丢弃。
+        # 用 prevent_thread_lock=True 让 launch() 立刻返回，然后我们在新的 self.app 上重新注册路由。
+        try:
+            slirn_app.launch(
+                share=args.share,
+                server_port=slirn_port,
+                server_name=server_name,
+                inbrowser=False if args.listen else True,
+                theme=gr.themes.Soft(),
+                css=slirn_home_static_css(),
+                # 不再传 head= — Gradio 6.17.3 的 launch(head=...) 不会渲染到页面 <head>。
+                # JS 注入改在 gr.HTML 组件的 head= 参数上（见 slirn_home/app.py build_app）。
+                prevent_thread_lock=True,
+            )
+            # launch() 已重新创建 app — 在新 app 上重新注册 /slirn/api/* 路由
+            from slirn_home.paths import find_slirn_standalone_root as _find_root
+            from tasklib import TaskManager as _TM
+            _mgr = _TM(_find_root())
+            _register_slirn_api(slirn_app, _mgr, _find_root())
+            print(f"[slirn] custom /slirn/api/* routes re-registered on live app", flush=True)
+            import time
+            while True:
+                time.sleep(3600)
+        except Exception as e:
+            print(f"[slirn] launch 自检失败但服务可能仍在运行: {e}", flush=True)
+            # 即使 launch() 抛错，uvicorn 已经在后台跑 — 重新注册路由
+            try:
+                from slirn_home.paths import find_slirn_standalone_root as _find_root
+                from tasklib import TaskManager as _TM
+                _mgr = _TM(_find_root())
+                _register_slirn_api(slirn_app, _mgr, _find_root())
+                print(f"[slirn] custom /slirn/api/* routes re-registered (recovery path)", flush=True)
+            except Exception as e2:
+                print(f"[slirn] re-register failed: {e2}", flush=True)
+            import time
+            while True:
+                time.sleep(3600)
         sys.exit(0)
     
     if args.lang == 'zh':
