@@ -354,33 +354,40 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
             <button class="slirn-btn slirn-btn-primary" data-action="revise-subtitle" data-task-id="{_esc(task_id)}">🤖 大模型分析字幕</button>
         </div></div>'''
 
-    # ---- 状态 3：建议列表（每行 = 原字幕 + 模型建议 + 手动决策）----
+    # ---- 状态 3：建议列表（行式与字幕生成列表一致：序号|时间|文本+徽章|决策；
+    #      模型分析/建议保留/手动说明收进每行可展开的详情块 — REQ-20260916-002）----
     rows = ""
     for e in entries:
         cat = e.get("category", "review")
         cat_label = dict(revision_service.LLM_CATEGORIES).get(cat, ("人工复核",))[0]
+        decision = e.get("decision", "pending")
+        # 需要人工关注或已有手动说明的行默认展开，其余收起保持列表紧凑
+        open_detail = cat == "review" or bool(e.get("user_note"))
+        opts = "".join(
+            f'<option value="{k}"{" selected" if decision == k else ""}>{v}</option>'
+            for k, v in revision_service.USER_DECISIONS.items()
+        )
         keep_html = (
             f'<div class="slirn-rev-keeptext">✂️ 建议保留：「{_esc(e.get("keep_text") or "")}」</div>'
             if cat == "split" and e.get("keep_text") else ""
         )
-        opts = "".join(
-            f'<option value="{k}"{" selected" if e.get("decision", "pending") == k else ""}>{v}</option>'
-            for k, v in revision_service.USER_DECISIONS.items()
-        )
         rows += (
-            f'<div class="slirn-rev-row" data-task-id="{_esc(task_id)}"'
+            f'<div class="slirn-rev-row{" open" if open_detail else ""}" data-task-id="{_esc(task_id)}"'
             f' data-start-ms="{int(e.get("start_ms", 0))}" data-end-ms="{int(e.get("end_ms", 0))}">'
-            f'<div class="slirn-rev-orig">'
+            f'<div class="slirn-rev-line">'
             f'<span class="slirn-sub-idx">{int(e["i"])}</span>'
             f'<span class="slirn-sub-time">{_esc(e.get("start", ""))} → {_esc(e.get("end", ""))}</span>'
-            f'<span class="slirn-sub-text">{_esc(e.get("text", ""))}</span></div>'
-            f'<div class="slirn-rev-suggest"><span class="slirn-rev-badge {cat}">{cat_label}</span>'
-            f'<span class="slirn-rev-note">{_esc(e.get("note", ""))}</span>{keep_html}</div>'
-            f'<div class="slirn-rev-decide">'
-            f'<select class="slirn-rev-select" data-i="{int(e["i"])}">{opts}</select>'
+            f'<span class="slirn-sub-text"><span class="slirn-rev-badge {cat}">{cat_label}</span>'
+            f'{_esc(e.get("text", ""))}</span>'
+            f'<select class="slirn-rev-select" data-i="{int(e["i"])}" title="处理决策">{opts}</select>'
+            f'<button class="slirn-rev-toggle" data-action="rev-detail" data-i="{int(e["i"])}"'
+            f' title="展开/收起模型分析与处理说明">{"▴" if open_detail else "▾"}</button>'
+            f'</div>'
+            f'<div class="slirn-rev-detail">'
+            f'<div class="slirn-rev-note">🤖 {_esc(e.get("note", ""))}</div>{keep_html}'
             f'<input class="slirn-rev-note-input" data-i="{int(e["i"])}"'
-            f' placeholder="手动处理说明（可空）" value="{_esc(e.get("user_note") or "")}" /></div>'
-            f"</div>"
+            f' placeholder="手动处理说明（可空）" value="{_esc(e.get("user_note") or "")}" />'
+            f'</div></div>'
         )
 
     n = len(entries)
@@ -393,7 +400,7 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
         f"📝 {n} 段 · 分析于 {created} · 模型 {model} · "
         f"保留 {cat_counts.get('keep', 0)} / 删除 {cat_counts.get('delete', 0)} / "
         f"切分 {cat_counts.get('split', 0)} / 复核 {cat_counts.get('review', 0)}"
-        f" · ✅ 已决策 <b>{decided}/{n}</b> · 点击行定位播放"
+        f" · ✅ 已决策 <b>{decided}/{n}</b> · 点击行定位播放 · ▾ 展开模型分析与处理说明"
     )
 
     return f'''<div class="slirn-card" style="margin-top:16px;">
@@ -658,6 +665,8 @@ def _render_workbench(task_id: str, mgr: TaskManager) -> str:
         <div class="slirn-panel-header">
             <div class="slirn-panel-title">✂️ 剪辑工作台 · {_esc(t.name)}</div>
             <div>
+                <button class="slirn-btn slirn-btn-sm slirn-wb-stages-expand" data-action="wb-toggle-stages"
+                        title="展开左侧阶段列表">🧭 展开阶段</button>
                 <button class="slirn-btn slirn-btn-sm" data-action="edit-task" data-task-id="{_esc(task_id)}">✏️ 编辑任务</button>
                 <button class="slirn-btn slirn-btn-sm" data-action="goto-tasks">📋 返回列表</button>
             </div>
@@ -665,7 +674,12 @@ def _render_workbench(task_id: str, mgr: TaskManager) -> str:
         {top_rows}
     </div>
     <div class="slirn-wb-main">
-        <div class="slirn-card slirn-wb-stages">{stage_items}</div>
+        <div class="slirn-card slirn-wb-stages">
+            <div class="slirn-wb-stages-head"><span class="slirn-wb-stages-title">🧭 阶段</span>
+                <button class="slirn-btn-mini" data-action="wb-toggle-stages"
+                        title="收起阶段列表，加宽右侧工作区">« 收起</button></div>
+            {stage_items}
+        </div>
         <div class="slirn-wb-panes">{pane_html}</div>
     </div>
     </div>'''
@@ -1521,10 +1535,20 @@ ROUTER_JS = """
         window.scrollTo({top: 0, behavior: 'smooth'});
         bindSubPlayer();
         bindRevPlayer();
+        applyWbStagesState();  // 恢复上次收起/展开（跨刷新保持 — REQ-20260916-002）
       } else if (r && r.error) {
         toast('❌ ' + r.error, 'error');
       }
     });
+  }
+
+  // ===== 阶段列表收起/展开（localStorage 记忆 — REQ-20260916-002）=====
+  function applyWbStagesState() {
+    var host = document.getElementById('slirn-tab-workbench-inner');
+    if (!host) return;
+    var collapsed = '';
+    try { collapsed = localStorage.getItem('slirnWbStagesCollapsed') || ''; } catch (err) {}
+    host.classList.toggle('wb-stages-collapsed', collapsed === '1');
   }
 
   function switchWbPane(paneKey) {
@@ -1730,9 +1754,9 @@ ROUTER_JS = """
       return;
     }
 
-    // 修订行点击定位播放（select/input/button 上的点击不触发）
+    // 修订行点击定位播放（select/input/button 与详情块上的点击不触发）
     var revRow = e.target.closest('.slirn-rev-row');
-    if (revRow && !e.target.closest('select, input, button, a')) {
+    if (revRow && !e.target.closest('select, input, button, a, .slirn-rev-detail')) {
       e.preventDefault();
       var tidR = revRow.getAttribute('data-task-id') || '';
       var startMsR = parseInt(revRow.getAttribute('data-start-ms'), 10) || 0;
@@ -1827,6 +1851,21 @@ ROUTER_JS = """
             toast('❌ ' + r.error, 'error');
           }
         });
+    }
+    else if (action === 'wb-toggle-stages') {
+      var hostW = document.getElementById('slirn-tab-workbench-inner');
+      if (hostW) {
+        var nowCollapsed = !hostW.classList.contains('wb-stages-collapsed');
+        hostW.classList.toggle('wb-stages-collapsed', nowCollapsed);
+        try { localStorage.setItem('slirnWbStagesCollapsed', nowCollapsed ? '1' : '0'); } catch (err) {}
+      }
+    }
+    else if (action === 'rev-detail') {
+      var rowD = target.closest('.slirn-rev-row');
+      if (rowD) {
+        var opened = rowD.classList.toggle('open');
+        target.textContent = opened ? '▴' : '▾';
+      }
     }
     else if (action === 'open-llm-settings') {
       openLLMSettings();

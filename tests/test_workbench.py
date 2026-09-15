@@ -180,3 +180,19 @@ def test_render_workbench_missing_task(tmp_path: Path):
 
     html = _render_workbench("20990101-001", _make_mgr(tmp_path)[0])
     assert "任务不存在" in html
+
+
+def test_render_workbench_stages_collapse_controls(tmp_path: Path):
+    """REQ-20260916-002 — 阶段列表可折叠：阶段卡内「« 收起」+ 顶部「🧭 展开阶段」（默认 CSS 隐藏）。"""
+    from slirn_home.app import _render_workbench
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="折叠", original_video=video)
+    html = _render_workbench(t.task_id, m)
+    assert 'class="slirn-wb-stages-head"' in html
+    # 两处开关：阶段卡头部收起 + 顶栏展开（展开按钮只在收起后由 CSS 显示）
+    assert html.count('data-action="wb-toggle-stages"') == 2
+    assert "« 收起" in html and "🧭 展开阶段" in html
+    assert "slirn-wb-stages-expand" in html
+    # 阶段条目不受影响
+    assert html.count('class="slirn-wb-stage ') == 8

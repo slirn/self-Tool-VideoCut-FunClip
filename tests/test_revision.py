@@ -496,7 +496,7 @@ def test_render_revision_zone_states(tmp_path: Path, monkeypatch):
     assert "整行删除" in h2 and "完整保留" in h2 and "切分修剪" in h2 and "人工复核" in h2
     assert "qwen-max" in h2, "状态2提示应显示当前生效模型"
 
-    # 状态 3：有建议 → 每行 原字幕+建议+决策（AC-3）
+    # 状态 3：有建议 → 行式列表（与字幕生成列表同列布局 — REQ-20260916-002）
     outputs = m.tasks_dir / tid / "outputs"
     (outputs / "revision.json").write_text(json.dumps({
         "version": 1, "model": "qwen-plus", "created_at": "2026-09-15T10:00:00",
@@ -515,16 +515,26 @@ def test_render_revision_zone_states(tmp_path: Path, monkeypatch):
     }, ensure_ascii=False), encoding="utf-8")
     h3 = _render_revision_zone(tid, m.get(tid), m)
     assert 'id="slirn-rev-list"' in h3
-    assert h3.count('class="slirn-rev-row"') == 3
-    assert h3.count("slirn-rev-badge") >= 3
-    assert 'slirn-rev-badge split">切分修剪' in h3
+    # 主行 ×3：序号|时间|文本+徽章|决策下拉|展开钮 同一行
+    assert h3.count("slirn-rev-line") == 3
+    assert h3.count("slirn-rev-row") == 3
+    # 有手动说明的行默认展开，其余收起（保持列表紧凑）
+    assert h3.count('class="slirn-rev-row open"') == 1
+    assert h3.count('class="slirn-rev-row"') == 2
+    assert h3.count(">▴</button>") == 1 and h3.count(">▾</button>") == 2
+    # 徽章内联在文本前，与字幕列表列对齐
+    assert 'slirn-rev-badge split">切分修剪</span>嗯嗯大家好' in h3
+    # 详情块：模型分析 + 建议保留 + 手动说明输入（点 ▾ 展开）
+    assert '<div class="slirn-rev-note">🤖 「嗯」为语气词</div>' in h3
     assert "建议保留：「大家好」" in h3
+    assert h3.count('data-action="rev-detail"') == 3
     # 手动决策下拉 ×3 + 手动说明输入 ×3（预填已保存的决策）
     assert h3.count('class="slirn-rev-select" data-i=') == 3
     assert h3.count('class="slirn-rev-note-input" data-i=') == 3
     assert '<option value="accept" selected>采纳建议</option>' in h3
     assert 'value="同意"' in h3
     assert "已决策 <b>1/3</b>" in h3
+    assert "点击行定位播放" in h3 and "展开模型分析与处理说明" in h3
     assert 'data-action="save-revision"' in h3
     assert 'data-action="revise-subtitle"' in h3 and 'data-has-revision="1"' in h3
 
