@@ -40,8 +40,17 @@ USER_DECISIONS: dict[str, str] = {
     "split": "切分",
 }
 
-# 长字幕分批：每批段数（qwen-plus 上下文/输出长度安全边际）
-BATCH_SIZE = 40
+# 长字幕分批：每批段数（qwen-plus 上下文/输出长度安全边际；
+# 20 段/批输出约 2K tokens，留足余量，解析失败还会减半重试 — REQ-20260915-007）
+BATCH_SIZE = 20
+
+# DashScope 业务错误码 → 中文说明（让用户一眼知道该怎么办 — REQ-20260915-007）
+_DASHSCOPE_CODE_ZH: dict[str, str] = {
+    "Arrearage": "账户欠费/余额不足，请到阿里云百炼控制台充值后重试",
+    "InvalidApiKey": "API Key 无效，请检查 DASHSCOPE_API_KEY 配置",
+    "Throttling": "调用被限流（请求过频或配额用尽），请稍后重试",
+    "AccessDenied": "无访问权限（可能未开通对应模型服务）",
+}
 
 _SYSTEM_PROMPT = """你是专业的视频字幕修订顾问。用户会给你视频字幕段列表（JSON 数组，每项含序号 i、起止时间、文本）。请对**每一段**判断修订方式，并给出具体分析说明。
 
@@ -73,8 +82,53 @@ def build_user_prompt(task_name: str, hotwords: list[str], segments: list[dict])
 
 # =============== 大模型调用（拆出便于测试 monkeypatch） ===============
 
-def _call_llm(system: str, user: str, retries: int = 1) -> str:
-    """DashScope qwen 调用 → 文本响应。网络类失败重试 1 次。"""
+def _dig(obj, *keys):
+    """dashscope 响应可能是 dict 或对象，统一安全取值（缺失/None → None）。"""
+    cur = obj
+    for k in keys:
+        if cur is None:
+            return None
+        if isinstance(cur, dict):
+            cur = cur.get(k)
+        else:
+            cur = getattr(cur, k, None)
+    return cur
+
+
+def _extract_content(resp, model: str) -> str:
+    """从 DashScope 响应取正文。
+
+    DashScope 业务失败（欠费/限流/Key 无效）不抛异常，而是返回
+    status_code != 200、output=None 的响应对象 — 必须先查 status_code，
+    否则真实错误被 'NoneType' 掩盖（REQ-20260915-007）。
+    输出被截断（finish_reason=length）→ ValueError（上层减半重试）。
+    """
+    if resp is None:
+        raise RuntimeError(f"{model} 无响应（返回 None）")
+    status = _dig(resp, "status_code")
+    if status != 200:
+        code = str(_dig(resp, "code") or "Unknown")
+        msg = str(_dig(resp, "message") or "无错误详情")
+        zh = _DASHSCOPE_CODE_ZH.get(code, f"HTTP {status}")
+        rid = _dig(resp, "request_id") or ""
+        raise RuntimeError(
+            f"阿里云百炼 [{code}] {zh}：{msg}"
+            + (f"（request_id={rid}）" if rid else "")
+        )
+    choices = _dig(resp, "output", "choices") or []
+    if not isinstance(choices, list) or not choices:
+        raise RuntimeError("响应缺少 choices 正文")
+    first = choices[0]
+    if _dig(first, "finish_reason") == "length":
+        raise ValueError("模型输出被截断（finish_reason=length），需减小批量重试")
+    content = _dig(first, "message", "content")
+    if not isinstance(content, str) or not content.strip():
+        raise RuntimeError("响应正文为空")
+    return content
+
+
+def _call_llm(system: str, user: str, retries: int = 2) -> str:
+    """DashScope qwen 调用 → 文本响应。瞬时失败退避重试（2s/4s）。"""
     import dashscope
     from dashscope import Generation
 
@@ -94,12 +148,15 @@ def _call_llm(system: str, user: str, retries: int = 1) -> str:
                 model, messages=messages, result_format="message",
                 stream=False, incremental_output=False,
             )
-            return resp["output"]["choices"][0]["message"]["content"]
+            return _extract_content(resp, model)
+        except ValueError:
+            raise  # 截断等输出质量问题：同批重试无意义，直接交上层减半
         except Exception as e:  # noqa: BLE001 — dashscope 异常类型不稳定
             last_err = e
             if attempt < retries:
-                log.warning("[revise] LLM 调用失败（第 %d 次）: %s", attempt + 1, e)
-                time.sleep(1.5)
+                wait = 2.0 * (attempt + 1)
+                log.warning("[revise] LLM 调用失败（第 %d 次，%.0fs 后重试）: %s", attempt + 1, wait, e)
+                time.sleep(wait)
     raise RuntimeError(f"大模型调用失败: {last_err}")
 
 
@@ -194,15 +251,34 @@ def start_job(
             job["stage"] = name
             log.info("[revise][%s] %s", task_id, name)
 
+        def _analyze(batch: list[dict]) -> list[dict]:
+            """分析一批：解析失败/截断 → 减半重试；单段仍失败 → 回填 review。
+
+            确定性失败（欠费/Key 无效等 RuntimeError）向上抛 → job 终止并透传原因
+            —— 这种错误每批都会失败，减半只是浪费调用（REQ-20260915-007）。
+            """
+            try:
+                raw = _call_llm(_SYSTEM_PROMPT, build_user_prompt(task_name, hotwords, batch))
+                return parse_llm_suggestions(raw, batch)
+            except ValueError as e:
+                if len(batch) == 1:
+                    log.warning("[revise][%s] 段 %s 分析失败（%s），回填人工复核", task_id, batch[0].get("i"), e)
+                    return [{
+                        "i": int(batch[0]["i"]), "category": "review", "keep_text": None,
+                        "note": f"模型分析失败（{e}），请人工复核",
+                    }]
+                mid = len(batch) // 2
+                log.warning("[revise][%s] 批解析失败，减半重试（%d 段）: %s", task_id, len(batch), e)
+                return _analyze(batch[:mid]) + _analyze(batch[mid:])
+
         try:
             batches = [segments[k:k + BATCH_SIZE] for k in range(0, len(segments), BATCH_SIZE)] or [[]]
             suggestions: list[dict] = []
             for bi, batch in enumerate(batches):
                 _stage(f"调用大模型 ({bi + 1}/{len(batches)})")
-                user = build_user_prompt(task_name, hotwords, batch)
-                raw = _call_llm(_SYSTEM_PROMPT, user)
-                _stage(f"解析结果 ({bi + 1}/{len(batches)})")
-                suggestions.extend(parse_llm_suggestions(raw, batch))
+                suggestions.extend(_analyze(batch))
+                if bi < len(batches) - 1:
+                    time.sleep(0.6)  # 批间间隔，降低限流概率
 
             _stage("保存结果")
             entries = []

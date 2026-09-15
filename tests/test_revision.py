@@ -178,6 +178,145 @@ def test_start_job_llm_error(tmp_path: Path, monkeypatch):
     assert not (outputs / "revision.json").exists()
 
 
+# ---------- _call_llm 响应硬校验（REQ-20260915-007）----------
+
+def _fake_resp(status_code=200, code=None, message=None, request_id=None,
+               output=None, finish_reason=None, content=None):
+    """构造 DashScope 响应的替身（业务失败时 output=None 不抛异常）。"""
+    import types
+
+    out = output
+    if out is None and content is not None:
+        out = {"choices": [{"finish_reason": finish_reason, "message": {"role": "assistant", "content": content}}]}
+    return types.SimpleNamespace(
+        status_code=status_code, code=code, message=message,
+        request_id=request_id, output=out,
+    )
+
+
+def test_call_llm_business_error_readable(monkeypatch):
+    """欠费（400/Arrearage/output=None）→ 可读错误，而非 NoneType 下标错。"""
+    from slirn_home import revision_service
+
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-test")
+    monkeypatch.setattr(revision_service.time, "sleep", lambda s: None)
+    monkeypatch.setattr(
+        "dashscope.Generation.call",
+        lambda *a, **k: _fake_resp(
+            status_code=400, code="Arrearage",
+            message="Access denied, please make sure your account is in good standing.",
+            request_id="rid-007", output=None,
+        ),
+    )
+    try:
+        revision_service._call_llm("sys", "user")
+    except RuntimeError as e:
+        msg = str(e)
+        assert "Arrearage" in msg and "欠费" in msg and "request_id=rid-007" in msg, msg
+    else:
+        raise AssertionError("应抛 RuntimeError")
+
+
+def test_call_llm_retries_throttle_then_ok(monkeypatch):
+    """限流 → 退避重试，第 3 次成功。"""
+    from slirn_home import revision_service
+
+    calls = []
+
+    def _fake(*a, **k):
+        calls.append(1)
+        if len(calls) < 3:
+            return _fake_resp(status_code=429, code="Throttling",
+                              message="Requests rate limit exceeded", request_id="r1")
+        return _fake_resp(content='[{"i":1,"category":"keep","note":"ok"}]')
+
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-test")
+    monkeypatch.setattr(revision_service.time, "sleep", lambda s: None)
+    monkeypatch.setattr("dashscope.Generation.call", _fake)
+    out = revision_service._call_llm("sys", "user")
+    assert "keep" in out and len(calls) == 3
+
+
+def test_call_llm_truncated_raises_valueerror_no_retry(monkeypatch):
+    """输出截断（finish_reason=length）→ ValueError 且不重试（同批重试无意义）。"""
+    from slirn_home import revision_service
+
+    calls = []
+
+    def _fake(*a, **k):
+        calls.append(1)
+        return _fake_resp(content='[{"i":1,"categ', finish_reason="length")
+
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-test")
+    monkeypatch.setattr("dashscope.Generation.call", _fake)
+    try:
+        revision_service._call_llm("sys", "user")
+    except ValueError as e:
+        assert "截断" in str(e), e
+    else:
+        raise AssertionError("应抛 ValueError")
+    assert len(calls) == 1
+
+
+# ---------- 批处理减半 / 回填（REQ-20260915-007）----------
+
+def test_start_job_halves_on_parse_failure(tmp_path: Path, monkeypatch):
+    """批解析失败 → 减半递归重试，最终全部段拿到建议，job done。"""
+    import re
+    import time
+
+    from slirn_home import revision_service
+
+    batch_sizes = []
+
+    def _fake_llm(system, user, retries=2):
+        n = user.count('"i":')
+        batch_sizes.append(n)
+        if n > 1:  # 多段批 → 返回非法 JSON
+            return "抱歉，我无法输出 JSON"
+        m = re.search(r'"i": (\d+)', user)
+        return json.dumps([{"i": int(m.group(1)), "category": "keep", "note": "ok"}])
+
+    monkeypatch.setattr(revision_service, "_call_llm", _fake_llm)
+    outputs = tmp_path / "outputs"
+    assert revision_service.start_job("t3", SEGS, "任务C", [], outputs)
+    for _ in range(100):
+        j = revision_service.job_status("t3")
+        if j and j["state"] in ("done", "error"):
+            break
+        time.sleep(0.05)
+    assert j["state"] == "done", j
+    # 3 段 → 失败 → 减半 [1] + [2,3] → [2,3] 再减半 [2] + [3]
+    assert batch_sizes[0] == 3, batch_sizes
+    rev = revision_service.load_revision(outputs)
+    assert rev["segments_count"] == 3
+    assert all(e["category"] == "keep" for e in rev["entries"])
+
+
+def test_start_job_backfills_on_total_parse_failure(tmp_path: Path, monkeypatch):
+    """所有批都解析失败 → 单段回填 review（note 含「请人工复核」），job done 不崩。"""
+    import time
+
+    from slirn_home import revision_service
+
+    def _always_bad(system, user, retries=2):
+        raise ValueError("模型输出不是合法 JSON: bad")
+
+    monkeypatch.setattr(revision_service, "_call_llm", _always_bad)
+    outputs = tmp_path / "outputs"
+    assert revision_service.start_job("t4", SEGS, "任务D", [], outputs)
+    for _ in range(100):
+        j = revision_service.job_status("t4")
+        if j and j["state"] in ("done", "error"):
+            break
+        time.sleep(0.05)
+    assert j["state"] == "done", j
+    rev = revision_service.load_revision(outputs)
+    assert rev["segments_count"] == 3
+    for e in rev["entries"]:
+        assert e["category"] == "review" and "请人工复核" in e["note"], e
+
+
 # ---------- 渲染三态 ----------
 
 def test_render_revision_zone_states(tmp_path: Path):
