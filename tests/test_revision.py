@@ -285,6 +285,130 @@ def test_call_llm_truncated_raises_valueerror_no_retry(monkeypatch):
     assert len(calls) == 1
 
 
+# ---------- Anthropic 协议（REQ-20260916-001）----------
+
+ANTHROPIC_ENTRY = {
+    "id": "claude-sonnet-4-5", "provider": "Anthropic",
+    "base_url": "https://api.anthropic.com",
+    "api_key_env": "ANTHROPIC_API_KEY", "protocol": "anthropic",
+}
+
+
+def _fake_anthropic_resp(status_code=200, error=None, request_id=None,
+                         contents=None, stop_reason="end_turn"):
+    """构造 Anthropic 协议响应替身（content 分块 / stop_reason / error 对象）。"""
+    import json as _json
+    import types
+
+    body: dict = {}
+    if error is not None:
+        body = {"type": "error", "error": error}
+    elif contents is not None:
+        body = {"content": contents, "stop_reason": stop_reason}
+    text = _json.dumps(body)
+    return types.SimpleNamespace(
+        status_code=status_code, text=text,
+        headers={"request-id": request_id} if request_id else {},
+        json=lambda: _json.loads(text),
+    )
+
+
+def test_anthropic_request_build(monkeypatch):
+    """anthropic 协议 → POST {base}/v1/messages + x-api-key 头 + system 顶层 + max_tokens 必填。"""
+    from slirn_home import revision_service
+
+    captured: dict = {}
+
+    def _fake(url, json=None, headers=None, timeout=None):
+        captured.update(url=url, json=json, headers=headers)
+        return _fake_anthropic_resp(contents=[{"type": "text", "text": "ok"}])
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setattr("httpx.post", _fake)
+    revision_service._call_llm("你是助手", "你好", entry=ANTHROPIC_ENTRY)
+    assert captured["url"] == "https://api.anthropic.com/v1/messages"
+    assert captured["headers"]["x-api-key"] == "sk-ant-test"
+    assert captured["headers"]["anthropic-version"]
+    assert "Authorization" not in captured["headers"], "anthropic 不用 Bearer 头"
+    body = captured["json"]
+    assert body["system"] == "你是助手" and body["messages"] == [{"role": "user", "content": "你好"}]
+    assert body["model"] == "claude-sonnet-4-5" and body["max_tokens"] > 0
+
+
+def test_anthropic_base_url_with_v1_not_duplicated(monkeypatch):
+    """base 已带 /v1 → 拼 /messages 而非 /v1/v1/messages（兼容网关前缀写法）。"""
+    from slirn_home import revision_service
+
+    captured: dict = {}
+
+    def _fake(url, **k):
+        captured["url"] = url
+        return _fake_anthropic_resp(contents=[{"type": "text", "text": "ok"}])
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setattr("httpx.post", _fake)
+    entry = dict(ANTHROPIC_ENTRY, base_url="https://gw.example.com/anthropic/v1")
+    revision_service._call_llm("s", "u", entry=entry)
+    assert captured["url"] == "https://gw.example.com/anthropic/v1/messages"
+
+
+def test_anthropic_error_readable(monkeypatch):
+    """401/authentication_error → 可读错误（厂商/模型/中文原因），Key 无效提示检查环境变量。"""
+    from slirn_home import revision_service
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-bad")
+    monkeypatch.setattr(revision_service.time, "sleep", lambda s: None)
+    monkeypatch.setattr("httpx.post", lambda *a, **k: _fake_anthropic_resp(
+        status_code=401,
+        error={"type": "authentication_error", "message": "invalid x-api-key"},
+        request_id="req-ant-1",
+    ))
+    try:
+        revision_service._call_llm("s", "u", entry=ANTHROPIC_ENTRY)
+    except RuntimeError as e:
+        msg = str(e)
+        assert "[claude-sonnet-4-5]" in msg and "Anthropic" in msg, msg
+        assert "authentication_error" in msg and "Key 无效" in msg, msg
+        assert "request_id=req-ant-1" in msg, msg
+    else:
+        raise AssertionError("应抛 RuntimeError")
+
+
+def test_anthropic_truncated_no_retry(monkeypatch):
+    """stop_reason=max_tokens 截断 → ValueError 且不重试（上层减半）。"""
+    from slirn_home import revision_service
+
+    calls = []
+
+    def _fake(*a, **k):
+        calls.append(1)
+        return _fake_anthropic_resp(contents=[{"type": "text", "text": "[{"}], stop_reason="max_tokens")
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setattr("httpx.post", _fake)
+    try:
+        revision_service._call_llm("s", "u", entry=ANTHROPIC_ENTRY)
+    except ValueError as e:
+        assert "截断" in str(e), e
+    else:
+        raise AssertionError("应抛 ValueError")
+    assert len(calls) == 1
+
+
+def test_anthropic_content_parts_joined(monkeypatch):
+    """content 多分块（含非 text）→ 只拼 text 分块。"""
+    from slirn_home import revision_service
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setattr("httpx.post", lambda *a, **k: _fake_anthropic_resp(contents=[
+        {"type": "text", "text": "前半"},
+        {"type": "tool_use", "id": "x", "name": "t"},
+        {"type": "text", "text": "后半"},
+    ]))
+    out = revision_service._call_llm("s", "u", entry=ANTHROPIC_ENTRY)
+    assert out == "前半后半"
+
+
 # ---------- 批处理减半 / 回填（REQ-20260915-007）----------
 
 def test_start_job_halves_on_parse_failure(tmp_path: Path, monkeypatch):

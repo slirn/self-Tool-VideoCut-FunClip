@@ -889,6 +889,25 @@ footer { display: none !important; }
   color: var(--text-secondary, #64748b);
   margin-left: 8px;
 }
+/* 协议徽章（OpenAI 兼容 / Anthropic — REQ-20260916-001） */
+.slirn-llm-item-proto {
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--accent-solid, #6366f1);
+  background: var(--accent-soft, rgba(99, 102, 241, 0.12));
+  padding: 0 6px;
+  border-radius: 6px;
+  margin-left: 8px;
+  white-space: nowrap;
+}
+/* 当前使用中徽章（替代按钮位置 — REQ-20260916-001） */
+.slirn-llm-item-cur {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--status-done, #16a34a);
+  padding: 4px 2px;
+  white-space: nowrap;
+}
 .slirn-llm-item-key { font-size: 12px; white-space: nowrap; }
 .slirn-llm-item-key.ok { color: var(--status-done, #16a34a); }
 .slirn-llm-item-key.miss { color: var(--danger, #ef4444); }

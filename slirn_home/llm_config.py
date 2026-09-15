@@ -1,23 +1,23 @@
-"""大模型用户配置（多厂商模型注册表）— REQ-20260915-008 v2。
+"""大模型用户配置（多厂商模型注册表）— REQ-20260915-008 v2 / REQ-20260916-001 v3。
 
 用户在界面（顶栏 ⚙️）**动态注册**自己拥有的大模型，并指定当前使用哪个：
 
 - 模型名（如 qwen-plus / deepseek-chat / gpt-4o）
 - 厂商（自由文本，如 阿里云百炼 / DeepSeek）
-- Base URL（OpenAI 兼容端点，调用 ``{base_url}/chat/completions``）
+- Base URL（端点根地址，具体路径按协议拼接，见下）
 - API Key 对应的**系统环境变量名**（Key 本身始终从环境变量读取，界面不存储）
+- 协议（REQ-20260916-001）：``openai`` → ``{base_url}/chat/completions``（默认，
+  覆盖百炼/DeepSeek/OpenAI 及各类兼容网关）；``anthropic`` → ``{base_url}/v1/messages``
 
 存储：``<repo_root>/config/llm.json``（机器本地运行时状态，与 tasks/、
 hotwords/ 同级，gitignore）::
 
-    {"models": [{"id", "provider", "base_url", "api_key_env"}, ...],
+    {"models": [{"id", "provider", "base_url", "api_key_env", "protocol"}, ...],
      "current": "qwen-plus", "updated_at": "..."}
 
 未做任何配置时回退内置默认（阿里云百炼 qwen-plus + DASHSCOPE_API_KEY）；
 ``SLIRN_LLM_MODEL`` 环境变量仍可覆盖默认模型 id（向后兼容）。
-
-调用统一走 OpenAI 兼容协议（DashScope 有 compatible-mode 端点），见
-revision_service._chat_completion。
+协议调用实现见 revision_service._chat_completion。
 """
 
 from __future__ import annotations
@@ -41,8 +41,13 @@ DEFAULT_MODELS: list[dict] = [
         "provider": "阿里云百炼",
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
         "api_key_env": "DASHSCOPE_API_KEY",
+        "protocol": "openai",
     },
 ]
+
+# 支持的调用协议（REQ-20260916-001）— 端点路径与请求格式见 revision_service
+PROTOCOLS = ("openai", "anthropic")
+PROTOCOL_LABELS = {"openai": "OpenAI 兼容", "anthropic": "Anthropic"}
 
 # 模型名规则：字母数字开头，可含 . _ : -，≤64 字符（覆盖 qwen2.5-14b-instruct 等）
 _ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:\-]{0,63}$")
@@ -56,7 +61,8 @@ class LLMConfigError(ValueError):
 
 # ---------- 校验 ----------
 
-def _validate_entry(id_: str, provider: str, base_url: str, api_key_env: str) -> dict:
+def _validate_entry(id_: str, provider: str, base_url: str, api_key_env: str,
+                    protocol: str = "openai") -> dict:
     """校验并规范化一个模型注册项；非法抛 LLMConfigError。"""
     mid = str(id_ or "").strip()
     if not _ID_RE.match(mid):
@@ -77,7 +83,10 @@ def _validate_entry(id_: str, provider: str, base_url: str, api_key_env: str) ->
         raise LLMConfigError(
             f"环境变量名不合法：{api_key_env!r}（字母/下划线开头，仅含字母数字下划线）"
         )
-    return {"id": mid, "provider": prov, "base_url": url, "api_key_env": env}
+    proto = str(protocol or "openai").strip().lower() or "openai"
+    if proto not in PROTOCOLS:
+        raise LLMConfigError(f"协议不合法：{protocol!r}（可选：{' / '.join(PROTOCOLS)}）")
+    return {"id": mid, "provider": prov, "base_url": url, "api_key_env": env, "protocol": proto}
 
 
 # ---------- 读写 ----------
@@ -87,12 +96,18 @@ def _config_path(repo_root: Path | str) -> Path:
 
 
 def _load(repo_root: Path | str) -> dict:
-    """读配置；无文件/损坏/旧版单模型格式 → 回退默认注册表。"""
+    """读配置；无文件/损坏/旧版单模型格式 → 回退默认注册表。
+
+    v2 落盘的条目没有 protocol 字段 → 统一补 "openai"（向后兼容）。
+    """
     p = _config_path(repo_root)
     if p.exists():
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
             if isinstance(data, dict) and isinstance(data.get("models"), list):
+                for m in data["models"]:
+                    if isinstance(m, dict):
+                        m.setdefault("protocol", "openai")
                 return data
             # 旧版单模型格式 {"model": "x"}（本功能当期开发中间态）→ 忽略回默认
             log.warning("llm 配置为旧格式，回退默认注册表")
@@ -152,18 +167,41 @@ def get_current_entry(repo_root: Path | str) -> dict | None:
     return data["models"][0] if data["models"] else None
 
 
-def add_model(repo_root: Path | str, id_: str, provider: str,
-              base_url: str, api_key_env: str) -> list[dict]:
+def add_model(repo_root: Path | str, id_: str, provider: str, base_url: str,
+              api_key_env: str, protocol: str = "openai") -> list[dict]:
     """添加模型注册项（id 重复拒绝）。返回新列表。"""
-    entry = _validate_entry(id_, provider, base_url, api_key_env)
+    entry = _validate_entry(id_, provider, base_url, api_key_env, protocol)
     data = _load(repo_root)
     if any(m.get("id") == entry["id"] for m in data["models"]):
-        raise LLMConfigError(f"模型 {entry['id']} 已存在（如需修改请先删除再添加）")
+        raise LLMConfigError(f"模型 {entry['id']} 已存在（如需修改请点「编辑」）")
     data["models"].append(entry)
     if not data.get("current"):
         data["current"] = entry["id"]  # 第一个注册项自动成为当前模型
     _save(repo_root, data)
-    log.info("llm 注册模型: %s (%s)", entry["id"], entry["provider"])
+    log.info("llm 注册模型: %s (%s, %s)", entry["id"], entry["provider"], entry["protocol"])
+    return data["models"]
+
+
+def update_model(repo_root: Path | str, id_: str, new_id: str, provider: str,
+                 base_url: str, api_key_env: str, protocol: str = "openai") -> list[dict]:
+    """修改模型注册项（REQ-20260916-001）。返回新列表。
+
+    - 原地替换（保持列表位置）；模型名可改，改后若原条目是当前模型 → current 跟随新名
+    - 新名与其他条目冲突 → 拒绝
+    """
+    entry = _validate_entry(new_id, provider, base_url, api_key_env, protocol)
+    data = _load(repo_root)
+    mid = str(id_ or "").strip()
+    idx = next((k for k, m in enumerate(data["models"]) if m.get("id") == mid), None)
+    if idx is None:
+        raise LLMConfigError(f"模型 {mid} 不存在")
+    if entry["id"] != mid and any(m.get("id") == entry["id"] for m in data["models"]):
+        raise LLMConfigError(f"模型 {entry['id']} 已存在（不能与其他模型重名）")
+    data["models"][idx] = entry
+    if data.get("current") == mid:
+        data["current"] = entry["id"]
+    _save(repo_root, data)
+    log.info("llm 更新模型: %s → %s", mid, entry["id"])
     return data["models"]
 
 

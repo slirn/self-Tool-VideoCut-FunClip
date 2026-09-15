@@ -1,7 +1,7 @@
 """字幕修订服务 — REQ-20260915-005。
 
 把上一阶段生成的 subtitle.json 交给大模型（用户在 ⚙️ 注册的当前模型，
-OpenAI 兼容协议，API Key 从环境变量读取 — REQ-20260915-008），
+OpenAI 兼容 / Anthropic 双协议，API Key 从环境变量读取 — REQ-008/REQ-20260916-001），
 逐段产出处理建议（keep 保留 / delete 整行删除 / split 切分修剪 / review 人工复核），
 落盘 outputs/revision.json；用户逐条决策（decision + user_note）合并回写。
 后台线程 job 管理与 asr_service 同模式（内存 job 表 + 阶段级进度）。
@@ -75,19 +75,24 @@ def build_user_prompt(task_name: str, hotwords: list[str], segments: list[dict])
 
 # =============== 大模型调用（拆出便于测试 monkeypatch） ===============
 
-# OpenAI 兼容错误码 → 中文说明（让用户一眼知道该怎么办 — REQ-20260915-007/008）
+# OpenAI 兼容 / Anthropic 错误码 → 中文说明（让用户一眼知道该怎么办 — REQ-20260915-007/008）
 _CODE_ZH: dict[str, str] = {
     "Arrearage": "账户欠费/余额不足，请到对应厂商控制台充值后重试",
     "insufficient_quota": "配额/余额不足，请到对应厂商控制台充值后重试",
     "InvalidApiKey": "API Key 无效，请检查对应环境变量中的 Key",
     "invalid_api_key": "API Key 无效，请检查对应环境变量中的 Key",
+    "authentication_error": "API Key 无效，请检查对应环境变量中的 Key",
     "Throttling": "调用被限流（请求过频或配额用尽），请稍后重试",
     "rate_limit_exceeded": "调用被限流，请稍后重试",
+    "rate_limit_error": "调用被限流，请稍后重试",
     "InvalidParameter": "请求参数不合法",
     "invalid_request_error": "请求参数不合法",
     "AccessDenied": "无访问权限（可能未开通对应模型服务）",
+    "permission_error": "无访问权限（可能未开通对应模型服务）",
     "DataInspectionFailed": "内容安全审查未通过",
     "model_not_found": "模型不存在（检查模型名是否为该厂商提供）",
+    "not_found_error": "模型不存在（检查模型名是否为该厂商提供）",
+    "overloaded_error": "服务端过载，请稍后重试",
 }
 
 
@@ -97,6 +102,20 @@ def _code_zh(code: str, status: int) -> str:
     if code and code.startswith("Throttling"):
         return _CODE_ZH["Throttling"]
     return f"HTTP {status}"
+
+
+class LLMBusinessError(RuntimeError):
+    """确定性业务失败（欠费/Key 无效/模型不存在等）— 重试无意义，直接上抛。
+
+    限流/过载类（Throttling*/rate_limit*/overloaded_error）仍抛普通
+    RuntimeError，由 _chat_completion 退避重试。
+    """
+
+
+def _is_retryable_code(code: str) -> bool:
+    c = str(code or "")
+    return (c in ("rate_limit_exceeded", "rate_limit_error", "overloaded_error")
+            or c.startswith("Throttling"))
 
 
 def _extract_openai_resp(resp, entry: dict) -> str:
@@ -118,16 +137,17 @@ def _extract_openai_resp(resp, entry: dict) -> str:
         code = str(err.get("code") or resp.status_code)
         msg = str(err.get("message") or resp.text[:300] or "无错误详情")
         rid = resp.headers.get("x-request-id") or resp.headers.get("X-Request-Id") or ""
-        raise RuntimeError(
+        err_cls = RuntimeError if _is_retryable_code(code) else LLMBusinessError
+        raise err_cls(
             f"{provider}（{model}）[{code}] {_code_zh(code, resp.status_code)}：{msg}"
             + (f"（request_id={rid}）" if rid else "")
         )
     if not isinstance(data, dict):
-        raise RuntimeError(f"{provider}（{model}）响应不是 JSON 对象")
+        raise LLMBusinessError(f"{provider}（{model}）响应不是 JSON 对象")
     if data.get("error"):  # 个别网关 200 也带 error
         err = data.get("error")
         err = err if isinstance(err, dict) else {}
-        raise RuntimeError(
+        raise LLMBusinessError(
             f"{provider}（{model}）[{err.get('code') or 'Error'}] {err.get('message') or ''}"
         )
     choices = data.get("choices") or []
@@ -142,14 +162,65 @@ def _extract_openai_resp(resp, entry: dict) -> str:
     return content
 
 
+def _extract_anthropic_resp(resp, entry: dict) -> str:
+    """解析 Anthropic 协议响应（``{base_url}/v1/messages``）→ 助手正文。
+
+    错误体 ``{"type":"error","error":{"type","message"}}``；截断
+    ``stop_reason == "max_tokens"`` → ValueError（上层减半重试）。
+    """
+    model = entry.get("id", "?")
+    provider = entry.get("provider", "未知厂商")
+    try:
+        data = resp.json()
+    except Exception:  # noqa: BLE001 — 非 JSON 响应按原文报错
+        data = None
+    if resp.status_code != 200:
+        err = data.get("error") if isinstance(data, dict) else None
+        err = err if isinstance(err, dict) else {}
+        code = str(err.get("type") or resp.status_code)
+        msg = str(err.get("message") or resp.text[:300] or "无错误详情")
+        rid = resp.headers.get("request-id") or resp.headers.get("x-request-id") or ""
+        err_cls = RuntimeError if _is_retryable_code(code) else LLMBusinessError
+        raise err_cls(
+            f"{provider}（{model}）[{code}] {_code_zh(code, resp.status_code)}：{msg}"
+            + (f"（request_id={rid}）" if rid else "")
+        )
+    if not isinstance(data, dict):
+        raise LLMBusinessError(f"{provider}（{model}）响应不是 JSON 对象")
+    if data.get("type") == "error":  # 个别网关 200 也带 error
+        err = data.get("error")
+        err = err if isinstance(err, dict) else {}
+        raise LLMBusinessError(
+            f"{provider}（{model}）[{err.get('type') or 'Error'}] {err.get('message') or ''}"
+        )
+    content = data.get("content")
+    text = ""
+    if isinstance(content, list):
+        text = "".join(
+            p.get("text", "") for p in content
+            if isinstance(p, dict) and p.get("type") == "text"
+        )
+    if data.get("stop_reason") == "max_tokens":
+        raise ValueError("模型输出被截断（stop_reason=max_tokens），需减小批量重试")
+    if not text.strip():
+        raise RuntimeError(f"{provider}（{model}）响应正文为空")
+    return text
+
+
 def _chat_completion(entry: dict, messages: list[dict],
                      retries: int = 2, timeout: float = 180.0) -> str:
-    """OpenAI 兼容 ``{base_url}/chat/completions`` 调用（httpx，gradio 既有依赖）。
+    """按注册项协议调用大模型（httpx，gradio 既有依赖）— REQ-20260916-001 双协议。
 
-    entry: llm_config 注册项 {"id","provider","base_url","api_key_env"}
-    （REQ-20260915-008 — 多厂商动态注册）。Key 从 entry.api_key_env 指定的
-    系统环境变量读取（界面不存储 Key）。瞬时失败退避重试；业务错误 →
-    可读 RuntimeError；截断 → ValueError（上层减半）。
+    entry: llm_config 注册项 {"id","provider","base_url","api_key_env","protocol"}
+    - protocol=openai（默认）：POST ``{base_url}/chat/completions`` + Bearer，
+      body {model, messages, stream:false}
+    - protocol=anthropic：POST ``{base_url}/v1/messages``（base 已带 /v1 则
+      ``{base_url}/messages``），headers x-api-key + anthropic-version，
+      body {model, max_tokens, system, messages}（system 提到顶层，max_tokens 必填）
+
+    Key 从 entry.api_key_env 指定的系统环境变量读取（界面不存储 Key）。
+    瞬时失败退避重试；确定性业务错误 → LLMBusinessError 直接上抛；截断 →
+    ValueError（上层减半）。
     """
     import httpx
 
@@ -157,21 +228,41 @@ def _chat_completion(entry: dict, messages: list[dict],
     key = os.environ.get(env, "")
     if not key:
         raise RuntimeError(f"未配置环境变量 {env}（{entry.get('provider', '未知厂商')} 的 API Key）")
-    url = str(entry.get("base_url", "")).rstrip("/")
-    url = url if url.endswith("/chat/completions") else url + "/chat/completions"
+
+    protocol = str(entry.get("protocol") or "openai").strip().lower()
+    base = str(entry.get("base_url", "")).rstrip("/")
+    if protocol == "anthropic":
+        if base.endswith("/v1/messages"):
+            url = base
+        elif base.endswith("/v1"):
+            url = base + "/messages"
+        else:
+            url = base + "/v1/messages"
+        system = "\n".join(m.get("content", "") for m in messages if m.get("role") == "system")
+        body = {
+            "model": entry.get("id", ""),
+            "max_tokens": 4096,  # Anthropic 必填；20 段/批输出约 2K tokens，留余量
+            "messages": [m for m in messages if m.get("role") != "system"],
+        }
+        if system:
+            body["system"] = system
+        headers = {"x-api-key": key, "anthropic-version": "2023-06-01"}
+        extract = _extract_anthropic_resp
+    else:
+        url = base if base.endswith("/chat/completions") else base + "/chat/completions"
+        body = {"model": entry.get("id", ""), "messages": messages, "stream": False}
+        headers = {"Authorization": f"Bearer {key}"}
+        extract = _extract_openai_resp
 
     last_err: Exception | None = None
     for attempt in range(retries + 1):
         try:
-            resp = httpx.post(
-                url,
-                json={"model": entry.get("id", ""), "messages": messages, "stream": False},
-                headers={"Authorization": f"Bearer {key}"},
-                timeout=timeout,
-            )
-            return _extract_openai_resp(resp, entry)
+            resp = httpx.post(url, json=body, headers=headers, timeout=timeout)
+            return extract(resp, entry)
         except ValueError:
             raise  # 截断等输出质量问题：同批重试无意义，直接交上层减半
+        except LLMBusinessError:
+            raise  # 确定性业务失败（欠费/Key 无效等）：重试同样失败，直接上抛
         except Exception as e:  # noqa: BLE001 — httpx 异常类型不稳定
             last_err = e
             if attempt < retries:
@@ -347,6 +438,7 @@ def start_job(
                 "version": 1,
                 "model": (entry or {}).get("id") or "qwen-plus",
                 "provider": (entry or {}).get("provider", ""),
+                "protocol": (entry or {}).get("protocol", "openai"),
                 "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 "saved_at": None,
                 "segments_count": len(entries),

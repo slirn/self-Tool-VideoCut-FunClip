@@ -24,7 +24,8 @@ DEEPSEEK = {
 
 def _add(root, **kw):
     return llm_config.add_model(
-        root, kw["id"], kw["provider"], kw["base_url"], kw["api_key_env"]
+        root, kw["id"], kw["provider"], kw["base_url"], kw["api_key_env"],
+        kw.get("protocol", "openai"),
     )
 
 
@@ -141,3 +142,67 @@ def test_add_normalizes_trailing_slash_and_blank_provider(root):
     m = llm_config.list_models(root)[-1]
     assert m["base_url"] == "https://a.com/v1"
     assert m["provider"] == "未填写厂商"
+
+
+# ---------- 协议字段（REQ-20260916-001）----------
+
+def test_default_and_anthropic_protocol(root):
+    """默认协议 openai；显式 anthropic 落盘可读回。"""
+    _add(root, **DEEPSEEK)
+    assert llm_config.list_models(root)[0]["protocol"] == "openai"  # 默认注册项
+    assert llm_config.list_models(root)[1]["protocol"] == "openai"  # add 缺省
+    _add(root, id="claude-sonnet-4-5", provider="Anthropic",
+         base_url="https://api.anthropic.com", api_key_env="ANTHROPIC_API_KEY",
+         protocol="Anthropic")  # 大小写归一
+    m = llm_config.list_models(root)[-1]
+    assert m["protocol"] == "anthropic"
+
+
+def test_invalid_protocol_rejected(root):
+    with pytest.raises(llm_config.LLMConfigError, match="协议不合法"):
+        _add(root, id="m1", provider="p", base_url="https://a.com/v1",
+             api_key_env="K", protocol="grpc")
+
+
+def test_legacy_entries_without_protocol_normalized(root):
+    """v2 落盘条目无 protocol 字段 → 读取时统一补 openai。"""
+    (root / "config").mkdir()
+    (root / "config/llm.json").write_text(json.dumps({
+        "models": [{"id": "old-model", "provider": "p",
+                    "base_url": "https://a.com/v1", "api_key_env": "K"}],
+        "current": "old-model",
+    }), encoding="utf-8")
+    assert llm_config.list_models(root)[0]["protocol"] == "openai"
+
+
+# ---------- 修改（REQ-20260916-001）----------
+
+def test_update_model_fields(root):
+    _add(root, **DEEPSEEK)
+    llm_config.update_model(root, "deepseek-chat", "deepseek-chat",
+                            "DeepSeek官方", "https://api.deepseek.com/v2", "DS_KEY")
+    m = llm_config.list_models(root)[-1]
+    assert m["provider"] == "DeepSeek官方" and m["base_url"] == "https://api.deepseek.com/v2"
+    assert m["api_key_env"] == "DS_KEY" and m["protocol"] == "openai"
+
+
+def test_update_model_rename_current_follows(root):
+    """改名后若原条目是当前模型 → current 跟随新名；位置保持。"""
+    _add(root, **DEEPSEEK)
+    llm_config.use_model(root, "deepseek-chat")
+    llm_config.update_model(root, "deepseek-chat", "deepseek-reasoner",
+                            "DeepSeek", DEEPSEEK["base_url"], "DEEPSEEK_API_KEY")
+    assert llm_config.get_current(root) == "deepseek-reasoner"
+    assert [m["id"] for m in llm_config.list_models(root)] == ["qwen-plus", "deepseek-reasoner"]
+
+
+def test_update_model_unknown_rejected(root):
+    with pytest.raises(llm_config.LLMConfigError, match="不存在"):
+        llm_config.update_model(root, "no-such", "x1", "p", "https://a.com/v1", "K")
+
+
+def test_update_model_rename_to_existing_rejected(root):
+    _add(root, **DEEPSEEK)
+    with pytest.raises(llm_config.LLMConfigError, match="已存在"):
+        llm_config.update_model(root, "deepseek-chat", "qwen-plus",
+                                "p", "https://a.com/v1", "K")

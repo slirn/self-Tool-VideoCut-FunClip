@@ -1299,9 +1299,25 @@ ROUTER_JS = """
     if (m) m.remove();
   }
 
-  // ===== 大模型设置弹窗（REQ-20260915-008：多厂商模型动态注册）=====
-  // 已注册模型列表（当前 ⭐ 高亮 + 使用/测试/删除）+ 添加表单（模型名/厂商/Base URL/
-  // Key 环境变量名）。Key 本身始终从系统环境变量读取，界面只填「环境变量名」。
+  // ===== 大模型设置弹窗（REQ-20260915-008：多厂商模型动态注册；REQ-20260916-001：协议 + 编辑）=====
+  // 已注册模型列表（当前 ⭐ 高亮 + 设为当前/测试/编辑/删除）+ 表单（模型名/厂商/
+  // 协议/Base URL/Key 环境变量名，添加与编辑共用）。Key 本身始终从系统环境变量
+  // 读取，界面只填「环境变量名」。
+  var LLM_EDIT_ID = null;   // 非空 = 表单处于编辑该模型状态
+  var LLM_MODELS = [];      // 最近一次列表数据（编辑时回填表单用）
+  function llmFormReset() {
+    LLM_EDIT_ID = null;
+    ['slirn-llm-in-id', 'slirn-llm-in-provider', 'slirn-llm-in-url', 'slirn-llm-in-env']
+      .forEach(function(i) { var el = document.getElementById(i); if (el) el.value = ''; });
+    var proto = document.getElementById('slirn-llm-in-proto');
+    if (proto) proto.value = 'openai';
+    var t = document.getElementById('slirn-llm-form-title');
+    if (t) t.textContent = '添加模型';
+    var btn = document.getElementById('slirn-llm-add-btn');
+    if (btn) btn.textContent = '➕ 添加';
+    var cancel = document.getElementById('slirn-llm-cancel-btn');
+    if (cancel) cancel.style.display = 'none';
+  }
   function openLLMSettings() {
     var existing = document.getElementById('slirn-llm-modal');
     if (existing) existing.remove();
@@ -1313,21 +1329,27 @@ ROUTER_JS = """
         '<div class="slirn-modal-title">⚙️ 大模型设置</div>' +
         '<div class="slirn-llm-subtitle">当前模型：<b id="slirn-llm-current">…</b></div>' +
         '<div class="slirn-llm-list" id="slirn-llm-list"></div>' +
-        '<div class="slirn-llm-section">添加模型</div>' +
+        '<div class="slirn-llm-section" id="slirn-llm-form-title">添加模型</div>' +
         '<div class="slirn-llm-form" id="slirn-llm-form">' +
           '<div class="slirn-llm-row"><span class="slirn-llm-label">模型名</span>' +
             '<input id="slirn-llm-in-id" class="slirn-llm-input" placeholder="如 deepseek-chat" /></div>' +
           '<div class="slirn-llm-row"><span class="slirn-llm-label">厂商</span>' +
             '<input id="slirn-llm-in-provider" class="slirn-llm-input" placeholder="如 DeepSeek / 阿里云百炼" /></div>' +
+          '<div class="slirn-llm-row"><span class="slirn-llm-label">协议</span>' +
+            '<select id="slirn-llm-in-proto" class="slirn-llm-input">' +
+              '<option value="openai">OpenAI 兼容（{Base URL}/chat/completions）</option>' +
+              '<option value="anthropic">Anthropic（{Base URL}/v1/messages）</option>' +
+            '</select></div>' +
           '<div class="slirn-llm-row"><span class="slirn-llm-label">Base URL</span>' +
             '<input id="slirn-llm-in-url" class="slirn-llm-input" placeholder="https://api.deepseek.com/v1" /></div>' +
           '<div class="slirn-llm-row"><span class="slirn-llm-label">Key 环境变量</span>' +
             '<input id="slirn-llm-in-env" class="slirn-llm-input" placeholder="如 DEEPSEEK_API_KEY" /></div>' +
         '</div>' +
-        '<div class="slirn-llm-tip">调用走 OpenAI 兼容协议（<code>{Base URL}/chat/completions</code>）；API Key 从上面填写的系统环境变量读取，界面不存储 Key。</div>' +
+        '<div class="slirn-llm-tip">按所选协议调用（OpenAI 兼容 <code>{Base URL}/chat/completions</code> / Anthropic <code>{Base URL}/v1/messages</code>）；API Key 从上面填写的系统环境变量读取，界面不存储 Key。</div>' +
         '<div id="slirn-llm-test-result" class="slirn-llm-test-result"></div>' +
         '<div class="slirn-llm-actions">' +
-          '<button class="slirn-btn slirn-btn-primary" data-action="llm-add">➕ 添加</button>' +
+          '<button class="slirn-btn slirn-btn-primary" data-action="llm-add" id="slirn-llm-add-btn">➕ 添加</button>' +
+          '<button class="slirn-btn" data-action="llm-cancel-edit" id="slirn-llm-cancel-btn" style="display:none">取消编辑</button>' +
           '<button class="slirn-btn" data-action="llm-close">关闭</button>' +
         '</div>' +
       '</div>';
@@ -1335,6 +1357,7 @@ ROUTER_JS = """
       if (e.target === overlay) overlay.remove();  // 点遮罩关闭
     });
     document.body.appendChild(overlay);
+    llmFormReset();
     fetch(SLIRN_API + '/llm_config').then(function(r) { return r.json(); })
       .then(function(r) {
         if (r && r.ok) renderLLMList(r.models || [], r.current || '');
@@ -1342,6 +1365,7 @@ ROUTER_JS = """
       .catch(function() {});
   }
   function renderLLMList(models, current) {
+    LLM_MODELS = models;
     var cur = document.getElementById('slirn-llm-current');
     if (cur) cur.textContent = current || '（无）';
     var list = document.getElementById('slirn-llm-list');
@@ -1352,19 +1376,24 @@ ROUTER_JS = """
     }
     list.innerHTML = models.map(function(m) {
       var isCur = m.id === current;
+      var proto = m.protocol === 'anthropic' ? 'Anthropic' : 'OpenAI 兼容';
       return '<div class="slirn-llm-item' + (isCur ? ' current' : '') + '">' +
         '<div class="slirn-llm-item-head">' +
           '<span class="slirn-llm-item-name">' + (isCur ? '⭐ ' : '') + escapeHtml(m.id) +
-            '<span class="slirn-llm-item-prov">' + escapeHtml(m.provider || '') + '</span></span>' +
+            '<span class="slirn-llm-item-prov">' + escapeHtml(m.provider || '') + '</span>' +
+            '<span class="slirn-llm-item-proto">' + proto + '</span></span>' +
           '<span class="slirn-llm-item-key ' + (m.key_present ? 'ok' : 'miss') + '">' +
             (m.key_present ? '✅ Key 已配置' : '❌ 未配置 ' + escapeHtml(m.api_key_env)) + '</span>' +
         '</div>' +
         '<div class="slirn-llm-item-url">' + escapeHtml(m.base_url) +
           ' <code>' + escapeHtml(m.api_key_env) + '</code></div>' +
         '<div class="slirn-llm-item-ops">' +
-          '<button class="slirn-btn slirn-btn-sm" data-action="llm-use" data-id="' + escapeHtml(m.id) + '"' +
-            (isCur ? ' disabled' : '') + '>使用</button>' +
+          (isCur
+            ? '<span class="slirn-llm-item-cur">✅ 当前使用中</span>'
+            : '<button class="slirn-btn slirn-btn-sm slirn-btn-primary" data-action="llm-use" data-id="' +
+              escapeHtml(m.id) + '">⭐ 设为当前</button>') +
           '<button class="slirn-btn slirn-btn-sm" data-action="llm-test" data-id="' + escapeHtml(m.id) + '">测试</button>' +
+          '<button class="slirn-btn slirn-btn-sm" data-action="llm-edit" data-id="' + escapeHtml(m.id) + '">编辑</button>' +
           '<button class="slirn-btn slirn-btn-sm" data-action="llm-remove" data-id="' + escapeHtml(m.id) + '">删除</button>' +
         '</div>' +
       '</div>';
@@ -1808,19 +1837,49 @@ ROUTER_JS = """
     }
     else if (action === 'llm-add') {
       var gv = function(elId) { return ((document.getElementById(elId) || {}).value || '').trim(); };
-      postJSON(SLIRN_API + '/llm_config/add', {
+      var protoSel = document.getElementById('slirn-llm-in-proto');
+      var editing = LLM_EDIT_ID;  // 非空 = 当前是编辑模式 → 提交修改
+      var payload = {
         id: gv('slirn-llm-in-id'), provider: gv('slirn-llm-in-provider'),
         base_url: gv('slirn-llm-in-url'), api_key_env: gv('slirn-llm-in-env'),
-      }).then(function(r) {
+        protocol: protoSel ? protoSel.value : 'openai',
+      };
+      postJSON(SLIRN_API + '/llm_config/' + (editing ? 'update' : 'add'), editing
+        ? {id: editing, new_id: payload.id, provider: payload.provider,
+           base_url: payload.base_url, api_key_env: payload.api_key_env,
+           protocol: payload.protocol}
+        : payload).then(function(r) {
         if (r && r.ok) {
-          toast(r.toast || '已添加');
+          toast(r.toast || (editing ? '已更新' : '已添加'));
           renderLLMList(r.models || [], r.current || '');
-          ['slirn-llm-in-id', 'slirn-llm-in-provider', 'slirn-llm-in-url', 'slirn-llm-in-env']
-            .forEach(function(i) { var el = document.getElementById(i); if (el) el.value = ''; });
+          llmFormReset();
         } else {
-          toast('❌ ' + ((r && r.error) || '添加失败'), 'error');
+          toast('❌ ' + ((r && r.error) || '操作失败'), 'error');
         }
       });
+    }
+    else if (action === 'llm-edit') {
+      var editId = target.getAttribute('data-id') || '';
+      var m = LLM_MODELS.filter(function(x) { return x.id === editId; })[0];
+      if (!m) return;
+      LLM_EDIT_ID = editId;
+      document.getElementById('slirn-llm-in-id').value = m.id;
+      document.getElementById('slirn-llm-in-provider').value = m.provider || '';
+      document.getElementById('slirn-llm-in-url').value = m.base_url || '';
+      document.getElementById('slirn-llm-in-env').value = m.api_key_env || '';
+      var protoSel2 = document.getElementById('slirn-llm-in-proto');
+      if (protoSel2) protoSel2.value = (m.protocol === 'anthropic') ? 'anthropic' : 'openai';
+      var ft = document.getElementById('slirn-llm-form-title');
+      if (ft) ft.textContent = '修改模型（' + editId + '）';
+      var ab = document.getElementById('slirn-llm-add-btn');
+      if (ab) ab.textContent = '💾 保存修改';
+      var cb = document.getElementById('slirn-llm-cancel-btn');
+      if (cb) cb.style.display = '';
+      var formEl = document.getElementById('slirn-llm-form');
+      if (formEl && formEl.scrollIntoView) formEl.scrollIntoView({block: 'nearest', behavior: 'smooth'});
+    }
+    else if (action === 'llm-cancel-edit') {
+      llmFormReset();
     }
     else if (action === 'llm-use' || action === 'llm-remove') {
       var llmId = target.getAttribute('data-id') || '';
@@ -2919,7 +2978,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
 
     @app.app.post("/slirn/api/llm_config/add")
     async def llm_config_add(body: dict = Body(default_factory=dict)):
-        """添加模型注册项：{id, provider, base_url, api_key_env}。"""
+        """添加模型注册项：{id, provider, base_url, api_key_env, protocol?}。"""
         from slirn_home import llm_config
 
         try:
@@ -2927,12 +2986,32 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
                 repo_root,
                 body.get("id", ""), body.get("provider", ""),
                 body.get("base_url", ""), body.get("api_key_env", ""),
+                body.get("protocol", "openai"),
             )
         except llm_config.LLMConfigError as e:
             return _err(str(e))
         return _ok("", models=llm_config.list_models(repo_root),
                    current=llm_config.get_current(repo_root),
                    toast=f"✅ 已添加模型 {body.get('id', '')}")
+
+    @app.app.post("/slirn/api/llm_config/update")
+    async def llm_config_update(body: dict = Body(default_factory=dict)):
+        """修改模型注册项（REQ-20260916-001）：{id, new_id, provider, base_url, api_key_env, protocol?}。"""
+        from slirn_home import llm_config
+
+        try:
+            llm_config.update_model(
+                repo_root,
+                str(body.get("id") or ""), body.get("new_id", ""),
+                body.get("provider", ""), body.get("base_url", ""),
+                body.get("api_key_env", ""), body.get("protocol", "openai"),
+            )
+        except llm_config.LLMConfigError as e:
+            return _err(str(e))
+        new_id = str(body.get("new_id") or "").strip()
+        return _ok("", models=llm_config.list_models(repo_root),
+                   current=llm_config.get_current(repo_root),
+                   toast=f"✏️ 已更新模型 {new_id}")
 
     @app.app.post("/slirn/api/llm_config/remove")
     async def llm_config_remove(body: dict = Body(default_factory=dict)):
