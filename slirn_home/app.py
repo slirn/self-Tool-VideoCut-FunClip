@@ -310,16 +310,59 @@ def _render_task_detail(task_id: str, mgr: TaskManager) -> str:
 
     from tasklib.models import TASK_STATUS_LABEL
     status_label = TASK_STATUS_LABEL.get(t.status, str(getattr(t.status, "value", t.status)))
-    # 热词：读任务热词文件内容展示
+
+    # ---- 原视频：格式对齐新建步骤1 的文件信息条「📁 name（size MB · duration）」 ----
+    src = t.original_video_source
+    if src.exists():
+        from tasklib.video import get_video_duration
+        dur = get_video_duration(src)
+        if dur:
+            mm_, ss_ = divmod(int(dur), 60)
+            hh_, mm_ = divmod(mm_, 60)
+            dur_str = f"{hh_:02d}:{mm_:02d}:{ss_:02d}"
+        else:
+            dur_str = "时长未知"
+        size_mb = round(src.stat().st_size / 1024 / 1024, 1)
+        video_disp = f"📁 {_esc(src.name)}（{size_mb} MB · {dur_str}）"
+    else:
+        video_disp = f"📁 {_esc(src.name)}（⚠️ 文件缺失）"
+
+    # ---- 截取段：原样起止时间 + 时长 + 大小（对齐新建「✅ 截取成功 N MB」）----
+    if t.segment:
+        seg_dur = "时长未知"
+        try:
+            from tasklib.time_utils import parse_time
+            _ds = (parse_time(t.segment.end) - parse_time(t.segment.start)).total_seconds()
+            if _ds > 0:
+                seg_dur = f"{int(_ds // 3600):02d}:{int(_ds % 3600 // 60):02d}:{int(_ds % 60):02d}"
+        except ValueError:
+            pass
+        if t.segment.path.exists():
+            seg_mb = round(t.segment.path.stat().st_size / 1024 / 1024, 1)
+            seg_disp = f"⏱ {_esc(t.segment.start)} → {_esc(t.segment.end)}（{seg_dur} · {seg_mb} MB）"
+        else:
+            seg_disp = f"⏱ {_esc(t.segment.start)} → {_esc(t.segment.end)}（{seg_dur} · ⚠️ 截取文件缺失）"
+    else:
+        seg_disp = "未截取 · 使用完整原视频"
+
+    # ---- 热词：chips 全量回显（带来源标签，与新建步骤3 显示方式一致；只读无 ✕）----
     hw_words: list[str] = []
     try:
         if t.hotwords_path.exists():
             hw_words = [w for w in t.hotwords_path.read_text(encoding="utf-8").split() if w]
     except Exception:  # noqa: BLE001
         pass
+    sources = t.hotword_sources or {}
+    src_labels = {"inherit": "继承", "pick": "已选", "manual": "手动"}
     if hw_words:
-        shown = "、".join(hw_words[:8]) + ("…" if len(hw_words) > 8 else "")
-        hotwords_disp = f"{len(hw_words)} 个：{_esc(shown)}"
+        chips = ""
+        for w in hw_words:
+            src_tag = sources.get(w)
+            label = f'<span class="slirn-hw-chip-label">{src_labels.get(src_tag, src_tag)}</span>' if src_tag else ""
+            cls = f"slirn-hw-chip src-{src_tag}" if src_tag else "slirn-hw-chip"
+            chips += f'<span class="{cls}" data-word="{_esc(w)}">{label}<span class="slirn-hw-chip-text">{_esc(w)}</span></span>'
+        summary = f"共 {len(hw_words)} 个词" + (" · 来自继承全部公共库" if t.inherit_public else "")
+        hotwords_disp = f'<div class="slirn-hw-chips">{chips}</div><div class="slirn-hw-summary">{_esc(summary)}</div>'
     else:
         hotwords_disp = "（无）"
 
@@ -327,14 +370,14 @@ def _render_task_detail(task_id: str, mgr: TaskManager) -> str:
         ("任务 ID", _esc(t.task_id)),
         ("任务名", _esc(t.name)),
         ("状态", _esc(status_label)),
-        ("原始视频", _esc(str(t.original_video_source))),
+        ("原始视频", f"{video_disp}<div class='slirn-detail-sub'>{_esc(str(src))}</div>"),
+        ("截取段", seg_disp),
+        ("热词", hotwords_disp),
         ("创建时间", _esc(t.created_at.isoformat() if hasattr(t.created_at, "isoformat") else str(t.created_at))),
         ("修改时间", _esc(t.updated_at.isoformat() if hasattr(t.updated_at, "isoformat") else str(t.updated_at))),
-        ("热词", hotwords_disp),
     ]
     if t.segment:
-        rows.append(("截取段", _esc(f"{t.segment.start} → {t.segment.end}")))
-        rows.append(("截取文件", _esc(str(t.segment.path))))
+        rows.append(("截取文件", f"<div class='slirn-detail-sub'>{_esc(str(t.segment.path))}</div>"))
 
     detail_rows = "".join([
         f'<div class="slirn-detail-row"><div class="slirn-detail-key">{k}</div><div class="slirn-detail-val">{v}</div></div>'
@@ -2047,8 +2090,10 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         final_name = name or src.stem
 
         # 组合最终热词（按：全部继承 → 选中 → 手动 去重保序）
+        # REQ-20260915-002：同时记录每个词的来源（详情页回显 chips 标签用）
         seen = set()
         ordered = []
+        word_sources: dict[str, str] = {}
         if inherit_public:
             try:
                 hwlib = HotwordLibrary(repo_root)
@@ -2058,6 +2103,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
                         if w and w not in seen:
                             seen.add(w)
                             ordered.append(w)
+                            word_sources[w] = "inherit"
             except Exception:
                 pass
         if isinstance(picked_raw, list):
@@ -2066,11 +2112,13 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
                 if w and w not in seen:
                     seen.add(w)
                     ordered.append(w)
+                    word_sources[w] = "pick"
         for w in manual_text.replace("\n", " ").split():
             w = w.strip()
             if w and w not in seen:
                 seen.add(w)
                 ordered.append(w)
+                word_sources[w] = "manual"
         hotwords = ordered
         segment = None
         seg_filename = None
@@ -2097,7 +2145,11 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             else:
                 segment_temp = None
         try:
-            task = mgr.create(name=final_name, original_video=src, segment=segment, hotwords=hotwords)
+            task = mgr.create(
+                name=final_name, original_video=src, segment=segment, hotwords=hotwords,
+                inherit_public=inherit_public,
+                hotword_sources=word_sources if word_sources else None,
+            )
         except Exception as e:
             return _err(f"创建失败: {e}")
         if segment_temp is not None and segment_temp.exists() and seg_filename:
