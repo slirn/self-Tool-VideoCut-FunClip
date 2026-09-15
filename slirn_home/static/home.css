@@ -154,7 +154,12 @@ footer { display: none !important; }
   border: none;
   box-shadow: 0 4px 12px rgba(102, 126, 234, 0.35);
 }
-.slirn-btn-primary:hover { box-shadow: 0 6px 20px rgba(102, 126, 234, 0.5); }
+.slirn-btn-primary:hover {
+  /* 重新声明渐变背景：否则 .slirn-btn:hover 的 var(--hover-bg)（近白）
+     会盖掉渐变，白字白底看不见文字（REQ-20260915-006） */
+  background: var(--accent-gradient);
+  box-shadow: 0 6px 20px rgba(102, 126, 234, 0.5);
+}
 .slirn-btn-danger {
   background: var(--danger-soft);
   color: var(--danger);
@@ -1001,10 +1006,14 @@ footer { display: none !important; }
 }
 .slirn-sub-row:last-child { border-bottom: none; }
 .slirn-sub-row:hover { background: var(--accent-soft); }
+/* 播放中当前行：渐变底 + 白字，与 hover（12% 淡紫）拉开差距（REQ-20260915-006） */
 .slirn-sub-row.active {
-  background: var(--accent-soft);
-  box-shadow: inset 3px 0 0 var(--accent-solid);
+  background: var(--accent-gradient);
+  box-shadow: inset 4px 0 0 rgba(255, 255, 255, 0.7);
 }
+.slirn-sub-row.active .slirn-sub-idx { color: rgba(255, 255, 255, 0.8); }
+.slirn-sub-row.active .slirn-sub-time { color: rgba(255, 255, 255, 0.85); }
+.slirn-sub-row.active .slirn-sub-text { color: #ffffff; font-weight: 600; }
 .slirn-sub-idx {
   font-size: 11px;
   color: var(--text-muted);
@@ -1080,7 +1089,16 @@ footer { display: none !important; }
 }
 .slirn-rev-row:last-child { border-bottom: none; }
 .slirn-rev-row:hover { background: var(--accent-soft); }
-.slirn-rev-row.active { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent-solid); }
+/* 播放中当前行：与字幕列表同款渐变高亮（REQ-20260915-006） */
+.slirn-rev-row.active {
+  background: var(--accent-gradient);
+  box-shadow: inset 4px 0 0 rgba(255, 255, 255, 0.7);
+}
+.slirn-rev-row.active .slirn-sub-idx { color: rgba(255, 255, 255, 0.8); }
+.slirn-rev-row.active .slirn-sub-time { color: rgba(255, 255, 255, 0.85); }
+.slirn-rev-row.active .slirn-sub-text { color: #ffffff; font-weight: 600; }
+.slirn-rev-row.active .slirn-rev-note { color: rgba(255, 255, 255, 0.92); }
+.slirn-rev-row.active .slirn-rev-keeptext { color: #ffffff; }
 .slirn-rev-orig {
   display: grid; grid-template-columns: 44px 216px 1fr; gap: 10px; align-items: baseline;
 }
