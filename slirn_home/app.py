@@ -304,6 +304,111 @@ def _render_subtitle_zone(task_id: str, t, mgr: TaskManager) -> str:
     </div>'''
 
 
+def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
+    """处理剪辑·第 2 步：字幕修订（大模型建议 + 手动决策）— REQ-20260915-005。"""
+    from slirn_home import asr_service, revision_service
+
+    outputs_dir = mgr.tasks_dir / task_id / "outputs"
+    sub_meta = asr_service.load_subtitle(outputs_dir)
+    rev = revision_service.load_revision(outputs_dir)
+    job = revision_service.job_status(task_id)
+
+    # ---- 状态 1：上一阶段未完成 → 引导 ----
+    if not (sub_meta and sub_meta.get("segments")):
+        return '''<div class="slirn-card" style="margin-top:16px;">
+        <div class="slirn-panel-header"><div class="slirn-panel-title">🎬 处理剪辑 · 第 2 步：字幕修订</div></div>
+        <div class="slirn-empty"><div class="slirn-empty-icon">🚧</div>
+            <div class="slirn-empty-text">请先完成上一阶段「字幕生成」— 修订以生成的字幕列表为输入</div></div>
+        <div class="slirn-task-actions" style="margin-top:14px;">
+            <button class="slirn-btn slirn-btn-primary" data-action="wb-stage" data-pane="subtitle">🎙 去生成字幕</button>
+        </div></div>'''
+
+    entries = (rev or {}).get("entries") or []
+    job_state = job.get("state") if job else ("done" if entries else "idle")
+    model = _esc((rev or {}).get("model") or "")
+    status_display = "" if job_state == "running" else "display:none;"
+    running_html = ""
+    if job_state == "running":
+        import time as _t
+        elapsed = int((job.get("finished_at") or _t.time()) - job.get("started_at", _t.time()))
+        running_html = f"⏳ {_esc(job.get('stage') or '处理中')} · 已耗时 {elapsed}s"
+
+    # ---- 状态 2：有字幕、无建议 → 说明 + 分析按钮 ----
+    if not entries:
+        return f'''<div class="slirn-card" style="margin-top:16px;">
+        <div class="slirn-panel-header"><div class="slirn-panel-title">🎬 处理剪辑 · 第 2 步：字幕修订</div></div>
+        <div class="slirn-form-hint">把上一阶段生成的 {len(sub_meta['segments'])} 段字幕交给大模型（qwen）逐段分析，识别：</div>
+        <div class="slirn-rev-intro">
+            <div>🟥 <strong>整行删除</strong> — 口癖、口头禅、语气词、无意义内容</div>
+            <div>🟩 <strong>完整保留</strong> — 正常有效内容</div>
+            <div>🟪 <strong>切分修剪</strong> — 行内重复只保留一次、剔除夹杂语气词（附建议保留文本）</div>
+            <div>🟧 <strong>人工复核</strong> — 模型拿不准，交给你判断</div>
+        </div>
+        <div class="slirn-form-hint">每段建议都带具体分析说明；你在建议之上逐条决策（采纳/改判 + 手动说明）。</div>
+        <div id="slirn-rev-status" class="slirn-status-msg" style="{status_display};"
+             data-task-id="{_esc(task_id)}" data-state="{_esc(job_state)}">{running_html}</div>
+        <div class="slirn-task-actions" style="margin-top:14px;">
+            <button class="slirn-btn slirn-btn-primary" data-action="revise-subtitle" data-task-id="{_esc(task_id)}">🤖 大模型分析字幕</button>
+        </div></div>'''
+
+    # ---- 状态 3：建议列表（每行 = 原字幕 + 模型建议 + 手动决策）----
+    rows = ""
+    for e in entries:
+        cat = e.get("category", "review")
+        cat_label = dict(revision_service.LLM_CATEGORIES).get(cat, ("人工复核",))[0]
+        keep_html = (
+            f'<div class="slirn-rev-keeptext">✂️ 建议保留：「{_esc(e.get("keep_text") or "")}」</div>'
+            if cat == "split" and e.get("keep_text") else ""
+        )
+        opts = "".join(
+            f'<option value="{k}"{" selected" if e.get("decision", "pending") == k else ""}>{v}</option>'
+            for k, v in revision_service.USER_DECISIONS.items()
+        )
+        rows += (
+            f'<div class="slirn-rev-row" data-task-id="{_esc(task_id)}"'
+            f' data-start-ms="{int(e.get("start_ms", 0))}" data-end-ms="{int(e.get("end_ms", 0))}">'
+            f'<div class="slirn-rev-orig">'
+            f'<span class="slirn-sub-idx">{int(e["i"])}</span>'
+            f'<span class="slirn-sub-time">{_esc(e.get("start", ""))} → {_esc(e.get("end", ""))}</span>'
+            f'<span class="slirn-sub-text">{_esc(e.get("text", ""))}</span></div>'
+            f'<div class="slirn-rev-suggest"><span class="slirn-rev-badge {cat}">{cat_label}</span>'
+            f'<span class="slirn-rev-note">{_esc(e.get("note", ""))}</span>{keep_html}</div>'
+            f'<div class="slirn-rev-decide">'
+            f'<select class="slirn-rev-select" data-i="{int(e["i"])}">{opts}</select>'
+            f'<input class="slirn-rev-note-input" data-i="{int(e["i"])}"'
+            f' placeholder="手动处理说明（可空）" value="{_esc(e.get("user_note") or "")}" /></div>'
+            f"</div>"
+        )
+
+    n = len(entries)
+    cat_counts = {k: 0 for k in revision_service.LLM_CATEGORIES}
+    for e in entries:
+        cat_counts[e.get("category", "review")] = cat_counts.get(e.get("category", "review"), 0) + 1
+    decided = sum(1 for e in entries if e.get("decision") != "pending")
+    created = _esc((rev or {}).get("created_at", ""))
+    stats = (
+        f"📝 {n} 段 · 分析于 {created} · 模型 {model} · "
+        f"保留 {cat_counts.get('keep', 0)} / 删除 {cat_counts.get('delete', 0)} / "
+        f"切分 {cat_counts.get('split', 0)} / 复核 {cat_counts.get('review', 0)}"
+        f" · ✅ 已决策 <b>{decided}/{n}</b> · 点击行定位播放"
+    )
+
+    return f'''<div class="slirn-card" style="margin-top:16px;">
+        <div class="slirn-panel-header"><div class="slirn-panel-title">🎬 处理剪辑 · 第 2 步：字幕修订</div></div>
+        <div class="slirn-sub-meta">{stats}</div>
+        <div id="slirn-rev-player-wrap" class="slirn-video-wrap slirn-sub-player-wrap" style="display:none;">
+            <video id="slirn-rev-player" controls preload="metadata"></video>
+        </div>
+        <div id="slirn-rev-status" class="slirn-status-msg" style="{status_display};"
+             data-task-id="{_esc(task_id)}" data-state="{_esc(job_state)}">{running_html}</div>
+        <div class="slirn-rev-list" id="slirn-rev-list">{rows}</div>
+        <div class="slirn-task-actions" style="margin-top:14px;">
+            <button class="slirn-btn slirn-btn-primary" data-action="save-revision" data-task-id="{_esc(task_id)}">💾 保存修订决策</button>
+            <button class="slirn-btn" data-action="play-rev-video" data-task-id="{_esc(task_id)}">▶️ 播放视频</button>
+            <button class="slirn-btn" data-action="revise-subtitle" data-task-id="{_esc(task_id)}" data-has-revision="1">🔄 重新分析</button>
+        </div></div>'''
+
+
 def _task_echo_fragments(t) -> tuple[str, str, str]:
     """任务回显片段（REQ-20260915-002）— 详情页 / 工作台共用。
 
@@ -429,28 +534,40 @@ def _wb_stage_states(t) -> list[str]:
     """各阶段状态：done / current / pending。
 
     素材准备看磁盘资产（原视频在即完成，DRAFT 状态也算）；
-    字幕生成看产物 subtitle.json（服务器重启后内存 job 不在，以磁盘为准）；
+    字幕生成看产物 subtitle.json、字幕修订看 revision.json（服务器重启后内存 job 不在，以磁盘为准）；
     其余按 TaskStatus 管线序比较。
     """
     from tasklib.models import TaskStatus
 
     from slirn_home import asr_service as _asr_mod
+    from slirn_home import revision_service as _rev_mod
 
     rank = {s.name: i for i, s in enumerate(TaskStatus)}
     cur_rank = rank.get(getattr(t.status, "name", str(t.status)), 0)
     states: list[str] = []
     assets_done = t.original_video_source.exists() or t.original_video_symlink.exists()
+    outputs_dir = Path(str(t.hotwords_path)).parent / "outputs"
     sub_meta = None
+    rev_meta = None
     try:
-        sub_meta = _asr_mod.load_subtitle(Path(str(t.hotwords_path)).parent / "outputs")
+        sub_meta = _asr_mod.load_subtitle(outputs_dir)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        rev_meta = _rev_mod.load_revision(outputs_dir)
     except Exception:  # noqa: BLE001
         pass
     subtitle_done = bool(sub_meta and sub_meta.get("segments"))
+    review_done = bool(rev_meta and rev_meta.get("entries"))
     for key, status_name, *_rest in _WB_STAGES:
         if key == "assets":
             states.append("done" if assets_done else "pending")
         elif key == "subtitle":
             states.append("done" if (subtitle_done or cur_rank >= rank["SUBTITLE_GENERATED"]) else "pending")
+        elif key == "subtitle_review":
+            states.append(
+                "done" if (review_done or cur_rank >= rank["SUBTITLE_REVIEWED"]) else "pending"
+            )
         else:
             states.append("done" if cur_rank >= rank[status_name] else "pending")
     # current = 第一个 pending
@@ -520,6 +637,7 @@ def _render_workbench(task_id: str, mgr: TaskManager) -> str:
     panes = {
         "assets": f'<div class="slirn-wb-pane-card"><div class="slirn-wb-pane-title">📦 资产清单</div>{assets_pane}</div>',
         "subtitle": _render_subtitle_zone(task_id, t, mgr),
+        "subtitle_review": _render_revision_zone(task_id, t, mgr),
     }
     for i, (key, _st, _t2, _ic, desc) in enumerate(_WB_STAGES):
         if key in panes:
@@ -1256,6 +1374,7 @@ ROUTER_JS = """
         var d = document.getElementById('slirn-tab-detail');
         if (d) { d.innerHTML = r.html; d.style.display = ''; }
         bindSubPlayer();
+        bindRevPlayer();
       }
     });
   }
@@ -1297,6 +1416,7 @@ ROUTER_JS = """
         w.style.display = '';
         window.scrollTo({top: 0, behavior: 'smooth'});
         bindSubPlayer();
+        bindRevPlayer();
       } else if (r && r.error) {
         toast('❌ ' + r.error, 'error');
       }
@@ -1400,6 +1520,91 @@ ROUTER_JS = """
     if (st && st.dataset.taskId && st.dataset.state === 'running') startSubPolling(st.dataset.taskId);
   }
 
+  // ===== 字幕修订：轮询 + 播放器（REQ-20260915-005，与字幕区同模式、独立 id）=====
+  var revPollTimer = null;
+  function startRevPolling(tid) {
+    if (revPollTimer) { clearInterval(revPollTimer); revPollTimer = null; }
+    var update = function() {
+      postJSON(SLIRN_API + '/revise_status', {task_id: tid}).then(function(r) {
+        if (!r || !r.ok) return;
+        var j = r.job || {};
+        var el = document.getElementById('slirn-rev-status');
+        if (j.state === 'running') {
+          if (el) {
+            el.style.display = '';
+            el.dataset.state = 'running';
+            el.innerHTML = '⏳ ' + escapeHtml(j.stage || '分析中') + ' · 已耗时 ' + fmtElapsed(j.elapsed_s || 0);
+          }
+        } else {
+          if (revPollTimer) { clearInterval(revPollTimer); revPollTimer = null; }
+          if (j.state === 'done') {
+            toast('✅ 大模型分析完成：' + (j.entries_count || 0) + ' 条建议');
+            openWorkbench(tid);  // 刷新面板（建议列表 + 阶段态）
+          } else if (j.state === 'error') {
+            if (el) {
+              el.style.display = '';
+              el.dataset.state = 'error';
+              el.innerHTML = '❌ ' + escapeHtml(j.error || '分析失败');
+            }
+            toast('❌ 大模型分析失败', 'error');
+          }
+        }
+      });
+    };
+    update();
+    revPollTimer = setInterval(update, 2000);
+  }
+
+  function playRevAt(tid, startMs) {
+    var wrap = document.getElementById('slirn-rev-player-wrap');
+    var v = document.getElementById('slirn-rev-player');
+    if (!v) { toast('❌ 播放器未就绪', 'error'); return; }
+    if (wrap) wrap.style.display = '';
+    if (!v.src) { v.src = SLIRN_API + '/video/' + encodeURIComponent(tid); v.load(); }
+    var go = function() {
+      try { v.currentTime = (startMs || 0) / 1000; } catch (err) {}
+      var p = v.play();
+      if (p && p.catch) p.catch(function() {});
+    };
+    if (v.readyState >= 1) go();
+    else v.addEventListener('loadedmetadata', go, {once: true});
+  }
+
+  function bindRevPlayer() {
+    var v = document.getElementById('slirn-rev-player');
+    var list = document.getElementById('slirn-rev-list');
+    if (v && list && !v.dataset.bound) {
+      v.dataset.bound = '1';
+      var rows = Array.prototype.slice.call(list.querySelectorAll('.slirn-rev-row'));
+      var lastHit = -1;
+      var setActive = function(idx) {
+        for (var i = 0; i < rows.length; i++) rows[i].classList.toggle('active', i === idx);
+        if (idx >= 0 && rows[idx] && rows[idx].scrollIntoView) rows[idx].scrollIntoView({block: 'nearest'});
+      };
+      v.addEventListener('timeupdate', function() {
+        var tms = v.currentTime * 1000, hit = -1;
+        for (var i = 0; i < rows.length; i++) {
+          var s0 = parseInt(rows[i].getAttribute('data-start-ms'), 10) || 0;
+          var e0 = parseInt(rows[i].getAttribute('data-end-ms'), 10) || 0;
+          if (tms >= s0 && tms < e0) { hit = i; break; }
+          if (s0 > tms) break;
+        }
+        if (hit === -1 && lastHit >= 0) {
+          var eh = parseInt(rows[lastHit].getAttribute('data-end-ms'), 10) || 0;
+          var nh = (lastHit + 1 < rows.length)
+            ? (parseInt(rows[lastHit + 1].getAttribute('data-start-ms'), 10) || 0)
+            : Infinity;
+          if (tms >= eh && tms < nh) hit = lastHit;
+        }
+        lastHit = hit;
+        setActive(hit);
+      });
+    }
+    // 工作台（重新）打开时，若 job 还在跑 → 恢复轮询
+    var st = document.getElementById('slirn-rev-status');
+    if (st && st.dataset.taskId && st.dataset.state === 'running') startRevPolling(st.dataset.taskId);
+  }
+
   function handleResp(resp, refreshCellId) {
     if (!resp) { toast('❌ 无响应', 'error'); return; }
     if (!resp.ok) { toast('❌ ' + (resp.error || '操作失败'), 'error'); return; }
@@ -1418,6 +1623,16 @@ ROUTER_JS = """
       var tidS = subRow.getAttribute('data-task-id') || '';
       var startMs = parseInt(subRow.getAttribute('data-start-ms'), 10) || 0;
       playSubAt(tidS, startMs);
+      return;
+    }
+
+    // 修订行点击定位播放（select/input/button 上的点击不触发）
+    var revRow = e.target.closest('.slirn-rev-row');
+    if (revRow && !e.target.closest('select, input, button, a')) {
+      e.preventDefault();
+      var tidR = revRow.getAttribute('data-task-id') || '';
+      var startMsR = parseInt(revRow.getAttribute('data-start-ms'), 10) || 0;
+      playRevAt(tidR, startMsR);
       return;
     }
 
@@ -1442,6 +1657,7 @@ ROUTER_JS = """
           var d = document.getElementById('slirn-tab-detail');
           if (d) { d.innerHTML = r.html; d.style.display = ''; }
           bindSubPlayer();
+          bindRevPlayer();
         }
       });
     }
@@ -1461,6 +1677,52 @@ ROUTER_JS = """
     else if (action === 'play-segment') {
       var tidP = target.getAttribute('data-task-id') || '';
       playSubAt(tidP, 0);
+    }
+    else if (action === 'play-rev-video') {
+      playRevAt(target.getAttribute('data-task-id') || '', 0);
+    }
+    else if (action === 'revise-subtitle') {
+      var tidV = target.getAttribute('data-task-id') || '';
+      var payloadV = {task_id: tidV};
+      if (target.getAttribute('data-has-revision') === '1') {
+        if (!window.confirm('重新分析将覆盖现有建议，并重置全部手动决策。确定继续？')) return;
+        payloadV.force = true;
+      }
+      postJSON(SLIRN_API + '/revise_subtitle', payloadV).then(function(r) {
+        if (r && r.ok) {
+          toast(r.toast || '已开始分析');
+          var el = document.getElementById('slirn-rev-status');
+          if (el) { el.dataset.state = 'running'; el.style.display = ''; el.innerHTML = '⏳ 已提交…'; }
+          startRevPolling(tidV);
+        } else if (r && r.error) {
+          toast('❌ ' + r.error, 'error');
+        }
+      });
+    }
+    else if (action === 'save-revision') {
+      var tidW = target.getAttribute('data-task-id') || '';
+      var decisions = [];
+      document.querySelectorAll('#slirn-rev-list .slirn-rev-row').forEach(function(row) {
+        var sel = row.querySelector('.slirn-rev-select');
+        var note = row.querySelector('.slirn-rev-note-input');
+        if (sel) {
+          decisions.push({
+            i: parseInt(sel.getAttribute('data-i'), 10),
+            decision: sel.value,
+            user_note: note ? note.value : '',
+          });
+        }
+      });
+      if (!decisions.length) { toast('❌ 无可保存的决策行', 'error'); return; }
+      postJSON(SLIRN_API + '/save_revision', {task_id: tidW, decisions: decisions})
+        .then(function(r) {
+          if (r && r.ok) {
+            toast(r.toast || '已保存');
+            openWorkbench(tidW);  // 刷新统计/阶段态
+          } else if (r && r.error) {
+            toast('❌ ' + r.error, 'error');
+          }
+        });
     }
     else if (action === 'close-detail') {
       var d = document.getElementById('slirn-tab-detail');
@@ -2517,6 +2779,102 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         j = dict(j)
         j["elapsed_s"] = int((j.get("finished_at") or _time.time()) - j["started_at"])
         return _ok("", job=j)
+
+    @app.app.post("/slirn/api/revise_subtitle")
+    async def revise_subtitle(body: dict = Body(default_factory=dict)):
+        """启动大模型字幕分析（REQ-20260915-005）。已有建议时须 force（前端二次确认）。"""
+        from slirn_home import revision_service
+
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            t = mgr.get(tid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+        outputs_dir = mgr.tasks_dir / tid / "outputs"
+        sub_meta = _asr.load_subtitle(outputs_dir)
+        if not (sub_meta and sub_meta.get("segments")):
+            return _err("请先生成字幕（上一阶段）再进行修订分析")
+        if revision_service.load_revision(outputs_dir) and not body.get("force"):
+            return _err("已存在修订建议 — 重新分析将覆盖建议并重置全部决策，请确认后重试")
+
+        hotwords: list[str] = []
+        try:
+            if t.hotwords_path.exists():
+                hotwords = [w for w in t.hotwords_path.read_text(encoding="utf-8").split() if w]
+        except Exception:  # noqa: BLE001
+            pass
+
+        started = revision_service.start_job(
+            tid, sub_meta["segments"], t.name, hotwords, outputs_dir,
+        )
+        if not started:
+            return _ok("", toast="⏳ 该任务已在分析中，请等待完成")
+        return _ok("", toast="🤖 大模型分析已开始（后台运行，可离开本页）",
+                   job={"state": "running", "stage": "准备提示词"})
+
+    @app.app.post("/slirn/api/revise_status")
+    async def revise_status(body: dict = Body(default_factory=dict)):
+        import time as _time
+
+        from slirn_home import revision_service
+
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        j = revision_service.job_status(tid)
+        if j is None:
+            rev = revision_service.load_revision(mgr.tasks_dir / tid / "outputs")
+            if rev and rev.get("entries"):
+                return _ok("", job={"state": "done", "entries_count": len(rev["entries"])})
+            return _ok("", job={"state": "idle"})
+        j = dict(j)
+        j["elapsed_s"] = int((j.get("finished_at") or _time.time()) - j["started_at"])
+        return _ok("", job=j)
+
+    @app.app.post("/slirn/api/save_revision")
+    async def save_revision(body: dict = Body(default_factory=dict)):
+        """保存用户逐条决策；全部决策完成 → 状态推进 SUBTITLE_REVIEWED。"""
+        import json
+        import time as _time
+
+        from slirn_home import revision_service
+
+        tid = (body.get("task_id") or "").strip()
+        decisions = body.get("decisions")
+        if not tid:
+            return _err("缺少 task_id")
+        if not isinstance(decisions, list):
+            return _err("缺少 decisions 列表")
+        try:
+            mgr.get(tid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+        outputs_dir = mgr.tasks_dir / tid / "outputs"
+        rev = revision_service.load_revision(outputs_dir)
+        if not (rev and rev.get("entries")):
+            return _err("尚无修订建议，请先运行大模型分析")
+        rev, applied = revision_service.merge_decisions(rev, decisions)
+        rev["saved_at"] = _time.strftime("%Y-%m-%dT%H:%M:%S")
+        (outputs_dir / revision_service.REVISION_JSON).write_text(
+            json.dumps(rev, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        total = len(rev["entries"])
+        decided = sum(1 for e in rev["entries"] if e.get("decision") != "pending")
+        finished = revision_service.all_decided(rev)
+        if finished:
+            try:
+                mgr.update_status(tid, TaskStatus.SUBTITLE_REVIEWED)
+            except Exception as e:  # noqa: BLE001
+                revision_service.log.warning("更新任务 %s 状态失败: %s", tid, e)
+        remaining = total - decided
+        toast = f"✅ 已保存（生效 {applied} 条 · 已决策 {decided}/{total}）"
+        if finished:
+            toast += " · 字幕修订完成，可进入粗剪"
+        elif remaining:
+            toast += f" · 还剩 {remaining} 条未决策"
+        return _ok("", toast=toast, decided=decided, total=total, finished=finished)
 
     @app.app.post("/slirn/api/file_selected")
     async def file_selected(body: dict = Body(default_factory=dict)):

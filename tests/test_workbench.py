@@ -162,10 +162,12 @@ def test_render_workbench_layout(tmp_path: Path):
     assert html.count('class="slirn-wb-stage ') == 8
     assert "slirn-wb-stage done" in html and "slirn-wb-stage current" in html
     assert "素材准备" in html and "字幕生成" in html and "字幕合成" in html
-    # 右侧面板：素材清单 + 字幕区（含生成按钮）+ 6 个规划占位
+    # 右侧面板：素材清单 + 字幕区（含生成按钮）+ 字幕修订区 + 5 个规划占位（REQ-005 后修订区真实化）
     assert "📦 资产清单" in html
     assert 'data-action="gen-subtitle"' in html
-    assert html.count("规划中 — 该阶段将在后续版本提供") == 6
+    assert "处理剪辑 · 第 2 步：字幕修订" in html
+    assert 'id="slirn-wb-pane-subtitle_review"' in html
+    assert html.count("规划中 — 该阶段将在后续版本提供") == 5
     assert html.count("slirn-wb-pane\"") >= 1  # 面板容器齐备
     # 聚焦 current（字幕生成）→ 字幕面板默认显示
     import re
