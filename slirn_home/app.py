@@ -304,6 +304,29 @@ def _render_subtitle_zone(task_id: str, t, mgr: TaskManager) -> str:
     </div>'''
 
 
+def _render_rigor_picker() -> str:
+    """分析严谨性级别单选卡（REQ-20260916-003，用户必选）— 高/中/低 三档。
+
+    每档带定位标题、说明、例子（revision_service.RIGOR_LEVELS），
+    让操作者不看文档也能体感三档差别；不预选（必须主动选择），
+    上次选择由前端 localStorage 预填（applyRevRigorState）。
+    """
+    from slirn_home.revision_service import RIGOR_LEVELS
+
+    cards = ""
+    for key in ("high", "medium", "low"):
+        cfg = RIGOR_LEVELS[key]
+        cards += (
+            f'<label class="slirn-rigor-card" title="{_esc(cfg["desc"])}">'
+            f'<input type="radio" name="slirn-rev-rigor" value="{key}" />'
+            f'<span class="slirn-rigor-card-title">{_esc(cfg["badge"])} · {_esc(cfg["title"])}</span>'
+            f'<span class="slirn-rigor-card-desc">{_esc(cfg["desc"])}</span>'
+            f'<span class="slirn-rigor-card-example">例：{_esc(cfg["example"])}</span>'
+            f'</label>'
+        )
+    return f'<div class="slirn-rigor-cards">{cards}</div>'
+
+
 def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
     """处理剪辑·第 2 步：字幕修订（大模型建议 + 手动决策）— REQ-20260915-005。"""
     from slirn_home import asr_service, revision_service
@@ -348,6 +371,8 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
             <div>🟧 <strong>人工复核</strong> — 模型拿不准，交给你判断</div>
         </div>
         <div class="slirn-form-hint">每段建议都带具体分析说明；你在建议之上逐条决策（采纳/改判 + 手动说明）。</div>
+        <div class="slirn-form-hint" style="margin-top:14px;"><b>分析严谨性级别</b>（必选）— 决定大模型按多严格的标准处理字幕：</div>
+        {_render_rigor_picker()}
         <div id="slirn-rev-status" class="slirn-status-msg" style="{status_display};"
              data-task-id="{_esc(task_id)}" data-state="{_esc(job_state)}">{running_html}</div>
         <div class="slirn-task-actions" style="margin-top:14px;">
@@ -363,8 +388,11 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
         decision = e.get("decision", "pending")
         # 需要人工关注或已有手动说明的行默认展开，其余收起保持列表紧凑
         open_detail = cat == "review" or bool(e.get("user_note"))
+        # 未决策的行默认选「采纳建议」（REQ-20260916-003）：扫一遍改掉不同意的，
+        # 直接保存即全量采纳；「未决策」选项保留，可手动改回
+        sel_val = decision if decision != "pending" else "accept"
         opts = "".join(
-            f'<option value="{k}"{" selected" if decision == k else ""}>{v}</option>'
+            f'<option value="{k}"{" selected" if sel_val == k else ""}>{v}</option>'
             for k, v in revision_service.USER_DECISIONS.items()
         )
         keep_html = (
@@ -396,11 +424,17 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
         cat_counts[e.get("category", "review")] = cat_counts.get(e.get("category", "review"), 0) + 1
     decided = sum(1 for e in entries if e.get("decision") != "pending")
     created = _esc((rev or {}).get("created_at", ""))
+    rigor_key = (rev or {}).get("rigor") or ""
+    rigor_cfg = revision_service.RIGOR_LEVELS.get(rigor_key)  # 旧数据无 rigor → 不显示
+    rigor_stats = (
+        f" · 严谨性 {rigor_cfg['badge']}（{rigor_cfg['title']}）" if rigor_cfg else ""
+    )
     stats = (
-        f"📝 {n} 段 · 分析于 {created} · 模型 {model} · "
+        f"📝 {n} 段 · 分析于 {created} · 模型 {model}{rigor_stats} · "
         f"保留 {cat_counts.get('keep', 0)} / 删除 {cat_counts.get('delete', 0)} / "
         f"切分 {cat_counts.get('split', 0)} / 复核 {cat_counts.get('review', 0)}"
-        f" · ✅ 已决策 <b>{decided}/{n}</b> · 点击行定位播放 · ▾ 展开模型分析与处理说明"
+        f" · ✅ 已决策 <b>{decided}/{n}</b> · 点击行定位播放 · 决策列默认「采纳建议」"
+        f" · ▾ 展开模型分析与处理说明"
     )
 
     return f'''<div class="slirn-card" style="margin-top:16px;">
@@ -412,6 +446,10 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
         <div id="slirn-rev-status" class="slirn-status-msg" style="{status_display};"
              data-task-id="{_esc(task_id)}" data-state="{_esc(job_state)}">{running_html}</div>
         <div class="slirn-rev-list" id="slirn-rev-list">{rows}</div>
+        <details class="slirn-rigor-box" id="slirn-rev-rigor-box">
+            <summary>🔄 重新分析：点选分析严谨性级别（必选）</summary>
+            {_render_rigor_picker()}
+        </details>
         <div class="slirn-task-actions" style="margin-top:14px;">
             <button class="slirn-btn slirn-btn-primary" data-action="save-revision" data-task-id="{_esc(task_id)}">💾 保存修订决策</button>
             <button class="slirn-btn" data-action="play-rev-video" data-task-id="{_esc(task_id)}">▶️ 播放视频</button>
@@ -1536,6 +1574,7 @@ ROUTER_JS = """
         bindSubPlayer();
         bindRevPlayer();
         applyWbStagesState();  // 恢复上次收起/展开（跨刷新保持 — REQ-20260916-002）
+        applyRevRigorState();  // 上次选过的严谨性级别预填（REQ-20260916-003）
       } else if (r && r.error) {
         toast('❌ ' + r.error, 'error');
       }
@@ -1549,6 +1588,16 @@ ROUTER_JS = """
     var collapsed = '';
     try { collapsed = localStorage.getItem('slirnWbStagesCollapsed') || ''; } catch (err) {}
     host.classList.toggle('wb-stages-collapsed', collapsed === '1');
+  }
+
+  // ===== 严谨性级别：上次选择预填（不发起新分析也可见 — REQ-20260916-003）=====
+  function applyRevRigorState() {
+    if (document.querySelector('input[name="slirn-rev-rigor"]:checked')) return;
+    var saved = '';
+    try { saved = localStorage.getItem('slirnRevRigor') || ''; } catch (err) {}
+    if (['high', 'medium', 'low'].indexOf(saved) < 0) return;
+    var el = document.querySelector('input[name="slirn-rev-rigor"][value="' + saved + '"]');
+    if (el) el.checked = true;
   }
 
   function switchWbPane(paneKey) {
@@ -1811,7 +1860,18 @@ ROUTER_JS = """
     }
     else if (action === 'revise-subtitle') {
       var tidV = target.getAttribute('data-task-id') || '';
-      var payloadV = {task_id: tidV};
+      // 严谨性级别必选（REQ-20260916-003）：先于覆盖确认 — 没选等级就不发请求
+      var rigorEl = document.querySelector('input[name="slirn-rev-rigor"]:checked');
+      if (!rigorEl) {
+        toast('❌ 请先选择分析严谨性级别（高 / 中 / 低）', 'error');
+        var det = document.getElementById('slirn-rev-rigor-box');
+        if (det) det.open = true;
+        var cards = document.querySelector('.slirn-rigor-cards');
+        if (cards) cards.scrollIntoView({behavior: 'smooth', block: 'center'});
+        return;
+      }
+      var payloadV = {task_id: tidV, rigor: rigorEl.value};
+      try { localStorage.setItem('slirnRevRigor', rigorEl.value); } catch (err) {}
       if (target.getAttribute('data-has-revision') === '1') {
         if (!window.confirm('重新分析将覆盖现有建议，并重置全部手动决策。确定继续？')) return;
         payloadV.force = true;
@@ -3101,12 +3161,18 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
 
     @app.app.post("/slirn/api/revise_subtitle")
     async def revise_subtitle(body: dict = Body(default_factory=dict)):
-        """启动大模型字幕分析（REQ-20260915-005）。已有建议时须 force（前端二次确认）。"""
+        """启动大模型字幕分析（REQ-20260915-005）。已有建议时须 force（前端二次确认）。
+
+        rigor 必填（REQ-20260916-003）：分析严谨性级别 high|medium|low，注入提示词并留痕。
+        """
         from slirn_home import llm_config, revision_service
 
         tid = (body.get("task_id") or "").strip()
         if not tid:
             return _err("缺少 task_id")
+        rigor = str(body.get("rigor") or "").strip().lower()
+        if rigor not in revision_service.RIGOR_LEVELS:
+            return _err("请先选择分析严谨性级别（高 / 中 / 低）")
         try:
             t = mgr.get(tid)
         except Exception as e:  # noqa: BLE001
@@ -3129,7 +3195,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         if entry is None:
             return _err("未注册任何大模型 — 请先点顶栏 ⚙️ 添加模型")
         started = revision_service.start_job(
-            tid, sub_meta["segments"], t.name, hotwords, outputs_dir, entry=entry,
+            tid, sub_meta["segments"], t.name, hotwords, outputs_dir, entry=entry, rigor=rigor,
         )
         if not started:
             return _ok("", toast="⏳ 该任务已在分析中，请等待完成")

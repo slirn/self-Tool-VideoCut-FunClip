@@ -1328,8 +1328,47 @@ footer { display: none !important; }
   border: 1px solid var(--border); border-radius: 8px;
   background: var(--input-bg); color: var(--text-primary);
 }
+/* 严谨性级别单选卡（REQ-20260916-003）：高/中/低 各带说明+例子；
+   选中态用 :has(input:checked) 高亮整卡 */
+.slirn-rigor-cards {
+  display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;
+  margin: 10px 0 2px;
+}
+.slirn-rigor-card {
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 10px 12px; border: 1.5px solid var(--border); border-radius: 10px;
+  cursor: pointer; position: relative;
+  background: var(--card-bg);
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.slirn-rigor-card:hover { border-color: var(--accent-solid); }
+.slirn-rigor-card input {
+  position: absolute; opacity: 0; pointer-events: none;
+}
+.slirn-rigor-card:has(input:checked) {
+  border-color: var(--accent-solid);
+  box-shadow: 0 0 0 2.5px var(--accent-soft);
+}
+.slirn-rigor-card-title {
+  font-size: 13px; font-weight: 700; color: var(--text-primary);
+}
+.slirn-rigor-card:has(input:checked) .slirn-rigor-card-title { color: var(--accent-solid); }
+.slirn-rigor-card-desc { font-size: 12px; line-height: 1.55; color: var(--text-secondary); }
+.slirn-rigor-card-example {
+  font-size: 11.5px; line-height: 1.55; color: var(--text-muted);
+  border-top: 1px dashed var(--border); padding-top: 6px;
+}
+/* 状态3里收进 <details>（重新分析前选级别，不占日常视线） */
+.slirn-rigor-box {
+  margin-top: 14px; padding: 8px 12px 10px;
+  border: 1px dashed var(--border); border-radius: 10px;
+}
+.slirn-rigor-box summary {
+  cursor: pointer; font-size: 13px; font-weight: 600; color: var(--text-secondary);
+}
 @media (max-width: 720px) {
   .slirn-rev-line { grid-template-columns: 32px 1fr 118px 22px; }
   .slirn-rev-line .slirn-sub-time { display: none; }
   .slirn-rev-detail { padding-left: 32px; }
+  .slirn-rigor-cards { grid-template-columns: 1fr; }
 }

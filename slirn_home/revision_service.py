@@ -45,18 +45,77 @@ USER_DECISIONS: dict[str, str] = {
 # 20 段/批输出约 2K tokens，留足余量，解析失败还会减半重试 — REQ-20260915-007）
 BATCH_SIZE = 20
 
-_SYSTEM_PROMPT = """你是专业的视频字幕修订顾问。用户会给你视频字幕段列表（JSON 数组，每项含序号 i、起止时间、文本）。请对**每一段**判断修订方式，并给出具体分析说明。
+# 分析严谨性级别（REQ-20260916-003，用户必选）：
+# - prompt 侧：badge/title/stance/criteria 注入系统提示词，决定模型挑毛病的严格程度
+# - UI 侧：desc/example 渲染成单选卡，给操作者体感（描述 + 例子）
+RIGOR_LEVELS: dict[str, dict] = {
+    "high": {
+        "badge": "高",
+        "title": "严格打磨",
+        "stance": "以成品口播稿的标准逐句精修，任何影响观感的语气词、口癖、重复、寒暄都要处理。",
+        "criteria": (
+            '- "keep"：有效内容，完整保留。\n'
+            '- "delete"：整行删除 — 纯口癖、口头禅、语气词（嗯、啊、呃、那个、就是说、然后等）、'
+            "无意义寒暄、与主题无关的废话、整行都是重复啰嗦。\n"
+            '- "split"：行内需进一步切分/修剪 — 例如一句话中重复多次的内容只保留一次；'
+            "有效内容中夹杂的语气词应剔除。keep_text 字段给出建议保留后的文本。\n"
+            '- "review"：无法判断（语义不明、可能依赖上下文）。'
+        ),
+        "desc": "逐句精修到成品口播稿水平：语气词、口癖、重复、无意义寒暄全部处理。"
+                "适合对外发布、追求专业观感的成片。",
+        "example": "「嗯呃，那个，就是说，我们今天讲一下神经网络」→ 修剪为「我们今天讲一下神经网络」",
+    },
+    "medium": {
+        "badge": "中",
+        "title": "意思正确即可",
+        "stance": "只处理影响理解的问题：每句话表达的意思正确、没有太大瑕疵即可，小语气词可以容忍保留。",
+        "criteria": (
+            '- "keep"：意思表达正确的内容，完整保留 — 个别语气词（嗯、呃、啊等）若不影响理解，'
+            "保留即可，不必强求剔除。\n"
+            '- "delete"：整行删除 — 仅限完全无意义的内容：纯寒暄、与主题无关的废话、'
+            "整行重复啰嗦到没有信息量。\n"
+            '- "split"：行内需进一步切分/修剪 — 仅限明显问题：明显口误/用词错误、'
+            "同一内容连续重复多次、明显不通顺需小幅修剪的句子。keep_text 字段给出建议保留后的文本。\n"
+            '- "review"：无法判断（语义不明、可能依赖上下文）。'
+        ),
+        "desc": "只处理影响理解的问题：明显口误、连续重复、明显不通顺的句子做小幅修剪；"
+                "小语气词可以保留。适合内部学习、速览回看。",
+        "example": "「嗯，我们今天讲一下神经网络」→ 整行保留（小语气词「嗯」不影响意思）",
+    },
+    "low": {
+        "badge": "低",
+        "title": "只去严重问题",
+        "stance": "最大限度保留原文，只处理过多重复和意思混乱的句子；允许字幕存在部分小瑕疵。",
+        "criteria": (
+            '- "keep"：默认选择 — 句子能看懂大意就保留；语气词、轻微口误、个别小重复均不处理。\n'
+            '- "delete"：整行删除 — 仅限严重影响观看的内容：大段纯重复、'
+            "完全无意义、与主题无关的废话。\n"
+            '- "split"：行内需进一步切分/修剪 — 仅限意思混乱/逻辑断裂、'
+            "同一内容过多重复的句子。keep_text 字段给出建议保留后的文本。\n"
+            '- "review"：无法判断（语义不明、可能依赖上下文）。'
+        ),
+        "desc": "最大限度保留原文：只处理大段纯重复和意思混乱的句子，语气词、轻微口误都保留。"
+                "适合只要大意、尽快出片。",
+        "example": "「所以我们所以我们所以我们看到」→ 修剪为「所以我们看到」（只去掉连续重复）",
+    },
+}
 
-判定标准：
-- "keep"：有效内容，完整保留。
-- "delete"：整行删除 — 纯口癖、口头禅、语气词（嗯、啊、呃、那个、就是说、然后等）、无意义寒暄、与主题无关的废话、整行都是重复啰嗦。
-- "split"：行内需进一步切分/修剪 — 例如一句话中重复多次的内容只保留一次；有效内容中夹杂的语气词应剔除。keep_text 字段给出建议保留后的文本。
-- "review"：无法判断（语义不明、可能依赖上下文）。
 
-输出要求：只输出 JSON 数组，不要任何其他文字。每项格式：
-{"i": 段序号, "category": "keep|delete|split|review", "keep_text": "建议保留的文本（仅 split 需要，其余为 null）", "note": "具体分析说明：指出问题词、为何删/留/切，切分的依据"}
-
-note 必须具体（例如：「行首『嗯』为语气词；『大家好』重复 2 次建议保留 1 次」），不要泛泛而谈。必须覆盖输入的每一个 i。"""
+def build_system_prompt(rigor: str = "high") -> str:
+    """按严谨性级别组装系统提示词（未知级别回退 high）。"""
+    cfg = RIGOR_LEVELS.get(rigor) or RIGOR_LEVELS["high"]
+    return (
+        "你是专业的视频字幕修订顾问。用户会给你视频字幕段列表（JSON 数组，每项含序号 i、起止时间、文本）。"
+        "请对**每一段**判断修订方式，并给出具体分析说明。\n\n"
+        f"本次分析严谨性级别：{cfg['badge']}（{cfg['title']}）。{cfg['stance']}\n\n"
+        "判定标准：\n"
+        f"{cfg['criteria']}\n\n"
+        "输出要求：只输出 JSON 数组，不要任何其他文字。每项格式：\n"
+        '{"i": 段序号, "category": "keep|delete|split|review", "keep_text": '
+        '"建议保留的文本（仅 split 需要，其余为 null）", "note": "具体分析说明：指出问题词、为何删/留/切，切分的依据"}\n\n'
+        "note 必须具体（例如：「行首『嗯』为语气词；『大家好』重复 2 次建议保留 1 次」），不要泛泛而谈。"
+        "必须覆盖输入的每一个 i。"
+    )
 
 
 def build_user_prompt(task_name: str, hotwords: list[str], segments: list[dict]) -> str:
@@ -371,13 +430,19 @@ def start_job(
     outputs_dir: Path,
     on_success: Callable[[list[dict]], None] | None = None,
     entry: dict | None = None,
+    rigor: str = "high",
 ) -> bool:
     """启动大模型分析线程。已在跑 → False。成功后写 revision.json（决策重置 pending）。
 
     entry：本次分析使用的模型注册项 {"id","provider","base_url","api_key_env"}
     （app.py 传入用户选择的当前模型，REQ-20260915-008），全程使用并写入
     revision.json meta 留痕。
+    rigor：分析严谨性级别 high|medium|low（REQ-20260916-003，用户必选），
+    非法值直接拒绝；级别写入 meta 留痕并注入系统提示词。
     """
+    if rigor not in RIGOR_LEVELS:
+        raise ValueError(f"未知严谨性级别: {rigor!r}（可选 {' / '.join(RIGOR_LEVELS)}）")
+    system_prompt = build_system_prompt(rigor)
     with _JOBS_LOCK:
         existing = _JOBS.get(task_id)
         if existing and existing.get("state") == "running":
@@ -401,7 +466,7 @@ def start_job(
             —— 这种错误每批都会失败，减半只是浪费调用（REQ-20260915-007）。
             """
             try:
-                raw = _call_llm(_SYSTEM_PROMPT, build_user_prompt(task_name, hotwords, batch), entry)
+                raw = _call_llm(system_prompt, build_user_prompt(task_name, hotwords, batch), entry)
                 return parse_llm_suggestions(raw, batch)
             except ValueError as e:
                 if len(batch) == 1:
@@ -439,6 +504,7 @@ def start_job(
                 "model": (entry or {}).get("id") or "qwen-plus",
                 "provider": (entry or {}).get("provider", ""),
                 "protocol": (entry or {}).get("protocol", "openai"),
+                "rigor": rigor,
                 "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 "saved_at": None,
                 "segments_count": len(entries),

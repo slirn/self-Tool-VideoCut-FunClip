@@ -137,15 +137,20 @@ def test_start_job_writes_revision(tmp_path: Path, monkeypatch):
     from slirn_home import revision_service
 
     outputs = tmp_path / "outputs"
-    monkeypatch.setattr(
-        revision_service, "_call_llm",
-        lambda sys_p, user, entry=None, retries=2: json.dumps([
+    captured: dict = {}
+
+    def _fake_llm(system, user, entry=None, retries=2):
+        captured["system"] = system
+        return json.dumps([
             {"i": 1, "category": "delete", "note": "语气词"},
             {"i": 2, "category": "keep", "note": "保留"},
             {"i": 3, "category": "split", "keep_text": "我们开始吧", "note": "去重复"},
-        ]),
+        ])
+
+    monkeypatch.setattr(revision_service, "_call_llm", _fake_llm)
+    assert revision_service.start_job(
+        "t1", SEGS, "任务A", ["热词"], outputs, entry=ENTRY, rigor="medium",
     )
-    assert revision_service.start_job("t1", SEGS, "任务A", ["热词"], outputs, entry=ENTRY)
     # 等 job 结束
     import time
     for _ in range(100):
@@ -154,9 +159,12 @@ def test_start_job_writes_revision(tmp_path: Path, monkeypatch):
             break
         time.sleep(0.05)
     assert j["state"] == "done", j
+    # 级别注入系统提示词（REQ-20260916-003）
+    assert "中（意思正确即可）" in captured["system"], captured["system"][:120]
     rev = revision_service.load_revision(outputs)
     assert rev is not None and rev["segments_count"] == 3
     assert rev["model"] == "qwen-max" and rev["provider"] == "阿里云百炼"  # meta 留痕（REQ-20260915-008）
+    assert rev["rigor"] == "medium"  # 级别留痕（REQ-20260916-003）
     entries = rev["entries"]
     # 每条齐备：建议 + 说明 + 用户决策字段（AC-2）
     for e, seg in zip(entries, SEGS):
@@ -184,6 +192,40 @@ def test_start_job_llm_error(tmp_path: Path, monkeypatch):
         time.sleep(0.05)
     assert j["state"] == "error" and "DEEPSEEK_API_KEY" in j["error"], j
     assert not (outputs / "revision.json").exists()
+
+
+# ---------- 严谨性级别（REQ-20260916-003）----------
+
+def test_build_system_prompt_rigor_levels():
+    """三档级别各自注入对应的严格度指令；公共输出格式不变；未知级别回退高。"""
+    from slirn_home.revision_service import RIGOR_LEVELS, build_system_prompt
+
+    assert list(RIGOR_LEVELS) == ["high", "medium", "low"]
+    hi = build_system_prompt("high")
+    assert "高（严格打磨）" in hi and "成品口播稿" in hi
+    assert "语气词（嗯、啊、呃、那个、就是说、然后等）" in hi, "高档保持原有最严判定标准"
+    mid = build_system_prompt("medium")
+    assert "中（意思正确即可）" in mid and "小语气词" in mid and "明显口误" in mid
+    lo = build_system_prompt("low")
+    assert "低（只去严重问题）" in lo and "最大限度保留原文" in lo
+    assert "过多重复" in lo and "意思混乱" in lo, "低档只放过严重问题（用户原话）"
+    for p in (hi, mid, lo):  # 输出格式与全段覆盖要求三档一致
+        assert '"category": "keep|delete|split|review"' in p
+        assert "必须覆盖输入的每一个 i" in p
+    assert build_system_prompt("bogus") == hi  # 防御：未知回退高
+
+
+def test_start_job_rejects_unknown_rigor(tmp_path: Path):
+    """非法级别直接拒绝（不发 LLM 请求）。"""
+    from slirn_home import revision_service
+
+    try:
+        revision_service.start_job("t9", SEGS, "任务E", [], tmp_path / "o", rigor="bogus")
+    except ValueError as e:
+        assert "严谨性" in str(e), e
+    else:
+        raise AssertionError("应抛 ValueError")
+    assert revision_service.job_status("t9") is None, "不应创建 job"
 
 
 # ---------- _chat_completion 响应硬校验（REQ-20260915-007 / 008 OpenAI 兼容层）----------
@@ -495,6 +537,13 @@ def test_render_revision_zone_states(tmp_path: Path, monkeypatch):
     assert "🤖 大模型分析字幕" in h2 and 'data-action="revise-subtitle"' in h2
     assert "整行删除" in h2 and "完整保留" in h2 and "切分修剪" in h2 and "人工复核" in h2
     assert "qwen-max" in h2, "状态2提示应显示当前生效模型"
+    # 严谨性级别单选卡（REQ-20260916-003）：必选、三档、说明 + 例子、不预选
+    assert "分析严谨性级别" in h2 and "必选" in h2
+    assert h2.count('name="slirn-rev-rigor"') == 3
+    assert 'value="high"' in h2 and 'value="medium"' in h2 and 'value="low"' in h2
+    assert "严格打磨" in h2 and "意思正确即可" in h2 and "只去严重问题" in h2
+    assert h2.count("例：") == 3, "三档各带一个例子给操作者体感"
+    assert "checked" not in h2, "服务端不预选 — 用户必须主动选择"
 
     # 状态 3：有建议 → 行式列表（与字幕生成列表同列布局 — REQ-20260916-002）
     outputs = m.tasks_dir / tid / "outputs"
@@ -531,12 +580,26 @@ def test_render_revision_zone_states(tmp_path: Path, monkeypatch):
     # 手动决策下拉 ×3 + 手动说明输入 ×3（预填已保存的决策）
     assert h3.count('class="slirn-rev-select" data-i=') == 3
     assert h3.count('class="slirn-rev-note-input" data-i=') == 3
-    assert '<option value="accept" selected>采纳建议</option>' in h3
+    # 未决策行默认选「采纳建议」（REQ-20260916-003）：pending×2 默认 accept + 已存 accept×1
+    assert h3.count('<option value="accept" selected>采纳建议</option>') == 3
+    assert 'value="pending" selected' not in h3, "不再有默认「未决策」（选项保留可手动改回）"
+    assert '<option value="pending">未决策</option>' in h3
     assert 'value="同意"' in h3
-    assert "已决策 <b>1/3</b>" in h3
+    assert "已决策 <b>1/3</b>" in h3, "统计口径仍是已保存决策（保存后生效）"
+    assert "决策列默认「采纳建议」" in h3
     assert "点击行定位播放" in h3 and "展开模型分析与处理说明" in h3
     assert 'data-action="save-revision"' in h3
     assert 'data-action="revise-subtitle"' in h3 and 'data-has-revision="1"' in h3
+    # 重新分析的等级选择收进 <details>；旧数据无 rigor → 统计行不显示严谨性
+    assert 'class="slirn-rigor-box"' in h3 and h3.count('name="slirn-rev-rigor"') == 3
+    assert " · 严谨性 " not in h3
+
+    # meta 带 rigor → 统计行显示级别（正向用例）
+    rev_data = json.loads((outputs / "revision.json").read_text(encoding="utf-8"))
+    rev_data["rigor"] = "medium"
+    (outputs / "revision.json").write_text(json.dumps(rev_data, ensure_ascii=False), encoding="utf-8")
+    h3b = _render_revision_zone(tid, m.get(tid), m)
+    assert " · 严谨性 中（意思正确即可）" in h3b
 
 
 def test_wb_stage_states_with_revision(tmp_path: Path):
