@@ -1,6 +1,7 @@
 """字幕修订服务 — REQ-20260915-005。
 
-把上一阶段生成的 subtitle.json 交给大模型（DashScope qwen，DASHSCOPE_API_KEY），
+把上一阶段生成的 subtitle.json 交给大模型（用户在 ⚙️ 注册的当前模型，
+OpenAI 兼容协议，API Key 从环境变量读取 — REQ-20260915-008），
 逐段产出处理建议（keep 保留 / delete 整行删除 / split 切分修剪 / review 人工复核），
 落盘 outputs/revision.json；用户逐条决策（decision + user_note）合并回写。
 后台线程 job 管理与 asr_service 同模式（内存 job 表 + 阶段级进度）。
@@ -44,14 +45,6 @@ USER_DECISIONS: dict[str, str] = {
 # 20 段/批输出约 2K tokens，留足余量，解析失败还会减半重试 — REQ-20260915-007）
 BATCH_SIZE = 20
 
-# DashScope 业务错误码 → 中文说明（让用户一眼知道该怎么办 — REQ-20260915-007）
-_DASHSCOPE_CODE_ZH: dict[str, str] = {
-    "Arrearage": "账户欠费/余额不足，请到阿里云百炼控制台充值后重试",
-    "InvalidApiKey": "API Key 无效，请检查 DASHSCOPE_API_KEY 配置",
-    "Throttling": "调用被限流（请求过频或配额用尽），请稍后重试",
-    "AccessDenied": "无访问权限（可能未开通对应模型服务）",
-}
-
 _SYSTEM_PROMPT = """你是专业的视频字幕修订顾问。用户会给你视频字幕段列表（JSON 数组，每项含序号 i、起止时间、文本）。请对**每一段**判断修订方式，并给出具体分析说明。
 
 判定标准：
@@ -82,82 +75,135 @@ def build_user_prompt(task_name: str, hotwords: list[str], segments: list[dict])
 
 # =============== 大模型调用（拆出便于测试 monkeypatch） ===============
 
-def _dig(obj, *keys):
-    """dashscope 响应可能是 dict 或对象，统一安全取值（缺失/None → None）。"""
-    cur = obj
-    for k in keys:
-        if cur is None:
-            return None
-        if isinstance(cur, dict):
-            cur = cur.get(k)
-        else:
-            cur = getattr(cur, k, None)
-    return cur
+# OpenAI 兼容错误码 → 中文说明（让用户一眼知道该怎么办 — REQ-20260915-007/008）
+_CODE_ZH: dict[str, str] = {
+    "Arrearage": "账户欠费/余额不足，请到对应厂商控制台充值后重试",
+    "insufficient_quota": "配额/余额不足，请到对应厂商控制台充值后重试",
+    "InvalidApiKey": "API Key 无效，请检查对应环境变量中的 Key",
+    "invalid_api_key": "API Key 无效，请检查对应环境变量中的 Key",
+    "Throttling": "调用被限流（请求过频或配额用尽），请稍后重试",
+    "rate_limit_exceeded": "调用被限流，请稍后重试",
+    "InvalidParameter": "请求参数不合法",
+    "invalid_request_error": "请求参数不合法",
+    "AccessDenied": "无访问权限（可能未开通对应模型服务）",
+    "DataInspectionFailed": "内容安全审查未通过",
+    "model_not_found": "模型不存在（检查模型名是否为该厂商提供）",
+}
 
 
-def _extract_content(resp, model: str) -> str:
-    """从 DashScope 响应取正文。
+def _code_zh(code: str, status: int) -> str:
+    if code in _CODE_ZH:
+        return _CODE_ZH[code]
+    if code and code.startswith("Throttling"):
+        return _CODE_ZH["Throttling"]
+    return f"HTTP {status}"
 
-    DashScope 业务失败（欠费/限流/Key 无效）不抛异常，而是返回
-    status_code != 200、output=None 的响应对象 — 必须先查 status_code，
-    否则真实错误被 'NoneType' 掩盖（REQ-20260915-007）。
+
+def _extract_openai_resp(resp, entry: dict) -> str:
+    """解析 OpenAI 兼容响应 → 助手正文。
+
+    网关业务失败（欠费/限流/Key 无效）返回非 200 + error 对象而非抛异常 —
+    必须先查状态码，否则真实错误被掩盖（REQ-20260915-007）。
     输出被截断（finish_reason=length）→ ValueError（上层减半重试）。
     """
-    if resp is None:
-        raise RuntimeError(f"{model} 无响应（返回 None）")
-    status = _dig(resp, "status_code")
-    if status != 200:
-        code = str(_dig(resp, "code") or "Unknown")
-        msg = str(_dig(resp, "message") or "无错误详情")
-        zh = _DASHSCOPE_CODE_ZH.get(code, f"HTTP {status}")
-        rid = _dig(resp, "request_id") or ""
+    model = entry.get("id", "?")
+    provider = entry.get("provider", "未知厂商")
+    try:
+        data = resp.json()
+    except Exception:  # noqa: BLE001 — 非 JSON 响应按原文报错
+        data = None
+    if resp.status_code != 200:
+        err = data.get("error") if isinstance(data, dict) else None
+        err = err if isinstance(err, dict) else {}
+        code = str(err.get("code") or resp.status_code)
+        msg = str(err.get("message") or resp.text[:300] or "无错误详情")
+        rid = resp.headers.get("x-request-id") or resp.headers.get("X-Request-Id") or ""
         raise RuntimeError(
-            f"阿里云百炼 [{code}] {zh}：{msg}"
+            f"{provider}（{model}）[{code}] {_code_zh(code, resp.status_code)}：{msg}"
             + (f"（request_id={rid}）" if rid else "")
         )
-    choices = _dig(resp, "output", "choices") or []
+    if not isinstance(data, dict):
+        raise RuntimeError(f"{provider}（{model}）响应不是 JSON 对象")
+    if data.get("error"):  # 个别网关 200 也带 error
+        err = data.get("error")
+        err = err if isinstance(err, dict) else {}
+        raise RuntimeError(
+            f"{provider}（{model}）[{err.get('code') or 'Error'}] {err.get('message') or ''}"
+        )
+    choices = data.get("choices") or []
     if not isinstance(choices, list) or not choices:
-        raise RuntimeError("响应缺少 choices 正文")
-    first = choices[0]
-    if _dig(first, "finish_reason") == "length":
+        raise RuntimeError(f"{provider}（{model}）响应缺少 choices 正文")
+    first = choices[0] if isinstance(choices[0], dict) else {}
+    if first.get("finish_reason") == "length":
         raise ValueError("模型输出被截断（finish_reason=length），需减小批量重试")
-    content = _dig(first, "message", "content")
+    content = (first.get("message") or {}).get("content")
     if not isinstance(content, str) or not content.strip():
-        raise RuntimeError("响应正文为空")
+        raise RuntimeError(f"{provider}（{model}）响应正文为空")
     return content
 
 
-def _call_llm(system: str, user: str, retries: int = 2) -> str:
-    """DashScope qwen 调用 → 文本响应。瞬时失败退避重试（2s/4s）。"""
-    import dashscope
-    from dashscope import Generation
+def _chat_completion(entry: dict, messages: list[dict],
+                     retries: int = 2, timeout: float = 180.0) -> str:
+    """OpenAI 兼容 ``{base_url}/chat/completions`` 调用（httpx，gradio 既有依赖）。
 
-    key = os.environ.get("DASHSCOPE_API_KEY", "")
+    entry: llm_config 注册项 {"id","provider","base_url","api_key_env"}
+    （REQ-20260915-008 — 多厂商动态注册）。Key 从 entry.api_key_env 指定的
+    系统环境变量读取（界面不存储 Key）。瞬时失败退避重试；业务错误 →
+    可读 RuntimeError；截断 → ValueError（上层减半）。
+    """
+    import httpx
+
+    env = entry.get("api_key_env", "")
+    key = os.environ.get(env, "")
     if not key:
-        raise RuntimeError("未配置 DASHSCOPE_API_KEY（无法调用大模型）")
-    model = os.environ.get("SLIRN_LLM_MODEL", "qwen-plus")
-    dashscope.api_key = key
-    messages = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": user},
-    ]
+        raise RuntimeError(f"未配置环境变量 {env}（{entry.get('provider', '未知厂商')} 的 API Key）")
+    url = str(entry.get("base_url", "")).rstrip("/")
+    url = url if url.endswith("/chat/completions") else url + "/chat/completions"
+
     last_err: Exception | None = None
     for attempt in range(retries + 1):
         try:
-            resp = Generation.call(
-                model, messages=messages, result_format="message",
-                stream=False, incremental_output=False,
+            resp = httpx.post(
+                url,
+                json={"model": entry.get("id", ""), "messages": messages, "stream": False},
+                headers={"Authorization": f"Bearer {key}"},
+                timeout=timeout,
             )
-            return _extract_content(resp, model)
+            return _extract_openai_resp(resp, entry)
         except ValueError:
             raise  # 截断等输出质量问题：同批重试无意义，直接交上层减半
-        except Exception as e:  # noqa: BLE001 — dashscope 异常类型不稳定
+        except Exception as e:  # noqa: BLE001 — httpx 异常类型不稳定
             last_err = e
             if attempt < retries:
                 wait = 2.0 * (attempt + 1)
                 log.warning("[revise] LLM 调用失败（第 %d 次，%.0fs 后重试）: %s", attempt + 1, wait, e)
                 time.sleep(wait)
-    raise RuntimeError(f"大模型调用失败: {last_err}")
+    raise RuntimeError(f"网络/服务端错误（重试 {retries} 次后仍失败）: {last_err}")
+
+
+def _call_llm(system: str, user: str, entry: dict | None = None, retries: int = 2) -> str:
+    """调用注册的大模型 → 文本响应。瞬时失败退避重试（2s/4s）。
+
+    entry: llm_config 注册项（app.py 传入用户选择的当前模型，REQ-20260915-008）；
+    None 时回退默认注册项 + SLIRN_LLM_MODEL 环境变量覆盖模型 id（向后兼容）。
+    """
+    if entry is None:
+        from slirn_home.llm_config import DEFAULT_MODELS
+
+        entry = dict(DEFAULT_MODELS[0])
+        entry["id"] = os.environ.get("SLIRN_LLM_MODEL", "").strip() or entry["id"]
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+    try:
+        return _chat_completion(entry, messages, retries=retries)
+    except ValueError:
+        raise  # 截断：上层减半重试
+    except Exception as e:  # noqa: BLE001
+        raise RuntimeError(
+            f"大模型调用失败[{entry.get('id', '?')}]（{entry.get('provider', '')}）: {e}"
+        ) from e
 
 
 _FENCE_RE = re.compile(r"```(?:json)?\s*|\s*```")
@@ -233,8 +279,14 @@ def start_job(
     hotwords: list[str],
     outputs_dir: Path,
     on_success: Callable[[list[dict]], None] | None = None,
+    entry: dict | None = None,
 ) -> bool:
-    """启动大模型分析线程。已在跑 → False。成功后写 revision.json（决策重置 pending）。"""
+    """启动大模型分析线程。已在跑 → False。成功后写 revision.json（决策重置 pending）。
+
+    entry：本次分析使用的模型注册项 {"id","provider","base_url","api_key_env"}
+    （app.py 传入用户选择的当前模型，REQ-20260915-008），全程使用并写入
+    revision.json meta 留痕。
+    """
     with _JOBS_LOCK:
         existing = _JOBS.get(task_id)
         if existing and existing.get("state") == "running":
@@ -258,7 +310,7 @@ def start_job(
             —— 这种错误每批都会失败，减半只是浪费调用（REQ-20260915-007）。
             """
             try:
-                raw = _call_llm(_SYSTEM_PROMPT, build_user_prompt(task_name, hotwords, batch))
+                raw = _call_llm(_SYSTEM_PROMPT, build_user_prompt(task_name, hotwords, batch), entry)
                 return parse_llm_suggestions(raw, batch)
             except ValueError as e:
                 if len(batch) == 1:
@@ -293,7 +345,8 @@ def start_job(
                 })
             meta = {
                 "version": 1,
-                "model": os.environ.get("SLIRN_LLM_MODEL", "qwen-plus"),
+                "model": (entry or {}).get("id") or "qwen-plus",
+                "provider": (entry or {}).get("provider", ""),
                 "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 "saved_at": None,
                 "segments_count": len(entries),

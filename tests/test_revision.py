@@ -126,19 +126,26 @@ def test_all_decided():
 
 # ---------- 后台 job（mock LLM）----------
 
+ENTRY = {
+    "id": "qwen-max", "provider": "阿里云百炼",
+    "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    "api_key_env": "DASHSCOPE_API_KEY",
+}
+
+
 def test_start_job_writes_revision(tmp_path: Path, monkeypatch):
     from slirn_home import revision_service
 
     outputs = tmp_path / "outputs"
     monkeypatch.setattr(
         revision_service, "_call_llm",
-        lambda sys_p, user, retries=1: json.dumps([
+        lambda sys_p, user, entry=None, retries=2: json.dumps([
             {"i": 1, "category": "delete", "note": "语气词"},
             {"i": 2, "category": "keep", "note": "保留"},
             {"i": 3, "category": "split", "keep_text": "我们开始吧", "note": "去重复"},
         ]),
     )
-    assert revision_service.start_job("t1", SEGS, "任务A", ["热词"], outputs)
+    assert revision_service.start_job("t1", SEGS, "任务A", ["热词"], outputs, entry=ENTRY)
     # 等 job 结束
     import time
     for _ in range(100):
@@ -149,6 +156,7 @@ def test_start_job_writes_revision(tmp_path: Path, monkeypatch):
     assert j["state"] == "done", j
     rev = revision_service.load_revision(outputs)
     assert rev is not None and rev["segments_count"] == 3
+    assert rev["model"] == "qwen-max" and rev["provider"] == "阿里云百炼"  # meta 留痕（REQ-20260915-008）
     entries = rev["entries"]
     # 每条齐备：建议 + 说明 + 用户决策字段（AC-2）
     for e, seg in zip(entries, SEGS):
@@ -164,7 +172,7 @@ def test_start_job_llm_error(tmp_path: Path, monkeypatch):
     from slirn_home import revision_service
 
     def _boom(*a, **k):
-        raise RuntimeError("未配置 DASHSCOPE_API_KEY（无法调用大模型）")
+        raise RuntimeError("未配置环境变量 DEEPSEEK_API_KEY（DeepSeek 的 API Key）")
 
     outputs = tmp_path / "outputs"
     monkeypatch.setattr(revision_service, "_call_llm", _boom)
@@ -174,51 +182,69 @@ def test_start_job_llm_error(tmp_path: Path, monkeypatch):
         if j and j["state"] in ("done", "error"):
             break
         time.sleep(0.05)
-    assert j["state"] == "error" and "DASHSCOPE" in j["error"], j
+    assert j["state"] == "error" and "DEEPSEEK_API_KEY" in j["error"], j
     assert not (outputs / "revision.json").exists()
 
 
-# ---------- _call_llm 响应硬校验（REQ-20260915-007）----------
+# ---------- _chat_completion 响应硬校验（REQ-20260915-007 / 008 OpenAI 兼容层）----------
 
-def _fake_resp(status_code=200, code=None, message=None, request_id=None,
-               output=None, finish_reason=None, content=None):
-    """构造 DashScope 响应的替身（业务失败时 output=None 不抛异常）。"""
+def _fake_resp(status_code=200, error=None, request_id=None,
+               content=None, finish_reason="stop"):
+    """构造 OpenAI 兼容响应替身（业务失败时非 200 + error 对象，不抛异常）。"""
+    import json as _json
     import types
 
-    out = output
-    if out is None and content is not None:
-        out = {"choices": [{"finish_reason": finish_reason, "message": {"role": "assistant", "content": content}}]}
+    body: dict = {}
+    if error is not None:
+        body["error"] = error
+    if content is not None:
+        body["choices"] = [{"finish_reason": finish_reason,
+                            "message": {"role": "assistant", "content": content}}]
+    text = _json.dumps(body)
     return types.SimpleNamespace(
-        status_code=status_code, code=code, message=message,
-        request_id=request_id, output=out,
+        status_code=status_code, text=text,
+        headers={"x-request-id": request_id} if request_id else {},
+        json=lambda: _json.loads(text),
     )
 
 
 def test_call_llm_business_error_readable(monkeypatch):
-    """欠费（400/Arrearage/output=None）→ 可读错误，而非 NoneType 下标错。"""
+    """欠费（400/Arrearage）→ 可读错误（厂商/模型/中文原因/request_id），而非 NoneType 下标错。"""
     from slirn_home import revision_service
 
     monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-test")
     monkeypatch.setattr(revision_service.time, "sleep", lambda s: None)
-    monkeypatch.setattr(
-        "dashscope.Generation.call",
-        lambda *a, **k: _fake_resp(
-            status_code=400, code="Arrearage",
-            message="Access denied, please make sure your account is in good standing.",
-            request_id="rid-007", output=None,
-        ),
-    )
+    monkeypatch.setattr("httpx.post", lambda *a, **k: _fake_resp(
+        status_code=400,
+        error={"code": "Arrearage", "message": "Access denied, please top up."},
+        request_id="rid-007",
+    ))
     try:
-        revision_service._call_llm("sys", "user")
+        revision_service._call_llm("sys", "user", entry=ENTRY)
     except RuntimeError as e:
         msg = str(e)
         assert "Arrearage" in msg and "欠费" in msg and "request_id=rid-007" in msg, msg
+        assert "[qwen-max]" in msg and "阿里云百炼" in msg, "错误应带模型名与厂商（REQ-20260915-008）"
+    else:
+        raise AssertionError("应抛 RuntimeError")
+
+
+def test_chat_completion_missing_env_readable(monkeypatch):
+    """entry 指定的 Key 环境变量未设置 → 可读错误（含环境变量名与厂商）。"""
+    from slirn_home import revision_service
+
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    entry = dict(ENTRY, id="deepseek-chat", provider="DeepSeek", api_key_env="DEEPSEEK_API_KEY")
+    try:
+        revision_service._chat_completion(entry, [])
+    except RuntimeError as e:
+        assert "未配置环境变量 DEEPSEEK_API_KEY" in str(e) and "DeepSeek" in str(e), e
     else:
         raise AssertionError("应抛 RuntimeError")
 
 
 def test_call_llm_retries_throttle_then_ok(monkeypatch):
-    """限流 → 退避重试，第 3 次成功。"""
+    """限流（429/Throttling）→ 退避重试，第 3 次成功。"""
     from slirn_home import revision_service
 
     calls = []
@@ -226,14 +252,15 @@ def test_call_llm_retries_throttle_then_ok(monkeypatch):
     def _fake(*a, **k):
         calls.append(1)
         if len(calls) < 3:
-            return _fake_resp(status_code=429, code="Throttling",
-                              message="Requests rate limit exceeded", request_id="r1")
+            return _fake_resp(status_code=429,
+                              error={"code": "Throttling.RequestsThrottled",
+                                     "message": "Requests rate limit exceeded"})
         return _fake_resp(content='[{"i":1,"category":"keep","note":"ok"}]')
 
     monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-test")
     monkeypatch.setattr(revision_service.time, "sleep", lambda s: None)
-    monkeypatch.setattr("dashscope.Generation.call", _fake)
-    out = revision_service._call_llm("sys", "user")
+    monkeypatch.setattr("httpx.post", _fake)
+    out = revision_service._call_llm("sys", "user", entry=ENTRY)
     assert "keep" in out and len(calls) == 3
 
 
@@ -248,9 +275,9 @@ def test_call_llm_truncated_raises_valueerror_no_retry(monkeypatch):
         return _fake_resp(content='[{"i":1,"categ', finish_reason="length")
 
     monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-test")
-    monkeypatch.setattr("dashscope.Generation.call", _fake)
+    monkeypatch.setattr("httpx.post", _fake)
     try:
-        revision_service._call_llm("sys", "user")
+        revision_service._call_llm("sys", "user", entry=ENTRY)
     except ValueError as e:
         assert "截断" in str(e), e
     else:
@@ -269,7 +296,7 @@ def test_start_job_halves_on_parse_failure(tmp_path: Path, monkeypatch):
 
     batch_sizes = []
 
-    def _fake_llm(system, user, retries=2):
+    def _fake_llm(system, user, entry=None, retries=2):
         n = user.count('"i":')
         batch_sizes.append(n)
         if n > 1:  # 多段批 → 返回非法 JSON
@@ -299,7 +326,7 @@ def test_start_job_backfills_on_total_parse_failure(tmp_path: Path, monkeypatch)
 
     from slirn_home import revision_service
 
-    def _always_bad(system, user, retries=2):
+    def _always_bad(system, user, entry=None, retries=2):
         raise ValueError("模型输出不是合法 JSON: bad")
 
     monkeypatch.setattr(revision_service, "_call_llm", _always_bad)
@@ -319,7 +346,8 @@ def test_start_job_backfills_on_total_parse_failure(tmp_path: Path, monkeypatch)
 
 # ---------- 渲染三态 ----------
 
-def test_render_revision_zone_states(tmp_path: Path):
+def test_render_revision_zone_states(tmp_path: Path, monkeypatch):
+    from slirn_home import llm_config
     from slirn_home.app import _render_revision_zone
 
     m, video = _make_mgr(tmp_path)
@@ -331,11 +359,18 @@ def test_render_revision_zone_states(tmp_path: Path):
     assert "请先完成上一阶段「字幕生成」" in h1
     assert 'data-action="wb-stage" data-pane="subtitle"' in h1
 
-    # 状态 2：有字幕无建议 → 分析按钮 + 类别说明
+    # 状态 2：有字幕无建议 → 分析按钮 + 类别说明 + 当前生效模型（REQ-20260915-008）
+    monkeypatch.delenv("SLIRN_LLM_MODEL", raising=False)
+    llm_config.add_model(  # repo_root = mgr.tasks_dir.parent = tmp_path
+        tmp_path, "qwen-max", "阿里云百炼",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1", "DASHSCOPE_API_KEY",
+    )
+    llm_config.use_model(tmp_path, "qwen-max")
     _write_subtitle(m, tid, SEGS)
     h2 = _render_revision_zone(tid, m.get(tid), m)
     assert "🤖 大模型分析字幕" in h2 and 'data-action="revise-subtitle"' in h2
     assert "整行删除" in h2 and "完整保留" in h2 and "切分修剪" in h2 and "人工复核" in h2
+    assert "qwen-max" in h2, "状态2提示应显示当前生效模型"
 
     # 状态 3：有建议 → 每行 原字幕+建议+决策（AC-3）
     outputs = m.tasks_dir / tid / "outputs"

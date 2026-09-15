@@ -335,9 +335,12 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
 
     # ---- 状态 2：有字幕、无建议 → 说明 + 分析按钮 ----
     if not entries:
+        from slirn_home import llm_config
+
+        cur_model = _esc(llm_config.get_current(mgr.tasks_dir.parent))
         return f'''<div class="slirn-card" style="margin-top:16px;">
         <div class="slirn-panel-header"><div class="slirn-panel-title">🎬 处理剪辑 · 第 2 步：字幕修订</div></div>
-        <div class="slirn-form-hint">把上一阶段生成的 {len(sub_meta['segments'])} 段字幕交给大模型（qwen）逐段分析，识别：</div>
+        <div class="slirn-form-hint">把上一阶段生成的 {len(sub_meta['segments'])} 段字幕交给大模型（<b>{cur_model}</b>，可在顶栏 ⚙️ 修改）逐段分析，识别：</div>
         <div class="slirn-rev-intro">
             <div>🟥 <strong>整行删除</strong> — 口癖、口头禅、语气词、无意义内容</div>
             <div>🟩 <strong>完整保留</strong> — 正常有效内容</div>
@@ -1295,6 +1298,78 @@ ROUTER_JS = """
     var m = document.getElementById('slirn-upload-modal');
     if (m) m.remove();
   }
+
+  // ===== 大模型设置弹窗（REQ-20260915-008：多厂商模型动态注册）=====
+  // 已注册模型列表（当前 ⭐ 高亮 + 使用/测试/删除）+ 添加表单（模型名/厂商/Base URL/
+  // Key 环境变量名）。Key 本身始终从系统环境变量读取，界面只填「环境变量名」。
+  function openLLMSettings() {
+    var existing = document.getElementById('slirn-llm-modal');
+    if (existing) existing.remove();
+    var overlay = document.createElement('div');
+    overlay.id = 'slirn-llm-modal';
+    overlay.className = 'slirn-modal-overlay';
+    overlay.innerHTML =
+      '<div class="slirn-modal-card slirn-llm-card">' +
+        '<div class="slirn-modal-title">⚙️ 大模型设置</div>' +
+        '<div class="slirn-llm-subtitle">当前模型：<b id="slirn-llm-current">…</b></div>' +
+        '<div class="slirn-llm-list" id="slirn-llm-list"></div>' +
+        '<div class="slirn-llm-section">添加模型</div>' +
+        '<div class="slirn-llm-form" id="slirn-llm-form">' +
+          '<div class="slirn-llm-row"><span class="slirn-llm-label">模型名</span>' +
+            '<input id="slirn-llm-in-id" class="slirn-llm-input" placeholder="如 deepseek-chat" /></div>' +
+          '<div class="slirn-llm-row"><span class="slirn-llm-label">厂商</span>' +
+            '<input id="slirn-llm-in-provider" class="slirn-llm-input" placeholder="如 DeepSeek / 阿里云百炼" /></div>' +
+          '<div class="slirn-llm-row"><span class="slirn-llm-label">Base URL</span>' +
+            '<input id="slirn-llm-in-url" class="slirn-llm-input" placeholder="https://api.deepseek.com/v1" /></div>' +
+          '<div class="slirn-llm-row"><span class="slirn-llm-label">Key 环境变量</span>' +
+            '<input id="slirn-llm-in-env" class="slirn-llm-input" placeholder="如 DEEPSEEK_API_KEY" /></div>' +
+        '</div>' +
+        '<div class="slirn-llm-tip">调用走 OpenAI 兼容协议（<code>{Base URL}/chat/completions</code>）；API Key 从上面填写的系统环境变量读取，界面不存储 Key。</div>' +
+        '<div id="slirn-llm-test-result" class="slirn-llm-test-result"></div>' +
+        '<div class="slirn-llm-actions">' +
+          '<button class="slirn-btn slirn-btn-primary" data-action="llm-add">➕ 添加</button>' +
+          '<button class="slirn-btn" data-action="llm-close">关闭</button>' +
+        '</div>' +
+      '</div>';
+    overlay.addEventListener('click', function(e) {
+      if (e.target === overlay) overlay.remove();  // 点遮罩关闭
+    });
+    document.body.appendChild(overlay);
+    fetch(SLIRN_API + '/llm_config').then(function(r) { return r.json(); })
+      .then(function(r) {
+        if (r && r.ok) renderLLMList(r.models || [], r.current || '');
+      })
+      .catch(function() {});
+  }
+  function renderLLMList(models, current) {
+    var cur = document.getElementById('slirn-llm-current');
+    if (cur) cur.textContent = current || '（无）';
+    var list = document.getElementById('slirn-llm-list');
+    if (!list) return;
+    if (!models.length) {
+      list.innerHTML = '<div class="slirn-llm-empty">尚未注册模型，请在下方添加</div>';
+      return;
+    }
+    list.innerHTML = models.map(function(m) {
+      var isCur = m.id === current;
+      return '<div class="slirn-llm-item' + (isCur ? ' current' : '') + '">' +
+        '<div class="slirn-llm-item-head">' +
+          '<span class="slirn-llm-item-name">' + (isCur ? '⭐ ' : '') + escapeHtml(m.id) +
+            '<span class="slirn-llm-item-prov">' + escapeHtml(m.provider || '') + '</span></span>' +
+          '<span class="slirn-llm-item-key ' + (m.key_present ? 'ok' : 'miss') + '">' +
+            (m.key_present ? '✅ Key 已配置' : '❌ 未配置 ' + escapeHtml(m.api_key_env)) + '</span>' +
+        '</div>' +
+        '<div class="slirn-llm-item-url">' + escapeHtml(m.base_url) +
+          ' <code>' + escapeHtml(m.api_key_env) + '</code></div>' +
+        '<div class="slirn-llm-item-ops">' +
+          '<button class="slirn-btn slirn-btn-sm" data-action="llm-use" data-id="' + escapeHtml(m.id) + '"' +
+            (isCur ? ' disabled' : '') + '>使用</button>' +
+          '<button class="slirn-btn slirn-btn-sm" data-action="llm-test" data-id="' + escapeHtml(m.id) + '">测试</button>' +
+          '<button class="slirn-btn slirn-btn-sm" data-action="llm-remove" data-id="' + escapeHtml(m.id) + '">删除</button>' +
+        '</div>' +
+      '</div>';
+    }).join('');
+  }
   function escapeHtml(s) {
     return String(s).replace(/[&<>"']/g, function(c) {
       return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
@@ -1724,6 +1799,56 @@ ROUTER_JS = """
           }
         });
     }
+    else if (action === 'open-llm-settings') {
+      openLLMSettings();
+    }
+    else if (action === 'llm-close') {
+      var llmModal = document.getElementById('slirn-llm-modal');
+      if (llmModal) llmModal.remove();
+    }
+    else if (action === 'llm-add') {
+      var gv = function(elId) { return ((document.getElementById(elId) || {}).value || '').trim(); };
+      postJSON(SLIRN_API + '/llm_config/add', {
+        id: gv('slirn-llm-in-id'), provider: gv('slirn-llm-in-provider'),
+        base_url: gv('slirn-llm-in-url'), api_key_env: gv('slirn-llm-in-env'),
+      }).then(function(r) {
+        if (r && r.ok) {
+          toast(r.toast || '已添加');
+          renderLLMList(r.models || [], r.current || '');
+          ['slirn-llm-in-id', 'slirn-llm-in-provider', 'slirn-llm-in-url', 'slirn-llm-in-env']
+            .forEach(function(i) { var el = document.getElementById(i); if (el) el.value = ''; });
+        } else {
+          toast('❌ ' + ((r && r.error) || '添加失败'), 'error');
+        }
+      });
+    }
+    else if (action === 'llm-use' || action === 'llm-remove') {
+      var llmId = target.getAttribute('data-id') || '';
+      postJSON(SLIRN_API + '/llm_config/' + action.slice(4), {id: llmId}).then(function(r) {
+        if (r && r.ok) {
+          toast(r.toast || '已更新');
+          renderLLMList(r.models || [], r.current || '');
+        } else {
+          toast('❌ ' + ((r && r.error) || '操作失败'), 'error');
+        }
+      });
+    }
+    else if (action === 'llm-test') {
+      var testId = target.getAttribute('data-id') || '';
+      var testBox = document.getElementById('slirn-llm-test-result');
+      if (testBox) { testBox.className = 'slirn-llm-test-result'; testBox.textContent = '⏳ 测试中（' + testId + ' 真实调用一次）…'; }
+      postJSON(SLIRN_API + '/llm_test', {id: testId}).then(function(r) {
+        if (!testBox) return;
+        if (r && r.ok) {
+          testBox.className = 'slirn-llm-test-result ok';
+          testBox.textContent = '✅ 模型可用（' + r.model + ' · 耗时 '
+            + (r.elapsed_s || 0).toFixed(1) + 's · 回复「' + (r.reply || '') + '」）';
+        } else {
+          testBox.className = 'slirn-llm-test-result err';
+          testBox.textContent = '❌ ' + ((r && r.error) || '测试失败');
+        }
+      });
+    }
     else if (action === 'close-detail') {
       var d = document.getElementById('slirn-tab-detail');
       if (d) d.style.display = 'none';
@@ -2047,6 +2172,7 @@ def build_app(repo_root: Path | None = None) -> gr.Blocks:
             <span>Slirn Studio</span>
         </div>
         <div class="slirn-topbar-actions">
+            <button class="slirn-btn-icon" data-action="open-llm-settings" aria-label="大模型设置" title="大模型设置">⚙️</button>
             <button class="slirn-btn-icon" onclick="window.slirnToggleTheme && window.slirnToggleTheme()" aria-label="切换主题" title="切换主题">🌓</button>
             <a class="slirn-btn" href="http://127.0.0.1:7860/" target="_blank">🚀 上游首页</a>
         </div>
@@ -2780,10 +2906,85 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         j["elapsed_s"] = int((j.get("finished_at") or _time.time()) - j["started_at"])
         return _ok("", job=j)
 
+    @app.app.get("/slirn/api/llm_config")
+    async def llm_config_get():
+        """模型注册表 + 当前模型 + 各条目 Key 状态（REQ-20260915-008 弹窗初始化）。"""
+        from slirn_home import llm_config
+
+        return _ok(
+            "",
+            models=llm_config.list_models(repo_root),
+            current=llm_config.get_current(repo_root),
+        )
+
+    @app.app.post("/slirn/api/llm_config/add")
+    async def llm_config_add(body: dict = Body(default_factory=dict)):
+        """添加模型注册项：{id, provider, base_url, api_key_env}。"""
+        from slirn_home import llm_config
+
+        try:
+            llm_config.add_model(
+                repo_root,
+                body.get("id", ""), body.get("provider", ""),
+                body.get("base_url", ""), body.get("api_key_env", ""),
+            )
+        except llm_config.LLMConfigError as e:
+            return _err(str(e))
+        return _ok("", models=llm_config.list_models(repo_root),
+                   current=llm_config.get_current(repo_root),
+                   toast=f"✅ 已添加模型 {body.get('id', '')}")
+
+    @app.app.post("/slirn/api/llm_config/remove")
+    async def llm_config_remove(body: dict = Body(default_factory=dict)):
+        """删除模型注册项；删的是当前模型 → 自动切到剩余第一个。"""
+        from slirn_home import llm_config
+
+        try:
+            llm_config.remove_model(repo_root, str(body.get("id") or ""))
+        except llm_config.LLMConfigError as e:
+            return _err(str(e))
+        return _ok("", models=llm_config.list_models(repo_root),
+                   current=llm_config.get_current(repo_root),
+                   toast=f"🗑 已删除模型 {body.get('id', '')}")
+
+    @app.app.post("/slirn/api/llm_config/use")
+    async def llm_config_use(body: dict = Body(default_factory=dict)):
+        """设置当前使用的模型。"""
+        from slirn_home import llm_config
+
+        try:
+            cur = llm_config.use_model(repo_root, str(body.get("id") or ""))
+        except llm_config.LLMConfigError as e:
+            return _err(str(e))
+        return _ok("", models=llm_config.list_models(repo_root),
+                   current=cur, toast=f"⚙️ 当前模型 → {cur}")
+
+    @app.app.post("/slirn/api/llm_test")
+    async def llm_test(body: dict = Body(default_factory=dict)):
+        """连通性测试：对已注册模型真实调用一次，返回可用性/耗时/可读错误。"""
+        import time as _time
+
+        from slirn_home import llm_config, revision_service
+
+        mid = str(body.get("id") or "").strip()
+        entry = next((m for m in llm_config.list_models(repo_root)
+                      if m.get("id") == mid and "key_present" in m), None)
+        if entry is None:
+            return _err(f"模型 {mid} 未注册")
+        t0 = _time.time()
+        try:
+            reply = revision_service._call_llm(
+                "你是连通性测试助手。", "请只回复两个字：正常", entry=entry, retries=0,
+            )
+        except Exception as e:  # noqa: BLE001 — 错误信息已是 REQ-007 可读格式
+            return _err(str(e))
+        return _ok("", model=entry["id"], elapsed_s=round(_time.time() - t0, 2),
+                   reply=(reply or "").strip()[:50])
+
     @app.app.post("/slirn/api/revise_subtitle")
     async def revise_subtitle(body: dict = Body(default_factory=dict)):
         """启动大模型字幕分析（REQ-20260915-005）。已有建议时须 force（前端二次确认）。"""
-        from slirn_home import revision_service
+        from slirn_home import llm_config, revision_service
 
         tid = (body.get("task_id") or "").strip()
         if not tid:
@@ -2806,8 +3007,11 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         except Exception:  # noqa: BLE001
             pass
 
+        entry = llm_config.get_current_entry(repo_root)
+        if entry is None:
+            return _err("未注册任何大模型 — 请先点顶栏 ⚙️ 添加模型")
         started = revision_service.start_job(
-            tid, sub_meta["segments"], t.name, hotwords, outputs_dir,
+            tid, sub_meta["segments"], t.name, hotwords, outputs_dir, entry=entry,
         )
         if not started:
             return _ok("", toast="⏳ 该任务已在分析中，请等待完成")
