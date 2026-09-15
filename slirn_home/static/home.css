@@ -1027,3 +1027,39 @@ footer { display: none !important; }
   .slirn-sub-text { grid-column: 1 / -1; }
   .slirn-sub-time { font-size: 10.5px; }
 }
+
+/* ============ 剪辑工作台（REQ-20260915-003） ============ */
+.slirn-wb-top .slirn-panel-header { margin-bottom: 8px; }
+.slirn-wb-tid { color: var(--text-muted); font-size: 12px; }
+
+.slirn-wb-main { display: grid; grid-template-columns: 260px 1fr; gap: 14px; margin-top: 14px; align-items: start; }
+
+.slirn-wb-stages { display: flex; flex-direction: column; gap: 6px; padding: 12px; }
+.slirn-wb-stage {
+  display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px;
+  border-radius: 10px; cursor: pointer; border: 1px solid transparent;
+  transition: background 0.15s, border-color 0.15s;
+}
+.slirn-wb-stage:hover { background: var(--bg-hover, rgba(127,127,127,0.08)); }
+.slirn-wb-stage-mark {
+  flex-shrink: 0; width: 24px; height: 24px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 600; margin-top: 1px;
+  background: var(--bg-inset, rgba(127,127,127,0.15)); color: var(--text-muted);
+}
+.slirn-wb-stage.done .slirn-wb-stage-mark { background: var(--ok-solid, #2e9e5b); color: #fff; }
+.slirn-wb-stage.current .slirn-wb-stage-mark { background: var(--accent-solid, #4f7cff); color: #fff; }
+.slirn-wb-stage-title { font-size: 13.5px; font-weight: 600; color: var(--text-primary); }
+.slirn-wb-stage.done .slirn-wb-stage-title { color: var(--text-muted); }
+.slirn-wb-stage-desc { font-size: 11.5px; color: var(--text-muted); margin-top: 2px; line-height: 1.4; }
+.slirn-wb-stage.active { border-color: var(--accent-solid, #4f7cff); background: var(--bg-hover, rgba(127,127,127,0.08)); }
+
+.slirn-wb-panes { min-width: 0; }
+.slirn-wb-pane-card { background: var(--card-bg, inherit); border-radius: 12px; padding: 14px 16px; }
+.slirn-wb-pane-title { font-weight: 700; font-size: 14px; margin-bottom: 10px; }
+
+@media (max-width: 900px) {
+  .slirn-wb-main { grid-template-columns: 1fr; }
+  .slirn-wb-stages { flex-direction: row; flex-wrap: wrap; }
+  .slirn-wb-stage { flex: 1 1 45%; }
+}

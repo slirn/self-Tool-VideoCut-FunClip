@@ -174,6 +174,8 @@ def _render_task_list(mgr: TaskManager) -> str:
             </div>
             <div class="slirn-task-actions">
                 <button class="slirn-btn slirn-btn-sm" data-action="view-task" data-task-id="{_esc(s.task_id)}">📄 详情</button>
+                <button class="slirn-btn slirn-btn-sm" data-action="edit-task" data-task-id="{_esc(s.task_id)}">✏️ 编辑</button>
+                <button class="slirn-btn slirn-btn-sm slirn-btn-primary" data-action="open-workbench" data-task-id="{_esc(s.task_id)}">✂️ 剪辑</button>
                 <button class="slirn-btn slirn-btn-sm slirn-btn-danger" data-action="delete-task" data-task-id="{_esc(s.task_id)}">🗑️ 删除</button>
             </div>
         </div>'''
@@ -302,15 +304,12 @@ def _render_subtitle_zone(task_id: str, t, mgr: TaskManager) -> str:
     </div>'''
 
 
-def _render_task_detail(task_id: str, mgr: TaskManager) -> str:
-    try:
-        t = mgr.get(task_id)
-    except Exception as e:
-        return f'<div class="slirn-empty"><div class="slirn-empty-icon">⚠️</div><div class="slirn-empty-text">{_esc(e)}</div></div>'
+def _task_echo_fragments(t) -> tuple[str, str, str]:
+    """任务回显片段（REQ-20260915-002）— 详情页 / 工作台共用。
 
-    from tasklib.models import TASK_STATUS_LABEL
-    status_label = TASK_STATUS_LABEL.get(t.status, str(getattr(t.status, "value", t.status)))
-
+    Returns:
+        (video_disp, seg_disp, hotwords_disp) 三个 HTML 片段。
+    """
     # ---- 原视频：格式对齐新建步骤1 的文件信息条「📁 name（size MB · duration）」 ----
     src = t.original_video_source
     if src.exists():
@@ -366,6 +365,20 @@ def _render_task_detail(task_id: str, mgr: TaskManager) -> str:
     else:
         hotwords_disp = "（无）"
 
+    return video_disp, seg_disp, hotwords_disp
+
+
+def _render_task_detail(task_id: str, mgr: TaskManager) -> str:
+    try:
+        t = mgr.get(task_id)
+    except Exception as e:
+        return f'<div class="slirn-empty"><div class="slirn-empty-icon">⚠️</div><div class="slirn-empty-text">{_esc(e)}</div></div>'
+
+    from tasklib.models import TASK_STATUS_LABEL
+    status_label = TASK_STATUS_LABEL.get(t.status, str(getattr(t.status, "value", t.status)))
+    video_disp, seg_disp, hotwords_disp = _task_echo_fragments(t)
+    src = t.original_video_source
+
     rows = [
         ("任务 ID", _esc(t.task_id)),
         ("任务名", _esc(t.name)),
@@ -395,6 +408,146 @@ def _render_task_detail(task_id: str, mgr: TaskManager) -> str:
         </div>
     </div>
     {_render_subtitle_zone(task_id, t, mgr)}'''
+
+
+# =============== 剪辑工作台（REQ-20260915-003） ===============
+
+# 阶段定义：(key, 对应 TaskStatus, 标题, 图标, 说明) — 与 TaskStatus 管线一一对应
+_WB_STAGES = [
+    ("assets",          "ASSETS_READY",         "素材准备", "📦", "上传视频 · 时间截取 · 任务热词"),
+    ("subtitle",        "SUBTITLE_GENERATED",   "字幕生成", "🎙", "FunASR seaco-paraformer + 热词识别"),
+    ("subtitle_review", "SUBTITLE_REVIEWED",    "字幕修订", "📝", "对照视频逐段校对、修改字幕文本与时间"),
+    ("rough_cut",       "ROUGH_CUT_DONE",       "粗剪",     "✂️", "按字幕段落选择保留片段，粗剪拼接"),
+    ("fine_subtitle",   "FINE_SUBTITLE_DONE",   "精剪字幕", "🔧", "对粗剪结果重新生成精确字幕"),
+    ("fine_review",     "FINE_SUBTITLE_REVIEWED", "精剪修订", "🔎", "精剪字幕二次校对"),
+    ("fine_cut",        "FINE_CUT_DONE",        "精剪视频", "🎬", "按精剪段生成成品视频"),
+    ("mux",             "MUXED",                "字幕合成", "🎞️", "字幕烧录进画面 / 封装输出成品"),
+]
+
+
+def _wb_stage_states(t) -> list[str]:
+    """各阶段状态：done / current / pending。
+
+    素材准备看磁盘资产（原视频在即完成，DRAFT 状态也算）；
+    字幕生成看产物 subtitle.json（服务器重启后内存 job 不在，以磁盘为准）；
+    其余按 TaskStatus 管线序比较。
+    """
+    from tasklib.models import TaskStatus
+
+    from slirn_home import asr_service as _asr_mod
+
+    rank = {s.name: i for i, s in enumerate(TaskStatus)}
+    cur_rank = rank.get(getattr(t.status, "name", str(t.status)), 0)
+    states: list[str] = []
+    assets_done = t.original_video_source.exists() or t.original_video_symlink.exists()
+    sub_meta = None
+    try:
+        sub_meta = _asr_mod.load_subtitle(Path(str(t.hotwords_path)).parent / "outputs")
+    except Exception:  # noqa: BLE001
+        pass
+    subtitle_done = bool(sub_meta and sub_meta.get("segments"))
+    for key, status_name, *_rest in _WB_STAGES:
+        if key == "assets":
+            states.append("done" if assets_done else "pending")
+        elif key == "subtitle":
+            states.append("done" if (subtitle_done or cur_rank >= rank["SUBTITLE_GENERATED"]) else "pending")
+        else:
+            states.append("done" if cur_rank >= rank[status_name] else "pending")
+    # current = 第一个 pending
+    for i, s in enumerate(states):
+        if s == "pending":
+            states[i] = "current"
+            break
+    return states
+
+
+def _render_workbench(task_id: str, mgr: TaskManager) -> str:
+    """剪辑工作台：顶部任务信息 + 左侧阶段步骤条 + 右侧各阶段执行面板。"""
+    try:
+        t = mgr.get(task_id)
+    except Exception as e:
+        return f'<div class="slirn-empty"><div class="slirn-empty-icon">⚠️</div><div class="slirn-empty-text">{_esc(e)}</div></div>'
+
+    from tasklib.models import TASK_STATUS_LABEL
+    status_label = TASK_STATUS_LABEL.get(t.status, str(getattr(t.status, "value", t.status)))
+    video_disp, seg_disp, hotwords_disp = _task_echo_fragments(t)
+
+    # ---- 顶部：任务信息 ----
+    top_rows = "".join([
+        f'<div class="slirn-detail-row"><div class="slirn-detail-key">{k}</div><div class="slirn-detail-val">{v}</div></div>'
+        for k, v in [
+            ("任务", f"{_esc(t.name)}<span class='slirn-wb-tid'>（{_esc(task_id)}）</span>"),
+            ("状态", _esc(status_label)),
+            ("原始视频", video_disp),
+            ("截取段", seg_disp),
+            ("热词", hotwords_disp),
+        ]
+    ])
+
+    # ---- 左：阶段步骤条 ----
+    states = _wb_stage_states(t)
+    # 默认聚焦：最后一个 done 的下一阶段（= current）；全完成 → 最后一阶段
+    focus = next((i for i, s in enumerate(states) if s == "current"), len(_WB_STAGES) - 1)
+    stage_items = ""
+    for i, (key, _st, title, icon, desc) in enumerate(_WB_STAGES):
+        state = states[i]
+        mark = "✓" if state == "done" else ("▶" if state == "current" else str(i + 1))
+        stage_items += (
+            f'<div class="slirn-wb-stage {state}{" active" if i == focus else ""}" '
+            f'data-action="wb-stage" data-pane="{key}">'
+            f'<span class="slirn-wb-stage-mark">{mark}</span>'
+            f'<div class="slirn-wb-stage-body"><div class="slirn-wb-stage-title">{icon} {title}</div>'
+            f'<div class="slirn-wb-stage-desc">{desc}</div></div></div>'
+        )
+
+    # ---- 右：各阶段面板 ----
+    def _pane_planned(i: int, desc: str) -> str:
+        return (
+            '<div class="slirn-empty"><div class="slirn-empty-icon">🚧</div>'
+            '<div class="slirn-empty-text">规划中 — 该阶段将在后续版本提供</div>'
+            f'<div class="slirn-form-hint">{_esc(desc)}</div></div>'
+        )
+
+    assets_pane = "".join([
+        f'<div class="slirn-detail-row"><div class="slirn-detail-key">{k}</div><div class="slirn-detail-val">{v}</div></div>'
+        for k, v in [
+            ("原始视频", f"{video_disp}<div class='slirn-detail-sub'>{_esc(str(t.original_video_source))}</div>"),
+            ("截取段", seg_disp),
+            ("热词", hotwords_disp),
+        ]
+    ])
+
+    panes = {
+        "assets": f'<div class="slirn-wb-pane-card"><div class="slirn-wb-pane-title">📦 资产清单</div>{assets_pane}</div>',
+        "subtitle": _render_subtitle_zone(task_id, t, mgr),
+    }
+    for i, (key, _st, _t2, _ic, desc) in enumerate(_WB_STAGES):
+        if key in panes:
+            continue
+        panes[key] = _pane_planned(i, desc)
+
+    hidden_attr = ' style="display:none;"'
+    pane_html = "".join(
+        f'<div class="slirn-wb-pane" id="slirn-wb-pane-{key}"{hidden_attr if i != focus else ""}>{panes[key]}</div>'
+        for i, (key, *_r) in enumerate(_WB_STAGES)
+    )
+
+    return f'''<div id="slirn-tab-workbench-inner" class="slirn-tab-inner" data-task-id="{_esc(task_id)}">
+    <div class="slirn-card slirn-wb-top">
+        <div class="slirn-panel-header">
+            <div class="slirn-panel-title">✂️ 剪辑工作台 · {_esc(t.name)}</div>
+            <div>
+                <button class="slirn-btn slirn-btn-sm" data-action="edit-task" data-task-id="{_esc(task_id)}">✏️ 编辑任务</button>
+                <button class="slirn-btn slirn-btn-sm" data-action="goto-tasks">📋 返回列表</button>
+            </div>
+        </div>
+        {top_rows}
+    </div>
+    <div class="slirn-wb-main">
+        <div class="slirn-card slirn-wb-stages">{stage_items}</div>
+        <div class="slirn-wb-panes">{pane_html}</div>
+    </div>
+    </div>'''
 
 
 # =============== 热词库 ===============
@@ -488,8 +641,143 @@ def _render_hotword_lib(repo_root: Path) -> str:
 
 # =============== 新建任务 ===============
 
-def _render_create_task(repo_root: Path) -> str:
+def _render_create_task(repo_root: Path, edit=None) -> str:
+    """新建任务页；edit 传入 tasklib.models.Task 时渲染为「编辑任务」模式（REQ-20260915-003）：
+    预填原视频信息（不可换视频）、截取时间、任务名、热词三来源状态。"""
     picker_html = _render_hotword_picker(repo_root)
+
+    if edit is not None:
+        # ---- 编辑模式预填 ----
+        from tasklib.video import get_video_duration
+        src = edit.original_video_source
+        dur = get_video_duration(src) if src.exists() else None
+        dur_str = ""
+        if dur:
+            _mm, _ss = divmod(int(dur), 60)
+            _hh, _mm = divmod(_mm, 60)
+            dur_str = f"{_hh:02d}:{_mm:02d}:{_ss:02d}"
+        size_mb = round(src.stat().st_size / 1024 / 1024, 1) if src.exists() else 0
+        # 公共库选中态：来源为 pick 的词在网格里预亮（直接加 .selected，JS 端照常收集）
+        sources = edit.hotword_sources or {}
+        if sources:
+            missing_picked: list[str] = []
+            for w in sorted(sources):
+                if sources[w] != "pick":
+                    continue
+                marker = f'data-word="{_esc(w)}"'
+                fresh = (
+                    f'<div class="slirn-hotword-cell slirn-pick-cell" {marker}>',
+                    f'<div class="slirn-hotword-cell slirn-pick-cell selected" {marker}>',
+                )
+                if fresh[0] in picker_html:
+                    picker_html = picker_html.replace(fresh[0], fresh[1])
+                else:
+                    missing_picked.append(w)  # 词已不在公共库（被删）→ 不能丢，追加专属分区
+            if missing_picked:
+                cells = "".join(
+                    f'<div class="slirn-hotword-cell slirn-pick-cell selected" data-word="{_esc(w)}">'
+                    f'  <span class="slirn-cell-text">{_esc(w)}</span></div>'
+                    for w in missing_picked
+                )
+                cat = "任务已选（不在公共库）"
+                picker_html += (
+                    f'<div class="slirn-category-section slirn-pick-section" data-category="{cat}">'
+                    f'<div class="slirn-category-title"><span class="slirn-cat-name">{cat} '
+                    f'<span class="slirn-category-count">{len(missing_picked)}</span></span></div>'
+                    f'<div class="slirn-hotword-grid">{cells}</div></div>'
+                )
+        manual_words = [w for w in (edit.hotwords_path.read_text(encoding="utf-8").split()
+                                    if edit.hotwords_path.exists() else []) if sources.get(w) == "manual"]
+        return f'''<div id="slirn-tab-create-inner" class="slirn-tab-inner">
+    <div id="slirn-edit-state"
+         data-task-id="{_esc(edit.task_id)}"
+         data-video-path="{_esc(str(src).replace(chr(92), '/'))}"
+         data-video-url="/slirn/api/video/{_esc(edit.task_id)}?src=original"
+         data-duration-seconds="{float(dur) if dur else 0}"></div>
+    <div class="slirn-card">
+        <div class="slirn-panel-header">
+            <div class="slirn-panel-title">📁 步骤 1 · 原视频（编辑模式，不可更换）</div>
+        </div>
+        <div class="slirn-status-msg">📁 {_esc(src.name)}（{size_mb} MB · {dur_str or "时长未知"}）</div>
+        <div class="slirn-form-hint" style="margin-top:6px;">如需更换视频请新建任务</div>
+    </div>
+
+    <div class="slirn-card" id="slirn-player-card" style="display:none;">
+        <div class="slirn-panel-header">
+            <div class="slirn-panel-title">🎥 步骤 2 · 视频预览 + 时间设置</div>
+            <span class="slirn-panel-subtitle">拖动滑块定位 · 点击按钮设置开始/结束</span>
+        </div>
+        <div class="slirn-video-wrap">
+            <video id="slirn-player" controls preload="metadata"></video>
+        </div>
+        <div class="slirn-slider-wrap">
+            <input type="range" class="slirn-slider" id="slirn-seek" min="0" max="600" step="0.1" value="0" />
+            <div class="slirn-time-display" id="slirn-time-display">00:00:00.000 / 00:00:00.000</div>
+        </div>
+        <div style="display:flex; gap:8px; margin-top:12px;">
+            <button class="slirn-btn slirn-btn-primary" data-action="set-start">⏱ 设为开始</button>
+            <button class="slirn-btn slirn-btn-primary" data-action="set-end">⏱ 设为结束</button>
+        </div>
+        <div class="slirn-form-grid" style="margin-top:16px;">
+            <div class="slirn-form-row">
+                <label class="slirn-form-label">开始时间 (HH:MM:SS.mmm)</label>
+                <input class="slirn-input" id="slirn-start-box" placeholder="00:00:00.000" value="{_esc(edit.segment.start if edit.segment else '')}" />
+            </div>
+            <div class="slirn-form-row">
+                <label class="slirn-form-label">结束时间 (HH:MM:SS.mmm)</label>
+                <input class="slirn-input" id="slirn-end-box" placeholder="00:00:00.000" value="{_esc(edit.segment.end if edit.segment else '')}" />
+            </div>
+        </div>
+        <button class="slirn-btn slirn-btn-primary" data-action="cut-preview" style="margin-top:8px;">🎬 截取预览</button>
+        <div id="slirn-cut-msg" style="margin-top:12px;"></div>
+        <div id="slirn-cut-preview-wrap" style="display:none; margin-top:12px;">
+            <div class="slirn-video-wrap">
+                <video id="slirn-cut-preview" controls preload="metadata"></video>
+            </div>
+        </div>
+    </div>
+
+    <div class="slirn-card">
+        <div class="slirn-panel-header">
+            <div class="slirn-panel-title">📝 步骤 3 · 任务信息</div>
+        </div>
+        <div class="slirn-form-row">
+            <label class="slirn-form-label">任务名（留空 = 文件名）</label>
+            <input class="slirn-input" id="slirn-task-name" placeholder="例如：讲师介绍视频" value="{_esc(edit.name)}" />
+        </div>
+        <div class="slirn-form-row">
+            <label class="slirn-form-label">🔥 任务级热词（3 种来源可叠加）</label>
+
+            <label class="slirn-hw-inherit-row" for="slirn-hw-inherit-all">
+                <input type="checkbox" id="slirn-hw-inherit-all" {'checked' if edit.inherit_public else ''} />
+                <span>① <strong>继承公共库所有热词</strong>（无需逐个勾选 · 公共库新增自动生效）</span>
+            </label>
+
+            <div class="slirn-form-hint" style="margin-top:10px;">
+                ② <strong>从公共库选择</strong>（仅在未勾选「继承」时显示 · 点击切换）
+            </div>
+            <div id="slirn-hw-picker-wrap">
+                <div id="slirn-hw-picker">
+                    {picker_html}
+                </div>
+            </div>
+
+            <div class="slirn-form-hint" style="margin-top:14px;">③ <strong>手动输入</strong>（空格 / 换行分隔 · 与上面两个叠加）</div>
+            <textarea class="slirn-textarea" id="slirn-hotwords-manual" rows="3" placeholder="手动输入热词...">{_esc(' '.join(manual_words))}</textarea>
+
+            <div class="slirn-form-hint" style="margin-top:14px;">✅ <strong>最终生效的热词</strong>（点击 ✕ 可移除）</div>
+            <div class="slirn-hw-chips" id="slirn-hw-chips"></div>
+            <div class="slirn-hw-summary" id="slirn-hw-summary"></div>
+        </div>
+    </div>
+
+    <div style="display:flex; gap:12px;">
+        <button class="slirn-btn slirn-btn-primary" data-action="update-task" data-task-id="{_esc(edit.task_id)}" style="flex:1;">💾 保存修改</button>
+        <button class="slirn-btn slirn-btn-danger" data-action="cancel-create">❌ 取消</button>
+    </div>
+    <div id="slirn-create-msg" style="margin-top:12px;"></div>
+    </div>'''
+
     return f'''<div id="slirn-tab-create-inner" class="slirn-tab-inner">
     <div class="slirn-card">
         <div class="slirn-panel-header">
@@ -824,7 +1112,7 @@ ROUTER_JS = """
     'goto-create':    'slirn-tab-create',
     'goto-hotwords':  'slirn-tab-hotwords',
   };
-  var ALL_TABS = ['slirn-tab-dashboard','slirn-tab-tasks','slirn-tab-create','slirn-tab-hotwords'];
+  var ALL_TABS = ['slirn-tab-dashboard','slirn-tab-tasks','slirn-tab-create','slirn-tab-hotwords','slirn-tab-workbench'];
 
   function showTab(targetCell) {
     ALL_TABS.forEach(function(id) {
@@ -833,9 +1121,20 @@ ROUTER_JS = """
     });
     var detail = document.getElementById('slirn-tab-detail');
     if (detail) detail.style.display = 'none';
-    // 切到「新建任务」时初始化热词选择器（刷新 chip 显示）
+    // 切到「新建任务」时初始化热词选择器（刷新 chip 显示）；
+    // 若上次是「编辑任务」占用了本页 → 重新拉取全新建页
     if (targetCell === 'slirn-tab-create') {
       try { window.slirnInitHotwordPicker && window.slirnInitHotwordPicker(); } catch (e) {}
+      if (window.slirnEditTaskId) {
+        window.slirnEditTaskId = null;
+        postJSON(SLIRN_API + '/create_page', {}).then(function(r) {
+          if (r && r.ok && r.html) {
+            var c = document.getElementById('slirn-tab-create');
+            if (c) c.innerHTML = r.html;
+            initTaskEdit();  // 无 edit-state 时仅清状态
+          }
+        });
+      }
     }
     window.scrollTo({top: 0, behavior: 'smooth'});
   }
@@ -961,6 +1260,58 @@ ROUTER_JS = """
     });
   }
 
+  // ===== 编辑任务 / 剪辑工作台（REQ-20260915-003）=====
+  function initTaskEdit() {
+    var st = document.getElementById('slirn-edit-state');
+    if (!st) { window.slirnEditTaskId = null; return; }
+    window.slirnEditTaskId = st.getAttribute('data-task-id');
+    window.slirnSelectedFile = st.getAttribute('data-video-path') || '';
+    // 播放器：完整原视频 + 滑块全长
+    var card = document.getElementById('slirn-player-card');
+    var v = document.getElementById('slirn-player');
+    var url = st.getAttribute('data-video-url');
+    if (card && v && url) {
+      v.src = url; v.load();
+      card.style.display = '';
+    }
+    var durSec = parseFloat(st.getAttribute('data-duration-seconds')) || 0;
+    var seek = document.getElementById('slirn-seek');
+    if (seek && durSec > 0) { seek.max = durSec; seek.value = 0; }
+    var td = document.getElementById('slirn-time-display');
+    if (td && durSec > 0) {
+      var ds = secondsToHMS(durSec);
+      td.textContent = '00:00:00.000 / ' + ds + '.000';
+    }
+    try { window.slirnRenderHwChips && window.slirnRenderHwChips(); } catch (e) {}
+  }
+
+  function openWorkbench(tid) {
+    postJSON(SLIRN_API + '/workbench', {task_id: tid}).then(function(r) {
+      if (r && r.ok && r.html) {
+        var w = document.getElementById('slirn-tab-workbench');
+        if (!w) return;
+        w.innerHTML = r.html;
+        ALL_TABS.forEach(function(id) { var el = document.getElementById(id); if (el) el.style.display = 'none'; });
+        var d = document.getElementById('slirn-tab-detail');
+        if (d) d.style.display = 'none';
+        w.style.display = '';
+        window.scrollTo({top: 0, behavior: 'smooth'});
+        bindSubPlayer();
+      } else if (r && r.error) {
+        toast('❌ ' + r.error, 'error');
+      }
+    });
+  }
+
+  function switchWbPane(paneKey) {
+    document.querySelectorAll('.slirn-wb-stage').forEach(function(s) {
+      s.classList.toggle('active', s.getAttribute('data-pane') === paneKey);
+    });
+    document.querySelectorAll('.slirn-wb-pane').forEach(function(p) {
+      p.style.display = (p.id === 'slirn-wb-pane-' + paneKey) ? '' : 'none';
+    });
+  }
+
   var subPollTimer = null;
   function startSubPolling(tid) {
     if (subPollTimer) { clearInterval(subPollTimer); subPollTimer = null; }
@@ -979,7 +1330,9 @@ ROUTER_JS = """
           if (subPollTimer) { clearInterval(subPollTimer); subPollTimer = null; }
           if (j.state === 'done') {
             toast('✅ 字幕生成完成：' + (j.segments_count || 0) + ' 段');
-            refreshDetail(tid);
+            // 字幕完成时用户可能在工作台或详情页 — 刷新所在视图
+            if (el && el.closest && el.closest('#slirn-tab-workbench')) { openWorkbench(tid); }
+            else { refreshDetail(tid); }
           } else if (j.state === 'error') {
             if (el) {
               el.style.display = '';
@@ -1119,6 +1472,50 @@ ROUTER_JS = """
         handleResp(r, 'slirn-tab-tasks');
         var d = document.getElementById('slirn-tab-detail');
         if (d) d.style.display = 'none';
+      });
+    }
+    else if (action === 'edit-task') {
+      var tidE = target.getAttribute('data-task-id') || '';
+      postJSON(SLIRN_API + '/edit_task', {task_id: tidE}).then(function(r) {
+        if (r && r.ok && r.html) {
+          var c = document.getElementById('slirn-tab-create');
+          if (c) { c.innerHTML = r.html; c.style.display = ''; }
+          ALL_TABS.forEach(function(id) {
+            if (id !== 'slirn-tab-create') { var el = document.getElementById(id); if (el) el.style.display = 'none'; }
+          });
+          var dE = document.getElementById('slirn-tab-detail');
+          if (dE) dE.style.display = 'none';
+          initTaskEdit();
+        } else if (r && r.error) {
+          toast('❌ ' + r.error, 'error');
+        }
+      });
+    }
+    else if (action === 'open-workbench') {
+      openWorkbench(target.getAttribute('data-task-id') || '');
+    }
+    else if (action === 'wb-stage') {
+      switchWbPane(target.getAttribute('data-pane') || '');
+    }
+    else if (action === 'update-task') {
+      var tidU = target.getAttribute('data-task-id') || window.slirnEditTaskId || '';
+      var sU = getInput('slirn-start-box'), eU = getInput('slirn-end-box');
+      var nU = getInput('slirn-task-name');
+      var manualU = getInput('slirn-hotwords-manual');
+      var inheritElU = document.getElementById('slirn-hw-inherit-all');
+      var inheritU = inheritElU ? !!inheritElU.checked : false;
+      var pickedU = collectPickedHotwords();
+      postJSON(SLIRN_API + '/update_task', {
+        task_id: tidU, start: sU, end: eU, name: nU,
+        inherit_public: inheritU, picked_words: pickedU, manual_words: manualU,
+      }).then(function(r) {
+        if (r && r.ok) {
+          toast(r.toast || '✅ 已保存');
+          handleResp(r, 'slirn-tab-tasks');
+          showTab('slirn-tab-tasks');
+        } else if (r && r.error) {
+          toast('❌ ' + r.error, 'error');
+        }
       });
     }
     else if (action === 'set-start') {
@@ -1410,6 +1807,7 @@ def build_app(repo_root: Path | None = None) -> gr.Blocks:
     <div id="slirn-tab-create" class="slirn-tab-content" style="display:none;">{_render_create_task(repo_root)}</div>
     <div id="slirn-tab-hotwords" class="slirn-tab-content" style="display:none;">{_render_hotword_lib(repo_root)}</div>
     <div id="slirn-tab-detail" class="slirn-tab-content" style="display:none;"></div>
+    <div id="slirn-tab-workbench" class="slirn-tab-content" style="display:none;"></div>
 
     <div class="slirn-footer">Slirn v0.2 · 仓库 <code>{_esc(repo_root)}</code></div>
     '''
@@ -1827,6 +2225,138 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             return _ok('<div class="slirn-empty"><div class="slirn-empty-icon">🔍</div><div class="slirn-empty-text">请指定任务 ID</div></div>')
         return _ok(_render_task_detail(tid, mgr))
 
+    @app.app.post("/slirn/api/create_page")
+    async def create_page():
+        """全新建任务页 HTML（编辑模式退出后还原用）。"""
+        return _ok(_render_create_task(repo_root))
+
+    @app.app.post("/slirn/api/edit_task")
+    async def edit_task(body: dict = Body(default_factory=dict)):
+        """编辑任务 — 返回新建页（编辑模式预填）HTML（REQ-20260915-003）。"""
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            t = mgr.get(tid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+        return _ok(_render_create_task(repo_root, edit=t))
+
+    @app.app.post("/slirn/api/update_task")
+    async def update_task(body: dict = Body(default_factory=dict)):
+        """保存编辑：任务名 / 截取时间（变更自动重截取）/ 热词三来源（REQ-20260915-003）。"""
+        tid = (body.get("task_id") or "").strip()
+        name = (body.get("name") or "").strip()
+        start = (body.get("start") or "").strip()
+        end = (body.get("end") or "").strip()
+        inherit_public = bool(body.get("inherit_public"))
+        picked_raw = body.get("picked_words")
+        manual_text = (body.get("manual_words") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            t = mgr.get(tid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+
+        # ---- 热词三来源重合并（与 create_task 同规则） ----
+        seen: set[str] = set()
+        ordered: list[str] = []
+        word_sources: dict[str, str] = {}
+        if inherit_public:
+            try:
+                hwlib = HotwordLibrary(repo_root)
+                for _cat, ws in hwlib.list_grouped().items():
+                    for w in ws:
+                        w = w.strip()
+                        if w and w not in seen:
+                            seen.add(w)
+                            ordered.append(w)
+                            word_sources[w] = "inherit"
+            except Exception:  # noqa: BLE001
+                pass
+        if isinstance(picked_raw, list):
+            for w in picked_raw:
+                w = str(w or "").strip()
+                if w and w not in seen:
+                    seen.add(w)
+                    ordered.append(w)
+                    word_sources[w] = "pick"
+        for w in manual_text.replace("\n", " ").split():
+            w = w.strip()
+            if w and w not in seen:
+                seen.add(w)
+                ordered.append(w)
+                word_sources[w] = "manual"
+
+        # ---- 截取段时间：变更 → 从原视频重截取 ----
+        from tasklib.exceptions import InvalidTimeRangeError
+        from tasklib.models import TimeSegment
+        from tasklib.time_utils import parse_time, segment_filename
+
+        old_seg = t.segment
+        seg_changed = False
+        new_segment: TimeSegment | None = None
+        toast = "✅ 任务已更新"
+        if start and end:
+            try:
+                if parse_time(start).total_seconds() >= parse_time(end).total_seconds():
+                    return _err(f"开始时间 ({start}) 必须小于结束时间 ({end})")
+            except ValueError as e:
+                return _err(f"时间格式错误: {e}")
+            if old_seg is None or old_seg.start != start or old_seg.end != end:
+                src = t.original_video_source
+                if not src.exists():
+                    return _err("原视频文件缺失，无法重截取")
+                ext = src.suffix.lstrip(".") or "mp4"
+                final_path = mgr.tasks_dir / tid / "raw_input" / segment_filename(src.stem, start, end, ext)
+                try:
+                    from tasklib.video import cut_video
+                    cut_video(src, final_path, start, end)
+                except Exception as e:  # noqa: BLE001
+                    return _err(f"重截取失败: {e}")
+                new_segment = TimeSegment(start=start, end=end, path=final_path)
+                seg_changed = True
+                toast = "✅ 任务已更新（截取段已重截）"
+        elif old_seg is not None:
+            # 时间清空 → 解除截取段（走完整原视频）
+            seg_changed = True
+            new_segment = None
+
+        # 已生成字幕 & 截取范围变化 → 字幕已过期，提示重新生成
+        had_subtitle = (mgr.tasks_dir / tid / "outputs" / _asr.SUBTITLE_JSON).exists()
+
+        try:
+            mgr.update_task(
+                tid, name=name or None,
+                segment=new_segment, segment_changed=seg_changed,
+                hotwords=ordered,
+                inherit_public=inherit_public,
+                hotword_sources=word_sources if word_sources else None,
+            )
+        except Exception as e:  # noqa: BLE001
+            return _err(f"更新失败: {e}")
+
+        # 清理被替换的旧截取文件
+        if seg_changed and old_seg is not None and old_seg.path != (new_segment.path if new_segment else None):
+            try:
+                if old_seg.path.exists():
+                    old_seg.path.unlink()
+            except OSError:
+                pass
+
+        if seg_changed and had_subtitle:
+            toast += " · 截取范围已变，建议重新生成字幕"
+        return _ok(_render_task_list(mgr), toast=toast, task_id=tid)
+
+    @app.app.post("/slirn/api/workbench")
+    async def workbench(body: dict = Body(default_factory=dict)):
+        """剪辑工作台 HTML（REQ-20260915-003）。"""
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        return _ok(_render_workbench(tid, mgr))
+
     @app.app.post("/slirn/api/delete_task")
     async def delete_task(body: dict = Body(default_factory=dict)):
         tid = (body.get("task_id") or "").strip()
@@ -1853,13 +2383,19 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
     async def _task_video_asgi(scope, receive, send):
         if scope["type"] != "http":
             return
+        from urllib.parse import parse_qs as _parse_qs
         from urllib.parse import unquote as _unquote
 
         tid = _unquote(scope["path"].rsplit("/", 1)[-1])
+        # ?src=original → 强制服务完整原视频（编辑页滑全片定位用，REQ-20260915-003）
+        force_original = _parse_qs(scope.get("query_string", b"").decode("latin-1")).get("src", [""])[0] == "original"
         video: Path | None = None
         try:
             t = mgr.get(tid)
-            video, _label = _resolve_task_video(t)
+            if force_original and t.original_video_source.exists():
+                video = t.original_video_source
+            else:
+                video, _label = _resolve_task_video(t)
         except Exception:  # noqa: BLE001
             video = None
         if video is None:
