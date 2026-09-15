@@ -22,6 +22,13 @@ slirn/.temp/
 /*.srt
 /*.log
 
+# Slirn home runtime temp (moviepy cuts, gradio api info dump)
+/.temp/
+/_info.json
+
+# REQ 验证工作区（本机留存的测试脚本 + 产物，见 work/REQ-*/README.md）
+/work/
+
 # Local skill junctions/symlinks (created by setup-junctions.*, not tracked)
 /.claude/skills/video-*
 /.claude/skills/long-*
