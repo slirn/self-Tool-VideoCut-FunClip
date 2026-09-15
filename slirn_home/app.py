@@ -326,7 +326,7 @@ def _task_echo_fragments(t) -> tuple[str, str, str]:
     else:
         video_disp = f"📁 {_esc(src.name)}（⚠️ 文件缺失）"
 
-    # ---- 截取段：原样起止时间 + 时长 + 大小（对齐新建「✅ 截取成功 N MB」）----
+    # ---- 截取段：原样起止时间 + 时长 + 大小（对齐新建「✅ 待剪辑视频已生成 N MB」）----
     if t.segment:
         seg_dur = "时长未知"
         try:
@@ -728,7 +728,7 @@ def _render_create_task(repo_root: Path, edit=None) -> str:
                 <input class="slirn-input" id="slirn-end-box" placeholder="00:00:00.000" value="{_esc(edit.segment.end if edit.segment else '')}" />
             </div>
         </div>
-        <button class="slirn-btn slirn-btn-primary" data-action="cut-preview" style="margin-top:8px;">🎬 截取预览</button>
+        <button class="slirn-btn slirn-btn-primary" data-action="cut-preview" style="margin-top:8px;">🎬 待剪辑视频预览</button>
         <div id="slirn-cut-msg" style="margin-top:12px;"></div>
         <div id="slirn-cut-preview-wrap" style="display:none; margin-top:12px;">
             <div class="slirn-video-wrap">
@@ -817,7 +817,7 @@ def _render_create_task(repo_root: Path, edit=None) -> str:
                 <input class="slirn-input" id="slirn-end-box" placeholder="00:00:00.000" />
             </div>
         </div>
-        <button class="slirn-btn slirn-btn-primary" data-action="cut-preview" style="margin-top:8px;">🎬 截取预览</button>
+        <button class="slirn-btn slirn-btn-primary" data-action="cut-preview" style="margin-top:8px;">🎬 待剪辑视频预览</button>
         <div id="slirn-cut-msg" style="margin-top:12px;"></div>
         <div id="slirn-cut-preview-wrap" style="display:none; margin-top:12px;">
             <div class="slirn-video-wrap">
@@ -1238,7 +1238,7 @@ ROUTER_JS = """
   function applyCutDone(info) {
     if (!info) return;
     var msg = document.getElementById('slirn-cut-msg');
-    if (msg) msg.innerHTML = '<div class="slirn-status-msg">✅ 截取成功 ' + info.size_mb + ' MB</div>';
+    if (msg) msg.innerHTML = '<div class="slirn-status-msg">✅ 待剪辑视频已生成 ' + info.size_mb + ' MB</div>';
     var wrap = document.getElementById('slirn-cut-preview-wrap');
     var v = document.getElementById('slirn-cut-preview');
     if (wrap && v) { v.src = '/gradio_api/file=' + encodeURI(info.path); v.load(); wrap.style.display = ''; }
@@ -2600,7 +2600,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         # 不返回 html — 不要替换整个 tab（保留原文件预览 + 滑块 + 时间输入）
         return _ok(
             "",
-            toast=f"✅ 截取成功 {round(size_mb, 1)} MB",
+            toast=f"✅ 待剪辑视频已生成 {round(size_mb, 1)} MB",
             cut_done={
                 "path": str(final_dst).replace("\\", "/"),
                 "size_mb": round(size_mb, 1),

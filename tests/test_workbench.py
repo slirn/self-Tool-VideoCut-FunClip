@@ -94,6 +94,23 @@ def test_render_create_task_fresh_has_dropzone(tmp_path: Path):
     assert "slirn-edit-state" not in html
 
 
+def test_render_create_task_cut_preview_label(tmp_path: Path):
+    """REQ-20260915-004 —「截取预览」更名「待剪辑视频预览」（fresh + edit 两模式）。"""
+    from slirn_home.app import _render_create_task
+
+    # 全新建
+    fresh = _render_create_task(tmp_path)
+    assert ">🎬 待剪辑视频预览</button>" in fresh
+    assert "截取预览" not in fresh
+
+    # 编辑模式（同一套页面）
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="编辑更名", original_video=video)
+    edit = _render_create_task(tmp_path, edit=m.get(t.task_id))
+    assert ">🎬 待剪辑视频预览</button>" in edit
+    assert "截取预览" not in edit
+
+
 # ---------- 工作台 ----------
 
 def test_wb_stage_states_fresh_task(tmp_path: Path):
