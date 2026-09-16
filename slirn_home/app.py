@@ -839,6 +839,40 @@ def _render_rough_compose_zone(task_id: str, t, mgr: TaskManager) -> str:
         f"保留单元 {len(units)} 个（合并连续段后 {n_merged} 个切点） · "
         f"预计成片时长 {_fmt_dur(keep_ms)}"
     )
+    # ---- REQ-20260916-019：有效字幕 SRT 内嵌（与精剪修订/字幕合成同源） ----
+    fine_for_subs = fine_service.load_fine(outputs_dir)
+    fmap = {str(e["id"]): e["new_text"]
+            for e in (fine_for_subs or {}).get("entries") or []
+            if not e.get("reverted")}
+    subs_srt = compose_service.format_srt(units, fmap)
+    subs_block = ""
+    if subs_srt:
+        # <pre> 内 textContent 由前端 escapeHtml 处理；这里直接拼字符串
+        # （format_srt 输出安全字符：换行 + HH:MM:SS,mmm + 行文本 — 字幕文本
+        # 是字幕修订/热词替换产物，前端落入 <pre> 时已用 escapeHtml 转义）
+        subs_escaped = subs_srt.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        subs_block = f'''<details class="slirn-rc-subs" open style="margin-top:14px;">
+        <summary>📝 切分之后的有效字幕（{len(units)} 行 · {_fmt_dur(keep_ms)}）</summary>
+        <pre class="slirn-rc-subs-body">{subs_escaped}</pre>
+        <div class="slirn-task-actions" style="margin-top:10px;">
+            <button class="slirn-btn slirn-btn-sm" data-action="compose-rough-subs-copy"
+                    data-task-id="{_esc(task_id)}">📋 复制 SRT</button>
+            <button class="slirn-btn slirn-btn-sm" data-action="compose-rough-subs-download"
+                    data-task-id="{_esc(task_id)}">⬇️ 下载 SRT</button>
+        </div>
+    </details>'''
+    else:
+        subs_block = '<div class="slirn-sub-meta" style="margin-top:14px;">📝 没有保留内容 — 字幕清单为空</div>'
+
+    # ---- REQ-20260916-019：删除按钮（仅产物存在时） ----
+    delete_btn = ""
+    if artifact.exists():
+        delete_btn = (
+            f'<button class="slirn-btn slirn-btn-danger" id="slirn-rc-delete" '
+            f'data-action="compose-rough-delete" data-task-id="{_esc(task_id)}" '
+            f'style="margin-left:8px;">🗑️ 删除粗剪成片</button>'
+        )
+
     return f'''<div class="slirn-card" style="margin-top:16px;">
         <div class="slirn-panel-header"><div class="slirn-panel-title">🎥 粗剪合成 <span class="slirn-wb-stage-optional">可选</span></div></div>
         <div class="slirn-sub-meta">{stats_line}</div>
@@ -850,8 +884,10 @@ def _render_rough_compose_zone(task_id: str, t, mgr: TaskManager) -> str:
         <div class="slirn-task-actions" style="margin-top:14px;">
             <button class="slirn-btn slirn-btn-primary" id="slirn-rc-compose" data-action="compose-rough"
                     data-task-id="{_esc(task_id)}">🎬 {'重新合成粗剪视频' if artifact.exists() else '合成粗剪视频'}</button>
+            {delete_btn}
         </div>
         <div id="slirn-rc-status" class="slirn-status-msg" style="display:none;"></div>
+        {subs_block}
         {preview_html}
     </div>'''
 
@@ -2842,6 +2878,62 @@ ROUTER_JS = """
       }, 2000);
     });
   }
+  // ===== 粗剪合成 · 删除 / 字幕 SRT 操作（REQ-20260916-019） =====
+  function rcDelete(btn) {
+    var tid = btn.getAttribute('data-task-id') || '';
+    if (!tid) { toast('❌ 缺少 task_id', 'error'); return; }
+    if (!window.confirm('删除「粗剪成片」（mp4 + 随片 srt 副产物）？\n'
+        + '删除后需要重新合成才能预览效果（约 11 分钟）。')) return;
+    btn.disabled = true;
+    postJSON(SLIRN_API + '/compose_rough_delete', {task_id: tid}).then(function(r) {
+      btn.disabled = false;
+      if (!r || !r.ok) {
+        toast('❌ ' + (r && r.error ? r.error : '删除失败'), 'error');
+        return;
+      }
+      toast(r.toast || '🗑️ 已删除');
+      openWorkbench(tid);  // 刷新工作台：删按钮消失、字幕预览保留（产物没了，按钮消失即可）
+    });
+  }
+  function rcSubsCopy(btn) {
+    var pane = btn.closest('.slirn-card');
+    if (!pane) { toast('❌ 找不到字幕面板', 'error'); return; }
+    var pre = pane.querySelector('pre.slirn-rc-subs-body');
+    var srt = pre ? pre.textContent : '';
+    if (!srt) { toast('❌ 没有可复制的字幕', 'error'); return; }
+    var done = function() { toast('📋 已复制 ' + srt.split('\\n\\n').length + ' 段 SRT'); };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(srt).then(done, function() { fallbackCopy(srt, done); });
+    } else {
+      fallbackCopy(srt, done);
+    }
+  }
+  function fallbackCopy(text, cb) {
+    var ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); cb && cb(); } catch (e) { toast('❌ 复制失败', 'error'); }
+    document.body.removeChild(ta);
+  }
+  function rcSubsDownload(btn) {
+    var tid = btn.getAttribute('data-task-id') || '';
+    if (!tid) { toast('❌ 缺少 task_id', 'error'); return; }
+    btn.disabled = true;
+    postJSON(SLIRN_API + '/compose_rough_preview_subs', {task_id: tid}).then(function(r) {
+      btn.disabled = false;
+      if (!r || !r.ok || !r.srt) {
+        toast('❌ ' + (r && r.error ? r.error : '获取 SRT 失败'), 'error');
+        return;
+      }
+      var blob = new Blob([r.srt], {type: 'text/plain;charset=utf-8'});
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url; a.download = 'rough_compose_subs_' + tid + '.srt';
+      document.body.appendChild(a); a.click();
+      setTimeout(function() { URL.revokeObjectURL(url); document.body.removeChild(a); }, 100);
+      toast('⬇️ 已下载 ' + (r.lines || 0) + ' 行 SRT');
+    });
+  }
   // ===== 精剪修订 · 热词替换（REQ-20260916-017）：轮询 + 行撤销/过滤 + 确认保存 =====
   var finePollTimer = null;
   function startFinePolling(tid) {
@@ -3676,6 +3768,18 @@ ROUTER_JS = """
     else if (action === 'compose-rough') {
       // 粗剪合成（REQ-20260916-016，可选）：后台拼接保留区间成片
       rcCompose(target);
+    }
+    else if (action === 'compose-rough-delete') {
+      // 删除粗剪成片（REQ-20260916-019）：confirm → POST → 刷新工作台
+      rcDelete(target);
+    }
+    else if (action === 'compose-rough-subs-copy') {
+      // 复制有效字幕 SRT（REQ-20260916-019）：从 <pre> 读 textContent
+      rcSubsCopy(target);
+    }
+    else if (action === 'compose-rough-subs-download') {
+      // 下载有效字幕 SRT（REQ-20260916-019）：拉端点拿 SRT → Blob 下载
+      rcSubsDownload(target);
     }
     else if (action === 'fine-revise') {
       // 精剪修订热词替换（REQ-20260916-017）：后台分析 → 轮询 → 刷新
@@ -5324,6 +5428,69 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
                 return _ok("", job={"state": "done", "progress": 100.0})
             return _err("没有进行中的合成任务")
         return _ok("", job=job)
+
+    @app.app.post("/slirn/api/compose_rough_delete")
+    async def compose_rough_delete(body: dict = Body(default_factory=dict)):
+        """删除粗剪成片（REQ-20260916-019）：用户主动清理产物以便重合成。"""
+        from slirn_home import compose_service
+
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            mgr.get(tid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+        outputs_dir = mgr.tasks_dir / tid / "outputs"
+        res = compose_service.delete_rough_compose(outputs_dir)
+        return _ok("", deleted=res["deleted"],
+                   toast="🗑️ " + res["message"] if res["deleted"] else None,
+                   removed=res["removed"], remaining=res["remaining"],
+                   message=res["message"])
+
+    @app.app.post("/slirn/api/compose_rough_preview_subs")
+    async def compose_rough_preview_subs(body: dict = Body(default_factory=dict)):
+        """预览「切分之后的有效字幕」（REQ-20260916-019）：SRT 格式字符串。
+
+        行集口径与 compose_rough 一致（修订实时 + 已保存手工翻转/改判），
+        行文本并入热词替换未撤销行的 new_text；按 start_ms 升序输出 SRT。
+        """
+        from slirn_home import asr_service, compose_service, cutlist_service, fine_service, revision_service
+
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            mgr.get(tid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+        outputs_dir = mgr.tasks_dir / tid / "outputs"
+        rev = revision_service.load_revision(outputs_dir)
+        if not (rev and rev.get("entries")):
+            return _err("请先完成「字幕修订」")
+        if not revision_service.all_decided(rev):
+            return _err("字幕修订还有未决策条目")
+        sub_meta = asr_service.load_subtitle(outputs_dir)
+        if not (sub_meta and sub_meta.get("segments")):
+            return _err("缺少字幕生成产物")
+        saved = cutlist_service.load_cutlist(outputs_dir)
+        try:
+            cutlist = cutlist_service.build_cutlist(
+                sub_meta, rev,
+                manual_marks=(saved or {}).get("manual_marks") if saved else None,
+                actions=(saved or {}).get("actions") if saved else None,
+            )
+        except Exception as e:  # noqa: BLE001
+            return _err(f"计算保留行失败: {e}")
+        units = cutlist_service.effective_keep_units(cutlist)
+        if not units:
+            return _err("没有保留内容")
+        fine = fine_service.load_fine(outputs_dir)
+        fmap = {str(e["id"]): e["new_text"]
+                for e in (fine or {}).get("entries") or [] if not e.get("reverted")}
+        srt = compose_service.format_srt(units, fmap)
+        keep_ms = sum(int(u["end_ms"]) - int(u["start_ms"]) for u in units)
+        return _ok("", srt=srt, lines=len(units), keep_ms=keep_ms)
 
     @app.app.post("/slirn/api/fine_revise")
     async def fine_revise(body: dict = Body(default_factory=dict)):

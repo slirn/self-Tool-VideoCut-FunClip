@@ -110,3 +110,75 @@ def test_start_compose_rejects_running_task(tmp_path):
 
 def test_job_status_missing():
     assert compose_service.job_status("never-existed") is None
+
+
+# ---- format_srt / _ms_to_srt_time (REQ-20260916-019) ----
+
+def test_ms_to_srt_time_basic():
+    assert compose_service._ms_to_srt_time(0) == "00:00:00,000"
+    assert compose_service._ms_to_srt_time(999) == "00:00:00,999"
+    assert compose_service._ms_to_srt_time(1000) == "00:00:01,000"
+    assert compose_service._ms_to_srt_time(950) == "00:00:00,950"
+
+
+def test_ms_to_srt_time_hours():
+    assert compose_service._ms_to_srt_time(3600000) == "01:00:00,000"
+    assert compose_service._ms_to_srt_time(3600000 + 65000) == "01:01:05,000"
+
+
+def test_format_srt_empty():
+    assert compose_service.format_srt([]) == ""
+
+
+def test_format_srt_basic_sorted():
+    units = [
+        {"id": "10", "start_ms": 0, "end_ms": 2000, "text": "你好"},
+        {"id": "11", "start_ms": 3000, "end_ms": 5000, "text": "世界"},
+    ]
+    out = compose_service.format_srt(units)
+    assert out == "1\n00:00:00,000 --> 00:00:02,000\n你好\n\n2\n00:00:03,000 --> 00:00:05,000\n世界\n", out
+
+
+def test_format_srt_unsorted_input_sorted():
+    """输入乱序也按 start_ms 升序输出。"""
+    units = [
+        {"id": "11", "start_ms": 3000, "end_ms": 5000, "text": "世界"},
+        {"id": "10", "start_ms": 0, "end_ms": 2000, "text": "你好"},
+    ]
+    out = compose_service.format_srt(units)
+    assert out.index("00:00:00,000") < out.index("00:00:03,000")
+
+
+def test_format_srt_text_overrides():
+    """热词替换：overrides[id] 优先于 unit.text。"""
+    units = [{"id": "10", "start_ms": 0, "end_ms": 2000, "text": "神精网络"}]
+    out = compose_service.format_srt(units, {"10": "神经网络"})
+    assert "神经网络" in out and "神精网络" not in out
+
+
+# ---- delete_rough_compose (REQ-20260916-019) ----
+
+def test_delete_rough_compose_missing(tmp_path):
+    res = compose_service.delete_rough_compose(tmp_path)
+    assert res["deleted"] is False
+    assert "不存在" in res["message"]
+
+
+def test_delete_rough_compose_only_mp4(tmp_path):
+    mp4 = compose_service.rough_compose_path(tmp_path)
+    mp4.write_bytes(b"fake mp4")
+    res = compose_service.delete_rough_compose(tmp_path)
+    assert res["deleted"] is True
+    assert mp4.name in res["removed"]
+    assert not mp4.exists()
+
+
+def test_delete_rough_compose_both(tmp_path):
+    mp4 = compose_service.rough_compose_path(tmp_path)
+    srt = mp4.with_suffix(".srt")
+    mp4.write_bytes(b"fake")
+    srt.write_text("1\n00:00:00,000 --> 00:00:01,000\nhi\n", encoding="utf-8")
+    res = compose_service.delete_rough_compose(tmp_path)
+    assert res["deleted"] is True
+    assert {mp4.name, srt.name} == set(res["removed"])
+    assert not mp4.exists() and not srt.exists()

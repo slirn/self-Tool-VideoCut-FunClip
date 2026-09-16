@@ -1687,3 +1687,42 @@ footer { display: none !important; }
   .slirn-fw-row { grid-template-columns: 36px 1fr auto; }
   .slirn-fw-time { display: none; }
 }
+
+/* ============ 粗剪合成 · 有效字幕 SRT 预览（REQ-20260916-019） ============ */
+.slirn-rc-subs {
+  border: 1px solid var(--border, rgba(255,255,255,0.12));
+  border-left: 3px solid var(--accent, #667eea);
+  border-radius: 8px;
+  padding: 8px 12px;
+  background: var(--card-bg, rgba(255,255,255,0.04));
+}
+.slirn-rc-subs > summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 4px 0;
+  user-select: none;
+  list-style: none;
+}
+.slirn-rc-subs > summary::-webkit-details-marker { display: none; }
+.slirn-rc-subs > summary::before {
+  content: "▸ ";
+  display: inline-block;
+  transition: transform 0.15s;
+  color: var(--accent, #667eea);
+}
+.slirn-rc-subs[open] > summary::before { content: "▾ "; }
+.slirn-rc-subs-body {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, "Microsoft YaHei", monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  max-height: 360px;
+  overflow-y: auto;
+  padding: 12px;
+  margin-top: 8px;
+  background: rgba(0, 0, 0, 0.25);
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: rgba(255, 255, 255, 0.92);
+}

@@ -84,6 +84,55 @@ def build_sentences(lines: list[dict]) -> list[dict]:
     ]
 
 
+def _ms_to_srt_time(ms: int) -> str:
+    """整数毫秒 → SRT 时间戳 'HH:MM:SS,mmm'（HH 不补零前导截断）。"""
+    h, ms = divmod(int(ms), 3600 * 1000)
+    m, ms = divmod(ms, 60 * 1000)
+    s, ms = divmod(ms, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def format_srt(units: list[dict], text_overrides: dict | None = None) -> str:
+    """保留行列表 → SRT 字符串（按 start_ms 升序，1-based 编号）。
+
+    text_overrides[id] = new_text 优先于 unit.text（热词替换未撤销行的修正）。
+    空 units → ""（前端按 lines=0 自行提示）。
+    """
+    text_overrides = text_overrides or {}
+    parts: list[str] = []
+    for i, u in enumerate(sorted(units, key=lambda x: int(x["start_ms"])), start=1):
+        start = int(u["start_ms"])
+        end = int(u["end_ms"])
+        text = text_overrides.get(str(u["id"]), str(u.get("text", "")))
+        parts.append(f"{i}\n{_ms_to_srt_time(start)} --> {_ms_to_srt_time(end)}\n{text}")
+    return "\n\n".join(parts) + ("\n" if parts else "")
+
+
+def delete_rough_compose(outputs_dir: Path) -> dict:
+    """删除粗剪成片（mp4 + srt 副产物）。同步、毫秒级，不进 job 表。
+
+    Returns:
+        {"deleted": bool, "removed": [...], "remaining": [...], "message": str}
+    """
+    out_dir = Path(outputs_dir)
+    mp4 = rough_compose_path(out_dir)
+    srt = mp4.with_suffix(".srt")
+    removed: list[str] = []
+    for p in (mp4, srt):
+        if p.exists():
+            try:
+                p.unlink()
+                removed.append(p.name)
+            except OSError as e:
+                log.warning("[compose] 删除失败 %s: %s", p, e)
+    remaining = [n for n in (mp4.name, srt.name) if (out_dir / n).exists()]
+    if removed:
+        return {"deleted": True, "removed": removed,
+                "remaining": remaining, "message": f"已删除 {' + '.join(removed)}"}
+    return {"deleted": False, "removed": [],
+            "remaining": remaining, "message": "粗剪成片不存在，无需删除"}
+
+
 def _load_upstream_clipper():
     """加载上游 VideoClipper（funclip/ 内部是平级 import，需注入 sys.path）。"""
     global _UPSTREAM_CLS
