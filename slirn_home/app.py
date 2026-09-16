@@ -733,8 +733,9 @@ def _render_cutlist_zone(task_id: str, t, mgr: TaskManager) -> str:
         <div class="slirn-sub-meta">{stats_line}</div>
         <div class="slirn-form-hint">本阶段把上一阶段确定的字幕决策落到时间段：完整保留与内容更正的整段带入（编号不变）；
         删除的不带入；切分修剪的按「原段内容 vs 切分后文字」对齐，把整段时间轴**完整**切成交替子段
-        （保留块 ✅ / 删除洞 ❌，父编号保留，子段依次编号 10.1、10.2、10.3）——点子段预播确认，
-        点标记徽章翻转去留，听完觉得整句不要可整段改判。</div>
+        （保留块 ✅ / 删除洞 ❌，父编号保留，子段依次编号 10.1、10.2、10.3）——点行从该处连续播放
+        （播完一条接下一条，播放行高亮跟随），点标记徽章翻转去留；快捷键与字幕修订阶段一致：
+        ↑↓ 切换 · 空格 播/停 · R 重播 · K/D/S 整条改判（保留/删除/切分）。</div>
         {fb_hint}{stale_note}
         <div id="slirn-cut-player-wrap" class="slirn-video-wrap slirn-sub-player-wrap" style="display:none;">
             <video id="slirn-cut-player" controls preload="metadata"></video>
@@ -1877,8 +1878,8 @@ ROUTER_JS = """
         window.scrollTo({top: 0, behavior: 'smooth'});
         bindSubPlayer();
         bindRevPlayer();
-        // 重渲染后旧行引用全部失效：试听/预播状态清零（防跳播序列指向已移除的行）
-        cutKeepSeq = null; cutStopAt = -1; cutKeepIdx = 0;
+        // 重渲染后旧行引用全部失效：试听状态清零（防跳播序列指向已移除的行）
+        cutKeepSeq = null; cutKeepIdx = 0;
         bindCutPlayer();  // 切分修剪播放器（timeupdate 高亮/自动停/跳播 — REQ-20260916-011）
         applyWbStagesState();  // 恢复上次收起/展开（跨刷新保持 — REQ-20260916-002）
         applyRevRigorState();  // 上次选过的严谨性级别预填（REQ-20260916-003）
@@ -2132,11 +2133,13 @@ ROUTER_JS = """
     else v.addEventListener('loadedmetadata', goCut, {once: true});
   }
 
-  // ===== 切分修剪预览与决策（REQ-20260916-011）=====
-  // 子段/整段行：↑↓ 选行（跳段起点）· 空格 播/停 · R 重播本段
-  // 预播 = 播到段尾自动停；组头 ▶ 试听 = 本组 keep 子段连续跳播（成片口径）；
-  // 播放中高亮跟随当前段。翻转/改判未保存纯前端，「💾 保存切分决策」落盘。
-  var cutStopAt = -1;    // 预播段尾 ms（-1 = 不自动停）
+  // ===== 切分修剪预览与决策（REQ-20260916-011 → 013 连续播放）=====
+  // 行点击/↑↓ = 从该行起点连续播放（REQ-20260916-013：播完一条自动接下一条，
+  // 不再段尾自停），播放中 active 高亮跟随（与字幕/修订阶段同款）；
+  // 组头 ▶ 试听 = 本组 keep 子段成片口径跳播。
+  // 快捷键与字幕修订阶段同键位（可自定义）：↑↓ 切换 · 空格 播/停 · R 重播 ·
+  // K/D/S 对选中行所属字幕整条改判（保留/删除/切分，再按同键取消）。
+  // 翻转/改判未保存纯前端，「💾 保存切分决策」落盘。
   var cutKeepSeq = null; // 试听跳播序列 [{s,e,row},…]（null = 不跳播）
   var cutKeepIdx = 0;    // 试听当前段下标（索引跟踪：只前进不回扫 — REQ-20260916-012）
   function cutRows() {
@@ -2163,14 +2166,14 @@ ROUTER_JS = """
     if (seek) cutPreview(row);
     return row;
   }
-  // 段级预播：定位段起点播放，timeupdate 播到 end_ms 自动停（keep/delete 段都可听）
+  // 行级连续播放（REQ-20260916-013）：定位行起点播起，不段尾自停 —
+  // 播完本行视频自然推进到下一行，active 高亮随 timeupdate 跟随切换
   function cutPreview(row) {
     if (!row) return;
     cutKeepSeq = null;
     cutAuditionBar(null);
     playCutAt(row.getAttribute('data-task-id') || '',
               parseInt(row.getAttribute('data-start-ms'), 10) || 0);
-    cutStopAt = parseInt(row.getAttribute('data-end-ms'), 10) || 0;
   }
   function cutReplayRow() {
     var rows = cutRows();
@@ -2191,7 +2194,7 @@ ROUTER_JS = """
       return;
     }
     if (v.paused) { var p = v.play(); if (p && p.catch) p.catch(function() {}); }
-    else { v.pause(); cutStopAt = -1; cutKeepSeq = null; cutAuditionBar(null); }  // 手动暂停即退出预播/跳播
+    else { v.pause(); cutKeepSeq = null; cutAuditionBar(null); }  // 手动暂停即退出连续播放/跳播
   }
   // 组头 ▶ 试听：本组 mark=keep 子段连续跳播 — 播完一段自动 seek 下一段
   // （跳变即真实剪辑效果：删掉洞后 keep 段首尾紧贴）
@@ -2205,7 +2208,6 @@ ROUTER_JS = """
       }
     });
     if (!seq.length) { toast('本组没有保留子段（全部为删除洞）', 'error'); return; }
-    cutStopAt = -1;
     cutKeepSeq = seq;
     cutKeepIdx = 0;  // 从第一段开播，一次到底（REQ-20260916-012）
     playCutAt(g.getAttribute('data-task-id') || '', seq[0].s);
@@ -2271,6 +2273,7 @@ ROUTER_JS = """
     }
     var g = row.closest('.slirn-cut-group');
     if (!g) return;
+    cutCloseResplit();  // 任何改判动作先收起重切编辑区（改判 split 时再重开 — 防取消后残留）
     if ((g.getAttribute('data-act') || '') === val) {  // 再按同键 → 取消，回到维持原状
       g.removeAttribute('data-act');
       cutActBadge(g, '');
@@ -2398,15 +2401,13 @@ ROUTER_JS = """
               cutAuditionBar(v);
               return;  // 跳转后的首个 timeupdate 再走高亮，防旧位置误亮
             }
-            v.pause(); cutKeepSeq = null; cutStopAt = -1;
+            v.pause(); cutKeepSeq = null;
             cutAuditionBar(null);  // 播放完毕：试听结束收起
           } else {
             cutAuditionBar(v);  // 试听时间戳与当前段保持一致
           }
         }
-        // ② 预播自动停：到段尾暂停（-30ms 提前量防越界误停不了）
-        if (cutStopAt >= 0 && tms >= cutStopAt - 30) { v.pause(); cutStopAt = -1; }
-        // ③ 高亮跟随（与修订区同款：段间缝隙保持前一段亮）
+        // ② 高亮跟随（与字幕/修订阶段同款 active：段间缝隙保持前一段亮）
         var hit = -1;
         for (var i = 0; i < rows.length; i++) {
           var s0 = parseInt(rows[i].getAttribute('data-start-ms'), 10) || 0;
@@ -2422,7 +2423,7 @@ ROUTER_JS = """
           if (tms >= eh && tms < nh) hit = lastHit;
         }
         lastHit = hit;
-        for (var j = 0; j < rows.length; j++) rows[j].classList.toggle('playing', j === hit);
+        for (var j = 0; j < rows.length; j++) rows[j].classList.toggle('active', j === hit);
         if (hit >= 0 && rows[hit] && rows[hit].scrollIntoView) rows[hit].scrollIntoView({block: 'nearest'});
       });
     }
