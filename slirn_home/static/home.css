@@ -1414,6 +1414,14 @@ footer { display: none !important; }
   padding: 6px 12px; border-radius: 10px; margin-top: 8px;
   background: rgba(217, 152, 22, 0.12); color: #92600a; font-weight: 600;
 }
+/* 试听条（REQ-20260916-012）：组头试听时显示成片口径连续时间戳 — 跳播下不回退不跳变，
+   与当前试听段严格一致（hidden 属性收起；类上不写 display，保证 hidden 生效） */
+.slirn-cut-audition {
+  margin-top: 8px; padding: 5px 12px; border-radius: 10px;
+  background: rgba(124, 92, 214, 0.10); color: #5b3fa8;
+  font-size: 12px; font-weight: 600; line-height: 1.6;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
 /* 字幕级改判后子段标记不再参与执行 → 置灰只读（行仍可点选预播听原声） */
 .slirn-cut-group[data-act="delete"] .slirn-cut-mark,
 .slirn-cut-group.split[data-act="keep"] .slirn-cut-mark {

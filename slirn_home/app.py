@@ -1877,6 +1877,8 @@ ROUTER_JS = """
         window.scrollTo({top: 0, behavior: 'smooth'});
         bindSubPlayer();
         bindRevPlayer();
+        // 重渲染后旧行引用全部失效：试听/预播状态清零（防跳播序列指向已移除的行）
+        cutKeepSeq = null; cutStopAt = -1; cutKeepIdx = 0;
         bindCutPlayer();  // 切分修剪播放器（timeupdate 高亮/自动停/跳播 — REQ-20260916-011）
         applyWbStagesState();  // 恢复上次收起/展开（跨刷新保持 — REQ-20260916-002）
         applyRevRigorState();  // 上次选过的严谨性级别预填（REQ-20260916-003）
@@ -2136,6 +2138,7 @@ ROUTER_JS = """
   // 播放中高亮跟随当前段。翻转/改判未保存纯前端，「💾 保存切分决策」落盘。
   var cutStopAt = -1;    // 预播段尾 ms（-1 = 不自动停）
   var cutKeepSeq = null; // 试听跳播序列 [{s,e,row},…]（null = 不跳播）
+  var cutKeepIdx = 0;    // 试听当前段下标（索引跟踪：只前进不回扫 — REQ-20260916-012）
   function cutRows() {
     var list = revVis('slirn-cut-list');
     if (!list || !list.offsetParent) return [];  // 面板不可见 → 快捷键整体不生效
@@ -2164,6 +2167,7 @@ ROUTER_JS = """
   function cutPreview(row) {
     if (!row) return;
     cutKeepSeq = null;
+    cutAuditionBar(null);
     playCutAt(row.getAttribute('data-task-id') || '',
               parseInt(row.getAttribute('data-start-ms'), 10) || 0);
     cutStopAt = parseInt(row.getAttribute('data-end-ms'), 10) || 0;
@@ -2187,7 +2191,7 @@ ROUTER_JS = """
       return;
     }
     if (v.paused) { var p = v.play(); if (p && p.catch) p.catch(function() {}); }
-    else { v.pause(); cutStopAt = -1; cutKeepSeq = null; }  // 手动暂停即退出预播/跳播
+    else { v.pause(); cutStopAt = -1; cutKeepSeq = null; cutAuditionBar(null); }  // 手动暂停即退出预播/跳播
   }
   // 组头 ▶ 试听：本组 mark=keep 子段连续跳播 — 播完一段自动 seek 下一段
   // （跳变即真实剪辑效果：删掉洞后 keep 段首尾紧贴）
@@ -2203,10 +2207,42 @@ ROUTER_JS = """
     if (!seq.length) { toast('本组没有保留子段（全部为删除洞）', 'error'); return; }
     cutStopAt = -1;
     cutKeepSeq = seq;
+    cutKeepIdx = 0;  // 从第一段开播，一次到底（REQ-20260916-012）
     playCutAt(g.getAttribute('data-task-id') || '', seq[0].s);
     cutMarkSel(seq[0].row);
     var v = revVis('slirn-cut-player');
-    if (v) { var p = v.play(); if (p && p.catch) p.catch(function() {}); }
+    if (v) {
+      var p = v.play(); if (p && p.catch) p.catch(function() {});
+      cutAuditionBar(v);  // 试听条：成片口径连续时间戳
+    }
+  }
+  // 试听条（REQ-20260916-012）：成片时间戳 = 当前段之前全部 keep 段累计时长 + 段内偏移。
+  // 跳播时视频原始时间戳会跳变；这条时间轴连续不回退，与当前试听进度严格一致。
+  function cutFmtMS(ms) {
+    var s = Math.floor(ms / 1000);
+    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
+    var two = function(n) { return (n < 10 ? '0' : '') + n; };
+    return (h ? h + ':' + two(m) : m) + ':' + two(ss);
+  }
+  function cutAuditionBar(v) {
+    var wrap = document.getElementById('slirn-cut-player-wrap');
+    if (!wrap) return;
+    var bar = wrap.querySelector('.slirn-cut-audition');
+    if (!cutKeepSeq || !v) { if (bar) bar.hidden = true; return; }
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.className = 'slirn-cut-audition';
+      wrap.appendChild(bar);
+    }
+    var total = 0, before = 0, i;
+    for (i = 0; i < cutKeepSeq.length; i++) total += Math.max(0, cutKeepSeq[i].e - cutKeepSeq[i].s);
+    for (i = 0; i < cutKeepIdx; i++) before += Math.max(0, cutKeepSeq[i].e - cutKeepSeq[i].s);
+    var seg = cutKeepSeq[cutKeepIdx];
+    var cur = before + Math.max(0, Math.min(v.currentTime * 1000, seg.e) - seg.s);
+    bar.hidden = false;
+    bar.textContent = '🎧 试听（成片口径）' + cutFmtMS(cur) + ' / ' + cutFmtMS(total)
+      + ' · 保留段 ' + (cutKeepIdx + 1) + '/' + cutKeepSeq.length
+      + ' · 对应视频 ' + cutFmtMS(v.currentTime * 1000);
   }
   // 翻转子段标记（未保存纯前端；data-mark 与 data-mark-init 供「有手工修改」判断）
   function cutFlipMark(row) {
@@ -2343,19 +2379,29 @@ ROUTER_JS = """
       var lastHit = -1;
       v.addEventListener('timeupdate', function() {
         var tms = v.currentTime * 1000;
-        // ① 试听跳播：播过当前 keep 段尾 → seek 下一段；无下一段 → 停
+        // ① 试听跳播（REQ-20260916-012 索引跟踪）：只看当前段 — 播过当前 keep
+        // 段尾 → seek 下一段起点；播完最后一段 → 停。绝不从 0 重扫：旧行为里
+        // 跳到下一段后 tms ≥ 前段尾恒成立，会立刻再跳、末组折返，段间无限
+        // 乒乓反复播放且永不结束。
         if (cutKeepSeq) {
-          for (var qi = 0; qi < cutKeepSeq.length; qi++) {
-            if (tms >= cutKeepSeq[qi].e - 30) {
-              if (qi + 1 < cutKeepSeq.length) {
-                try { v.currentTime = cutKeepSeq[qi + 1].s / 1000; } catch (err) {}
-                cutMarkSel(cutKeepSeq[qi + 1].row);
-                return;
-              }
-              v.pause(); cutKeepSeq = null; cutStopAt = -1;
-              break;
+          var seg = cutKeepSeq[cutKeepIdx];
+          if (tms < seg.s - 500) {  // 用户回拖：重定位到 tms 所在段
+            while (cutKeepIdx > 0 && tms < cutKeepSeq[cutKeepIdx].s) cutKeepIdx--;
+            seg = cutKeepSeq[cutKeepIdx];
+          }
+          if (tms >= seg.e - 30) {
+            if (cutKeepIdx + 1 < cutKeepSeq.length) {
+              cutKeepIdx++;
+              var nxt = cutKeepSeq[cutKeepIdx];
+              try { v.currentTime = nxt.s / 1000; } catch (err) {}
+              cutMarkSel(nxt.row);
+              cutAuditionBar(v);
+              return;  // 跳转后的首个 timeupdate 再走高亮，防旧位置误亮
             }
-            if (tms < cutKeepSeq[qi].e) break;  // 还在当前段内
+            v.pause(); cutKeepSeq = null; cutStopAt = -1;
+            cutAuditionBar(null);  // 播放完毕：试听结束收起
+          } else {
+            cutAuditionBar(v);  // 试听时间戳与当前段保持一致
           }
         }
         // ② 预播自动停：到段尾暂停（-30ms 提前量防越界误停不了）
