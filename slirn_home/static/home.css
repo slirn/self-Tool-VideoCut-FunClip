@@ -1309,6 +1309,7 @@ footer { display: none !important; }
 .slirn-rev-row.open .slirn-rev-detail { display: block; }
 .slirn-rev-note { font-size: 12.5px; line-height: 1.55; color: var(--text-secondary); white-space: pre-wrap; }
 .slirn-rev-keeptext { margin-top: 4px; color: var(--text-primary); font-weight: 600; }
+.slirn-rev-keeptext.fix { color: #2563eb; }  /* 内容更正（REQ-20260916-006）：蓝色区别于切分 */
 .slirn-rev-badge {
   display: inline-block; padding: 1px 8px; border-radius: 999px;
   font-size: 11px; font-weight: 600; color: #fff;
@@ -1316,6 +1317,7 @@ footer { display: none !important; }
 .slirn-rev-badge.keep   { background: #2e9e5b; }
 .slirn-rev-badge.delete { background: #d9534f; }
 .slirn-rev-badge.split  { background: #7c5cd6; }
+.slirn-rev-badge.fix    { background: #2563eb; }
 .slirn-rev-badge.review { background: #d97706; }
 .slirn-rev-select {
   width: 100%; padding: 4px 6px; font-size: 12.5px;

@@ -2,7 +2,8 @@
 
 把上一阶段生成的 subtitle.json 交给大模型（用户在 ⚙️ 注册的当前模型，
 OpenAI 兼容 / Anthropic 双协议，API Key 从环境变量读取 — REQ-008/REQ-20260916-001），
-逐段产出处理建议（keep 保留 / delete 整行删除 / split 切分修剪 / review 人工复核），
+逐段产出处理建议（keep 保留 / delete 整行删除 / split 切分修剪 /
+fix 内容更正（错字别字，附更正后文本）/ review 人工复核），
 落盘 outputs/revision.json；用户逐条决策（decision + user_note）合并回写。
 后台线程 job 管理与 asr_service 同模式（内存 job 表 + 阶段级进度）。
 
@@ -29,6 +30,7 @@ LLM_CATEGORIES: dict[str, tuple[str, str]] = {
     "keep": ("完整保留", "keep"),
     "delete": ("整行删除", "delete"),
     "split": ("切分修剪", "split"),
+    "fix": ("内容更正", "fix"),
     "review": ("人工复核", "review"),
 }
 
@@ -39,6 +41,7 @@ USER_DECISIONS: dict[str, str] = {
     "keep": "保留",
     "delete": "删除",
     "split": "切分",
+    "fix": "内容更正",
 }
 
 # 长字幕分批：每批段数（qwen-plus 上下文/输出长度安全边际；
@@ -101,6 +104,17 @@ RIGOR_LEVELS: dict[str, dict] = {
 }
 
 
+# 内容更正判定（REQ-20260916-006）— 错字/别字是 ASR 听写层面的文字错误，
+# 与严谨性级别无关：任何级别下都应更正（用户原话"直接把字幕内容修订为正确的内容"）。
+# 边界：说话人本身口误 / 需要修剪语义 ≠ 文字错误，仍按 keep/delete/split/review 判。
+FIX_CRITERIA = (
+    '- "fix"：字幕文字存在错字、别字、同音字误识别等**文字错误**时选用'
+    "（与严谨性级别无关，任何级别都必须判）：keep_text 给出更正后的完整字幕文本；"
+    "note 给出原文与更正的对照说明（原文哪个字有误、应更正为什么）。"
+    "注意：说话人本身口误或需修剪语义的情况不判 fix，仍按其余类别处理。"
+)
+
+
 def build_system_prompt(rigor: str = "high") -> str:
     """按严谨性级别组装系统提示词（未知级别回退 high）。"""
     cfg = RIGOR_LEVELS.get(rigor) or RIGOR_LEVELS["high"]
@@ -109,11 +123,14 @@ def build_system_prompt(rigor: str = "high") -> str:
         "请对**每一段**判断修订方式，并给出具体分析说明。\n\n"
         f"本次分析严谨性级别：{cfg['badge']}（{cfg['title']}）。{cfg['stance']}\n\n"
         "判定标准：\n"
-        f"{cfg['criteria']}\n\n"
+        f"{cfg['criteria']}\n"
+        f"{FIX_CRITERIA}\n\n"
         "输出要求：只输出 JSON 数组，不要任何其他文字。每项格式：\n"
-        '{"i": 段序号, "category": "keep|delete|split|review", "keep_text": '
-        '"建议保留的文本（仅 split 需要，其余为 null）", "note": "具体分析说明：指出问题词、为何删/留/切，切分的依据"}\n\n'
-        "note 必须具体（例如：「行首『嗯』为语气词；『大家好』重复 2 次建议保留 1 次」），不要泛泛而谈。"
+        '{"i": 段序号, "category": "keep|delete|split|fix|review", "keep_text": '
+        '"建议保留的文本（split=修剪后文本 / fix=更正后完整文本，其余为 null）", '
+        '"note": "具体分析说明：指出问题词、为何删/留/切，切分的依据；fix 需给出原文与更正的对照"}\n\n'
+        "note 必须具体（例如：「行首『嗯』为语气词；『大家好』重复 2 次建议保留 1 次」；"
+        "「『神精网络』应为『神经网络』（同音误识别），更正文本见 keep_text」），不要泛泛而谈。"
         "必须覆盖输入的每一个 i。"
     )
 
@@ -390,12 +407,17 @@ def parse_llm_suggestions(raw: str, segments: list[dict]) -> list[dict]:
         cat = str(item.get("category") or "").strip().lower()
         if cat not in LLM_CATEGORIES:
             cat = "review"
-        keep_text = item.get("keep_text") if cat == "split" else None
-        if cat == "split" and not (isinstance(keep_text, str) and keep_text.strip()):
-            keep_text = None
         note = str(item.get("note") or "").strip()
         if not note:
             note = "模型未给出说明"
+        keep_text = item.get("keep_text") if cat in ("split", "fix") else None
+        if not (isinstance(keep_text, str) and keep_text.strip()):
+            if cat == "fix":
+                # 更正建议必须有更正文本，否则无从执行 → 降级人工复核
+                # （note 前加提示，保留模型发现的问题供人工修改 — REQ-20260916-006）
+                cat = "review"
+                note = f"模型发现文字错误但未给出更正文本，请人工修改：{note}"
+            keep_text = None
         parsed[i] = {"category": cat, "keep_text": keep_text, "note": note[:500]}
     # 漏答回填
     out: list[dict] = []

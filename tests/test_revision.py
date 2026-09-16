@@ -76,6 +76,25 @@ def test_parse_defensive_fills_and_normalizes():
     assert out[2]["category"] == "split" and out[2]["keep_text"] is None
 
 
+def test_parse_fix_category():
+    """内容更正（REQ-20260916-006）：keep_text 保留更正文本；无有效更正文本 → 降级人工复核。"""
+    from slirn_home.revision_service import parse_llm_suggestions
+
+    raw = json.dumps([
+        {"i": 1, "category": "fix", "keep_text": "神经网络入门", "note": "「神精」应为「神经」"},
+        {"i": 2, "category": "fix", "keep_text": "   ", "note": "有错字但更正文本为空白"},
+        {"i": 3, "category": "fix", "note": "缺 keep_text 字段"},
+    ])
+    out = parse_llm_suggestions(raw, SEGS)
+    assert out[0]["category"] == "fix" and out[0]["keep_text"] == "神经网络入门"
+    assert out[0]["note"] == "「神精」应为「神经」", "note 即原文对照说明"
+    # 更正无更正文本 → 无从执行，降级 review 并保留模型发现的问题（前缀提示人工修改）
+    for o in (out[1], out[2]):
+        assert o["category"] == "review" and o["keep_text"] is None, o
+        assert o["note"].startswith("模型发现文字错误但未给出更正文本"), o["note"]
+    assert "有错字但更正文本为空白" in out[1]["note"], "模型发现的问题保留在说明中"
+
+
 def test_parse_invalid_json_raises():
     from slirn_home.revision_service import parse_llm_suggestions
 
@@ -103,17 +122,21 @@ def test_merge_decisions_apply_and_skip():
     rev = {"entries": [
         {"i": 1, "decision": "pending", "user_note": ""},
         {"i": 2, "decision": "pending", "user_note": ""},
+        {"i": 3, "decision": "pending", "user_note": ""},
     ]}
     rev2, applied = merge_decisions(rev, [
         {"i": 1, "decision": "accept", "user_note": "同意删语气词"},
-        {"i": 2, "decision": "wrong", "user_note": "非法类别跳过"},
+        {"i": 2, "decision": "fix", "user_note": "已核对更正文本"},
+        {"i": 3, "decision": "wrong", "user_note": "非法类别跳过"},
         {"i": 9, "decision": "keep", "user_note": "未知段跳过"},
         {"decision": "keep"},  # 缺 i 跳过
     ])
-    assert applied == 1
+    assert applied == 2
     assert rev2["entries"][0]["decision"] == "accept"
     assert rev2["entries"][0]["user_note"] == "同意删语气词"
-    assert rev2["entries"][1]["decision"] == "pending"
+    assert rev2["entries"][1]["decision"] == "fix", "手动改判内容更正（REQ-20260916-006）"
+    assert rev2["entries"][1]["user_note"] == "已核对更正文本"
+    assert rev2["entries"][2]["decision"] == "pending"
 
 
 def test_all_decided():
@@ -210,8 +233,10 @@ def test_build_system_prompt_rigor_levels():
     assert "低（只去严重问题）" in lo and "最大限度保留原文" in lo
     assert "过多重复" in lo and "意思混乱" in lo, "低档只放过严重问题（用户原话）"
     for p in (hi, mid, lo):  # 输出格式与全段覆盖要求三档一致
-        assert '"category": "keep|delete|split|review"' in p
+        assert '"category": "keep|delete|split|fix|review"' in p
         assert "必须覆盖输入的每一个 i" in p
+        # 内容更正（REQ-20260916-006）：错字别字与级别无关，任何档都必须判
+        assert '"fix"' in p and "同音字误识别" in p and "对照说明" in p
     assert build_system_prompt("bogus") == hi  # 防御：未知回退高
 
 
@@ -536,6 +561,7 @@ def test_render_revision_zone_states(tmp_path: Path, monkeypatch):
     h2 = _render_revision_zone(tid, m.get(tid), m)
     assert "🤖 大模型分析字幕" in h2 and 'data-action="revise-subtitle"' in h2
     assert "整行删除" in h2 and "完整保留" in h2 and "切分修剪" in h2 and "人工复核" in h2
+    assert "内容更正" in h2 and "原文对照" in h2, "状态2介绍新增内容更正类别（REQ-20260916-006）"
     assert "qwen-max" in h2, "状态2提示应显示当前生效模型"
     # 严谨性级别单选卡（REQ-20260916-003）：必选、三档、说明 + 例子、不预选
     assert "分析严谨性级别" in h2 and "必选" in h2
@@ -584,10 +610,11 @@ def test_render_revision_zone_states(tmp_path: Path, monkeypatch):
     assert h3.count('<option value="accept" selected>采纳建议</option>') == 3
     assert 'value="pending" selected' not in h3, "不再有默认「未决策」（选项保留可手动改回）"
     assert '<option value="pending">未决策</option>' in h3
+    assert '<option value="fix">内容更正</option>' in h3, "决策下拉可手动改判内容更正（REQ-20260916-006）"
     assert 'value="同意"' in h3
     assert "已决策 <b>1/3</b>" in h3, "统计口径仍是已保存决策（保存后生效）"
     assert "决策列默认「采纳建议」" in h3
-    assert "点击行定位播放" in h3 and "展开模型分析与处理说明" in h3
+    assert "点击行定位播放" in h3 and "展开模型分析与切分修剪后内容" in h3
     # 快捷键提示条（REQ-20260916-004）：键帽芯片 + 动作说明；选中态由 JS 挂 kbsel，不预渲染
     assert 'class="slirn-rev-kbhint"' in h3 and h3.count("<kbd>") == 8
     for kw in ("上一条 / 下一条", "播放 / 暂停", "重播本行", "<kbd>K</kbd> 保留",
@@ -610,6 +637,48 @@ def test_render_revision_zone_states(tmp_path: Path, monkeypatch):
     (outputs / "revision.json").write_text(json.dumps(rev_data, ensure_ascii=False), encoding="utf-8")
     h3b = _render_revision_zone(tid, m.get(tid), m)
     assert " · 严谨性 中（意思正确即可）" in h3b
+
+
+def test_render_fix_row_and_input_rename(tmp_path: Path):
+    """内容更正行渲染 + 输入区改名（REQ-20260916-006）。
+
+    fix 行：蓝色徽章、note 即原文对照说明、「✏️ 更正后」块收进详情；
+    与 split 一致不默认展开。输入区 placeholder 由「手动处理说明」改为
+    「切分修剪后内容」（用户原话）。
+    """
+    from slirn_home.app import _render_revision_zone
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="更正任务", original_video=video)
+    tid = t.task_id
+    _write_subtitle(m, tid, SEGS)
+    outputs = m.tasks_dir / tid / "outputs"
+    (outputs / "revision.json").write_text(json.dumps({
+        "version": 1, "model": "qwen-plus", "created_at": "2026-09-16T10:00:00",
+        "saved_at": None, "segments_count": 2,
+        "entries": [
+            {"i": 1, "start_ms": 0, "end_ms": 1500, "start": "00:00:00.000", "end": "00:00:01.500",
+             "text": "神精网络入门", "category": "fix", "keep_text": "神经网络入门",
+             "note": "「神精」应为「神经」（同音误识别）", "decision": "pending", "user_note": ""},
+            {"i": 2, "start_ms": 1500, "end_ms": 4000, "start": "00:00:01.500", "end": "00:00:04.000",
+             "text": "今天讲第一课", "category": "keep", "keep_text": None,
+             "note": "正常内容", "decision": "pending", "user_note": ""},
+        ],
+    }, ensure_ascii=False), encoding="utf-8")
+    h = _render_revision_zone(tid, m.get(tid), m)
+    # 徽章内联文本前 + note 对照说明 + 更正后文本（详情块内，独立于切分的建议保留块）
+    assert 'slirn-rev-badge fix">内容更正</span>神精网络入门' in h
+    assert "🤖 「神精」应为「神经」（同音误识别）" in h
+    assert '<div class="slirn-rev-keeptext fix">✏️ 更正后：「神经网络入门」</div>' in h
+    assert "✂️ 建议保留" not in h
+    # 统计行含更正计数；fix 行与 split 一致不默认展开（保持列表紧凑）
+    assert "更正 1 / 复核 0" in h
+    assert h.count('class="slirn-rev-row open"') == 0 and h.count(">▾</button>") == 2
+    # 未决策默认「采纳建议」（fix 行同样，采纳即采用更正文本）
+    assert h.count('<option value="accept" selected>采纳建议</option>') == 2
+    # 输入区改名（用户原话）：手动处理说明 → 切分修剪后内容
+    assert h.count('placeholder="切分修剪后内容（可空）"') == 2
+    assert "手动处理说明" not in h
 
 
 def test_wb_stage_states_with_revision(tmp_path: Path):

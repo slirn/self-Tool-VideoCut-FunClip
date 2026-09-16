@@ -368,9 +368,10 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
             <div>🟥 <strong>整行删除</strong> — 口癖、口头禅、语气词、无意义内容</div>
             <div>🟩 <strong>完整保留</strong> — 正常有效内容</div>
             <div>🟪 <strong>切分修剪</strong> — 行内重复只保留一次、剔除夹杂语气词（附建议保留文本）</div>
+            <div>🟦 <strong>内容更正</strong> — 错字/别字等文字错误，直接给出更正后字幕（说明附原文对照）</div>
             <div>🟧 <strong>人工复核</strong> — 模型拿不准，交给你判断</div>
         </div>
-        <div class="slirn-form-hint">每段建议都带具体分析说明；你在建议之上逐条决策（采纳/改判 + 手动说明）。</div>
+        <div class="slirn-form-hint">每段建议都带具体分析说明；你在建议之上逐条决策（采纳/改判，切分行填写切分修剪后内容）。</div>
         <div class="slirn-form-hint" style="margin-top:14px;"><b>分析严谨性级别</b>（必选）— 决定大模型按多严格的标准处理字幕：</div>
         {_render_rigor_picker()}
         <div id="slirn-rev-status" class="slirn-status-msg" style="{status_display};"
@@ -395,10 +396,17 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
             f'<option value="{k}"{" selected" if sel_val == k else ""}>{v}</option>'
             for k, v in revision_service.USER_DECISIONS.items()
         )
-        keep_html = (
-            f'<div class="slirn-rev-keeptext">✂️ 建议保留：「{_esc(e.get("keep_text") or "")}」</div>'
-            if cat == "split" and e.get("keep_text") else ""
-        )
+        # 建议保留（split）/ 更正后（fix）：模型给出的目标文本，收进详情块（REQ-20260916-006）
+        extra_html = ""
+        if e.get("keep_text"):
+            if cat == "split":
+                extra_html = (
+                    f'<div class="slirn-rev-keeptext">✂️ 建议保留：「{_esc(e["keep_text"])}」</div>'
+                )
+            elif cat == "fix":
+                extra_html = (
+                    f'<div class="slirn-rev-keeptext fix">✏️ 更正后：「{_esc(e["keep_text"])}」</div>'
+                )
         rows += (
             f'<div class="slirn-rev-row{" open" if open_detail else ""}" data-task-id="{_esc(task_id)}"'
             f' data-start-ms="{int(e.get("start_ms", 0))}" data-end-ms="{int(e.get("end_ms", 0))}">'
@@ -409,12 +417,12 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
             f'{_esc(e.get("text", ""))}</span>'
             f'<select class="slirn-rev-select" data-i="{int(e["i"])}" title="处理决策">{opts}</select>'
             f'<button class="slirn-rev-toggle" data-action="rev-detail" data-i="{int(e["i"])}"'
-            f' title="展开/收起模型分析与处理说明">{"▴" if open_detail else "▾"}</button>'
+            f' title="展开/收起模型分析与切分修剪后内容">{"▴" if open_detail else "▾"}</button>'
             f'</div>'
             f'<div class="slirn-rev-detail">'
-            f'<div class="slirn-rev-note">🤖 {_esc(e.get("note", ""))}</div>{keep_html}'
+            f'<div class="slirn-rev-note">🤖 {_esc(e.get("note", ""))}</div>{extra_html}'
             f'<input class="slirn-rev-note-input" data-i="{int(e["i"])}"'
-            f' placeholder="手动处理说明（可空）" value="{_esc(e.get("user_note") or "")}" />'
+            f' placeholder="切分修剪后内容（可空）" value="{_esc(e.get("user_note") or "")}" />'
             f'</div></div>'
         )
 
@@ -432,9 +440,9 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
     stats = (
         f"📝 {n} 段 · 分析于 {created} · 模型 {model}{rigor_stats} · "
         f"保留 {cat_counts.get('keep', 0)} / 删除 {cat_counts.get('delete', 0)} / "
-        f"切分 {cat_counts.get('split', 0)} / 复核 {cat_counts.get('review', 0)}"
+        f"切分 {cat_counts.get('split', 0)} / 更正 {cat_counts.get('fix', 0)} / 复核 {cat_counts.get('review', 0)}"
         f" · ✅ 已决策 <b>{decided}/{n}</b> · 点击行定位播放 · 决策列默认「采纳建议」"
-        f" · ▾ 展开模型分析与处理说明"
+        f" · ▾ 展开模型分析与切分修剪后内容"
     )
 
     return f'''<div class="slirn-card" style="margin-top:16px;">
@@ -442,7 +450,7 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
         <div class="slirn-sub-meta">{stats}</div>
         <div class="slirn-rev-kbhint">⌨ 快捷键：<kbd>↑</kbd><kbd>↓</kbd> 上一条 / 下一条 · <kbd>空格</kbd> 播放 / 暂停
  · <kbd>R</kbd> 重播本行 · <kbd>K</kbd> 保留 · <kbd>D</kbd> 删除（标记后自动下一条）
- · <kbd>S</kbd> 切分（展开详情聚焦说明） · <kbd>Esc</kbd> 退出输入框
+ · <kbd>S</kbd> 切分（展开详情聚焦内容） · <kbd>Esc</kbd> 退出输入框
  · <span class="slirn-revkeys-open" data-action="revkeys-open" role="button" tabindex="0">⚙ 自定义</span></div>
         <div id="slirn-rev-player-wrap" class="slirn-video-wrap slirn-sub-player-wrap" style="display:none;">
             <video id="slirn-rev-player" controls preload="metadata"></video>
@@ -1797,8 +1805,8 @@ ROUTER_JS = """
 
   // ===== 字幕修订快捷键（REQ-20260916-004）：听 → 判 → 标记 → 下一条 =====
   // ↑↓ 选行（跳到行起点，播放态跟随）· 空格 播放/暂停 · R 重播本行
-  // K 保留 / D 删除（标记后自动下一条）· S 切分（展开详情+聚焦说明，不跳行）
-  // Esc 从手动说明输入框退回列表；输入框/下拉聚焦时不劫持按键
+  // K 保留 / D 删除（标记后自动下一条）· S 切分（展开详情+聚焦内容输入，不跳行）
+  // Esc 从切分修剪后内容输入框退回列表；输入框/下拉聚焦时不劫持按键
   function revRows() {
     var list = revVis('slirn-rev-list');
     if (!list || !list.offsetParent) return [];  // 列表不可见 → 快捷键整体不生效
@@ -1866,7 +1874,7 @@ ROUTER_JS = """
     sel.value = val;
     sel.dispatchEvent(new Event('change', {bubbles: true}));
     if (val === 'split') {
-      // 切分需要人工说明：展开详情块、光标移到输入框，不自动跳行（写完按 Esc 返回）
+      // 切分需要人工给出修剪后文本：展开详情块、光标移到输入框，不自动跳行（写完按 Esc 返回）
       row.classList.add('open');
       var tg = row.querySelector('.slirn-rev-toggle');
       if (tg) tg.textContent = '▴';
@@ -1875,7 +1883,7 @@ ROUTER_JS = """
         note.focus();
         try { note.setSelectionRange(note.value.length, note.value.length); } catch (err) {}
       }
-      toast('✂️ 已标记切分 — 填写手动处理说明后按 ' + revKeyLabel(revKeysLoad().esc) + ' 返回列表');
+      toast('✂️ 已标记切分 — 填写切分修剪后内容后按 ' + revKeyLabel(revKeysLoad().esc) + ' 返回列表');
     } else {
       revSelectRow(idx + 1, true);  // 保留/删除：标记即过，自动下一条
     }
@@ -1891,7 +1899,7 @@ ROUTER_JS = """
     { id: 'replay', name: '重播本行',                  def: 'r' },
     { id: 'keep',   name: '保留（标记后自动下一条）',   def: 'k' },
     { id: 'del',    name: '删除（标记后自动下一条）',   def: 'd' },
-    { id: 'split',  name: '切分（展开详情并聚焦说明）', def: 's' },
+    { id: 'split',  name: '切分（展开详情并聚焦内容）', def: 's' },
     { id: 'esc',    name: '退出说明输入框',             def: 'escape' }
   ];
   var REV_KEY_ALLOWED = ['arrowup', 'arrowdown', 'arrowleft', 'arrowright', 'escape',
@@ -1932,7 +1940,7 @@ ROUTER_JS = """
         + '</kbd> 播放 / 暂停 · <kbd>' + revKeyLabel(km.replay) + '</kbd> 重播本行 · <kbd>'
         + revKeyLabel(km.keep) + '</kbd> 保留 · <kbd>' + revKeyLabel(km.del)
         + '</kbd> 删除（标记后自动下一条）· <kbd>' + revKeyLabel(km.split)
-        + '</kbd> 切分（展开详情聚焦说明） · <kbd>' + revKeyLabel(km.esc)
+        + '</kbd> 切分（展开详情聚焦内容） · <kbd>' + revKeyLabel(km.esc)
         + '</kbd> 退出输入框'
         + ' · <span class="slirn-revkeys-open" data-action="revkeys-open" role="button" tabindex="0">⚙ 自定义</span>';
     });
