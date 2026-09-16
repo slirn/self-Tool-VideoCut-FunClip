@@ -66,6 +66,25 @@ def test_align_tokens_and_blocks():
     assert align_tokens(list("abc"), ["x", "y"]) == []
 
 
+def test_partition_tokens_full_alternation():
+    """REQ-20260916-011 — 完整交替划分：keep 块 + delete 洞（含首尾）不重不漏。"""
+    from slirn_home.cutlist_service import partition_tokens
+
+    # 命中中间一块 → 首洞 + keep + 尾洞
+    assert partition_tokens(15, list(range(3, 7))) == [
+        ("delete", 0, 2), ("keep", 3, 6), ("delete", 7, 14)]
+
+    # 两块 → 首无洞（0 起）、中洞、尾洞
+    assert partition_tokens(14, [0, 1, 2, 3, 12, 13]) == [
+        ("keep", 0, 3), ("delete", 4, 11), ("keep", 12, 13)]
+
+    # 全命中 → 无洞单块
+    assert partition_tokens(5, [0, 1, 2, 3, 4]) == [("keep", 0, 4)]
+
+    # 全未命中 → 单 delete 洞（对齐层会先 fallback，此为纯函数语义）
+    assert partition_tokens(4, []) == [("delete", 0, 3)]
+
+
 def test_ms2srt_format():
     from slirn_home.cutlist_service import ms2srt
 
@@ -122,31 +141,37 @@ def test_build_cutlist_full(tmp_path: Path):
     ]}
     cut = build_cutlist({"segments": segs}, rev)
     items = cut["items"]
-    assert [it["id"] for it in items] == ["1.1", "2", "4"], "继承编号不重排（3/5 已剔除）"
+    # 完整划分（REQ-20260916-011）：段1 产 1.1 delete 洞（嗯嗯那个）+ 1.2 keep
+    assert [it["id"] for it in items] == ["1.1", "1.2", "2", "4"], "继承编号不重排（3/5 已剔除）"
     s = cut["stats"]
-    assert (s["kept"], s["fixed"], s["split_parents"], s["split_subs"], s["dropped"]) == (1, 1, 1, 1, 2)
-    assert s["brought"] == 3
+    assert (s["kept"], s["fixed"], s["split_parents"]) == (1, 1, 1)
+    assert (s["split_subs"], s["split_subs_delete"], s["dropped"]) == (2, 1, 2)
+    assert s["brought"] == 4
 
-    # split 子段：时间来自字级时间戳（token4 起 1600ms，token14 止 6000ms）
-    sub = items[0]
-    assert sub["kind"] == "split" and sub["sub"] == 1 and sub["source_i"] == 1
-    assert sub["start_ms"] == 400 * 4 and sub["end_ms"] == 400 * 14 + 360
-    assert sub["start"] == "00:00:01,600"
-    assert sub["text"] == "我们今天讲一下神经网络"
-    assert sub["orig_text"] == "嗯嗯那个我们今天讲一下神经网络"
-    assert sub["fallback"] is False
+    # split 子段：完整划分 — 1.1 = 首洞「嗯嗯那个」（外扩到父段起点）
+    d1, k1 = items[0], items[1]
+    assert d1["kind"] == "split" and d1["mark"] == "delete" and d1["text"] == "嗯嗯那个"
+    assert d1["start_ms"] == 0 and d1["end_ms"] == 400 * 4, "首洞外扩：父段起点 → 下一 keep 块首 token 起点"
+    # 1.2 = keep 块：时间来自字级时间戳（token4 起 1600ms，token14 止 6000ms）
+    assert k1["sub"] == 2 and k1["mark"] == "keep" and k1["source_i"] == 1
+    assert k1["start_ms"] == 400 * 4 and k1["end_ms"] == 400 * 14 + 360
+    assert k1["start"] == "00:00:01,600"
+    assert k1["text"] == "我们今天讲一下神经网络"
+    assert k1["orig_text"] == "嗯嗯那个我们今天讲一下神经网络"
+    assert k1["fallback"] is False
+    assert k1["start_ms"] == d1["end_ms"], "相邻段共享边界（父段被完全二分）"
 
     # keep：原文本原时间段
-    k = items[1]
+    k = items[2]
     assert k["kind"] == "keep" and k["text"] == "今天讲第一课" and k["start_ms"] == 6000
 
     # fix：更正后文本
-    f = items[2]
+    f = items[3]
     assert f["kind"] == "fix" and f["text"] == "神经网络入门" and f["orig_text"] == "神精网络入门"
 
 
 def test_build_cutlist_split_multi_blocks_and_user_note(tmp_path: Path):
-    """重复语句 → 多个子段（父编号.1/.2/.3…）；手动「切分修剪后内容」优先于模型建议。"""
+    """重复语句 → 完整三段（keep/delete 洞/keep）；手动「切分修剪后内容」优先于模型建议。"""
     from slirn_home.cutlist_service import build_cutlist
 
     tokens = list("所以我们所以我们所以我们看到")  # 14 token
@@ -158,14 +183,19 @@ def test_build_cutlist_split_multi_blocks_and_user_note(tmp_path: Path):
     ]}
     cut = build_cutlist({"segments": segs}, rev)
     items = cut["items"]
-    assert [it["id"] for it in items] == ["10.1", "10.2"], "原编号 10 → 10.1 / 10.2"
-    # 贪心最靠前：keep 的「我们」映射到第一遍（块1），尾块 = 残余「看到」——
-    # 子段拼起来 = keep_text，内容无损、时间正确（重复词不再重复保留）
-    assert items[0]["text"] == "所以我们" and items[1]["text"] == "看到"
+    # 完整划分：keep(0-3) / delete 洞(4-11) / keep(12-13)
+    assert [it["id"] for it in items] == ["10.1", "10.2", "10.3"], "时间序编号不分标记"
+    assert [(it["mark"], it["text"]) for it in items] == [
+        ("keep", "所以我们"), ("delete", "所以我们所以我们"), ("keep", "看到")]
     assert items[0]["start_ms"] == 0 and items[0]["end_ms"] == 300 * 3 + 280
-    assert items[1]["start_ms"] == 300 * 12
+    # delete 洞外扩：前一段终点 → 下一 keep 块首 token 起点（静默随洞删净）
+    assert items[1]["start_ms"] == 300 * 3 + 280 and items[1]["end_ms"] == 300 * 12
+    assert items[2]["start_ms"] == 300 * 12
     assert all(it["kind"] == "split" for it in items)
-    assert cut["stats"]["split_parents"] == 1 and cut["stats"]["split_subs"] == 2
+    s = cut["stats"]
+    assert s["split_parents"] == 1 and s["split_subs"] == 3 and s["split_subs_delete"] == 1
+    # 保留时长 = 执行口径（只计 keep 子段：10.1 [0,1180] + 10.3 [3600,4180]）
+    assert s["keep_duration_ms"] == (300 * 3 + 280) + (300 * 13 + 280 - 300 * 12)
 
 
 def test_build_cutlist_fallback_without_tokens(tmp_path: Path):
@@ -182,6 +212,7 @@ def test_build_cutlist_fallback_without_tokens(tmp_path: Path):
     assert it["id"] == "7.1" and it["fallback"] is True
     assert it["start_ms"] == 5000 and it["end_ms"] == 8000  # 整段时间
     assert it["text"] == "我们开始吧"  # 文本=切分后文字
+    assert it["mark"] == "keep", "fallback 段建议保留（可手工翻转为整段删）"
     assert cut["stats"]["fallback"] == 1
 
     # 有 tokens 但目标文字完全对不上（用户改写）→ 同样降级整段
@@ -193,6 +224,127 @@ def test_build_cutlist_fallback_without_tokens(tmp_path: Path):
     ]}
     (it2,) = build_cutlist({"segments": segs2}, rev2)["items"]
     assert it2["id"] == "8.1" and it2["fallback"] is True and it2["text"] == "完全可以呀"
+
+
+def test_manual_marks_flip_and_zero_len_hole():
+    """REQ-20260916-011 — 子段级手工翻转（mark_manual）+ 零长洞跳过。"""
+    from slirn_home.cutlist_service import build_cutlist
+
+    # 3 token：甲(0-300) 乙(300-300 零长) 丙(300-600)，target "甲丙" → 洞(1,1) 零长跳过
+    segs = [_seg(3, 0, 600, "甲乙丙", tokens=list("甲乙丙"),
+                 token_ts=[[0, 300], [300, 300], [300, 600]])]
+    rev = {"entries": [{"i": 3, "category": "split", "keep_text": "甲丙",
+                        "decision": "accept", "user_note": ""}]}
+    cut = build_cutlist({"segments": segs}, rev)
+    assert [(it["id"], it["mark"]) for it in cut["items"]] == [("3.1", "keep"), ("3.2", "keep")]
+    assert cut["items"][0]["text"] == "甲" and cut["items"][1]["text"] == "丙"
+
+    # 手工翻转：10.2 洞 → keep（保留重复段）
+    tokens = list("所以我们所以我们所以我们看到")
+    segs2 = [_seg(10, 0, 4200, "所以我们所以我们所以我们看到",
+                  tokens=tokens, token_ts=[[300 * k, 300 * k + 280] for k in range(14)])]
+    rev2 = {"entries": [{"i": 10, "category": "split", "keep_text": "所以我们看到",
+                         "decision": "accept", "user_note": ""}]}
+    cut2 = build_cutlist({"segments": segs2}, rev2,
+                         manual_marks={"10.2": "keep", "10.9": "delete"})  # 10.9 不存在 → 忽略
+    m2 = next(it for it in cut2["items"] if it["id"] == "10.2")
+    assert m2["mark"] == "keep" and m2["mark_manual"] is True, "建议 delete 被手工翻转为 keep"
+    assert cut2["stats"]["mark_flipped"] == 1
+    assert cut2.get("manual_marks") == {"10.2": "keep", "10.9": "delete"}, "手工决策随清单落盘"
+    # 翻转后三段全 keep：0→4180 连续覆盖（尾 token 止于 4180，父段边界 4200）
+    assert cut2["stats"]["keep_duration_ms"] == 300 * 13 + 280
+
+
+def test_actions_reclass_and_effective_units():
+    """REQ-20260916-011 — 字幕级改判：keep 原切分整段保留 / split 原保留划子段 /
+    delete 整条剔除（条目仍产出供渲染，执行口径剔除）。"""
+    from slirn_home.cutlist_service import build_cutlist, effective_keep_units
+
+    segs = [
+        _seg(1, 0, 4200, "所以我们所以我们所以我们看到",
+             tokens=list("所以我们所以我们所以我们看到"),
+             token_ts=[[300 * k, 300 * k + 280] for k in range(14)]),
+        _seg(2, 4200, 4800, "今天讲第一课",
+             tokens=list("今天讲第一课"),
+             token_ts=[[4200 + 100 * k, 4200 + 100 * k + 90] for k in range(6)]),
+        _seg(3, 5000, 6000, "神经网络的入门"),
+    ]
+    rev = {"entries": [
+        {"i": 1, "category": "split", "keep_text": "所以我们看到", "decision": "accept", "user_note": ""},
+        {"i": 2, "category": "keep", "keep_text": None, "decision": "accept", "user_note": "第一课"},
+        {"i": 3, "category": "keep", "keep_text": None, "decision": "accept", "user_note": ""},
+    ]}
+
+    # 三种改判一次到位：1=keep（原 split 整段保留）、2=split（原 keep 划子段）、3=delete（剔除）
+    cut = build_cutlist({"segments": segs}, rev,
+                        actions={"1": "keep", "2": "split", "3": "delete"})
+    it1 = next(it for it in cut["items"] if it["source_i"] == 1)
+    assert it1["kind"] == "keep" and it1["id"] == "1" and it1["sub"] is None
+    assert it1["start_ms"] == 0 and it1["end_ms"] == 4200 and it1["text"].startswith("所以我们")
+
+    # action=split：原 keep 段2 → 按 user_note「第一课」划子段（3 字命中尾部）
+    it2s = [it for it in cut["items"] if it["source_i"] == 2]
+    assert [it["id"] for it in it2s] == ["2.1", "2.2"], "「今」被剔除 → delete 洞 + keep 尾块"
+    assert it2s[0]["mark"] == "delete" and it2s[1]["mark"] == "keep"
+    assert it2s[1]["text"] == "第一课"
+
+    # action=delete：段3 条目仍产出（渲染置灰）但执行口径剔除
+    it3 = next(it for it in cut["items"] if it["source_i"] == 3)
+    assert it3["kind"] == "keep"
+    units = effective_keep_units(cut)
+    assert [u["source_i"] for u in units if u["source_i"] == 3] == [], "action=delete 整条剔除"
+    assert any(u["source_i"] == 1 for u in units), "改判 keep 的整段保留"
+    assert cut["actions"] == {"1": "keep", "2": "split", "3": "delete"}
+    assert cut["stats"]["action_changed"] == 3
+
+    # 无改判时段1 为完整三段划分；时长 = keep 块（洞剔除）
+    cut0 = build_cutlist({"segments": segs}, rev)
+    ids0 = [it["id"] for it in cut0["items"]]
+    assert ids0 == ["1.1", "1.2", "1.3", "2", "3"]
+    assert sum(1 for u in effective_keep_units(cut0) if u["source_i"] == 1) == 2, "洞剔除后剩两 keep 子段"
+
+
+def test_resplit_segment():
+    """REQ-20260916-011 M3 — 单段重切：回写 user_note/decision、清本组手工决策、
+    保留其它组；命中 0 / 无字级时间戳 / 空内容 → 宁可不切不可错切。"""
+    from slirn_home.cutlist_service import resplit_segment
+
+    tokens = list("所以我们所以我们所以我们看到")  # 14 token
+    segs = [
+        _seg(1, 0, 4200, "所以我们所以我们所以我们看到",
+             tokens=tokens, token_ts=[[300 * k, 300 * k + 280] for k in range(14)]),
+        _seg(2, 4200, 4800, "今天讲第一课"),  # 无字级时间戳
+    ]
+    rev = {"entries": [
+        {"i": 1, "category": "split", "keep_text": "所以我们看到",
+         "decision": "accept", "user_note": ""},
+        {"i": 2, "category": "keep", "keep_text": None, "decision": "accept", "user_note": ""},
+    ]}
+    saved = {"manual_marks": {"1.2": "keep"}, "actions": {"2": "delete"}}
+
+    cut, rev2, err = resplit_segment({"segments": segs}, rev, 1, "所以我们所以我们看到", saved)
+    assert err == ""
+    subs = [it for it in cut["items"] if it["source_i"] == 1]
+    assert [it["id"] for it in subs] == ["1.1", "1.2", "1.3"], "新 target 两 keep 块 + 中洞"
+    assert [it["mark"] for it in subs] == ["keep", "delete", "keep"]
+    assert subs[0]["text"] == "所以我们所以我们" and subs[2]["text"] == "看到"
+    # 回写修订（单一事实源）
+    e1 = next(e for e in rev2["entries"] if e["i"] == 1)
+    assert e1["decision"] == "split" and e1["user_note"] == "所以我们所以我们看到"
+    # 本组手工清空（1.2 不再手工 keep → 建议 delete 生效）；其它组改判保留
+    assert "1.2" not in (cut.get("manual_marks") or {})
+    assert cut.get("actions") == {"2": "delete"}
+    assert "manual_marks" not in cut or not any(k.startswith("1.") for k in cut["manual_marks"])
+
+    # 命中 0 / 无字级时间戳 / 空内容 / 未知条目 → 不改不落盘
+    rev_before = json.loads(json.dumps(rev))
+    for si, tt, want in [(1, "完全无关的内容", "对不上"),
+                         (2, "第一课", "字级时间戳"),
+                         (1, "  ", "不能为空"),
+                         (99, "任意", "未找到")]:
+        c, r, err = resplit_segment({"segments": segs}, rev, si, tt, saved)
+        assert (c, r) == (None, None) and want in err, f"{si}/{tt}: {err}"
+    assert rev == rev_before, "失败路径不改动修订"
 
 
 def test_build_cutlist_accept_review_falls_back_keep():
@@ -274,21 +426,31 @@ def test_render_cutlist_zone_states(tmp_path: Path):
     h2 = _render_cutlist_zone(tid, m.get(tid), m)
     assert "✂️ 处理剪辑 · 第 3 步：切分修剪" in h2
     assert "带入 <b>3</b> 段" in h2 and "剔除 1 条" in h2
-    assert "编号继承修订阶段" in h2 and "10.1、10.2、10.3" in h2
-    # 行式列表 + 父段对照（无字级时间戳 → 降级单子段 + ⚠️ 提示）
+    assert "编号继承修订阶段" in h2
+    # 分组渲染（REQ-20260916-011）：切分组 = 组头（原段→切分后）+ 子段行（data-mark）
     assert 'id="slirn-cut-list"' in h2
-    assert ">2.1</span>" in h2, "split 子段编号 父.子"
+    assert 'class="slirn-cut-ghead"' in h2
     assert "原段：「那个我们开始吧」" in h2 and "切分后：「我们开始吧」" in h2
+    assert 'data-id="2.1"' in h2, "split 子段编号 父.子"
+    assert 'data-mark="keep"' in h2 and 'class="slirn-cut-mark"' in h2
+    assert ">✅ 保留</span>" in h2, "标记徽章（可点翻转）"
+    assert 'data-mark-init="keep"' in h2, "初始标记快照（翻转检测用）"
+    assert 'data-cut-act="play-keep"' in h2, "组头试听（keep 连续跳播）"
+    assert 'data-cut-act="resplit"' in h2 and "✂️ 重新切分" in h2, "切分组重切入口（M3）"
+    assert 'data-target="我们开始吧"' in h2, "组级切分后内容（重切预填/保存校验用）"
+    # 整段组单行（whole）：类别徽章在行内 + 决策徽章默认「维持原状」
+    assert 'slirn-cut-row whole' in h2
+    assert 'data-kind="fix">内容更正</span>' in h2 and "神经网络" in h2
+    assert 'data-abadge>维持原状</span>' in h2
     assert "1 条切分段缺少字级时间戳" in h2
-    # fix 行徽章 + 更正后文本
-    assert 'slirn-rev-badge fix" data-kind="fix">内容更正</span>神经网络' in h2
-    # 播放器 + 按钮动作
+    # 播放器 + 按钮动作（保存决策 / 生成清单 / 播放）
     assert 'id="slirn-cut-player"' in h2
+    assert 'data-action="save-cut-decisions"' in h2 and "保存切分决策" in h2
     assert 'data-action="build-cutlist"' in h2 and "生成切分清单并完成本阶段" in h2
     assert 'data-action="play-cut-video"' in h2
     assert not (outputs / "cutlist.json").exists(), "预览不落盘"
 
-    # 已落盘 → 统计行标注「清单已生成」
+    # 已落盘 → 统计行标注「清单已生成」+ 主按钮状态化为「重新执行」
     from slirn_home import cutlist_service
     cutlist_service.save_cutlist(outputs, cutlist_service.build_cutlist(
         {"segments": json.loads((outputs / "subtitle.json").read_text(encoding="utf-8"))["segments"]},
@@ -296,6 +458,36 @@ def test_render_cutlist_zone_states(tmp_path: Path):
     ))
     h3 = _render_cutlist_zone(tid, m.get(tid), m)
     assert "清单已生成" in h3
+    assert 'data-action="rebuild-cutlist"' in h3 and "重新执行切分修剪" in h3
+    assert 'data-action="build-cutlist"' not in h3, "已生成过 → 不再显示「生成」按钮"
+    # 修订比清单新 → 过期黄条（构造 saved_at 早于修订 saved_at=10:05）
+    data = json.loads((outputs / "cutlist.json").read_text(encoding="utf-8"))
+    data["saved_at"] = "2026-09-16T09:00:00"
+    (outputs / "cutlist.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    h4 = _render_cutlist_zone(tid, m.get(tid), m)
+    assert "已保存的切分清单可能过期" in h4
+
+    # 已保存手工决策（翻转 + 字幕级改判）→ 渲染恢复（data-act / ✏️ 手工标识）
+    cut2 = cutlist_service.build_cutlist(
+        {"segments": json.loads((outputs / "subtitle.json").read_text(encoding="utf-8"))["segments"]},
+        json.loads((outputs / "revision.json").read_text(encoding="utf-8")),
+        manual_marks={"2.1": "delete"}, actions={"1": "delete"})
+    cutlist_service.save_cutlist(outputs, cut2)
+    h5 = _render_cutlist_zone(tid, m.get(tid), m)
+    assert 'data-act="delete"' in h5 and "已改判删除" in h5
+    assert "❌ 删除 ✏️" in h5, "手工翻转恢复（✏️ 手工标识）"
+
+    # 改判切分的整段组（keep 无切分内容 → 防御维持原状）→ 整段行 + ✂️ 入口 + 原文预填
+    cut3 = cutlist_service.build_cutlist(
+        {"segments": json.loads((outputs / "subtitle.json").read_text(encoding="utf-8"))["segments"]},
+        json.loads((outputs / "revision.json").read_text(encoding="utf-8")),
+        actions={"1": "split"})
+    cutlist_service.save_cutlist(outputs, cut3)
+    h6 = _render_cutlist_zone(tid, m.get(tid), m)
+    assert 'data-act="split"' in h6 and "已改判切分" in h6
+    g1 = h6[h6.find('data-source-i="1"'):h6.find('data-source-i="2"')]
+    assert 'slirn-cut-row whole' in g1 and 'data-cut-act="resplit"' in g1
+    assert 'data-orig-text="正常一句"' in g1, "整段组原文（改判切分编辑区预填）"
 
 
 def test_wb_stage_states_with_cutlist(tmp_path: Path):

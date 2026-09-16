@@ -584,9 +584,13 @@ def _render_cutlist_zone(task_id: str, t, mgr: TaskManager) -> str:
             'data-pane="subtitle">🎙 去生成字幕</button>',
         )
 
-    # ---- 状态 2：决策齐备 → 预览清单（服务端现算，不落盘）----
-    cutlist = cutlist_service.build_cutlist(sub_meta, rev)
+    # ---- 状态 2：决策齐备 → 预览清单（服务端现算；已保存的手工决策并入显示）----
     saved = cutlist_service.load_cutlist(outputs_dir)
+    cutlist = cutlist_service.build_cutlist(
+        sub_meta, rev,
+        manual_marks=(saved or {}).get("manual_marks") if saved else None,
+        actions=(saved or {}).get("actions") if saved else None,
+    )
     stats = cutlist["stats"]
     dur_ms = stats["keep_duration_ms"]
     mm_, ss_ = divmod(dur_ms // 1000, 60)
@@ -597,35 +601,101 @@ def _render_cutlist_zone(task_id: str, t, mgr: TaskManager) -> str:
         saved_at = _esc(saved.get("saved_at") or "")
         saved_note = f" · ✅ 清单已生成{f'（{saved_at}）' if saved_at else ''}"
 
-    rows = ""
-    last_source = 0
+    # 按父段分组渲染（REQ-20260916-011 第二步）：keep/fix 整段 = 单行组；
+    # split = 组头 + 完整子段表（keep 块 + delete 洞，时间序编号 父.N）
+    ACT_BADGES = {"keep": "✅ 已改判保留", "delete": "❌ 已改判删除", "split": "✂️ 已改判切分"}
+    actions_map: dict[int, str] = {}
+    for k, v in (cutlist.get("actions") or {}).items():
+        try:
+            actions_map[int(k)] = str(v)
+        except (TypeError, ValueError):
+            continue
+    groups: list[tuple[int, list[dict]]] = []
     for it in cutlist["items"]:
-        kind = it["kind"]
-        kind_label = dict(cutlist_service.CUT_KINDS).get(kind, ("切分子段",))[0]
-        is_sub = it.get("sub") is not None
-        # 同一父段的子段收进一个缩进组（首个子段前渲染父段对照行）
-        parent_html = ""
-        if is_sub and it["source_i"] != last_source:
-            parent_html = (
-                f'<div class="slirn-cut-parent">'
-                f'<span class="slirn-cut-pidx">{int(it["source_i"])}</span>'
-                f'<span class="slirn-cut-ptext">原段：「{_esc(it.get("orig_text", ""))}」'
-                f'<span class="slirn-cut-ptarget">→ 切分后：「{_esc(it.get("target_text") or "")}」</span></span></div>'
+        si = int(it["source_i"])
+        if not groups or groups[-1][0] != si:
+            groups.append((si, []))
+        groups[-1][1].append(it)
+    # 改判切分的整段组预填用：修订条目的切分后内容（user_note 优先 → 模型建议）
+    note_by_i: dict[int, str] = {}
+    for e in rev["entries"]:
+        try:
+            note_by_i[int(e["i"])] = cutlist_service._split_target(e)
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    rows = ""
+    for si, its in groups:
+        first = its[0]
+        is_split_group = any(x.get("sub") is not None for x in its)
+        act = actions_map.get(si)
+        act_badge = ACT_BADGES.get(act, "维持原状")
+        act_attr = f' data-act="{_esc(act)}"' if act else ""
+        act_cls = " changed" if act else ""
+        if is_split_group:
+            # 切分组：组头（父编号+原段→切分后文字+决策徽章+重切/试听钮）+ 完整子段表
+            rows += (
+                f'<div class="slirn-cut-group split" data-source-i="{si}"'
+                f' data-task-id="{_esc(task_id)}"{act_attr}'
+                f' data-target="{_esc(first.get("target_text") or "")}">'
+                f'<div class="slirn-cut-ghead">'
+                f'<span class="slirn-sub-idx">{si}</span>'
+                f'<span class="slirn-rev-badge split" data-kind="split">切分修剪</span>'
+                f'<span class="slirn-cut-gtext">原段：「{_esc(first.get("orig_text", ""))}」'
+                f'<span class="slirn-cut-ptarget">→ 切分后：「{_esc(first.get("target_text") or "")}」</span></span>'
+                f'<span class="slirn-cut-abadge{act_cls}" data-abadge>{act_badge}</span>'
+                f'<button class="slirn-btn slirn-btn-xs" data-cut-act="resplit"'
+                f' title="修改切分后内容并按新内容重新划分本段">✂️ 重新切分</button>'
+                f'<button class="slirn-btn slirn-btn-xs" data-cut-act="play-keep"'
+                f' title="连续跳播本段全部保留子段（成片效果）">▶ 试听</button></div>'
             )
-        last_source = it["source_i"] if is_sub else 0
-        fb_title = ' title="无字级时间戳（旧字幕数据）或切分后文字无法对齐 — 已整段带入，可重新生成字幕后重试"' if it.get("fallback") else ""
-        fb_mark = ' ⚠️' if it.get("fallback") else ""
-        rows += (
-            f'{parent_html}'
-            f'<div class="slirn-cut-row{" sub" if is_sub else ""}" data-task-id="{_esc(task_id)}"'
-            f' data-start-ms="{int(it["start_ms"])}" data-end-ms="{int(it["end_ms"])}"{fb_title}>'
-            f'<div class="slirn-cut-line">'
-            f'<span class="slirn-sub-idx">{_esc(it["id"])}</span>'
-            f'<span class="slirn-sub-time">{_esc(it.get("start", ""))} → {_esc(it.get("end", ""))}</span>'
-            f'<span class="slirn-sub-text"><span class="slirn-rev-badge {kind}"'
-            f' data-kind="{kind}">{kind_label}</span>{_esc(it["text"])}{fb_mark}</span>'
-            f'</div></div>'
-        )
+            for it in its:
+                mk = str(it.get("mark") or "keep")
+                mk_manual = " ✏️" if it.get("mark_manual") else ""
+                mk_label = ("✅ 保留" if mk == "keep" else "❌ 删除") + mk_manual
+                fb_title = ' title="无字级时间戳（旧字幕数据）或切分后文字无法对齐 — 已整段带入，可重新生成字幕后重试"' if it.get("fallback") else ""
+                fb_mark = " ⚠️" if it.get("fallback") else ""
+                rows += (
+                    f'<div class="slirn-cut-row sub mark-{mk}" data-task-id="{_esc(task_id)}"'
+                    f' data-id="{_esc(it["id"])}" data-mark="{mk}" data-mark-init="{mk}" data-source-i="{si}"'
+                    f' data-start-ms="{int(it["start_ms"])}" data-end-ms="{int(it["end_ms"])}"{fb_title}>'
+                    f'<span class="slirn-sub-idx">{_esc(it["id"])}</span>'
+                    f'<span class="slirn-sub-time">{_esc(it["start"])} → {_esc(it["end"])}</span>'
+                    f'<span class="slirn-cut-mark" title="点击翻转 保留/删除">{mk_label}</span>'
+                    f'<span class="slirn-sub-text">{_esc(it["text"])}{fb_mark}</span>'
+                    f'</div>'
+                )
+            rows += "</div>"
+        else:
+            # 整段组（keep/fix）：单行即组（可预播/键盘选中/改判，无需组头）。
+            # 改判切分（act=split）时附 ✂️ 入口 + data-target（修订 user_note 预填）
+            kind = str(first.get("kind", "keep"))
+            kind_label = dict(cutlist_service.CUT_KINDS).get(kind, ("完整保留",))[0]
+            if kind == "fix":
+                text_html = (f'{_esc(first.get("text", ""))}'
+                             f'<span class="slirn-cut-ptarget">（原文「{_esc(first.get("orig_text", ""))}」）</span>')
+            else:
+                text_html = _esc(first.get("text", ""))
+            orig_text = str(first.get("text") or first.get("orig_text") or "")
+            resplit_btn = ('<button class="slirn-btn slirn-btn-xs" data-cut-act="resplit"'
+                           ' title="填写切分后内容，把本段按新内容重新切分">✂️ 重新切分</button>'
+                           ) if act == "split" else ""
+            rows += (
+                f'<div class="slirn-cut-group" data-source-i="{si}"'
+                f' data-task-id="{_esc(task_id)}"{act_attr}'
+                f' data-orig-text="{_esc(orig_text)}"'
+                f' data-target="{_esc(note_by_i.get(si, ""))}">'
+                f'<div class="slirn-cut-row whole" data-task-id="{_esc(task_id)}"'
+                f' data-id="{_esc(first["id"])}" data-source-i="{si}"'
+                f' data-start-ms="{int(first["start_ms"])}" data-end-ms="{int(first["end_ms"])}">'
+                f'<span class="slirn-sub-idx">{si}</span>'
+                f'<span class="slirn-sub-time">{_esc(first["start"])} → {_esc(first["end"])}</span>'
+                f'<span class="slirn-rev-badge {kind}" data-kind="{kind}">{kind_label}</span>'
+                f'<span class="slirn-sub-text">{text_html}</span>'
+                f'<span class="slirn-cut-abadge{act_cls}" data-abadge>{act_badge}</span>'
+                f'{resplit_btn}'
+                f'</div></div>'
+            )
     # fallback 提示（有降级子段时在统计行下提醒）
     n_fb = stats["fallback"]
     fb_hint = (
@@ -633,27 +703,47 @@ def _render_cutlist_zone(task_id: str, t, mgr: TaskManager) -> str:
         f"在「字幕生成」阶段重新生成字幕后重算即可精确切分。</div>" if n_fb else ""
     )
 
+    # 修订比已保存清单新 → 过期黄条（REQ-20260916-011）
+    stale_note = ""
+    if saved and saved.get("items"):
+        rev_at = str((rev or {}).get("saved_at") or "")
+        cut_at = str(saved.get("saved_at") or "")
+        if rev_at and cut_at and rev_at > cut_at:
+            stale_note = ('<div class="slirn-form-hint slirn-cut-stale">'
+                          "📝 修订决策已更新，已保存的切分清单可能过期 — 可「🔄 重新执行切分修剪」按最新决策重算</div>")
+
     total_in = len(entries)
     stats_line = (
         f"✂️ 切分修剪预览 · 修订输入 {total_in} 条 · 带入 <b>{stats['brought']}</b> 段"
-        f"（保留 {stats['kept']} · 更正 {stats['fixed']} · 切分子段 {stats['split_subs']}）"
+        f"（保留 {stats['kept']} · 更正 {stats['fixed']} · 切分子段 {stats['split_subs']}"
+        f"（含删除洞 {stats['split_subs_delete']}））"
         f" · 剔除 {stats['dropped']} 条 · 预计保留时长 {dur_str}{saved_note}"
-        f" · 点击行定位播放 · 编号继承修订阶段（切分子段 = 父编号.子序号）"
+        f" · 点击子段预播（播到段尾自动停）· 编号继承修订阶段（父编号.子序号）"
     )
+    # 已生成过清单 → 主按钮变「重新执行」（按最新决策重算并清除全部手工决策）
+    if saved and saved.get("items"):
+        main_btn = (f'<button class="slirn-btn slirn-btn-primary" data-action="rebuild-cutlist"'
+                    f' data-task-id="{_esc(task_id)}">🔄 重新执行切分修剪</button>')
+    else:
+        main_btn = (f'<button class="slirn-btn slirn-btn-primary" data-action="build-cutlist"'
+                    f' data-task-id="{_esc(task_id)}">✅ 生成切分清单并完成本阶段</button>')
 
     return f'''<div class="slirn-card" style="margin-top:16px;">
         <div class="slirn-panel-header"><div class="slirn-panel-title">✂️ 处理剪辑 · 第 3 步：切分修剪</div></div>
         <div class="slirn-sub-meta">{stats_line}</div>
         <div class="slirn-form-hint">本阶段把上一阶段确定的字幕决策落到时间段：完整保留与内容更正的整段带入（编号不变）；
-        删除的不带入；切分修剪的按「原段内容 vs 切分后文字」对齐，从原段音频中切出目标文字的时间段
-        （父编号保留，子段依次编号 10.1、10.2、10.3）。</div>
-        {fb_hint}
+        删除的不带入；切分修剪的按「原段内容 vs 切分后文字」对齐，把整段时间轴**完整**切成交替子段
+        （保留块 ✅ / 删除洞 ❌，父编号保留，子段依次编号 10.1、10.2、10.3）——点子段预播确认，
+        点标记徽章翻转去留，听完觉得整句不要可整段改判。</div>
+        {fb_hint}{stale_note}
         <div id="slirn-cut-player-wrap" class="slirn-video-wrap slirn-sub-player-wrap" style="display:none;">
             <video id="slirn-cut-player" controls preload="metadata"></video>
         </div>
         <div class="slirn-cut-list" id="slirn-cut-list">{rows}</div>
         <div class="slirn-task-actions" style="margin-top:14px;">
-            <button class="slirn-btn slirn-btn-primary" data-action="build-cutlist" data-task-id="{_esc(task_id)}">✅ 生成切分清单并完成本阶段</button>
+            {main_btn}
+            <button class="slirn-btn" id="slirn-cut-save" data-action="save-cut-decisions"
+                    data-task-id="{_esc(task_id)}">💾 保存切分决策</button>
             <button class="slirn-btn" data-action="play-cut-video" data-task-id="{_esc(task_id)}">▶️ 播放视频</button>
         </div></div>'''
 
@@ -1787,6 +1877,7 @@ ROUTER_JS = """
         window.scrollTo({top: 0, behavior: 'smooth'});
         bindSubPlayer();
         bindRevPlayer();
+        bindCutPlayer();  // 切分修剪播放器（timeupdate 高亮/自动停/跳播 — REQ-20260916-011）
         applyWbStagesState();  // 恢复上次收起/展开（跨刷新保持 — REQ-20260916-002）
         applyRevRigorState();  // 上次选过的严谨性级别预填（REQ-20260916-003）
       } else if (r && r.error) {
@@ -2037,6 +2128,258 @@ ROUTER_JS = """
     };
     if (v.readyState >= 1) goCut();
     else v.addEventListener('loadedmetadata', goCut, {once: true});
+  }
+
+  // ===== 切分修剪预览与决策（REQ-20260916-011）=====
+  // 子段/整段行：↑↓ 选行（跳段起点）· 空格 播/停 · R 重播本段
+  // 预播 = 播到段尾自动停；组头 ▶ 试听 = 本组 keep 子段连续跳播（成片口径）；
+  // 播放中高亮跟随当前段。翻转/改判未保存纯前端，「💾 保存切分决策」落盘。
+  var cutStopAt = -1;    // 预播段尾 ms（-1 = 不自动停）
+  var cutKeepSeq = null; // 试听跳播序列 [{s,e,row},…]（null = 不跳播）
+  function cutRows() {
+    var list = revVis('slirn-cut-list');
+    if (!list || !list.offsetParent) return [];  // 面板不可见 → 快捷键整体不生效
+    return Array.prototype.slice.call(list.querySelectorAll('.slirn-cut-row'));
+  }
+  function cutSelIndex(rows) {
+    for (var i = 0; i < rows.length; i++) { if (rows[i].classList.contains('kbsel')) return i; }
+    return -1;
+  }
+  function cutMarkSel(row) {
+    cutRows().forEach(function(r) { r.classList.toggle('kbsel', r === row); });
+    if (row && row.scrollIntoView) row.scrollIntoView({block: 'nearest'});
+  }
+  function cutSelectRow(idx, seek) {
+    var rows = cutRows();
+    if (!rows.length) return null;
+    var cur = cutSelIndex(rows);
+    if (cur < 0) idx = (idx < 0) ? rows.length - 1 : 0;  // 无选中：↓ 第一行，↑ 最后一行
+    idx = Math.max(0, Math.min(rows.length - 1, idx));
+    var row = rows[idx];
+    cutMarkSel(row);
+    if (seek) cutPreview(row);
+    return row;
+  }
+  // 段级预播：定位段起点播放，timeupdate 播到 end_ms 自动停（keep/delete 段都可听）
+  function cutPreview(row) {
+    if (!row) return;
+    cutKeepSeq = null;
+    playCutAt(row.getAttribute('data-task-id') || '',
+              parseInt(row.getAttribute('data-start-ms'), 10) || 0);
+    cutStopAt = parseInt(row.getAttribute('data-end-ms'), 10) || 0;
+  }
+  function cutReplayRow() {
+    var rows = cutRows();
+    var row = rows[cutSelIndex(rows)];
+    if (!row) {
+      var kmR = revKeysLoad();
+      toast('⌨ 先用 ' + revKeyLabel(kmR.prev) + ' / ' + revKeyLabel(kmR.next) + ' 选择一个子段', 'error');
+      return;
+    }
+    cutPreview(row);
+  }
+  function cutTogglePlay() {
+    var v = revVis('slirn-cut-player');
+    if (!v) return;
+    if (!v.src) {  // 从未播放过：从选中行（或第一行）起点开播
+      var rows = cutRows();
+      cutPreview(rows[cutSelIndex(rows)] || rows[0]);
+      return;
+    }
+    if (v.paused) { var p = v.play(); if (p && p.catch) p.catch(function() {}); }
+    else { v.pause(); cutStopAt = -1; cutKeepSeq = null; }  // 手动暂停即退出预播/跳播
+  }
+  // 组头 ▶ 试听：本组 mark=keep 子段连续跳播 — 播完一段自动 seek 下一段
+  // （跳变即真实剪辑效果：删掉洞后 keep 段首尾紧贴）
+  function cutPlayGroupKeep(g) {
+    if (!g) return;
+    var seq = [];
+    Array.prototype.slice.call(g.querySelectorAll('.slirn-cut-row.sub')).forEach(function(r) {
+      if ((r.getAttribute('data-mark') || 'keep') === 'keep') {
+        seq.push({ s: parseInt(r.getAttribute('data-start-ms'), 10) || 0,
+                   e: parseInt(r.getAttribute('data-end-ms'), 10) || 0, row: r });
+      }
+    });
+    if (!seq.length) { toast('本组没有保留子段（全部为删除洞）', 'error'); return; }
+    cutStopAt = -1;
+    cutKeepSeq = seq;
+    playCutAt(g.getAttribute('data-task-id') || '', seq[0].s);
+    cutMarkSel(seq[0].row);
+    var v = revVis('slirn-cut-player');
+    if (v) { var p = v.play(); if (p && p.catch) p.catch(function() {}); }
+  }
+  // 翻转子段标记（未保存纯前端；data-mark 与 data-mark-init 供「有手工修改」判断）
+  function cutFlipMark(row) {
+    var nw = (row.getAttribute('data-mark') || 'keep') === 'keep' ? 'delete' : 'keep';
+    row.setAttribute('data-mark', nw);
+    row.classList.toggle('mark-delete', nw === 'delete');
+    var el = row.querySelector('.slirn-cut-mark');
+    if (el) el.textContent = nw === 'keep' ? '✅ 保留' : '❌ 删除';
+    toast(nw === 'keep' ? '已翻转为 ✅ 保留（未保存）' : '已翻转为 ❌ 删除（未保存）');
+  }
+  // ===== 字幕级改判 K/D/S（REQ-20260916-011 M3）：作用于选中行所属的字幕（组）=====
+  // 空=维持原状 · delete=整条删 · keep=原切分不切了整段保留 · split=改为切分（展开编辑区）
+  var CUT_ACT_BADGES = { keep: '✅ 已改判保留', delete: '❌ 已改判删除', split: '✂️ 已改判切分' };
+  function cutActBadge(g, val) {
+    var b = g.querySelector('[data-abadge]');
+    if (b) b.textContent = val ? CUT_ACT_BADGES[val] : '维持原状';
+  }
+  function cutApplyDecision(val) {
+    var rows = cutRows();
+    var row = rows[cutSelIndex(rows)];
+    if (!row) {
+      var kmA = revKeysLoad();
+      toast('⌨ 先用 ' + revKeyLabel(kmA.prev) + ' / ' + revKeyLabel(kmA.next) + ' 选择一条字幕，再按 '
+        + revKeyLabel(kmA.keep) + ' / ' + revKeyLabel(kmA.del) + ' / ' + revKeyLabel(kmA.split) + ' 改判', 'error');
+      return;
+    }
+    var g = row.closest('.slirn-cut-group');
+    if (!g) return;
+    if ((g.getAttribute('data-act') || '') === val) {  // 再按同键 → 取消，回到维持原状
+      g.removeAttribute('data-act');
+      cutActBadge(g, '');
+      toast('已取消改判（维持原状）— 未保存');
+      return;
+    }
+    g.setAttribute('data-act', val);
+    cutActBadge(g, val);
+    if (val === 'split') {
+      cutOpenResplit(g);  // 切分需要内容：展开编辑区（预填原文/当前切分后文字）
+      toast('✂️ 已改判切分 — 填写切分后内容后点「重新切分」（未保存）');
+    } else {
+      toast((val === 'keep' ? '✅ 已改判整条保留' : '❌ 已改判整条删除')
+        + '（子段标记不再参与执行）— 未保存');
+    }
+  }
+  // ===== 单段重新切分（REQ-20260916-011 M3）：组头下行内展开编辑区 =====
+  function cutOpenResplit(g) {
+    if (!g) return;
+    cutCloseResplit();
+    var target = g.getAttribute('data-target') || g.getAttribute('data-orig-text') || '';
+    var si = g.getAttribute('data-source-i') || '?';
+    var box = document.createElement('div');
+    box.className = 'slirn-cut-resplit';
+    box.innerHTML =
+      '<div class="slirn-cut-resplit-label">✂️ 重新切分第 ' + si + ' 条 — 修改「切分后内容」'
+      + '（多写少写都行，对不上的字自动落进删除洞）：</div>'
+      + '<input class="slirn-cut-resplit-input" type="text">'
+      + '<button class="slirn-btn slirn-btn-xs" data-cut-act="resplit-go">✂️ 按新内容重新切分</button>'
+      + '<button class="slirn-btn slirn-btn-xs" data-cut-act="resplit-cancel">取消</button>'
+      + '<span class="slirn-cut-resplit-hint">重切会重置本段的手工翻转标记；切分后内容将回写修订决策（本条 → 切分）</span>';
+    var head = g.querySelector('.slirn-cut-ghead') || g.querySelector('.slirn-cut-row');
+    if (!head) return;
+    head.parentNode.insertBefore(box, head.nextSibling);
+    var inp = box.querySelector('.slirn-cut-resplit-input');
+    inp.value = target.trim();
+    inp.focus();
+    try { inp.setSelectionRange(inp.value.length, inp.value.length); } catch (err) {}
+  }
+  function cutCloseResplit() {
+    var b = document.querySelector('.slirn-cut-resplit');
+    if (b && b.parentNode) b.parentNode.removeChild(b);
+  }
+  function cutDoResplit(g) {
+    var inp = document.querySelector('.slirn-cut-resplit-input');
+    if (!g || !inp) return;
+    var val = inp.value.trim();
+    if (!val) { toast('❌ 请填写切分后内容', 'error'); inp.focus(); return; }
+    var tid = g.getAttribute('data-task-id') || '';
+    postJSON(SLIRN_API + '/resplit_segment', {
+      task_id: tid,
+      source_i: parseInt(g.getAttribute('data-source-i'), 10),
+      target_text: val,
+    }).then(function(r) {
+      if (r && r.ok) { toast(r.toast || '已按新内容重新切分'); openWorkbench(tid); }
+      else if (r && r.error) toast('❌ ' + r.error, 'error');
+    });
+  }
+  function cutHasManual() {  // 有手工修改？（翻转过 / 有字幕级改判）→ 重新执行前 confirm
+    var flipped = cutRows().some(function(r) {
+      return (r.getAttribute('data-mark') || '') !== (r.getAttribute('data-mark-init') || '');
+    });
+    var acted = !!document.querySelector('#slirn-cut-list .slirn-cut-group[data-act]');
+    return flipped || acted;
+  }
+  // 保存切分决策：全量收集子段 mark + 组级 action（改判 split 附切分后内容）→ 落盘
+  function cutSave(btn) {
+    var tid = btn.getAttribute('data-task-id') || '';
+    var marks = {};
+    cutRows().forEach(function(r) {
+      if (r.classList.contains('sub') && r.getAttribute('data-id'))
+        marks[r.getAttribute('data-id')] = r.getAttribute('data-mark') || 'keep';
+    });
+    var acts = {}, targets = {}, badSplit = null;
+    document.querySelectorAll('#slirn-cut-list .slirn-cut-group[data-act]').forEach(function(g) {
+      acts[g.getAttribute('data-source-i') || ''] = g.getAttribute('data-act');
+    });
+    // 改判切分必须有切分后内容：组 data-target（重切/恢复）或当前编辑区输入值
+    document.querySelectorAll('#slirn-cut-list .slirn-cut-group[data-act="split"]').forEach(function(g) {
+      var tv = (g.getAttribute('data-target') || '').trim();
+      if (!tv) {
+        var inp = document.querySelector('.slirn-cut-resplit-input');
+        if (inp && inp.closest('.slirn-cut-group') === g) tv = inp.value.trim();
+      }
+      if (!tv) badSplit = g.getAttribute('data-source-i');
+      targets[g.getAttribute('data-source-i') || ''] = tv;
+    });
+    if (badSplit !== null) {
+      toast('❌ 第 ' + badSplit + ' 条已改判切分，但未填写切分后内容 — 按 S 或点 ✂️ 填写后重切', 'error');
+      return;
+    }
+    postJSON(SLIRN_API + '/save_cut_decisions',
+             {task_id: tid, manual_marks: marks, actions: acts, split_targets: targets})
+      .then(function(r) {
+        if (r && r.ok) { toast(r.toast || '切分决策已保存'); openWorkbench(tid); }
+        else if (r && r.error) toast('❌ ' + r.error, 'error');
+      });
+  }
+  // 播放器绑定：timeupdate 三合一 — 试听跳播 / 预播段尾自动停 / 高亮跟随
+  function bindCutPlayer() {
+    var v = revVis('slirn-cut-player');
+    var list = revVis('slirn-cut-list');
+    if (v && list && !v.dataset.bound) {
+      v.dataset.bound = '1';
+      var rows = Array.prototype.slice.call(list.querySelectorAll('.slirn-cut-row'));
+      var lastHit = -1;
+      v.addEventListener('timeupdate', function() {
+        var tms = v.currentTime * 1000;
+        // ① 试听跳播：播过当前 keep 段尾 → seek 下一段；无下一段 → 停
+        if (cutKeepSeq) {
+          for (var qi = 0; qi < cutKeepSeq.length; qi++) {
+            if (tms >= cutKeepSeq[qi].e - 30) {
+              if (qi + 1 < cutKeepSeq.length) {
+                try { v.currentTime = cutKeepSeq[qi + 1].s / 1000; } catch (err) {}
+                cutMarkSel(cutKeepSeq[qi + 1].row);
+                return;
+              }
+              v.pause(); cutKeepSeq = null; cutStopAt = -1;
+              break;
+            }
+            if (tms < cutKeepSeq[qi].e) break;  // 还在当前段内
+          }
+        }
+        // ② 预播自动停：到段尾暂停（-30ms 提前量防越界误停不了）
+        if (cutStopAt >= 0 && tms >= cutStopAt - 30) { v.pause(); cutStopAt = -1; }
+        // ③ 高亮跟随（与修订区同款：段间缝隙保持前一段亮）
+        var hit = -1;
+        for (var i = 0; i < rows.length; i++) {
+          var s0 = parseInt(rows[i].getAttribute('data-start-ms'), 10) || 0;
+          var e0 = parseInt(rows[i].getAttribute('data-end-ms'), 10) || 0;
+          if (tms >= s0 && tms < e0) { hit = i; break; }
+          if (s0 > tms) break;
+        }
+        if (hit === -1 && lastHit >= 0) {
+          var eh = parseInt(rows[lastHit].getAttribute('data-end-ms'), 10) || 0;
+          var nh = (lastHit + 1 < rows.length)
+            ? (parseInt(rows[lastHit + 1].getAttribute('data-start-ms'), 10) || 0)
+            : Infinity;
+          if (tms >= eh && tms < nh) hit = lastHit;
+        }
+        lastHit = hit;
+        for (var j = 0; j < rows.length; j++) rows[j].classList.toggle('playing', j === hit);
+        if (hit >= 0 && rows[hit] && rows[hit].scrollIntoView) rows[hit].scrollIntoView({block: 'nearest'});
+      });
+    }
   }
 
   function bindRevPlayer() {
@@ -2412,6 +2755,44 @@ ROUTER_JS = """
     else if (act === 'split') { revApplyDecision('split'); }
   });
 
+  // ===== 切分修剪快捷键（REQ-20260916-011）：与修订区共用键位/自定义，按可见面板分发 =====
+  // ↑↓ 选行（跳段起点播放）· 空格 播放/暂停 · R 重播本段（播到段尾自动停）
+  // K/D/S 字幕级改判（作用于选中行所属字幕：保留/删除/切分，再按同键取消）
+  // 修订列表可见时本 handler 自然让位（cutRows 为空），两区互不抢键。
+  document.addEventListener('keydown', function(e) {
+    if (revKeysModalOpen()) return;  // 键位自定义弹窗打开 → 录制监听器接管
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    var k = (e.key || '').toLowerCase();
+    var km = revKeysLoad();
+    // Esc：退出重切编辑区（焦点在输入框内也生效，键可改绑）
+    if (k === km.esc) {
+      var aeC = document.activeElement;
+      if (aeC && aeC.classList && aeC.classList.contains('slirn-cut-resplit-input')) {
+        cutCloseResplit();
+        e.preventDefault();
+      }
+      return;
+    }
+    var t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+    var rows = cutRows();
+    if (!rows.length) return;  // 切分面板不可见 → 快捷键不生效
+    var act = null;
+    for (var i = 0; i < REV_KEY_ACTIONS.length; i++) {
+      if (km[REV_KEY_ACTIONS[i].id] === k) { act = REV_KEY_ACTIONS[i].id; break; }
+    }
+    if (!act || act === 'esc') return;
+    if (e.repeat && act !== 'prev' && act !== 'next') return;  // 长按只放行导航
+    e.preventDefault();
+    if (act === 'prev') { cutSelectRow(cutSelIndex(rows) - 1, true); }
+    else if (act === 'next') { cutSelectRow(cutSelIndex(rows) + 1, true); }
+    else if (act === 'play') { cutTogglePlay(); }
+    else if (act === 'replay') { cutReplayRow(); }
+    else if (act === 'keep') { cutApplyDecision('keep'); }
+    else if (act === 'del') { cutApplyDecision('delete'); }
+    else if (act === 'split') { cutApplyDecision('split'); }
+  });
+
   function handleResp(resp, refreshCellId) {
     if (!resp) { toast('❌ 无响应', 'error'); return; }
     if (!resp.ok) { toast('❌ ' + (resp.error || '操作失败'), 'error'); return; }
@@ -2444,12 +2825,45 @@ ROUTER_JS = """
       return;
     }
 
-    // 切分修剪行点击定位播放（REQ-20260916-008；父段对照行同样可点子段播放）
+    // 切分修剪（REQ-20260916-011）：mark 徽章点击=翻转 · 组头试听钮=keep 连续跳播 ·
+    // 行点击=段级预播（播到段尾自动停）；旧「点行续播」由预播替代
+    var cutMark = e.target.closest('.slirn-cut-mark');
+    if (cutMark) {
+      e.preventDefault();
+      var rowM = cutMark.closest('.slirn-cut-row');
+      if (rowM) { cutMarkSel(rowM); cutFlipMark(rowM); }
+      return;
+    }
+    var cutListen = e.target.closest('[data-cut-act="play-keep"]');
+    if (cutListen) {
+      e.preventDefault();
+      cutPlayGroupKeep(cutListen.closest('.slirn-cut-group'));
+      return;
+    }
+    // 单段重新切分（REQ-20260916-011）：入口展开 / 执行 / 取消
+    var cutRsg = e.target.closest('[data-cut-act="resplit"]');
+    if (cutRsg) {
+      e.preventDefault();
+      cutOpenResplit(cutRsg.closest('.slirn-cut-group'));
+      return;
+    }
+    var cutRsgGo = e.target.closest('[data-cut-act="resplit-go"]');
+    if (cutRsgGo) {
+      e.preventDefault();
+      cutDoResplit(cutRsgGo.closest('.slirn-cut-group'));
+      return;
+    }
+    var cutRsgNo = e.target.closest('[data-cut-act="resplit-cancel"]');
+    if (cutRsgNo) {
+      e.preventDefault();
+      cutCloseResplit();
+      return;
+    }
     var cutRow = e.target.closest('.slirn-cut-row');
     if (cutRow && !e.target.closest('button, a')) {
       e.preventDefault();
-      playCutAt(cutRow.getAttribute('data-task-id') || '',
-                parseInt(cutRow.getAttribute('data-start-ms'), 10) || 0);
+      cutMarkSel(cutRow);  // 鼠标与键盘共享「当前行」
+      cutPreview(cutRow);
       return;
     }
 
@@ -2573,6 +2987,26 @@ ROUTER_JS = """
           if (r && r.ok) {
             toast(r.toast || '切分清单已生成');
             openWorkbench(tidC);
+          } else if (r && r.error) {
+            toast('❌ ' + r.error, 'error');
+          }
+        });
+    }
+    else if (action === 'save-cut-decisions') {
+      // 保存切分决策（REQ-20260916-011）：翻转 manual_marks + 字幕级改判 actions
+      cutSave(target);
+    }
+    else if (action === 'rebuild-cutlist') {
+      // 重新执行切分修剪（REQ-20260916-011）：按最新修订决策整单重算落盘，
+      // 清除全部手工决策（与「重新分析=重置」同一哲学）；有手工修改先 confirm
+      var tidRb = target.getAttribute('data-task-id') || '';
+      if (cutHasManual() &&
+          !window.confirm('重新执行将按最新修订决策整单重算，并清除全部手工决策（子段翻转与字幕级改判）。确定继续？')) return;
+      postJSON(SLIRN_API + '/build_cutlist', {task_id: tidRb})
+        .then(function(r) {
+          if (r && r.ok) {
+            toast(r.toast || '已按最新决策重新执行切分修剪');
+            openWorkbench(tidRb);
           } else if (r && r.error) {
             toast('❌ ' + r.error, 'error');
           }
@@ -4033,6 +4467,144 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             f"✅ 切分清单已生成（带入 {stats.get('brought', 0)} 段 · 剔除 {stats.get('dropped', 0)} 条"
             f" · 切分子段 {stats.get('split_subs', 0)}）· 切分修剪完成，可进入精剪字幕"
         ), saved_at=saved_at, stats=stats)
+
+    @app.app.post("/slirn/api/save_cut_decisions")
+    async def save_cut_decisions(body: dict = Body(default_factory=dict)):
+        """保存切分决策（REQ-20260916-011）：子段翻转 manual_marks + 字幕级改判 actions。
+
+        重算并入显示后落盘 cutlist.json（阶段随磁盘判定/幂等推进不变）。
+        改判 split 携带的切分后内容（split_targets）回写修订 user_note（S→填内容
+        →直接保存的路径闭环）；校验改判 split 必须有切分后内容，残缺决策不落盘。
+        """
+        import json
+        import time as _time
+
+        from slirn_home import asr_service, cutlist_service, revision_service
+
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            mgr.get(tid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+        outputs_dir = mgr.tasks_dir / tid / "outputs"
+        rev = revision_service.load_revision(outputs_dir)
+        if not (rev and rev.get("entries")):
+            return _err("尚无修订建议，请先在「字幕修订」阶段完成大模型分析")
+        if not revision_service.all_decided(rev):
+            pending = sum(1 for e in rev["entries"] if e.get("decision") == "pending")
+            return _err(f"字幕修订还有 {pending} 条未决策，请先保存全部决策")
+        sub_meta = asr_service.load_subtitle(outputs_dir)
+        if not (sub_meta and sub_meta.get("segments")):
+            return _err("缺少字幕生成产物（subtitle.json），请先在「字幕生成」阶段生成字幕")
+
+        manual_marks = body.get("manual_marks") or {}
+        actions = body.get("actions") or {}
+        split_targets = body.get("split_targets") or {}
+        if (not isinstance(manual_marks, dict) or not isinstance(actions, dict)
+                or not isinstance(split_targets, dict)):
+            return _err("manual_marks / actions / split_targets 格式不正确")
+        # 改判 split 附带的切分后内容 → 回写修订（decision=split + user_note，
+        # 单一事实源；与「✂️ 重新切分」同一落点）
+        rev_changed = False
+        for k, tv in split_targets.items():
+            if str(actions.get(k)) != "split":
+                continue
+            tv = str(tv or "").strip()
+            if not tv:
+                continue
+            entry = next((e for e in rev["entries"] if str(e.get("i")) == str(k)), None)
+            if entry is not None and cutlist_service._split_target(entry) != tv:
+                entry["decision"] = "split"
+                entry["user_note"] = tv[:500]
+                rev_changed = True
+        # 改判 split 必须有切分后内容（本次携带 / 修订 user_note / 模型建议），
+        # 否则执行口径残缺
+        for k, v in actions.items():
+            if str(v) not in cutlist_service.ACTIONS:
+                return _err(f"未知的决策状态「{v}」（第 {k} 条）")
+            if str(v) == "split":
+                entry = next((e for e in rev["entries"] if str(e.get("i")) == str(k)), None)
+                if entry is None or not cutlist_service._split_target(entry):
+                    return _err(f"第 {k} 条已改判切分，但未填写切分后内容 — 请填写后再保存")
+        try:
+            cutlist = cutlist_service.build_cutlist(sub_meta, rev,
+                                                    manual_marks=manual_marks, actions=actions)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"保存切分决策失败: {e}")
+        if rev_changed:  # 修订先落盘、清单后落盘（saved_at 单调，不误报过期黄条）
+            rev["saved_at"] = _time.strftime("%Y-%m-%dT%H:%M:%S")
+            (outputs_dir / revision_service.REVISION_JSON).write_text(
+                json.dumps(rev, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        cutlist_service.save_cutlist(outputs_dir, cutlist)
+        try:
+            mgr.update_status(tid, TaskStatus.ROUGH_CUT_DONE)  # 幂等：清单在盘即完成
+        except Exception as e:  # noqa: BLE001
+            revision_service.log.warning("更新任务 %s 状态失败: %s", tid, e)
+        stats = cutlist.get("stats", {})
+        parts = ["✅ 切分决策已保存"]
+        if stats.get("mark_flipped"):
+            parts.append(f"手工翻转 {stats['mark_flipped']} 段")
+        if stats.get("action_changed"):
+            parts.append(f"字幕级改判 {stats['action_changed']} 条")
+        return _ok("", toast=" · ".join(parts), stats=stats)
+
+    @app.app.post("/slirn/api/resplit_segment")
+    async def resplit_segment_api(body: dict = Body(default_factory=dict)):
+        """单段重新切分（REQ-20260916-011）：改切分后内容 → 回写修订 + 重算清单落盘。
+
+        纯逻辑见 cutlist_service.resplit_segment（命中 0 / 无字级时间戳 →
+        宁可不切不可错切，返回错误不落盘）。
+        """
+        import json
+        import time as _time
+
+        from slirn_home import asr_service, cutlist_service, revision_service
+
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            si = int(body.get("source_i"))
+        except (TypeError, ValueError):
+            return _err("缺少 source_i")
+        target_text = str(body.get("target_text") or "")
+        try:
+            mgr.get(tid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+        outputs_dir = mgr.tasks_dir / tid / "outputs"
+        rev = revision_service.load_revision(outputs_dir)
+        if not (rev and rev.get("entries")):
+            return _err("尚无修订建议，请先在「字幕修订」阶段完成大模型分析")
+        sub_meta = asr_service.load_subtitle(outputs_dir)
+        if not (sub_meta and sub_meta.get("segments")):
+            return _err("缺少字幕生成产物（subtitle.json），请先在「字幕生成」阶段生成字幕")
+        saved = cutlist_service.load_cutlist(outputs_dir)
+        cutlist, rev2, err = cutlist_service.resplit_segment(
+            sub_meta, rev, si, target_text, saved)
+        if err:
+            return _err(err)
+        # 修订先落盘、清单后落盘（saved_at 单调，不误报过期黄条）
+        rev2["saved_at"] = _time.strftime("%Y-%m-%dT%H:%M:%S")
+        (outputs_dir / revision_service.REVISION_JSON).write_text(
+            json.dumps(rev2, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        cutlist_service.save_cutlist(outputs_dir, cutlist)
+        try:
+            mgr.update_status(tid, TaskStatus.ROUGH_CUT_DONE)  # 幂等：清单在盘即完成
+        except Exception as e:  # noqa: BLE001
+            revision_service.log.warning("更新任务 %s 状态失败: %s", tid, e)
+        subs = [it for it in cutlist.get("items", [])
+                if int(it.get("source_i", -1)) == si and it.get("kind") == "split"]
+        n_keep = sum(1 for s in subs if str(s.get("mark")) == "keep")
+        n_del = len(subs) - n_keep
+        return _ok("", toast=(
+            f"✅ 第 {si} 条已重新切分：{len(subs)} 个子段"
+            f"（保留 {n_keep} · 删除洞 {n_del}）— 可预播确认"
+        ))
 
     @app.app.post("/slirn/api/file_selected")
     async def file_selected(body: dict = Body(default_factory=dict)):
