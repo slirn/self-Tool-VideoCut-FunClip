@@ -1319,6 +1319,54 @@ footer { display: none !important; }
 .slirn-rev-badge.split  { background: #7c5cd6; }
 .slirn-rev-badge.fix    { background: #2563eb; }
 .slirn-rev-badge.review { background: #d97706; }
+
+/* ---- 切分修剪清单（REQ-20260916-008）：行式对齐修订列表 ---- */
+.slirn-cut-list {
+  max-height: 560px; overflow-y: auto; margin-top: 10px;
+  border: 1px solid var(--border); border-radius: 12px; background: var(--input-bg);
+}
+.slirn-cut-row {
+  cursor: pointer; border-bottom: 1px solid var(--border);
+  transition: background var(--transition);
+}
+.slirn-cut-row:last-child { border-bottom: none; }
+.slirn-cut-row:hover { background: var(--accent-soft); }
+.slirn-cut-row.active {
+  background: var(--accent-gradient);
+  box-shadow: inset 4px 0 0 rgba(255, 255, 255, 0.7);
+}
+.slirn-cut-row.active .slirn-sub-idx { color: rgba(255, 255, 255, 0.8); }
+.slirn-cut-row.active .slirn-sub-time { color: rgba(255, 255, 255, 0.85); }
+.slirn-cut-row.active .slirn-sub-text { color: #ffffff; font-weight: 600; }
+/* 与修订主行同列布局（序号|时间|文本）— 子段带 10.1 样式编号 */
+.slirn-cut-line {
+  display: grid;
+  grid-template-columns: 44px 216px 1fr;
+  gap: 10px;
+  padding: 6px 14px;
+  align-items: center;
+  min-height: 34px;
+}
+.slirn-cut-line .slirn-rev-badge { margin-right: 7px; vertical-align: 1px; }
+/* 切分子段行：左缩进 + 紫色竖条（视觉归属同一父段组） */
+.slirn-cut-row.sub .slirn-cut-line {
+  padding-left: 30px;
+  box-shadow: inset 3px 0 0 #7c5cd6;
+}
+/* 父段对照行（原段内容 vs 切分后文字）：灰底小字，不可点 */
+.slirn-cut-parent {
+  display: flex; gap: 10px; align-items: baseline;
+  padding: 7px 14px 3px 14px; margin-top: 4px;
+  border-top: 1px dashed var(--border);
+  font-size: 12px; color: var(--text-muted); line-height: 1.5;
+}
+.slirn-cut-parent:first-child { border-top: none; margin-top: 0; }
+.slirn-cut-pidx { min-width: 34px; font-weight: 700; color: var(--text-secondary); }
+.slirn-cut-ptarget { color: #7c5cd6; font-weight: 600; }
+@media (max-width: 900px) {
+  .slirn-cut-line { grid-template-columns: 40px 1fr; }
+  .slirn-cut-line .slirn-sub-time { display: none; }
+}
 .slirn-rev-select {
   width: 100%; padding: 4px 6px; font-size: 12.5px;
   border: 1px solid var(--border); border-radius: 8px;

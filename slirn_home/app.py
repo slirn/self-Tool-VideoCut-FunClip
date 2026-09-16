@@ -500,6 +500,123 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
         </div></div>'''
 
 
+def _render_cutlist_zone(task_id: str, t, mgr: TaskManager) -> str:
+    """处理剪辑·第 3 步：切分修剪（REQ-20260916-008）。
+
+    把字幕修订的最终决策翻译成切分修剪清单：保留/更正整段带入（编号继承
+    不变）、删除剔除、切分对齐字级时间戳切子段（父编号.子序号 10.1/10.2/10.3）。
+    面板打开即服务端现算预览（不落盘）；「生成切分清单」才落盘 +
+    推进 ROUGH_CUT_DONE。
+    """
+    from slirn_home import asr_service, cutlist_service, revision_service
+
+    outputs_dir = mgr.tasks_dir / task_id / "outputs"
+
+    # ---- 状态 1：上一阶段未完成 → 引导 ----
+    def _guide(msg: str, btn: str) -> str:
+        return f'''<div class="slirn-card" style="margin-top:16px;">
+        <div class="slirn-panel-header"><div class="slirn-panel-title">✂️ 处理剪辑 · 第 3 步：切分修剪</div></div>
+        <div class="slirn-empty"><div class="slirn-empty-icon">🚧</div>
+            <div class="slirn-empty-text">{_esc(msg)}</div></div>
+        <div class="slirn-task-actions" style="margin-top:14px;">{btn}</div></div>'''
+
+    rev = revision_service.load_revision(outputs_dir)
+    entries = (rev or {}).get("entries") or []
+    if not entries:
+        return _guide(
+            "请先完成上一阶段「字幕修订」— 切分修剪以修订决策（保留/删除/切分/更正）为输入",
+            '<button class="slirn-btn slirn-btn-primary" data-action="wb-stage" '
+            'data-pane="subtitle_review">📝 去字幕修订</button>',
+        )
+    if not revision_service.all_decided(rev):
+        pending = sum(1 for e in entries if e.get("decision") == "pending")
+        return _guide(
+            f"字幕修订还有 {pending}/{len(entries)} 条未决策 — 全部决策并保存后，本阶段才可生成切分清单",
+            '<button class="slirn-btn slirn-btn-primary" data-action="wb-stage" '
+            'data-pane="subtitle_review">📝 去完成决策</button>',
+        )
+    sub_meta = asr_service.load_subtitle(outputs_dir)
+    if not (sub_meta and sub_meta.get("segments")):
+        return _guide(
+            "缺少字幕生成产物（subtitle.json）— 请先在「字幕生成」阶段生成字幕",
+            '<button class="slirn-btn slirn-btn-primary" data-action="wb-stage" '
+            'data-pane="subtitle">🎙 去生成字幕</button>',
+        )
+
+    # ---- 状态 2：决策齐备 → 预览清单（服务端现算，不落盘）----
+    cutlist = cutlist_service.build_cutlist(sub_meta, rev)
+    saved = cutlist_service.load_cutlist(outputs_dir)
+    stats = cutlist["stats"]
+    dur_ms = stats["keep_duration_ms"]
+    mm_, ss_ = divmod(dur_ms // 1000, 60)
+    hh_, mm_ = divmod(mm_, 60)
+    dur_str = f"{hh_}:{mm_:02d}:{ss_:02d}" if hh_ else f"{mm_:02d}:{ss_:02d}"
+    saved_note = ""
+    if saved and saved.get("items"):
+        saved_at = _esc(saved.get("saved_at") or "")
+        saved_note = f" · ✅ 清单已生成{f'（{saved_at}）' if saved_at else ''}"
+
+    rows = ""
+    last_source = 0
+    for it in cutlist["items"]:
+        kind = it["kind"]
+        kind_label = dict(cutlist_service.CUT_KINDS).get(kind, ("切分子段",))[0]
+        is_sub = it.get("sub") is not None
+        # 同一父段的子段收进一个缩进组（首个子段前渲染父段对照行）
+        parent_html = ""
+        if is_sub and it["source_i"] != last_source:
+            parent_html = (
+                f'<div class="slirn-cut-parent">'
+                f'<span class="slirn-cut-pidx">{int(it["source_i"])}</span>'
+                f'<span class="slirn-cut-ptext">原段：「{_esc(it.get("orig_text", ""))}」'
+                f'<span class="slirn-cut-ptarget">→ 切分后：「{_esc(it.get("target_text") or "")}」</span></span></div>'
+            )
+        last_source = it["source_i"] if is_sub else 0
+        fb_title = ' title="无字级时间戳（旧字幕数据）或切分后文字无法对齐 — 已整段带入，可重新生成字幕后重试"' if it.get("fallback") else ""
+        fb_mark = ' ⚠️' if it.get("fallback") else ""
+        rows += (
+            f'{parent_html}'
+            f'<div class="slirn-cut-row{" sub" if is_sub else ""}" data-task-id="{_esc(task_id)}"'
+            f' data-start-ms="{int(it["start_ms"])}" data-end-ms="{int(it["end_ms"])}"{fb_title}>'
+            f'<div class="slirn-cut-line">'
+            f'<span class="slirn-sub-idx">{_esc(it["id"])}</span>'
+            f'<span class="slirn-sub-time">{_esc(it.get("start", ""))} → {_esc(it.get("end", ""))}</span>'
+            f'<span class="slirn-sub-text"><span class="slirn-rev-badge {kind}"'
+            f' data-kind="{kind}">{kind_label}</span>{_esc(it["text"])}{fb_mark}</span>'
+            f'</div></div>'
+        )
+    # fallback 提示（有降级子段时在统计行下提醒）
+    n_fb = stats["fallback"]
+    fb_hint = (
+        f'<div class="slirn-form-hint">⚠️ {n_fb} 条切分段缺少字级时间戳（旧格式字幕），已整段带入；'
+        f"在「字幕生成」阶段重新生成字幕后重算即可精确切分。</div>" if n_fb else ""
+    )
+
+    total_in = len(entries)
+    stats_line = (
+        f"✂️ 切分修剪预览 · 修订输入 {total_in} 条 · 带入 <b>{stats['brought']}</b> 段"
+        f"（保留 {stats['kept']} · 更正 {stats['fixed']} · 切分子段 {stats['split_subs']}）"
+        f" · 剔除 {stats['dropped']} 条 · 预计保留时长 {dur_str}{saved_note}"
+        f" · 点击行定位播放 · 编号继承修订阶段（切分子段 = 父编号.子序号）"
+    )
+
+    return f'''<div class="slirn-card" style="margin-top:16px;">
+        <div class="slirn-panel-header"><div class="slirn-panel-title">✂️ 处理剪辑 · 第 3 步：切分修剪</div></div>
+        <div class="slirn-sub-meta">{stats_line}</div>
+        <div class="slirn-form-hint">本阶段把上一阶段确定的字幕决策落到时间段：完整保留与内容更正的整段带入（编号不变）；
+        删除的不带入；切分修剪的按「原段内容 vs 切分后文字」对齐，从原段音频中切出目标文字的时间段
+        （父编号保留，子段依次编号 10.1、10.2、10.3）。</div>
+        {fb_hint}
+        <div id="slirn-cut-player-wrap" class="slirn-video-wrap slirn-sub-player-wrap" style="display:none;">
+            <video id="slirn-cut-player" controls preload="metadata"></video>
+        </div>
+        <div class="slirn-cut-list" id="slirn-cut-list">{rows}</div>
+        <div class="slirn-task-actions" style="margin-top:14px;">
+            <button class="slirn-btn slirn-btn-primary" data-action="build-cutlist" data-task-id="{_esc(task_id)}">✅ 生成切分清单并完成本阶段</button>
+            <button class="slirn-btn" data-action="play-cut-video" data-task-id="{_esc(task_id)}">▶️ 播放视频</button>
+        </div></div>'''
+
+
 def _task_echo_fragments(t) -> tuple[str, str, str]:
     """任务回显片段（REQ-20260915-002）— 详情页 / 工作台共用。
 
@@ -613,8 +730,8 @@ _WB_STAGES = [
     ("assets",          "ASSETS_READY",         "素材准备", "📦", "上传视频 · 时间截取 · 任务热词"),
     ("subtitle",        "SUBTITLE_GENERATED",   "字幕生成", "🎙", "FunASR seaco-paraformer + 热词识别"),
     ("subtitle_review", "SUBTITLE_REVIEWED",    "字幕修订", "📝", "对照视频逐段校对、修改字幕文本与时间"),
-    ("rough_cut",       "ROUGH_CUT_DONE",       "粗剪",     "✂️", "按字幕段落选择保留片段，粗剪拼接"),
-    ("fine_subtitle",   "FINE_SUBTITLE_DONE",   "精剪字幕", "🔧", "对粗剪结果重新生成精确字幕"),
+    ("rough_cut",       "ROUGH_CUT_DONE",       "切分修剪", "✂️", "按修订决策带入保留/更正段，切分段父编号+子编号"),
+    ("fine_subtitle",   "FINE_SUBTITLE_DONE",   "精剪字幕", "🔧", "对切分修剪清单重新生成精确字幕"),
     ("fine_review",     "FINE_SUBTITLE_REVIEWED", "精剪修订", "🔎", "精剪字幕二次校对"),
     ("fine_cut",        "FINE_CUT_DONE",        "精剪视频", "🎬", "按精剪段生成成品视频"),
     ("mux",             "MUXED",                "字幕合成", "🎞️", "字幕烧录进画面 / 封装输出成品"),
@@ -625,12 +742,14 @@ def _wb_stage_states(t) -> list[str]:
     """各阶段状态：done / current / pending。
 
     素材准备看磁盘资产（原视频在即完成，DRAFT 状态也算）；
-    字幕生成看产物 subtitle.json、字幕修订看 revision.json（服务器重启后内存 job 不在，以磁盘为准）；
+    字幕生成看产物 subtitle.json、字幕修订看 revision.json、切分修剪看
+    cutlist.json（服务器重启后内存 job 不在，以磁盘为准）；
     其余按 TaskStatus 管线序比较。
     """
     from tasklib.models import TaskStatus
 
     from slirn_home import asr_service as _asr_mod
+    from slirn_home import cutlist_service as _cut_mod
     from slirn_home import revision_service as _rev_mod
 
     rank = {s.name: i for i, s in enumerate(TaskStatus)}
@@ -640,6 +759,7 @@ def _wb_stage_states(t) -> list[str]:
     outputs_dir = Path(str(t.hotwords_path)).parent / "outputs"
     sub_meta = None
     rev_meta = None
+    cut_meta = None
     try:
         sub_meta = _asr_mod.load_subtitle(outputs_dir)
     except Exception:  # noqa: BLE001
@@ -648,8 +768,13 @@ def _wb_stage_states(t) -> list[str]:
         rev_meta = _rev_mod.load_revision(outputs_dir)
     except Exception:  # noqa: BLE001
         pass
+    try:
+        cut_meta = _cut_mod.load_cutlist(outputs_dir)
+    except Exception:  # noqa: BLE001
+        pass
     subtitle_done = bool(sub_meta and sub_meta.get("segments"))
     review_done = bool(rev_meta and rev_meta.get("entries"))
+    cut_done = bool(cut_meta and cut_meta.get("items"))
     for key, status_name, *_rest in _WB_STAGES:
         if key == "assets":
             states.append("done" if assets_done else "pending")
@@ -659,6 +784,8 @@ def _wb_stage_states(t) -> list[str]:
             states.append(
                 "done" if (review_done or cur_rank >= rank["SUBTITLE_REVIEWED"]) else "pending"
             )
+        elif key == "rough_cut":
+            states.append("done" if (cut_done or cur_rank >= rank[status_name]) else "pending")
         else:
             states.append("done" if cur_rank >= rank[status_name] else "pending")
     # current = 第一个 pending
@@ -729,6 +856,7 @@ def _render_workbench(task_id: str, mgr: TaskManager) -> str:
         "assets": f'<div class="slirn-wb-pane-card"><div class="slirn-wb-pane-title">📦 资产清单</div>{assets_pane}</div>',
         "subtitle": _render_subtitle_zone(task_id, t, mgr),
         "subtitle_review": _render_revision_zone(task_id, t, mgr),
+        "rough_cut": _render_cutlist_zone(task_id, t, mgr),
     }
     for i, (key, _st, _t2, _ic, desc) in enumerate(_WB_STAGES):
         if key in panes:
@@ -1829,6 +1957,22 @@ ROUTER_JS = """
     else v.addEventListener('loadedmetadata', go, {once: true});
   }
 
+  // 切分修剪行定位播放（REQ-20260916-008）— 与修订行同模式，独立播放器防 id 撞车
+  function playCutAt(tid, startMs) {
+    var wrap = revVis('slirn-cut-player-wrap');
+    var v = revVis('slirn-cut-player');
+    if (!v) { toast('❌ 播放器未就绪', 'error'); return; }
+    if (wrap) wrap.style.display = '';
+    if (!v.src) { v.src = SLIRN_API + '/video/' + encodeURIComponent(tid); v.load(); }
+    var goCut = function() {
+      try { v.currentTime = (startMs || 0) / 1000; } catch (err) {}
+      var p = v.play();
+      if (p && p.catch) p.catch(function() {});
+    };
+    if (v.readyState >= 1) goCut();
+    else v.addEventListener('loadedmetadata', goCut, {once: true});
+  }
+
   function bindRevPlayer() {
     var v = revVis('slirn-rev-player');
     var list = revVis('slirn-rev-list');
@@ -2159,6 +2303,15 @@ ROUTER_JS = """
       return;
     }
 
+    // 切分修剪行点击定位播放（REQ-20260916-008；父段对照行同样可点子段播放）
+    var cutRow = e.target.closest('.slirn-cut-row');
+    if (cutRow && !e.target.closest('button, a')) {
+      e.preventDefault();
+      playCutAt(cutRow.getAttribute('data-task-id') || '',
+                parseInt(cutRow.getAttribute('data-start-ms'), 10) || 0);
+      return;
+    }
+
     // 快捷键自定义：键帽点击进入录制（REQ-20260916-005；键帽无 data-action，先于其判断）
     var rk = e.target.closest('[data-revkey]');
     if (rk) {
@@ -2241,6 +2394,23 @@ ROUTER_JS = """
     }
     else if (action === 'play-rev-video') {
       playRevAt(target.getAttribute('data-task-id') || '', 0);
+    }
+    else if (action === 'play-cut-video') {
+      playCutAt(target.getAttribute('data-task-id') || '', 0);
+    }
+    else if (action === 'build-cutlist') {
+      // 生成切分清单并完成本阶段（REQ-20260916-008）：落盘 + 推进 ROUGH_CUT_DONE，
+      // openWorkbench 全刷新（阶段条 rough_cut → done、精剪字幕 → current）
+      var tidC = target.getAttribute('data-task-id') || '';
+      postJSON(SLIRN_API + '/build_cutlist', {task_id: tidC})
+        .then(function(r) {
+          if (r && r.ok) {
+            toast(r.toast || '切分清单已生成');
+            openWorkbench(tidC);
+          } else if (r && r.error) {
+            toast('❌ ' + r.error, 'error');
+          }
+        });
     }
     else if (action === 'revise-subtitle') {
       var tidV = target.getAttribute('data-task-id') || '';
@@ -3653,10 +3823,50 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         remaining = total - decided
         toast = f"✅ 已保存（生效 {applied} 条 · 已决策 {decided}/{total}）"
         if finished:
-            toast += " · 字幕修订完成，可进入粗剪"
+            toast += " · 字幕修订完成，可进入切分修剪"
         elif remaining:
             toast += f" · 还剩 {remaining} 条未决策"
         return _ok("", toast=toast, decided=decided, total=total, finished=finished)
+
+    @app.app.post("/slirn/api/build_cutlist")
+    async def build_cutlist(body: dict = Body(default_factory=dict)):
+        """生成切分修剪清单（REQ-20260916-008）：决策落盘 cutlist.json + 推进 ROUGH_CUT_DONE。"""
+        import time as _time
+
+        from slirn_home import asr_service, cutlist_service, revision_service
+
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            mgr.get(tid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+        outputs_dir = mgr.tasks_dir / tid / "outputs"
+        rev = revision_service.load_revision(outputs_dir)
+        if not (rev and rev.get("entries")):
+            return _err("尚无修订建议，请先在「字幕修订」阶段完成大模型分析")
+        if not revision_service.all_decided(rev):
+            pending = sum(1 for e in rev["entries"] if e.get("decision") == "pending")
+            return _err(f"字幕修订还有 {pending} 条未决策，请先保存全部决策")
+        sub_meta = asr_service.load_subtitle(outputs_dir)
+        if not (sub_meta and sub_meta.get("segments")):
+            return _err("缺少字幕生成产物（subtitle.json），请先在「字幕生成」阶段生成字幕")
+        try:
+            cutlist = cutlist_service.build_cutlist(sub_meta, rev)
+            cutlist_service.save_cutlist(outputs_dir, cutlist)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"生成切分清单失败: {e}")
+        stats = cutlist.get("stats", {})
+        try:
+            mgr.update_status(tid, TaskStatus.ROUGH_CUT_DONE)
+        except Exception as e:  # noqa: BLE001
+            revision_service.log.warning("更新任务 %s 状态失败: %s", tid, e)
+        saved_at = _time.strftime("%Y-%m-%dT%H:%M:%S")
+        return _ok("", toast=(
+            f"✅ 切分清单已生成（带入 {stats.get('brought', 0)} 段 · 剔除 {stats.get('dropped', 0)} 条"
+            f" · 切分子段 {stats.get('split_subs', 0)}）· 切分修剪完成，可进入精剪字幕"
+        ), saved_at=saved_at, stats=stats)
 
     @app.app.post("/slirn/api/file_selected")
     async def file_selected(body: dict = Body(default_factory=dict)):

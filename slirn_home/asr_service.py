@@ -69,8 +69,15 @@ def segments_from_sentences(sentence_info: list[dict]) -> list[dict]:
     text 可能是 str（未拆分句）或 token 列表（_split_long_sentence 拆分产物），
     Text2SRT.text() 两者都处理（中文直接拼接、英文词空格连接）。
     无有效 timestamp 的条目跳过（与 generate_srt 行为一致）。
+
+    字级时间戳（tokens + token_ts，REQ-20260916-008）：FunASR 的 timestamp
+    与 tokenize(text) 一一对应（上游 generate_srt_clip 同口径），切分修剪
+    阶段靠它把「切分后文字」对齐到原段音频内的具体时间段；两列表等长
+    才保存（不等长视为不可信，该段切分时降级整段）。
     """
     from utils.subtitle_utils import Text2SRT, time_convert
+
+    from slirn_home.cutlist_service import tokenize
 
     segs = []
     for sent in sentence_info or []:
@@ -82,14 +89,23 @@ def segments_from_sentences(sentence_info: list[dict]) -> list[dict]:
         except Exception:  # noqa: BLE001 — 单条畸形不拖垮整批
             log.warning("跳过畸形句子条目: %r", sent)
             continue
-        segs.append({
+        seg = {
             "i": len(segs) + 1,
             "start_ms": int(t2s.start_sec),
             "end_ms": int(t2s.end_sec),
             "start": time_convert(t2s.start_sec),
             "end": time_convert(t2s.end_sec),
             "text": t2s.text(),
-        })
+        }
+        raw_text = sent.get("text", "")
+        tokens = [str(w) for w in raw_text] if isinstance(raw_text, list) else tokenize(str(raw_text))
+        if tokens and len(tokens) == len(ts):
+            try:
+                seg["tokens"] = tokens
+                seg["token_ts"] = [[int(t[0]), int(t[1])] for t in ts]
+            except (TypeError, ValueError, IndexError):
+                pass  # 时间戳非数值对 → 不保存（切分阶段该段降级整段）
+        segs.append(seg)
     return segs
 
 

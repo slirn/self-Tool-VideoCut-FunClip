@@ -77,6 +77,39 @@ def test_segments_indexing_across_rows():
     assert [s["i"] for s in segs] == [1, 2]
 
 
+# ---------- 字级时间戳（tokens + token_ts，REQ-20260916-008） ----------
+
+def test_segments_keep_tokens_when_aligned():
+    """timestamp 与 tokenize(text) 等长 → 保存 tokens/token_ts（切分修剪对齐用）。"""
+    from slirn_home.asr_service import segments_from_sentences
+
+    sent = {"text": "嗯我们今天",
+            "timestamp": [[100, 300], [300, 800], [800, 1200], [1200, 1700], [1700, 2200]]}
+    segs = segments_from_sentences([sent])
+    assert segs[0]["tokens"] == ["嗯", "我", "们", "今", "天"]
+    assert segs[0]["token_ts"] == [[100, 300], [300, 800], [800, 1200], [1200, 1700], [1700, 2200]]
+
+    # token 列表文本（拆分句产物）同样保存
+    sent2 = {"text": ["神经", "网络"], "timestamp": [[0, 500], [500, 900]]}
+    segs2 = segments_from_sentences([sent2])
+    assert segs2[0]["tokens"] == ["神经", "网络"]
+
+
+def test_segments_drop_tokens_when_mismatch():
+    """timestamp 与 token 数不等长 → 视为不可信，不保存（该段切分时降级整段）。"""
+    from slirn_home.asr_service import segments_from_sentences
+
+    sent = {"text": "大家好呀", "timestamp": [[0, 100], [100, 300]]}  # 4 字 vs 2 对
+    segs = segments_from_sentences([sent])
+    assert "tokens" not in segs[0] and "token_ts" not in segs[0]
+
+    # 中间对畸形（缺 end）：Text2SRT 只碰首尾不受影响，token_ts 归一化失败 → 不保存
+    sent2 = {"text": "好的呀", "timestamp": [[0, 500], [900], [1000, 1200]]}
+    segs2 = segments_from_sentences([sent2])
+    assert segs2[0]["text"] == "好的呀"
+    assert "token_ts" not in segs2[0]
+
+
 # ---------- job 状态机（monkeypatch 假识别器） ----------
 
 @pytest.fixture

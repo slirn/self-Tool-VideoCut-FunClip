@@ -1,0 +1,317 @@
+"""测试切分修剪清单服务 — REQ-20260916-008。
+
+单元层（纯函数，无网络/无 ASR）：token 对齐、清单生成（保留/更正/删除/切分
+子段父编号+子编号/降级）、落盘往返、面板三态渲染、阶段状态推进。
+完整浏览器链路走 E2E（work/REQ-20260916-008-cutlist/）。
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+FUNCLIP_ROOT = Path(__file__).resolve().parent.parent
+SLIRN_STANDALONE = FUNCLIP_ROOT.parent / "slirn-standalone"
+
+if str(FUNCLIP_ROOT) not in sys.path:
+    sys.path.insert(0, str(FUNCLIP_ROOT))
+if SLIRN_STANDALONE.exists() and str(SLIRN_STANDALONE) not in sys.path:
+    sys.path.insert(0, str(SLIRN_STANDALONE))
+
+
+def _make_mgr(tmp_path: Path):
+    from tasklib import TaskManager
+
+    video = tmp_path / "lecture.mp4"
+    video.write_bytes(b"fake-video")
+    return TaskManager(tmp_path), video
+
+
+def _write_subtitle(mgr, tid: str, segs: list[dict]) -> Path:
+    outputs = mgr.tasks_dir / tid / "outputs"
+    outputs.mkdir(parents=True, exist_ok=True)
+    (outputs / "subtitle.json").write_text(
+        json.dumps({"version": 1, "segments": segs}, ensure_ascii=False), encoding="utf-8"
+    )
+    return outputs
+
+
+# ---------- 纯函数 ----------
+
+def test_tokenize_and_join():
+    from slirn_home.cutlist_service import join_tokens, tokenize
+
+    assert tokenize("嗯嗯那个我们今天讲一下神经网络") == list("嗯嗯那个我们今天讲一下神经网络")
+    assert tokenize("hello world 你好 GPT-4") == ["hello", "world", "你", "好", "GPT-4"]
+    assert join_tokens(["hello", "世", "界", "GPT-4"]) == "hello世界 GPT-4"
+    assert join_tokens(["好", "的", "。"]) == "好的"  # 去尾部标点（Text2SRT 同款）
+
+
+def test_align_tokens_and_blocks():
+    """贪心子序列对齐：剔除语气词/重复后剩余 token 的连续块。"""
+    from slirn_home.cutlist_service import align_tokens, contiguous_blocks
+
+    orig = list("嗯嗯那个我们今天讲一下神经网络")
+    keep = list("我们今天讲一下神经网络")
+    marks = align_tokens(orig, keep)
+    assert contiguous_blocks(marks) == [(4, 14)], "剔除行首「嗯嗯那个」→ 单块"
+
+    # 重复语句只保留一次 → 两块（重复段中间被剔除）
+    rep = list("所以我们所以我们所以我们看到")
+    marks2 = align_tokens(rep, list("所以我们看到"))
+    assert contiguous_blocks(marks2) == [(0, 3), (12, 13)], "10.1/10.3 式两块"
+
+    # 对不上（用户改写）→ 空匹配
+    assert align_tokens(list("abc"), ["x", "y"]) == []
+
+
+def test_ms2srt_format():
+    from slirn_home.cutlist_service import ms2srt
+
+    assert ms2srt(0) == "00:00:00,000"
+    assert ms2srt(7980) == "00:00:07,980"
+    assert ms2srt(3661500) == "01:01:01,500"
+
+
+# ---------- build_cutlist ----------
+
+def _seg(i, start_ms, end_ms, text, tokens=None, token_ts=None):
+    from slirn_home.cutlist_service import ms2srt
+
+    seg = {"i": i, "start_ms": start_ms, "end_ms": end_ms,
+           "start": ms2srt(start_ms), "end": ms2srt(end_ms), "text": text}
+    if tokens is not None:
+        seg["tokens"] = tokens
+        seg["token_ts"] = token_ts
+    return seg
+
+
+def test_build_cutlist_full(tmp_path: Path):
+    """全类别组合：keep/fix 带入编号不变、delete 剔除、split 对齐切子段（父编号.子序号）。"""
+    from slirn_home.cutlist_service import build_cutlist
+
+    # 段1：嗯嗯那个(4 token) + 我们今天讲一下神经网络(11 token)，token_ts 逐字 200ms
+    t1 = [[400 * k, 400 * k + 360] for k in range(15)]
+    segs = [
+        _seg(1, 0, 6000, "嗯嗯那个我们今天讲一下神经网络",
+             tokens=list("嗯嗯那个我们今天讲一下神经网络"), token_ts=t1),
+        _seg(2, 6000, 9000, "今天讲第一课"),
+        _seg(3, 9000, 12000, "那个那个就是说我们开始吧",
+             tokens=list("那个那个就是说我们开始吧"),
+             token_ts=[[300 * k, 300 * k + 280] for k in range(12)]),
+        _seg(4, 12000, 15000, "神精网络入门"),
+        _seg(5, 15000, 18000, "与主题无关的废话"),
+    ]
+    rev = {"entries": [
+        # 采纳模型 split 建议 → 对齐切子段：token[4..14] = 我们今天讲一下神经网络
+        {"i": 1, "category": "split", "keep_text": "我们今天讲一下神经网络",
+         "decision": "accept", "user_note": ""},
+        # 手动改判 keep（模型原建议 split）→ 整段带入、原编号不变
+        {"i": 2, "category": "split", "keep_text": "第一课",
+         "decision": "keep", "user_note": ""},
+        # 采纳 delete → 剔除
+        {"i": 3, "category": "delete", "keep_text": None,
+         "decision": "accept", "user_note": ""},
+        # 采纳 fix → 文本=更正后（keep_text），时间段整段
+        {"i": 4, "category": "fix", "keep_text": "神经网络入门",
+         "decision": "accept", "user_note": ""},
+        # 手动 delete（模型建议 keep）→ 剔除
+        {"i": 5, "category": "keep", "keep_text": None,
+         "decision": "delete", "user_note": ""},
+    ]}
+    cut = build_cutlist({"segments": segs}, rev)
+    items = cut["items"]
+    assert [it["id"] for it in items] == ["1.1", "2", "4"], "继承编号不重排（3/5 已剔除）"
+    s = cut["stats"]
+    assert (s["kept"], s["fixed"], s["split_parents"], s["split_subs"], s["dropped"]) == (1, 1, 1, 1, 2)
+    assert s["brought"] == 3
+
+    # split 子段：时间来自字级时间戳（token4 起 1600ms，token14 止 6000ms）
+    sub = items[0]
+    assert sub["kind"] == "split" and sub["sub"] == 1 and sub["source_i"] == 1
+    assert sub["start_ms"] == 400 * 4 and sub["end_ms"] == 400 * 14 + 360
+    assert sub["start"] == "00:00:01,600"
+    assert sub["text"] == "我们今天讲一下神经网络"
+    assert sub["orig_text"] == "嗯嗯那个我们今天讲一下神经网络"
+    assert sub["fallback"] is False
+
+    # keep：原文本原时间段
+    k = items[1]
+    assert k["kind"] == "keep" and k["text"] == "今天讲第一课" and k["start_ms"] == 6000
+
+    # fix：更正后文本
+    f = items[2]
+    assert f["kind"] == "fix" and f["text"] == "神经网络入门" and f["orig_text"] == "神精网络入门"
+
+
+def test_build_cutlist_split_multi_blocks_and_user_note(tmp_path: Path):
+    """重复语句 → 多个子段（父编号.1/.2/.3…）；手动「切分修剪后内容」优先于模型建议。"""
+    from slirn_home.cutlist_service import build_cutlist
+
+    tokens = list("所以我们所以我们所以我们看到")  # 14 token
+    segs = [_seg(10, 0, 4200, "所以我们所以我们所以我们看到",
+                 tokens=tokens, token_ts=[[300 * k, 300 * k + 280] for k in range(14)])]
+    rev = {"entries": [
+        {"i": 10, "category": "review", "keep_text": None,  # 模型建议复核
+         "decision": "split", "user_note": "所以我们看到"},  # 手动改判切分+内容
+    ]}
+    cut = build_cutlist({"segments": segs}, rev)
+    items = cut["items"]
+    assert [it["id"] for it in items] == ["10.1", "10.2"], "原编号 10 → 10.1 / 10.2"
+    # 贪心最靠前：keep 的「我们」映射到第一遍（块1），尾块 = 残余「看到」——
+    # 子段拼起来 = keep_text，内容无损、时间正确（重复词不再重复保留）
+    assert items[0]["text"] == "所以我们" and items[1]["text"] == "看到"
+    assert items[0]["start_ms"] == 0 and items[0]["end_ms"] == 300 * 3 + 280
+    assert items[1]["start_ms"] == 300 * 12
+    assert all(it["kind"] == "split" for it in items)
+    assert cut["stats"]["split_parents"] == 1 and cut["stats"]["split_subs"] == 2
+
+
+def test_build_cutlist_fallback_without_tokens(tmp_path: Path):
+    """旧格式字幕（无字级时间戳）/目标文字对不上 → 整段单子段降级（fallback 标记）。"""
+    from slirn_home.cutlist_service import build_cutlist
+
+    segs = [_seg(7, 5000, 8000, "嗯那个我们开始吧")]  # 无 tokens/token_ts
+    rev = {"entries": [
+        {"i": 7, "category": "split", "keep_text": "我们开始吧",
+         "decision": "accept", "user_note": ""},
+    ]}
+    cut = build_cutlist({"segments": segs}, rev)
+    (it,) = cut["items"]
+    assert it["id"] == "7.1" and it["fallback"] is True
+    assert it["start_ms"] == 5000 and it["end_ms"] == 8000  # 整段时间
+    assert it["text"] == "我们开始吧"  # 文本=切分后文字
+    assert cut["stats"]["fallback"] == 1
+
+    # 有 tokens 但目标文字完全对不上（用户改写）→ 同样降级整段
+    segs2 = [_seg(8, 0, 1000, "好的没问题", tokens=list("好的没问题"),
+                  token_ts=[[250 * k, 250 * k + 200] for k in range(4)])]
+    rev2 = {"entries": [
+        {"i": 8, "category": "split", "keep_text": "完全可以呀",
+         "decision": "accept", "user_note": ""},
+    ]}
+    (it2,) = build_cutlist({"segments": segs2}, rev2)["items"]
+    assert it2["id"] == "8.1" and it2["fallback"] is True and it2["text"] == "完全可以呀"
+
+
+def test_build_cutlist_accept_review_falls_back_keep():
+    """防御：采纳 review 建议（无明确处理）→ 按整段保留带入，不丢内容。"""
+    from slirn_home.cutlist_service import build_cutlist
+
+    segs = [_seg(1, 0, 900, "拿不准的内容")]
+    rev = {"entries": [{"i": 1, "category": "review", "keep_text": None,
+                        "decision": "accept", "user_note": ""}]}
+    (it,) = build_cutlist({"segments": segs}, rev)["items"]
+    assert it["kind"] == "keep" and it["id"] == "1" and it["text"] == "拿不准的内容"
+
+
+def test_save_and_load_roundtrip(tmp_path: Path):
+    from slirn_home.cutlist_service import build_cutlist, load_cutlist, save_cutlist
+
+    segs = [_seg(1, 0, 500, "正常一句")]
+    rev = {"entries": [{"i": 1, "category": "keep", "keep_text": None,
+                        "decision": "accept", "user_note": ""}]}
+    cut = build_cutlist({"segments": segs}, rev)
+    p = save_cutlist(tmp_path, cut)
+    assert p.name == "cutlist.json"
+    loaded = load_cutlist(tmp_path)
+    assert loaded["items"] == cut["items"]
+    assert loaded["saved_at"], "落盘时补 saved_at"
+
+    assert load_cutlist(tmp_path / "nope") is None
+    (tmp_path / "cutlist.json").write_text("{broken", encoding="utf-8")
+    assert load_cutlist(tmp_path) is None
+
+
+# ---------- 面板渲染 + 阶段状态 ----------
+
+def _write_revision(outputs: Path, entries: list[dict]) -> None:
+    (outputs / "revision.json").write_text(
+        json.dumps({"version": 1, "created_at": "2026-09-16T10:00:00", "saved_at": "2026-09-16T10:05:00",
+                    "segments_count": len(entries), "entries": entries},
+                   ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def test_render_cutlist_zone_states(tmp_path: Path):
+    from slirn_home.app import _render_cutlist_zone
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="切分任务", original_video=video)
+    tid = t.task_id
+
+    # 状态 1a：无修订数据 → 引导去字幕修订
+    h1 = _render_cutlist_zone(tid, m.get(tid), m)
+    assert "请先完成上一阶段「字幕修订」" in h1
+    assert 'data-action="wb-stage" data-pane="subtitle_review"' in h1
+
+    # 状态 1b：有建议未决策 → 提示剩余数
+    outputs = _write_subtitle(m, tid, [_seg(1, 0, 500, "一句")])
+    _write_revision(outputs, [
+        {"i": 1, "category": "keep", "keep_text": None, "decision": "accept", "user_note": ""},
+        {"i": 2, "category": "delete", "keep_text": None, "decision": "pending", "user_note": ""},
+    ])
+    h1b = _render_cutlist_zone(tid, m.get(tid), m)
+    assert "还有 1/2 条未决策" in h1b
+
+    # 状态 2：全部决策 → 预览清单（服务端现算不落盘）
+    _write_revision(outputs, [
+        {"i": 1, "category": "keep", "keep_text": None, "decision": "accept", "user_note": ""},
+        {"i": 2, "category": "split", "keep_text": "我们开始吧",
+         "decision": "accept", "user_note": ""},
+        {"i": 3, "category": "fix", "keep_text": "神经网络", "decision": "accept", "user_note": ""},
+        {"i": 4, "category": "delete", "keep_text": None, "decision": "accept", "user_note": ""},
+    ])
+    outputs_join = _write_subtitle(m, tid, [
+        _seg(1, 0, 500, "正常一句"),
+        _seg(2, 500, 1500, "那个我们开始吧"),
+        _seg(3, 1500, 2200, "神精网络"),
+        _seg(4, 2200, 3000, "废话"),
+    ])
+    assert outputs_join == outputs
+    h2 = _render_cutlist_zone(tid, m.get(tid), m)
+    assert "✂️ 处理剪辑 · 第 3 步：切分修剪" in h2
+    assert "带入 <b>3</b> 段" in h2 and "剔除 1 条" in h2
+    assert "编号继承修订阶段" in h2 and "10.1、10.2、10.3" in h2
+    # 行式列表 + 父段对照（无字级时间戳 → 降级单子段 + ⚠️ 提示）
+    assert 'id="slirn-cut-list"' in h2
+    assert ">2.1</span>" in h2, "split 子段编号 父.子"
+    assert "原段：「那个我们开始吧」" in h2 and "切分后：「我们开始吧」" in h2
+    assert "1 条切分段缺少字级时间戳" in h2
+    # fix 行徽章 + 更正后文本
+    assert 'slirn-rev-badge fix" data-kind="fix">内容更正</span>神经网络' in h2
+    # 播放器 + 按钮动作
+    assert 'id="slirn-cut-player"' in h2
+    assert 'data-action="build-cutlist"' in h2 and "生成切分清单并完成本阶段" in h2
+    assert 'data-action="play-cut-video"' in h2
+    assert not (outputs / "cutlist.json").exists(), "预览不落盘"
+
+    # 已落盘 → 统计行标注「清单已生成」
+    from slirn_home import cutlist_service
+    cutlist_service.save_cutlist(outputs, cutlist_service.build_cutlist(
+        {"segments": json.loads((outputs / "subtitle.json").read_text(encoding="utf-8"))["segments"]},
+        json.loads((outputs / "revision.json").read_text(encoding="utf-8")),
+    ))
+    h3 = _render_cutlist_zone(tid, m.get(tid), m)
+    assert "清单已生成" in h3
+
+
+def test_wb_stage_states_with_cutlist(tmp_path: Path):
+    """cutlist.json 落盘 → 切分修剪 done（磁盘判定，状态未推进也认）。"""
+    from slirn_home.app import _wb_stage_states
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="t", original_video=video)
+    tid = t.task_id
+    outputs = m.tasks_dir / tid / "outputs"
+    outputs.mkdir(parents=True, exist_ok=True)
+    (outputs / "subtitle.json").write_text(
+        json.dumps({"version": 1, "segments": [_seg(1, 0, 500, "一句")]}), encoding="utf-8")
+    (outputs / "revision.json").write_text(
+        json.dumps({"version": 1, "entries": [{"i": 1, "decision": "accept"}]}), encoding="utf-8")
+    assert _wb_stage_states(m.get(tid))[3] == "current"
+    (outputs / "cutlist.json").write_text(
+        json.dumps({"version": 1, "items": [{"id": "1"}]}), encoding="utf-8")
+    assert _wb_stage_states(m.get(tid)) == ["done", "done", "done", "done", "current"] + ["pending"] * 3

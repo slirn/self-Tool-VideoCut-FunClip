@@ -771,7 +771,7 @@ def test_render_fix_row_and_input_rename(tmp_path: Path):
 
 
 def test_wb_stage_states_with_revision(tmp_path: Path):
-    """revision.json 落盘 → 前三阶段 done，粗剪 current。"""
+    """revision.json 落盘 → 前三阶段 done，切分修剪 current。"""
     from slirn_home.app import _wb_stage_states
 
     m, video = _make_mgr(tmp_path)
