@@ -734,7 +734,8 @@ def _render_cutlist_zone(task_id: str, t, mgr: TaskManager) -> str:
         <div class="slirn-form-hint">本阶段把上一阶段确定的字幕决策落到时间段：完整保留与内容更正的整段带入（编号不变）；
         删除的不带入；切分修剪的按「原段内容 vs 切分后文字」对齐，把整段时间轴**完整**切成交替子段
         （保留块 ✅ / 删除洞 ❌，父编号保留，子段依次编号 10.1、10.2、10.3）——点行从该处连续播放
-        （播完一条接下一条，播放行高亮跟随），点标记徽章翻转去留；快捷键与字幕修订阶段一致：
+        （播完一条接下一条，播放行高亮跟随，**只播保留内容：删除洞与改判删除的整条自动跳过 = 成片效果**），
+        点标记徽章翻转去留；组头「▶ 试听」同样只播本组保留部分；快捷键与字幕修订阶段一致：
         ↑↓ 切换 · 空格 播/停 · R 重播 · K/D/S 整条改判（保留/删除/切分）。</div>
         {fb_hint}{stale_note}
         <div id="slirn-cut-player-wrap" class="slirn-video-wrap slirn-sub-player-wrap" style="display:none;">
@@ -1880,7 +1881,7 @@ ROUTER_JS = """
         bindSubPlayer();
         bindRevPlayer();
         // 重渲染后旧行引用全部失效：试听状态清零（防跳播序列指向已移除的行）
-        cutKeepSeq = null; cutKeepIdx = 0;
+        cutKeepSeq = null; cutKeepIdx = 0; cutKeepMode = null;
         bindCutPlayer();  // 切分修剪播放器（timeupdate 高亮/自动停/跳播 — REQ-20260916-011）
         applyWbStagesState();  // 恢复上次收起/展开（跨刷新保持 — REQ-20260916-002）
         applyRevRigorState();  // 上次选过的严谨性级别预填（REQ-20260916-003）
@@ -2200,6 +2201,33 @@ ROUTER_JS = """
   // 翻转/改判未保存纯前端，「💾 保存切分决策」落盘。
   var cutKeepSeq = null; // 试听跳播序列 [{s,e,row},…]（null = 不跳播）
   var cutKeepIdx = 0;    // 试听当前段下标（索引跟踪：只前进不回扫 — REQ-20260916-012）
+  var cutKeepMode = null; // 跳播来源：'group' 组头试听（显示成片试听条）| 'row' 行级连续播放（REQ-20260916-015）
+  // 执行口径的行保留判定（与 cutlist_service.effective_keep_units 对齐 — REQ-20260916-015）：
+  // 组级改判 delete → 整条剔除；切分组子段按 mark（组改判 keep → 子段划分作废、整段保留）；
+  // 整段组默认保留（改判 split 未重切前维持整段）。试听/连续播放只播保留内容 = 成片效果。
+  function cutRowKept(row) {
+    var g = row.closest('.slirn-cut-group');
+    var act = g ? (g.getAttribute('data-act') || '') : '';
+    if (act === 'delete') return false;
+    if (row.classList.contains('sub')) {
+      if (act === 'keep') return true;
+      return (row.getAttribute('data-mark') || 'keep') === 'keep';
+    }
+    return true;
+  }
+  // 从 startRow 起到列表末尾的全部保留区间（时间序）— 行级连续播放的跳播序列：
+  // 删除洞（子段 mark=delete）与改判删除的整条直接跳过不播
+  function cutKeepAllFrom(startRow) {
+    var seq = [], started = false;
+    cutRows().forEach(function(r) {
+      if (r === startRow) started = true;
+      if (!started || !cutRowKept(r)) return;
+      var s = parseInt(r.getAttribute('data-start-ms'), 10) || 0;
+      var e = parseInt(r.getAttribute('data-end-ms'), 10) || 0;
+      if (e > s) seq.push({ s: s, e: e, row: r });
+    });
+    return seq;
+  }
   function cutRows() {
     var list = revVis('slirn-cut-list');
     if (!list || !list.offsetParent) return [];  // 面板不可见 → 快捷键整体不生效
@@ -2224,14 +2252,26 @@ ROUTER_JS = """
     if (seek) cutPreview(row);
     return row;
   }
-  // 行级连续播放（REQ-20260916-013）：定位行起点播起，不段尾自停 —
-  // 播完本行视频自然推进到下一行，active 高亮随 timeupdate 跟随切换
+  // 行级连续播放（REQ-20260916-013 起，REQ-20260916-015 改为保留内容跳播）：从本行起
+  // 按执行口径连续播保留区间 — 播完一条 seek 下一条，删除洞/改判删除整条直接跳过不播
+  // （= 成片效果），active 高亮随 timeupdate 跟随切换。点击的行若本身是删除内容，
+  // 从其后的下一个保留区间播起。
   function cutPreview(row) {
     if (!row) return;
-    cutKeepSeq = null;
     cutAuditionBar(null);
-    playCutAt(row.getAttribute('data-task-id') || '',
-              parseInt(row.getAttribute('data-start-ms'), 10) || 0);
+    var tid = row.getAttribute('data-task-id') || '';
+    var seq = cutKeepAllFrom(row);
+    if (!seq.length) {
+      // 本行起再无保留内容：退化为定位普通播放（至少让用户听到点过的位置）
+      cutKeepSeq = null; cutKeepMode = null;
+      playCutAt(tid, parseInt(row.getAttribute('data-start-ms'), 10) || 0);
+      return;
+    }
+    cutKeepSeq = seq;
+    cutKeepIdx = 0;
+    cutKeepMode = 'row';
+    cutMarkSel(row);  // 选中停在点到的行（播放起点可能是其后的保留区间）— 键盘改判目标可预期
+    playCutAt(tid, seq[0].s);
   }
   function cutReplayRow() {
     var rows = cutRows();
@@ -2252,23 +2292,48 @@ ROUTER_JS = """
       return;
     }
     if (v.paused) { var p = v.play(); if (p && p.catch) p.catch(function() {}); }
-    else { v.pause(); cutKeepSeq = null; cutAuditionBar(null); }  // 手动暂停即退出连续播放/跳播
+    else {
+      v.pause();
+      if (cutKeepMode === 'group') { cutKeepSeq = null; cutAuditionBar(null); }  // 组试听：手动暂停即退出（REQ-20260916-012）
+      // 行级连续播放：暂停保留跳播序列 — 恢复播放后继续跳过删除内容（REQ-20260916-015）
+    }
   }
-  // 组头 ▶ 试听：本组 mark=keep 子段连续跳播 — 播完一段自动 seek 下一段
-  // （跳变即真实剪辑效果：删掉洞后 keep 段首尾紧贴）
+  // 组头 ▶ 试听：本组「执行口径」保留内容连续跳播 — 播完一段自动 seek 下一段
+  // （跳变即真实剪辑效果：删掉洞后 keep 段首尾紧贴）。REQ-20260916-015 对齐
+  // effective_keep_units：改判删除 → 成片没有这段；改判保留 → 整段一段（子段作废）；
+  // 其余按子段 mark=keep。
   function cutPlayGroupKeep(g) {
     if (!g) return;
+    var tid = g.getAttribute('data-task-id') || '';
+    var act = g.getAttribute('data-act') || '';
+    if (act === 'delete') {
+      toast('本组已改判删除 — 成片中没有这段内容', 'error');
+      return;
+    }
     var seq = [];
-    Array.prototype.slice.call(g.querySelectorAll('.slirn-cut-row.sub')).forEach(function(r) {
-      if ((r.getAttribute('data-mark') || 'keep') === 'keep') {
-        seq.push({ s: parseInt(r.getAttribute('data-start-ms'), 10) || 0,
-                   e: parseInt(r.getAttribute('data-end-ms'), 10) || 0, row: r });
+    var subs = Array.prototype.slice.call(g.querySelectorAll('.slirn-cut-row.sub'));
+    if (subs.length && act !== 'keep') {
+      subs.forEach(function(r) {
+        if ((r.getAttribute('data-mark') || 'keep') === 'keep') {
+          var s = parseInt(r.getAttribute('data-start-ms'), 10) || 0;
+          var e = parseInt(r.getAttribute('data-end-ms'), 10) || 0;
+          if (e > s) seq.push({ s: s, e: e, row: r });
+        }
+      });
+    } else {
+      // 整段保留：改判 keep 的切分组（子段划分作废）或整段组 — 首行起点到末行终点一段
+      var rowsG = Array.prototype.slice.call(g.querySelectorAll('.slirn-cut-row'));
+      if (rowsG.length) {
+        var s0 = parseInt(rowsG[0].getAttribute('data-start-ms'), 10) || 0;
+        var e0 = parseInt(rowsG[rowsG.length - 1].getAttribute('data-end-ms'), 10) || 0;
+        if (e0 > s0) seq.push({ s: s0, e: e0, row: rowsG[0] });
       }
-    });
+    }
     if (!seq.length) { toast('本组没有保留子段（全部为删除洞）', 'error'); return; }
     cutKeepSeq = seq;
     cutKeepIdx = 0;  // 从第一段开播，一次到底（REQ-20260916-012）
-    playCutAt(g.getAttribute('data-task-id') || '', seq[0].s);
+    cutKeepMode = 'group';
+    playCutAt(tid, seq[0].s);
     cutMarkSel(seq[0].row);
     var v = revVis('slirn-cut-player');
     if (v) {
@@ -2445,6 +2510,8 @@ ROUTER_JS = """
         // 段尾 → seek 下一段起点；播完最后一段 → 停。绝不从 0 重扫：旧行为里
         // 跳到下一段后 tms ≥ 前段尾恒成立，会立刻再跳、末组折返，段间无限
         // 乒乓反复播放且永不结束。
+        // 序列来源（REQ-20260916-015）：组头试听（cutKeepMode='group'，显示成片
+        // 试听条）或行级连续播放（'row'，只播保留内容、不显示试听条）。
         if (cutKeepSeq) {
           var seg = cutKeepSeq[cutKeepIdx];
           if (tms < seg.s - 500) {  // 用户回拖：重定位到 tms 所在段
@@ -2457,13 +2524,13 @@ ROUTER_JS = """
               var nxt = cutKeepSeq[cutKeepIdx];
               try { v.currentTime = nxt.s / 1000; } catch (err) {}
               cutMarkSel(nxt.row);
-              cutAuditionBar(v);
+              if (cutKeepMode === 'group') cutAuditionBar(v);
               return;  // 跳转后的首个 timeupdate 再走高亮，防旧位置误亮
             }
-            v.pause(); cutKeepSeq = null;
+            v.pause(); cutKeepSeq = null; cutKeepMode = null;
             cutAuditionBar(null);  // 播放完毕：试听结束收起
           } else {
-            cutAuditionBar(v);  // 试听时间戳与当前段保持一致
+            if (cutKeepMode === 'group') cutAuditionBar(v);  // 试听时间戳与当前段保持一致
           }
         }
         // ② 高亮跟随（与字幕/修订阶段同款 active：段间缝隙保持前一段亮）
