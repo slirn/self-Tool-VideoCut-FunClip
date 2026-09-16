@@ -1493,6 +1493,16 @@ footer { display: none !important; }
   gap: 10px; flex-wrap: wrap; margin-bottom: 8px;
   font-size: 13px; font-weight: 600; color: var(--text-primary);
 }
+/* 底稿按钮组（REQ-20260916-009）：载入/恢复 高/中/低 任一档提示词 */
+.slirn-rigor-preset-group {
+  display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap;
+}
+.slirn-rigor-preset-label {
+  font-size: 12px; font-weight: 600; color: var(--text-secondary);
+}
+.slirn-btn.slirn-rigor-preset {
+  padding: 3px 10px; font-size: 12px; line-height: 1.5; border-radius: 999px;
+}
 .slirn-rigor-custom-text {
   width: 100%; min-height: 150px; font-size: 12.5px;
   font-family: Consolas, Menlo, monospace; line-height: 1.55;

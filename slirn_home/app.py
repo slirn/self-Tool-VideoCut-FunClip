@@ -310,9 +310,10 @@ def _render_rigor_picker() -> str:
     每档带定位标题、说明、例子（revision_service.RIGOR_LEVELS），
     让操作者不看文档也能体感三档差别；不预选（必须主动选择），
     上次选择由前端 localStorage 预填（applyRevRigorState）。
-    自定义档（REQ-20260916-007）：默认底稿（高档完整提示词，随 data-default-prompt
-    下发）可编辑 + 一键恢复默认；textarea 服务端置空，由 JS 预填
-    localStorage 草稿（slirnRevCustomPrompt）或底稿。
+    自定义档（REQ-20260916-007）：默认底稿（高档完整提示词）可编辑；
+    REQ-20260916-009：高/中/低三档完整提示词随 data-prompt-* 下发，
+    编辑区提供三个底稿按钮 — 点击即载入/恢复该档（默认底稿仍为高档）；
+    textarea 服务端置空，由 JS 预填 localStorage 草稿（slirnRevCustomPrompt）或高档底稿。
     """
     from slirn_home import revision_service
     from slirn_home.revision_service import RIGOR_LEVELS
@@ -329,26 +330,42 @@ def _render_rigor_picker() -> str:
             f'</label>'
         )
     cards += (
-        '<label class="slirn-rigor-card" title="在默认提示词基础上修改修订标准，适合有自己一套规则的老手">'
+        '<label class="slirn-rigor-card" title="可在高/中/低任一底稿基础上修改修订标准，'
+        '适合有自己一套规则的老手">'
         '<input type="radio" name="slirn-rev-rigor" value="custom" />'
         '<span class="slirn-rigor-card-title">自 · 自定义严谨性</span>'
-        '<span class="slirn-rigor-card-desc">在默认提示词（严格打磨底稿）基础上修改修订标准，'
+        '<span class="slirn-rigor-card-desc">可在高/中/低任一底稿基础上修改修订标准，'
         '可附加自有规则</span>'
         '<span class="slirn-rigor-card-example">例：附加「专业术语保留英文原文」等自有规则</span>'
         '</label>'
     )
-    # 自定义提示词编辑区：选「自定义」时由 JS 展开；底稿放 data-default-prompt，
-    # 恢复默认 = textarea.value ← data-default-prompt（与服务端回退逻辑同源）
+    # 自定义提示词编辑区：选「自定义」时由 JS 展开；高/中/低三档完整提示词随
+    # data-prompt-* 下发（REQ-20260916-009）— 点底稿按钮即载入/恢复该档提示词
+    # （与服务端 default_custom_prompt 回退逻辑同源，默认底稿 = 高档）
+    preset_btns = "".join(
+        f'<button type="button" class="slirn-btn slirn-rigor-preset"'
+        f' data-action="rigor-prompt-preset" data-preset="{key}"'
+        f' title="载入「{_esc(cfg["badge"])} · {_esc(cfg["title"])}」完整提示词，可在此基础上修改">'
+        f'{_esc(cfg["badge"])} · {_esc(cfg["title"])}</button>'
+        for key, cfg in RIGOR_LEVELS.items()
+    )
     custom = (
         f'<div class="slirn-rigor-custom" id="slirn-rigor-custom" style="display:none;"'
-        f' data-default-prompt="{_esc(revision_service.default_custom_prompt())}">'
+        f' data-prompt-high="{_esc(revision_service.build_system_prompt("high"))}"'
+        f' data-prompt-medium="{_esc(revision_service.build_system_prompt("medium"))}"'
+        f' data-prompt-low="{_esc(revision_service.build_system_prompt("low"))}">'
         '<div class="slirn-rigor-custom-head">'
-        '<span>📝 自定义提示词（默认 = 严格打磨底稿，可直接修改）</span>'
-        '<button type="button" class="slirn-btn" data-action="rigor-prompt-reset">↩️ 恢复默认提示词</button>'
+        '<span>📝 自定义提示词（可载入高/中/低底稿修改）</span>'
+        '<span class="slirn-rigor-preset-group">'
+        '<span class="slirn-rigor-preset-label">底稿：</span>'
+        f'{preset_btns}'
+        '</span>'
         '</div>'
         '<textarea class="slirn-textarea slirn-rigor-custom-text" rows="10"'
-        ' placeholder="在此修改默认提示词…"></textarea>'
-        '<div class="slirn-rigor-custom-tip">请保留「输出要求」中的 JSON 格式部分，否则模型输出无法解析；'
+        ' placeholder="点右侧底稿载入参考后直接修改…"></textarea>'
+        '<div class="slirn-rigor-custom-tip">点「底稿：高/中/低」载入对应级别的完整提示词'
+        '（会覆盖当前编辑内容），给修改提供参考、也可一键恢复任一档；'
+        '请保留「输出要求」中的 JSON 格式部分，否则模型输出无法解析；'
         '内容更正（fix）判定建议保留。草稿自动保存，仅本机浏览器。</div>'
         '</div>'
     )
@@ -1774,9 +1791,9 @@ ROUTER_JS = """
     syncRigorCustomUI();  // 自定义档编辑区跟随（REQ-20260916-007）
   }
 
-  // ===== 自定义严谨性（REQ-20260916-007）：编辑区展开 + 底稿/草稿预填 =====
-  // 选中「自定义」才展开；textarea 首次展开预填 localStorage 草稿，无草稿用默认底稿
-  // （data-default-prompt 与服务端回退逻辑同源），此后不再覆盖用户编辑
+  // ===== 自定义严谨性（REQ-20260916-007/009）：编辑区展开 + 底稿/草稿预填 =====
+  // 选中「自定义」才展开；textarea 首次展开预填 localStorage 草稿，无草稿用高档底稿
+  // （data-prompt-high 与服务端 default_custom_prompt 回退逻辑同源），此后不再覆盖用户编辑
   function syncRigorCustomUI() {
     var wrap = document.getElementById('slirn-rigor-custom');
     if (!wrap) return;
@@ -1787,7 +1804,7 @@ ROUTER_JS = """
     if (isCustom && ta && !ta.dataset.slirnFilled) {
       var draft = '';
       try { draft = localStorage.getItem('slirnRevCustomPrompt') || ''; } catch (err) {}
-      ta.value = draft || wrap.getAttribute('data-default-prompt') || '';
+      ta.value = draft || wrap.getAttribute('data-prompt-high') || '';
       ta.dataset.slirnFilled = '1';
     }
   }
@@ -2326,15 +2343,21 @@ ROUTER_JS = """
     var action = target.getAttribute('data-action');
     e.preventDefault();
 
-    if (action === 'rigor-prompt-reset') {
-      // 自定义严谨性：恢复默认提示词（REQ-20260916-007）；草稿同步覆盖
+    if (action === 'rigor-prompt-preset') {
+      // 自定义严谨性：载入/恢复 高/中/低 任一档底稿（REQ-20260916-009）；
+      // 已有编辑内容且不同 → 确认后再覆盖；草稿同步覆盖
       var wrapR = document.getElementById('slirn-rigor-custom');
       var taR = wrapR ? wrapR.querySelector('.slirn-rigor-custom-text') : null;
       if (taR) {
-        taR.value = wrapR.getAttribute('data-default-prompt') || '';
-        try { localStorage.setItem('slirnRevCustomPrompt', taR.value); } catch (err) {}
+        var keyR = target.getAttribute('data-preset') || 'high';
+        var textR = wrapR.getAttribute('data-prompt-' + keyR) || '';
+        var nameR = target.textContent.trim();
+        if (taR.value && taR.value !== textR &&
+            !window.confirm('载入底稿「' + nameR + '」会覆盖当前编辑内容。确定继续？')) return;
+        taR.value = textR;
+        try { localStorage.setItem('slirnRevCustomPrompt', textR); } catch (err) {}
         taR.focus();
-        toast('↩️ 已恢复默认提示词');
+        toast('已载入底稿「' + nameR + '」，可在此基础上修改');
       }
       return;
     }

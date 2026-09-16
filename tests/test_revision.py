@@ -643,15 +643,20 @@ def test_render_revision_zone_states(tmp_path: Path, monkeypatch):
     assert h2.count('name="slirn-rev-rigor"') == 4
     assert 'value="high"' in h2 and 'value="medium"' in h2 and 'value="low"' in h2
     assert 'value="custom"' in h2 and "自定义严谨性" in h2, "第四档自定义（REQ-20260916-007）"
+    assert "可在高/中/低任一底稿" in h2, "自定义档说明可在三档底稿上改（REQ-20260916-009）"
     assert "严格打磨" in h2 and "意思正确即可" in h2 and "只去严重问题" in h2
     assert h2.count("例：") == 4, "四档各带一个例子给操作者体感"
     assert "checked" not in h2, "服务端不预选 — 用户必须主动选择"
-    # 自定义提示词编辑区：服务端隐藏（选中自定义由 JS 展开）、textarea 置空（JS 预填草稿/底稿）
+    # 自定义提示词编辑区：服务端隐藏（选中自定义由 JS 展开）、textarea 置空（JS 预填草稿/高档底稿）
     assert 'id="slirn-rigor-custom" style="display:none;"' in h2
     assert h2.count('class="slirn-textarea slirn-rigor-custom-text"') == 1
-    assert 'placeholder="在此修改默认提示词…"' in h2
-    assert 'data-action="rigor-prompt-reset"' in h2 and "恢复默认提示词" in h2
-    assert "data-default-prompt=" in h2, "默认底稿随属性下发（恢复默认/服务端回退同源）"
+    assert 'placeholder="点右侧底稿载入参考后直接修改…"' in h2
+    # 高/中/低三个底稿按钮 + 三档完整提示词随属性下发（REQ-20260916-009），
+    # 默认底稿 = 高档（与服务端 default_custom_prompt 回退同源）
+    assert h2.count('data-action="rigor-prompt-preset" data-preset="') == 3
+    assert 'data-preset="high"' in h2 and 'data-preset="medium"' in h2 and 'data-preset="low"' in h2
+    assert 'data-prompt-high="' in h2 and 'data-prompt-medium="' in h2 and 'data-prompt-low="' in h2
+    assert "data-default-prompt" not in h2, "旧单底稿属性退役（统一 data-prompt-*）"
 
     # 状态 3：有建议 → 行式列表（与字幕生成列表同列布局 — REQ-20260916-002）
     outputs = m.tasks_dir / tid / "outputs"
