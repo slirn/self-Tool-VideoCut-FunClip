@@ -1248,13 +1248,32 @@ footer { display: none !important; }
 }
 .slirn-wb-stages-expand { display: none; }
 .wb-stages-collapsed .slirn-wb-stages { display: none; }
-.wb-stages-collapsed .slirn-wb-main { grid-template-columns: 1fr; }
+.wb-stages-collapsed .slirn-wb-main { grid-template-columns: 40px 1fr; }
 .wb-stages-collapsed .slirn-wb-stages-expand { display: inline-block; }
+
+/* 收起后左缘常驻竖向导轨（REQ-20260916-011）：恢复入口就在原面板位置，
+   不再只依赖右上角「展开阶段」小按钮（用户反馈：收起后找不到恢复入口） */
+.slirn-wb-stages-rail { display: none; }
+.wb-stages-collapsed .slirn-wb-stages-rail {
+  display: flex; flex-direction: column; align-items: center; align-self: stretch;
+  gap: 6px; padding: 14px 0 10px; cursor: pointer; user-select: none;
+  border: 1px dashed var(--border); border-radius: 12px;
+  color: var(--text-muted); font-size: 12.5px; font-weight: 700;
+  transition: color 0.15s, border-color 0.15s;
+}
+.wb-stages-collapsed .slirn-wb-stages-rail:hover {
+  color: var(--text-primary); border-color: var(--accent-solid, #4f7cff);
+}
 
 @media (max-width: 900px) {
   .slirn-wb-main { grid-template-columns: 1fr; }
   .slirn-wb-stages { flex-direction: row; flex-wrap: wrap; }
   .slirn-wb-stage { flex: 1 1 45%; }
+  /* 窄屏单列布局下，导轨横放在工作区顶部 */
+  .wb-stages-collapsed .slirn-wb-main { grid-template-columns: 1fr; }
+  .wb-stages-collapsed .slirn-wb-stages-rail {
+    flex-direction: row; gap: 8px; padding: 8px 12px;
+  }
 }
 
 /* ===== 字幕修订（REQ-20260915-005）===== */

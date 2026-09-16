@@ -195,8 +195,31 @@ def test_render_workbench_stages_collapse_controls(tmp_path: Path):
     html = _render_workbench(t.task_id, m)
     assert 'class="slirn-wb-stages-head"' in html
     # 两处开关：阶段卡头部收起 + 顶栏展开（展开按钮只在收起后由 CSS 显示）
-    assert html.count('data-action="wb-toggle-stages"') == 2
     assert "« 收起" in html and "🧭 展开阶段" in html
     assert "slirn-wb-stages-expand" in html
     # 阶段条目不受影响
     assert html.count('class="slirn-wb-stage ') == 8
+
+
+def test_render_workbench_stages_rail(tmp_path):
+    """REQ-20260916-011 — 收起后左缘常驻「阶段»」竖向导轨：恢复入口就在原面板位置。
+
+    背景：此前唯一恢复入口是右上角「🧭 展开阶段」小按钮，长列表滚动后不在
+    视口内，用户收起后找不到 → 阶段列表「消失再也出不来」。导轨与顶栏按钮
+    同一 data-action，任何一处点击即可展开；CSS 默认隐藏、收起后才显示。
+    """
+    from slirn_home.app import _render_workbench
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="导轨", original_video=video)
+    html = _render_workbench(t.task_id, m)
+    assert 'class="slirn-wb-stages-rail" data-action="wb-toggle-stages"' in html
+    # 导轨内容：🧭 + 阶 + 段 + »（竖排 span，避免 writing-mode 兼容性问题）
+    assert "<span>🧭</span><span>阶</span><span>段</span><span>»</span>" in html
+    # 三处开关共用同一 handler：阶段卡收起 + 顶栏展开 + 左缘导轨
+    assert html.count('data-action="wb-toggle-stages"') == 3
+    # CSS：导轨默认隐藏，收起后显示并占 40px 窄列（导轨在原面板位置）
+    css = (FUNCLIP_ROOT / "slirn_home" / "static" / "home.css").read_text(encoding="utf-8")
+    assert ".slirn-wb-stages-rail { display: none; }" in css
+    assert ".wb-stages-collapsed .slirn-wb-stages-rail {" in css
+    assert ".wb-stages-collapsed .slirn-wb-main { grid-template-columns: 40px 1fr; }" in css

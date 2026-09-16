@@ -924,6 +924,8 @@ def _render_workbench(task_id: str, mgr: TaskManager) -> str:
         {top_rows}
     </div>
     <div class="slirn-wb-main">
+        <div class="slirn-wb-stages-rail" data-action="wb-toggle-stages"
+             title="展开左侧阶段列表"><span>🧭</span><span>阶</span><span>段</span><span>»</span></div>
         <div class="slirn-card slirn-wb-stages">
             <div class="slirn-wb-stages-head"><span class="slirn-wb-stages-title">🧭 阶段</span>
                 <button class="slirn-btn-mini" data-action="wb-toggle-stages"
@@ -1799,6 +1801,10 @@ ROUTER_JS = """
     if (!host) return;
     var collapsed = '';
     try { collapsed = localStorage.getItem('slirnWbStagesCollapsed') || ''; } catch (err) {}
+    if (collapsed !== '0' && collapsed !== '1') {  // 脏值自愈：当作未收起（REQ-20260916-011）
+      collapsed = '';
+      try { localStorage.removeItem('slirnWbStagesCollapsed'); } catch (err) {}
+    }
     host.classList.toggle('wb-stages-collapsed', collapsed === '1');
   }
 
