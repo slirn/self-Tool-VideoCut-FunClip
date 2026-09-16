@@ -2882,7 +2882,7 @@ ROUTER_JS = """
   function rcDelete(btn) {
     var tid = btn.getAttribute('data-task-id') || '';
     if (!tid) { toast('❌ 缺少 task_id', 'error'); return; }
-    if (!window.confirm('删除「粗剪成片」（mp4 + 随片 srt 副产物）？\n'
+    if (!window.confirm('删除「粗剪成片」（mp4 + 随片 srt 副产物）？\\n'
         + '删除后需要重新合成才能预览效果（约 11 分钟）。')) return;
     btn.disabled = true;
     postJSON(SLIRN_API + '/compose_rough_delete', {task_id: tid}).then(function(r) {
