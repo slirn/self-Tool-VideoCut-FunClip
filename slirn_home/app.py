@@ -750,6 +750,109 @@ def _render_cutlist_zone(task_id: str, t, mgr: TaskManager) -> str:
         </div></div>'''
 
 
+def _render_rough_compose_zone(task_id: str, t, mgr: TaskManager) -> str:
+    """可选步骤 · 粗剪合成（REQ-20260916-016）。
+
+    根据切分修剪的执行口径（保留区间）合成一版粗剪视频，快速预览切分后的
+    整体效果。可选：不推进任务状态、不合成不影响后续阶段；产物
+    outputs/rough_compose.mp4 存在即视为本阶段完成。口径与切分修剪面板
+    完全一致（修订决策实时 + 已保存的手工翻转/改判）。
+    """
+    from slirn_home import asr_service, compose_service, cutlist_service, revision_service
+
+    outputs_dir = mgr.tasks_dir / task_id / "outputs"
+
+    def _fmt_dur(ms: int) -> str:
+        s = ms // 1000
+        mm_, ss_ = divmod(s, 60)
+        hh_, mm_ = divmod(mm_, 60)
+        return f"{hh_}:{mm_:02d}:{ss_:02d}" if hh_ else f"{mm_}:{ss_:02d}"
+
+    def _guide(msg: str, btn: str) -> str:
+        return f'''<div class="slirn-card" style="margin-top:16px;">
+        <div class="slirn-panel-header"><div class="slirn-panel-title">🎥 粗剪合成 <span class="slirn-wb-stage-optional">可选</span></div></div>
+        <div class="slirn-empty"><div class="slirn-empty-icon">🚧</div>
+            <div class="slirn-empty-text">{_esc(msg)}</div></div>
+        <div class="slirn-task-actions" style="margin-top:14px;">{btn}</div></div>'''
+
+    rev = revision_service.load_revision(outputs_dir)
+    entries = (rev or {}).get("entries") or []
+    if not entries:
+        return _guide(
+            "需要先完成「字幕修订」— 粗剪合成按切分修剪的保留区间拼接视频",
+            '<button class="slirn-btn slirn-btn-primary" data-action="wb-stage" '
+            'data-pane="subtitle_review">📝 去字幕修订</button>',
+        )
+    if not revision_service.all_decided(rev):
+        return _guide(
+            "字幕修订还有未决策条目 — 切分修剪完成后才能确定保留区间",
+            '<button class="slirn-btn slirn-btn-primary" data-action="wb-stage" '
+            'data-pane="subtitle_review">📝 去完成决策</button>',
+        )
+    sub_meta = asr_service.load_subtitle(outputs_dir)
+    if not (sub_meta and sub_meta.get("segments")):
+        return _guide(
+            "缺少字幕生成产物 — 请先在「字幕生成」阶段生成字幕",
+            '<button class="slirn-btn slirn-btn-primary" data-action="wb-stage" '
+            'data-pane="subtitle">🎙 去生成字幕</button>',
+        )
+
+    # 与切分修剪面板同口径：修订实时重建 + 已保存手工翻转/改判 → 执行口径保留区间
+    saved = cutlist_service.load_cutlist(outputs_dir)
+    cutlist = cutlist_service.build_cutlist(
+        sub_meta, rev,
+        manual_marks=(saved or {}).get("manual_marks") if saved else None,
+        actions=(saved or {}).get("actions") if saved else None,
+    )
+    units = cutlist_service.effective_keep_units(cutlist)
+    intervals = [(int(u["start_ms"]) / 1000, int(u["end_ms"]) / 1000) for u in units]
+    n_merged = len(compose_service.merge_intervals(intervals))
+    keep_ms = sum(int(u["end_ms"]) - int(u["start_ms"]) for u in units)
+
+    artifact = compose_service.rough_compose_path(outputs_dir)
+    preview_html = ""
+    stale_note = ""
+    if artifact.exists():
+        stat = artifact.stat()
+        dur = compose_service._probe_duration(artifact)  # noqa: SLF001 — 同模块族内使用
+        size_mb = round(stat.st_size / 1024 / 1024, 1)
+        dur_str = _fmt_dur(int((dur or 0) * 1000)) if dur else "时长未知"
+        import time as _time
+
+        mtime = _time.strftime("%Y-%m-%d %H:%M", _time.localtime(stat.st_mtime))
+        saved_at = str((saved or {}).get("saved_at") or "")
+        rev_at = str((rev or {}).get("saved_at") or "")
+        newer = max(saved_at, rev_at)
+        if newer and newer > _time.strftime("%Y-%m-%dT%H:%M:%S", _time.localtime(stat.st_mtime)):
+            stale_note = ('<div class="slirn-cut-stale">⚠️ 切分决策在合成之后有更新 — '
+                          "建议重新合成以预览最新效果</div>")
+        preview_html = f'''{stale_note}
+        <div class="slirn-video-wrap" style="margin-top:12px;">
+            <video id="slirn-rc-player" controls preload="metadata"
+                   src="/slirn/api/video/{_esc(task_id)}?src=rough_compose"></video>
+        </div>
+        <div class="slirn-sub-meta" style="margin-top:8px;">🎞️ 粗剪成片 · {size_mb} MB · {dur_str} · 合成于 {mtime}</div>'''
+
+    stats_line = (
+        f"保留单元 {len(units)} 个（合并连续段后 {n_merged} 个切点） · "
+        f"预计成片时长 {_fmt_dur(keep_ms)}"
+    )
+    return f'''<div class="slirn-card" style="margin-top:16px;">
+        <div class="slirn-panel-header"><div class="slirn-panel-title">🎥 粗剪合成 <span class="slirn-wb-stage-optional">可选</span></div></div>
+        <div class="slirn-sub-meta">{stats_line}</div>
+        <div class="slirn-form-hint">根据「切分修剪」的保留区间把视频拼接成一版粗剪成片，快速预览切分后的整体效果。
+        本步骤为<b>可选</b> — 不合成也不影响后续阶段；口径与切分修剪面板一致（修订决策实时并入，
+        手工翻转/整条改判以「💾 保存切分决策」之后的为准）。合成需重新编码（边界按字幕级精度，
+        不关键帧对齐）：44 分钟源实测约 6 分钟，请在后台合成期间继续其它操作。</div>
+        <div class="slirn-task-actions" style="margin-top:14px;">
+            <button class="slirn-btn slirn-btn-primary" id="slirn-rc-compose" data-action="compose-rough"
+                    data-task-id="{_esc(task_id)}">🎬 {'重新合成粗剪视频' if artifact.exists() else '合成粗剪视频'}</button>
+        </div>
+        <div id="slirn-rc-status" class="slirn-status-msg" style="display:none;"></div>
+        {preview_html}
+    </div>'''
+
+
 def _task_echo_fragments(t) -> tuple[str, str, str]:
     """任务回显片段（REQ-20260915-002）— 详情页 / 工作台共用。
 
@@ -864,7 +967,7 @@ _WB_STAGES = [
     ("subtitle",        "SUBTITLE_GENERATED",   "字幕生成", "🎙", "FunASR seaco-paraformer + 热词识别"),
     ("subtitle_review", "SUBTITLE_REVIEWED",    "字幕修订", "📝", "对照视频逐段校对、修改字幕文本与时间"),
     ("rough_cut",       "ROUGH_CUT_DONE",       "切分修剪", "✂️", "按修订决策带入保留/更正段，切分段父编号+子编号"),
-    ("fine_subtitle",   "FINE_SUBTITLE_DONE",   "精剪字幕", "🔧", "对切分修剪清单重新生成精确字幕"),
+    ("rough_compose",  "FINE_SUBTITLE_DONE",   "粗剪合成", "🎥", "按切分保留内容合成粗剪视频，快速预览整体效果（可选）"),
     ("fine_review",     "FINE_SUBTITLE_REVIEWED", "精剪修订", "🔎", "精剪字幕二次校对"),
     ("fine_cut",        "FINE_CUT_DONE",        "精剪视频", "🎬", "按精剪段生成成品视频"),
     ("mux",             "MUXED",                "字幕合成", "🎞️", "字幕烧录进画面 / 封装输出成品"),
@@ -919,6 +1022,13 @@ def _wb_stage_states(t) -> list[str]:
             )
         elif key == "rough_cut":
             states.append("done" if (cut_done or cur_rank >= rank[status_name]) else "pending")
+        elif key == "rough_compose":
+            # 可选步骤（REQ-20260916-016）：不推进任务状态，产物存在即完成；
+            # 未合成也不阻塞后续阶段（current 停留于此仅是建议）
+            from slirn_home import compose_service as _comp_mod
+
+            composed = _comp_mod.rough_compose_path(outputs_dir).exists()
+            states.append("done" if (composed or cur_rank >= rank[status_name]) else "pending")
         else:
             states.append("done" if cur_rank >= rank[status_name] else "pending")
     # current = 第一个 pending
@@ -960,11 +1070,12 @@ def _render_workbench(task_id: str, mgr: TaskManager) -> str:
     for i, (key, _st, title, icon, desc) in enumerate(_WB_STAGES):
         state = states[i]
         mark = "✓" if state == "done" else ("▶" if state == "current" else str(i + 1))
+        opt_chip = '<span class="slirn-wb-stage-optional">可选</span>' if key == "rough_compose" else ""
         stage_items += (
             f'<div class="slirn-wb-stage {state}{" active" if i == focus else ""}" '
             f'data-action="wb-stage" data-pane="{key}">'
             f'<span class="slirn-wb-stage-mark">{mark}</span>'
-            f'<div class="slirn-wb-stage-body"><div class="slirn-wb-stage-title">{icon} {title}</div>'
+            f'<div class="slirn-wb-stage-body"><div class="slirn-wb-stage-title">{icon} {title}{opt_chip}</div>'
             f'<div class="slirn-wb-stage-desc">{desc}</div></div></div>'
         )
 
@@ -990,6 +1101,7 @@ def _render_workbench(task_id: str, mgr: TaskManager) -> str:
         "subtitle": _render_subtitle_zone(task_id, t, mgr),
         "subtitle_review": _render_revision_zone(task_id, t, mgr),
         "rough_cut": _render_cutlist_zone(task_id, t, mgr),
+        "rough_compose": _render_rough_compose_zone(task_id, t, mgr),
     }
     for i, (key, _st, _t2, _ic, desc) in enumerate(_WB_STAGES):
         if key in panes:
@@ -1883,6 +1995,8 @@ ROUTER_JS = """
         // 重渲染后旧行引用全部失效：试听状态清零（防跳播序列指向已移除的行）
         cutKeepSeq = null; cutKeepIdx = 0; cutKeepMode = null;
         bindCutPlayer();  // 切分修剪播放器（timeupdate 高亮/自动停/跳播 — REQ-20260916-011）
+        var rcPv = document.getElementById('slirn-rc-player');
+        if (rcPv) bindSpeedControl(rcPv);  // 粗剪成片预览倍速（REQ-20260916-014 同款）
         applyWbStagesState();  // 恢复上次收起/展开（跨刷新保持 — REQ-20260916-002）
         applyRevRigorState();  // 上次选过的严谨性级别预填（REQ-20260916-003）
       } else if (r && r.error) {
@@ -2461,6 +2575,79 @@ ROUTER_JS = """
     });
     var acted = !!document.querySelector('#slirn-cut-list .slirn-cut-group[data-act]');
     return flipped || acted;
+  }
+  // 粗剪合成（REQ-20260916-016，可选步骤）：启动后台拼接 → 轮询进度 → 完成注入预览
+  function rcFmtDur(sec) {
+    var s = Math.floor(sec || 0), m = Math.floor(s / 60), h = Math.floor(m / 60);
+    var two = function(n) { return (n < 10 ? '0' : '') + n; };
+    return h ? h + ':' + two(m % 60) + ':' + two(s % 60) : m + ':' + two(s % 60);
+  }
+  function rcInjectPreview(tid, result) {
+    var pane = document.getElementById('slirn-wb-pane-rough_compose');
+    if (!pane) return;
+    var old = pane.querySelector('#slirn-rc-player');
+    if (old && old.closest('.slirn-video-wrap')) {  // 已有预览 → 换源刷新即可
+      old.src = '/slirn/api/video/' + encodeURIComponent(tid) + '?src=rough_compose&t=' + Date.now();
+      old.load();
+      var meta = pane.querySelector('.slirn-sub-meta:last-of-type');
+      if (meta && result) meta.textContent = '🎞️ 粗剪成片 · ' + result.size_mb + ' MB · ' + rcFmtDur(result.duration);
+      return;
+    }
+    var card = pane.querySelector('.slirn-card');
+    if (!card) return;
+    var wrap = document.createElement('div');
+    wrap.className = 'slirn-video-wrap';
+    wrap.style.marginTop = '12px';
+    wrap.innerHTML = '<video id="slirn-rc-player" controls preload="metadata" src="'
+      + '/slirn/api/video/' + encodeURIComponent(tid) + '?src=rough_compose"></video>';
+    card.appendChild(wrap);
+    var meta = document.createElement('div');
+    meta.className = 'slirn-sub-meta';
+    meta.style.marginTop = '8px';
+    meta.textContent = result ? ('🎞️ 粗剪成片 · ' + result.size_mb + ' MB · ' + rcFmtDur(result.duration)) : '🎞️ 粗剪成片已生成';
+    card.appendChild(meta);
+    bindSpeedControl(wrap.querySelector('video'));  // 倍速控件（REQ-20260916-014）
+  }
+  function rcCompose(btn) {
+    var tid = btn.getAttribute('data-task-id') || '';
+    var status = document.getElementById('slirn-rc-status');
+    var setBtn = function(txt, dis) { btn.textContent = txt; btn.disabled = !!dis; };
+    var show = function(msg) { if (status) { status.style.display = ''; status.textContent = msg; } };
+    setBtn('🎬 合成中…', true);
+    show('⏳ 正在启动合成…');
+    postJSON(SLIRN_API + '/compose_rough', {task_id: tid}).then(function(r) {
+      if (!r || !r.ok) {
+        setBtn('🎬 合成粗剪视频', false);
+        show('');
+        if (status) status.style.display = 'none';
+        toast('❌ ' + (r && r.error ? r.error : '启动失败'), 'error');
+        return;
+      }
+      toast(r.toast || '🎬 合成已启动');
+      var timer = setInterval(function() {
+        postJSON(SLIRN_API + '/compose_rough_status', {task_id: tid}).then(function(s) {
+          if (!s || !s.ok || !s.job) return;
+          var j = s.job;
+          if (j.state === 'running') {
+            var pct = Math.max(1, Math.min(99, Math.round(j.progress || 0)));
+            setBtn('🎬 合成中… ' + pct + '%', true);
+            show('⏳ 合成进行中 ' + pct + '% — 可继续其它操作，完成后此处自动显示预览');
+            return;
+          }
+          clearInterval(timer);
+          if (j.state === 'done') {
+            setBtn('🎬 重新合成粗剪视频', false);
+            show('✅ 粗剪成片已生成 — 下方预览整体效果');
+            toast('✅ 粗剪成片已生成');
+            rcInjectPreview(tid, j.result);
+          } else {
+            setBtn('🎬 重新合成粗剪视频', false);
+            show('❌ ' + (j.error || '合成失败'));
+            toast('❌ ' + (j.error || '合成失败'), 'error');
+          }
+        });
+      }, 2000);
+    });
   }
   // 保存切分决策：全量收集子段 mark + 组级 action（改判 split 附切分后内容）→ 落盘
   function cutSave(btn) {
@@ -3169,6 +3356,10 @@ ROUTER_JS = """
     else if (action === 'save-cut-decisions') {
       // 保存切分决策（REQ-20260916-011）：翻转 manual_marks + 字幕级改判 actions
       cutSave(target);
+    }
+    else if (action === 'compose-rough') {
+      // 粗剪合成（REQ-20260916-016，可选）：后台拼接保留区间成片
+      rcCompose(target);
     }
     else if (action === 'rebuild-cutlist') {
       // 重新执行切分修剪（REQ-20260916-011）：按最新修订决策整单重算落盘，
@@ -4266,13 +4457,19 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         from urllib.parse import unquote as _unquote
 
         tid = _unquote(scope["path"].rsplit("/", 1)[-1])
-        # ?src=original → 强制服务完整原视频（编辑页滑全片定位用，REQ-20260915-003）
-        force_original = _parse_qs(scope.get("query_string", b"").decode("latin-1")).get("src", [""])[0] == "original"
+        # ?src=original → 完整原视频（编辑页滑全片定位用，REQ-20260915-003）
+        # ?src=rough_compose → 粗剪成片（可选阶段产物，REQ-20260916-016）
+        src_q = _parse_qs(scope.get("query_string", b"").decode("latin-1")).get("src", [""])[0]
         video: Path | None = None
         try:
             t = mgr.get(tid)
-            if force_original and t.original_video_source.exists():
+            if src_q == "original" and t.original_video_source.exists():
                 video = t.original_video_source
+            elif src_q == "rough_compose":
+                from slirn_home import compose_service as _comp_mod
+
+                rc = _comp_mod.rough_compose_path(mgr.tasks_dir / tid / "outputs")
+                video = rc if rc.exists() else None
             else:
                 video, _label = _resolve_task_video(t)
         except Exception:  # noqa: BLE001
@@ -4724,6 +4921,70 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         if stats.get("action_changed"):
             parts.append(f"字幕级改判 {stats['action_changed']} 条")
         return _ok("", toast=" · ".join(parts), stats=stats)
+
+    @app.app.post("/slirn/api/compose_rough")
+    async def compose_rough(body: dict = Body(default_factory=dict)):
+        """启动粗剪合成（REQ-20260916-016，可选步骤）：后台线程拼接保留区间。
+
+        口径与切分修剪面板一致（修订实时 + 已保存手工翻转/改判）；
+        不推进任务状态。已在跑 → 返回 running 供前端接续轮询。
+        """
+        from slirn_home import asr_service, compose_service, cutlist_service, revision_service
+
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            mgr.get(tid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+        outputs_dir = mgr.tasks_dir / tid / "outputs"
+        rev = revision_service.load_revision(outputs_dir)
+        if not (rev and rev.get("entries")):
+            return _err("请先完成「字幕修订」")
+        if not revision_service.all_decided(rev):
+            return _err("字幕修订还有未决策条目，无法确定保留区间")
+        sub_meta = asr_service.load_subtitle(outputs_dir)
+        if not (sub_meta and sub_meta.get("segments")):
+            return _err("缺少字幕生成产物，请先生成字幕")
+        saved = cutlist_service.load_cutlist(outputs_dir)
+        try:
+            cutlist = cutlist_service.build_cutlist(
+                sub_meta, rev,
+                manual_marks=(saved or {}).get("manual_marks") if saved else None,
+                actions=(saved or {}).get("actions") if saved else None,
+            )
+        except Exception as e:  # noqa: BLE001
+            return _err(f"计算保留区间失败: {e}")
+        units = cutlist_service.effective_keep_units(cutlist)
+        if not units:
+            return _err("没有保留内容 — 全部被删除时无需合成")
+        intervals = [(int(u["start_ms"]) / 1000, int(u["end_ms"]) / 1000) for u in units]
+        video, _label = _resolve_task_video(mgr.get(tid))
+        if video is None:
+            return _err("任务视频文件缺失，无法合成")
+        keep_ms = sum(int(u["end_ms"]) - int(u["start_ms"]) for u in units)
+        started = compose_service.start_compose(tid, video, intervals, compose_service.rough_compose_path(outputs_dir))
+        job = compose_service.job_status(tid) or {}
+        return _ok("", running=bool(started), job=job,
+                   toast="🎬 合成已启动" if started else "🎬 合成已在进行中",
+                   keep_ms=keep_ms, segments=len(compose_service.merge_intervals(intervals)))
+
+    @app.app.post("/slirn/api/compose_rough_status")
+    async def compose_rough_status(body: dict = Body(default_factory=dict)):
+        """粗剪合成进度轮询（REQ-20260916-016）。"""
+        from slirn_home import compose_service
+
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        job = compose_service.job_status(tid)
+        if job is None:  # 服务重启后 job 丢失 — 产物在即视为完成
+            artifact = compose_service.rough_compose_path(mgr.tasks_dir / tid / "outputs")
+            if artifact.exists():
+                return _ok("", job={"state": "done", "progress": 100.0})
+            return _err("没有进行中的合成任务")
+        return _ok("", job=job)
 
     @app.app.post("/slirn/api/resplit_segment")
     async def resplit_segment_api(body: dict = Body(default_factory=dict)):

@@ -1231,6 +1231,12 @@ footer { display: none !important; }
 .slirn-wb-stage.current .slirn-wb-stage-mark { background: var(--accent-solid, #4f7cff); color: #fff; }
 .slirn-wb-stage-title { font-size: 13.5px; font-weight: 600; color: var(--text-primary); }
 .slirn-wb-stage.done .slirn-wb-stage-title { color: var(--text-muted); }
+.slirn-wb-stage-optional {
+  display: inline-block; margin-left: 6px; padding: 1px 7px;
+  border-radius: 999px; vertical-align: 1px;
+  background: rgba(124, 92, 214, 0.12); color: #5b3fa8;
+  font-size: 10.5px; font-weight: 600; line-height: 1.5;
+}
 .slirn-wb-stage-desc { font-size: 11.5px; color: var(--text-muted); margin-top: 2px; line-height: 1.4; }
 .slirn-wb-stage.active { border-color: var(--accent-solid, #4f7cff); background: var(--bg-hover, rgba(127,127,127,0.08)); }
 

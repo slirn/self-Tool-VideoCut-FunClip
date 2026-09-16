@@ -171,7 +171,11 @@ def test_render_workbench_layout(tmp_path: Path):
     assert "✂️ 切分修剪" in html, "阶段名「粗剪」改为「切分修剪」（REQ-20260916-008）"
     assert "处理剪辑 · 第 3 步：切分修剪" in html
     assert 'id="slirn-wb-pane-rough_cut"' in html
-    assert html.count("规划中 — 该阶段将在后续版本提供") == 4
+    # 粗剪合成（REQ-20260916-016）：原「精剪字幕」占位真实化 — 可选步骤，产物驱动 done
+    assert "🎥 粗剪合成" in html
+    assert "slirn-wb-stage-optional" in html, "可选徽章"
+    assert 'id="slirn-wb-pane-rough_compose"' in html
+    assert html.count("规划中 — 该阶段将在后续版本提供") == 3
     assert html.count("slirn-wb-pane\"") >= 1  # 面板容器齐备
     # 聚焦 current（字幕生成）→ 字幕面板默认显示
     import re
