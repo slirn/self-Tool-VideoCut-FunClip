@@ -442,7 +442,8 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
         <div class="slirn-sub-meta">{stats}</div>
         <div class="slirn-rev-kbhint">⌨ 快捷键：<kbd>↑</kbd><kbd>↓</kbd> 上一条 / 下一条 · <kbd>空格</kbd> 播放 / 暂停
  · <kbd>R</kbd> 重播本行 · <kbd>K</kbd> 保留 · <kbd>D</kbd> 删除（标记后自动下一条）
- · <kbd>S</kbd> 切分（展开详情聚焦说明） · <kbd>Esc</kbd> 退出输入框</div>
+ · <kbd>S</kbd> 切分（展开详情聚焦说明） · <kbd>Esc</kbd> 退出输入框
+ · <span class="slirn-revkeys-open" data-action="revkeys-open" role="button" tabindex="0">⚙ 自定义</span></div>
         <div id="slirn-rev-player-wrap" class="slirn-video-wrap slirn-sub-player-wrap" style="display:none;">
             <video id="slirn-rev-player" controls preload="metadata"></video>
         </div>
@@ -1791,6 +1792,7 @@ ROUTER_JS = """
     // 工作台（重新）打开时，若 job 还在跑 → 恢复轮询
     var st = document.getElementById('slirn-rev-status');
     if (st && st.dataset.taskId && st.dataset.state === 'running') startRevPolling(st.dataset.taskId);
+    applyRevKeysState();  // 提示条跟随自定义键位（localStorage — REQ-20260916-005）
   }
 
   // ===== 字幕修订快捷键（REQ-20260916-004）：听 → 判 → 标记 → 下一条 =====
@@ -1842,13 +1844,22 @@ ROUTER_JS = """
   function revReplayRow() {
     var rows = revRows();
     var row = rows[revSelIndex(rows)];
-    if (!row) { toast('⌨ 先用 ↑ / ↓ 选择一条字幕', 'error'); return; }
+    if (!row) {
+      var kmR = revKeysLoad();
+      toast('⌨ 先用 ' + revKeyLabel(kmR.prev) + ' / ' + revKeyLabel(kmR.next) + ' 选择一条字幕', 'error');
+      return;
+    }
     playRevAt(row.getAttribute('data-task-id') || '', parseInt(row.getAttribute('data-start-ms'), 10) || 0);
   }
   function revApplyDecision(val) {
     var rows = revRows();
     var idx = revSelIndex(rows);
-    if (idx < 0) { toast('⌨ 先用 ↑ / ↓ 选择一条字幕，再按 K / D / S 标记', 'error'); return; }
+    if (idx < 0) {
+      var kmA = revKeysLoad();
+      toast('⌨ 先用 ' + revKeyLabel(kmA.prev) + ' / ' + revKeyLabel(kmA.next) + ' 选择一条字幕，再按 '
+        + revKeyLabel(kmA.keep) + ' / ' + revKeyLabel(kmA.del) + ' / ' + revKeyLabel(kmA.split) + ' 标记', 'error');
+      return;
+    }
     var row = rows[idx];
     var sel = row.querySelector('.slirn-rev-select');
     if (!sel) return;
@@ -1864,14 +1875,158 @@ ROUTER_JS = """
         note.focus();
         try { note.setSelectionRange(note.value.length, note.value.length); } catch (err) {}
       }
-      toast('✂️ 已标记切分 — 填写手动处理说明后按 Esc 返回列表');
+      toast('✂️ 已标记切分 — 填写手动处理说明后按 ' + revKeyLabel(revKeysLoad().esc) + ' 返回列表');
     } else {
       revSelectRow(idx + 1, true);  // 保留/删除：标记即过，自动下一条
     }
   }
+
+  // ===== 快捷键自定义（REQ-20260916-005）：localStorage 键 slirnRevKeys =====
+  // 每个人习惯不同：点击提示条「⚙ 自定义」→ 点键帽 → 按新键。键位图持久化，
+  // 提示条/引导 toast 跟随当前键位渲染；冲突拒绝、可恢复默认。
+  var REV_KEY_ACTIONS = [
+    { id: 'prev',   name: '上一条',                   def: 'arrowup' },
+    { id: 'next',   name: '下一条',                   def: 'arrowdown' },
+    { id: 'play',   name: '播放 / 暂停',               def: ' ' },
+    { id: 'replay', name: '重播本行',                  def: 'r' },
+    { id: 'keep',   name: '保留（标记后自动下一条）',   def: 'k' },
+    { id: 'del',    name: '删除（标记后自动下一条）',   def: 'd' },
+    { id: 'split',  name: '切分（展开详情并聚焦说明）', def: 's' },
+    { id: 'esc',    name: '退出说明输入框',             def: 'escape' }
+  ];
+  var REV_KEY_ALLOWED = ['arrowup', 'arrowdown', 'arrowleft', 'arrowright', 'escape',
+    'enter', 'backspace', 'delete', 'home', 'end', 'pageup', 'pagedown'];  // 单字符键另判
+  function revKeysLoad() {
+    var km = {};
+    REV_KEY_ACTIONS.forEach(function(a) { km[a.id] = a.def; });
+    try {
+      var raw = JSON.parse(localStorage.getItem('slirnRevKeys') || 'null');
+      if (raw && typeof raw === 'object') {
+        REV_KEY_ACTIONS.forEach(function(a) {
+          var v = raw[a.id];
+          // 脏数据（非字符串/重复键）→ 该动作回退默认，先到先得
+          if (typeof v === 'string' && v) {
+            var used = REV_KEY_ACTIONS.some(function(b) { return km[b.id] === v; });
+            if (!used) km[a.id] = v;
+          }
+        });
+      }
+    } catch (err) {}
+    return km;
+  }
+  function revKeyLabel(k) {
+    var map = { ' ': '空格', 'arrowup': '↑', 'arrowdown': '↓', 'arrowleft': '←',
+      'arrowright': '→', 'escape': 'Esc', 'enter': 'Enter', 'backspace': '⌫',
+      'delete': 'Del', 'home': 'Home', 'end': 'End', 'pageup': 'PgUp', 'pagedown': 'PgDn' };
+    var s = map[k] || ((k && k.length === 1) ? k.toUpperCase() : k);
+    return String(s).replace(/[&<>"']/g, function(c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+  // 提示条跟随当前键位重渲染（详情页/工作台两份一并更新）
+  function applyRevKeysState() {
+    var km = revKeysLoad();
+    document.querySelectorAll('.slirn-rev-kbhint').forEach(function(el) {
+      el.innerHTML = '⌨ 快捷键：<kbd>' + revKeyLabel(km.prev) + '</kbd><kbd>'
+        + revKeyLabel(km.next) + '</kbd> 上一条 / 下一条 · <kbd>' + revKeyLabel(km.play)
+        + '</kbd> 播放 / 暂停 · <kbd>' + revKeyLabel(km.replay) + '</kbd> 重播本行 · <kbd>'
+        + revKeyLabel(km.keep) + '</kbd> 保留 · <kbd>' + revKeyLabel(km.del)
+        + '</kbd> 删除（标记后自动下一条）· <kbd>' + revKeyLabel(km.split)
+        + '</kbd> 切分（展开详情聚焦说明） · <kbd>' + revKeyLabel(km.esc)
+        + '</kbd> 退出输入框'
+        + ' · <span class="slirn-revkeys-open" data-action="revkeys-open" role="button" tabindex="0">⚙ 自定义</span>';
+    });
+  }
+  var revKeysRec = null;  // 正在录制换绑的动作 id（null = 未在录制）
+  function revKeysModalOpen() { return !!document.getElementById('slirn-revkeys-modal'); }
+  function revKeysOpenModal() {
+    if (revKeysModalOpen()) return;
+    var bd = document.createElement('div');
+    bd.id = 'slirn-revkeys-modal';
+    bd.className = 'slirn-revkeys-backdrop';
+    bd.innerHTML = '<div class="slirn-revkeys-modal" role="dialog" aria-label="快捷键自定义">'
+      + '<div class="slirn-revkeys-title">⌨ 快捷键自定义'
+      + '<span class="slirn-revkeys-sub">点击键帽 → 按新键更换</span></div>'
+      + '<div class="slirn-revkeys-rows"></div>'
+      + '<div class="slirn-revkeys-foot">'
+      + '<span class="slirn-revkeys-tip">Esc 取消录制 · 不支持组合键</span>'
+      + '<button class="slirn-btn" data-action="revkeys-reset">↩️ 恢复默认</button>'
+      + '<button class="slirn-btn slirn-btn-primary" data-action="revkeys-close">✅ 完成</button>'
+      + '</div></div>';
+    bd.addEventListener('click', function(ev) { if (ev.target === bd) revKeysCloseModal(); });
+    document.body.appendChild(bd);
+    revKeysRec = null;
+    revKeysRenderRows();
+  }
+  function revKeysCloseModal() {
+    var m = document.getElementById('slirn-revkeys-modal');
+    if (m) m.remove();
+    revKeysRec = null;
+  }
+  function revKeysRenderRows(flashConflict) {
+    var box = document.querySelector('#slirn-revkeys-modal .slirn-revkeys-rows');
+    if (!box) return;
+    var km = revKeysLoad();
+    var html = '';
+    REV_KEY_ACTIONS.forEach(function(a) {
+      var cls = 'slirn-revkeys-key';
+      if (revKeysRec === a.id) cls += ' rec';
+      if (flashConflict === a.id) cls += ' conflict';
+      html += '<div class="slirn-revkeys-row"><span class="slirn-revkeys-name">' + a.name
+        + '</span><span class="' + cls + '" data-revkey="' + a.id + '">'
+        + (revKeysRec === a.id ? '按新键…' : revKeyLabel(km[a.id])) + '</span></div>';
+    });
+    box.innerHTML = html;
+  }
+  // 录制监听（capture）：弹窗打开时接管全部按键，列表快捷键让位
   document.addEventListener('keydown', function(e) {
-    // Esc：手动说明输入框 → 退回列表快捷键状态
-    if (e.key === 'Escape') {
+    if (!revKeysModalOpen()) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.ctrlKey || e.metaKey || e.altKey) {
+      toast('❌ 不支持组合键（避免与浏览器/系统冲突）', 'error');
+      return;
+    }
+    if (e.key === 'Shift' || e.key === 'Control' || e.key === 'Alt'
+      || e.key === 'Meta' || e.key === 'Dead') return;  // 等待实际按键
+    if (e.repeat) return;
+    if (!revKeysRec) { if (e.key === 'Escape') revKeysCloseModal(); return; }
+    // Esc 取消录制；但 esc 动作本身允许绑 Esc（否则永远绑不回去）
+    if (e.key === 'Escape' && revKeysRec !== 'esc') {
+      revKeysRec = null;
+      revKeysRenderRows();
+      return;
+    }
+    var k = (e.key || '').toLowerCase();
+    var okChar = (k.length === 1 && /[\x20-\x7e]/.test(k));  // 可打印 ASCII 单键
+    if (!okChar && REV_KEY_ALLOWED.indexOf(k) < 0) {
+      toast('❌ 该键不可用作快捷键', 'error');
+      return;
+    }
+    var km = revKeysLoad();
+    for (var i = 0; i < REV_KEY_ACTIONS.length; i++) {
+      var a = REV_KEY_ACTIONS[i];
+      if (a.id !== revKeysRec && km[a.id] === k) {
+        revKeysRenderRows(a.id);  // 冲突行闪红
+        toast('❌ 「' + revKeyLabel(k) + '」已用于「' + a.name + '」，请换一个键', 'error');
+        return;
+      }
+    }
+    km[revKeysRec] = k;
+    try { localStorage.setItem('slirnRevKeys', JSON.stringify(km)); } catch (err) {}
+    revKeysRec = null;
+    revKeysRenderRows();
+    applyRevKeysState();  // 提示条立即跟随新键位
+  }, true);
+
+  document.addEventListener('keydown', function(e) {
+    if (revKeysModalOpen()) return;  // 自定义弹窗打开 → 录制监听器接管
+    // 带修饰键的组合留给浏览器/系统
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    var k = (e.key || '').toLowerCase();
+    var km = revKeysLoad();
+    // 退回键：手动说明输入框 → 退回列表快捷键状态（焦点在输入框内也生效，键可改绑）
+    if (k === km.esc) {
       var ae = document.activeElement;
       if (ae && ae.classList && ae.classList.contains('slirn-rev-note-input')) {
         ae.blur();
@@ -1879,21 +2034,27 @@ ROUTER_JS = """
       }
       return;
     }
-    // 文本输入中不劫持（下拉的 ↑↓ 保留原生行为）
+    // 文本输入中不劫持（下拉的方向键保留原生行为）
     var t = e.target;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
-    // 带修饰键的组合留给浏览器/系统
-    if (e.ctrlKey || e.metaKey || e.altKey) return;
     var rows = revRows();
     if (!rows.length) return;  // 修订列表不可见/无行 → 快捷键不生效
-    var k = (e.key || '').toLowerCase();
-    if (e.key === 'ArrowDown') { e.preventDefault(); revSelectRow(revSelIndex(rows) + 1, true); }
-    else if (e.key === 'ArrowUp') { e.preventDefault(); revSelectRow(revSelIndex(rows) - 1, true); }
-    else if (k === ' ') { if (!e.repeat) { e.preventDefault(); revTogglePlay(); } }
-    else if (k === 'r') { if (!e.repeat) { e.preventDefault(); revReplayRow(); } }
-    else if (k === 'k') { if (!e.repeat) { e.preventDefault(); revApplyDecision('keep'); } }
-    else if (k === 'd') { if (!e.repeat) { e.preventDefault(); revApplyDecision('delete'); } }
-    else if (k === 's') { if (!e.repeat) { e.preventDefault(); revApplyDecision('split'); } }
+    // 反查当前键位对应的动作（按动作表顺序，先定义者优先）
+    var act = null;
+    for (var i = 0; i < REV_KEY_ACTIONS.length; i++) {
+      if (km[REV_KEY_ACTIONS[i].id] === k) { act = REV_KEY_ACTIONS[i].id; break; }
+    }
+    if (!act) return;
+    // 长按只放行导航（快速滚动）；其余动作防连环触发
+    if (e.repeat && act !== 'prev' && act !== 'next') return;
+    e.preventDefault();
+    if (act === 'prev') { revSelectRow(revSelIndex(rows) - 1, true); }
+    else if (act === 'next') { revSelectRow(revSelIndex(rows) + 1, true); }
+    else if (act === 'play') { revTogglePlay(); }
+    else if (act === 'replay') { revReplayRow(); }
+    else if (act === 'keep') { revApplyDecision('keep'); }
+    else if (act === 'del') { revApplyDecision('delete'); }
+    else if (act === 'split') { revApplyDecision('split'); }
   });
 
   function handleResp(resp, refreshCellId) {
@@ -1928,10 +2089,36 @@ ROUTER_JS = """
       return;
     }
 
+    // 快捷键自定义：键帽点击进入录制（REQ-20260916-005；键帽无 data-action，先于其判断）
+    var rk = e.target.closest('[data-revkey]');
+    if (rk) {
+      e.preventDefault();
+      revKeysRec = rk.getAttribute('data-revkey');
+      revKeysRenderRows();
+      return;
+    }
+
     var target = e.target.closest('[data-action]');
     if (!target) return;
     var action = target.getAttribute('data-action');
     e.preventDefault();
+
+    if (action === 'revkeys-open') {
+      revKeysOpenModal();
+      return;
+    }
+    if (action === 'revkeys-close') {
+      revKeysCloseModal();
+      return;
+    }
+    if (action === 'revkeys-reset') {
+      try { localStorage.removeItem('slirnRevKeys'); } catch (err) {}
+      revKeysRec = null;
+      revKeysRenderRows();
+      applyRevKeysState();
+      toast('↩️ 快捷键已恢复默认键位');
+      return;
+    }
 
     // Tab 切换
     if (TAB_BUTTONS[action]) {

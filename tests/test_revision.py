@@ -594,6 +594,10 @@ def test_render_revision_zone_states(tmp_path: Path, monkeypatch):
                "<kbd>D</kbd> 删除", "<kbd>S</kbd> 切分", "<kbd>Esc</kbd> 退出输入框"):
         assert kw in h3, f"提示条缺少：{kw}"
     assert "kbsel" not in h3, "选中行高亮由 JS 动态添加，服务端不预渲染"
+    # 快捷键自定义入口（REQ-20260916-005）：服务端渲染默认键位 + 入口；
+    # 自定义弹窗/键位图由 JS 端 localStorage 驱动，不预渲染
+    assert 'data-action="revkeys-open"' in h3 and "⚙ 自定义" in h3
+    assert "slirn-revkeys-modal" not in h3, "换绑弹窗由 JS 按需创建"
     assert 'data-action="save-revision"' in h3
     assert 'data-action="revise-subtitle"' in h3 and 'data-has-revision="1"' in h3
     # 重新分析的等级选择收进 <details>；旧数据无 rigor → 统计行不显示严谨性
