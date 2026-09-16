@@ -751,14 +751,15 @@ def _render_cutlist_zone(task_id: str, t, mgr: TaskManager) -> str:
 
 
 def _render_rough_compose_zone(task_id: str, t, mgr: TaskManager) -> str:
-    """可选步骤 · 粗剪合成（REQ-20260916-016）。
+    """可选步骤 · 粗剪合成（REQ-20260916-016 → REQ-20260916-018 改用上游合成方法）。
 
-    根据切分修剪的执行口径（保留区间）合成一版粗剪视频，快速预览切分后的
-    整体效果。可选：不推进任务状态、不合成不影响后续阶段；产物
-    outputs/rough_compose.mp4 存在即视为本阶段完成。口径与切分修剪面板
-    完全一致（修订决策实时 + 已保存的手工翻转/改判）。
+    根据切分修剪的执行口径（保留区间）用上游 VideoClipper 方法合成一版粗剪
+    视频，快速预览切分后的整体效果。可选：不推进任务状态、不合成不影响后续
+    阶段；产物 outputs/rough_compose.mp4 存在即视为本阶段完成（附随片字幕
+    rough_compose.srt）。口径与切分修剪面板完全一致（修订决策实时 + 已保存
+    的手工翻转/改判），行文本并入热词替换已确认的修正。
     """
-    from slirn_home import asr_service, compose_service, cutlist_service, revision_service
+    from slirn_home import asr_service, compose_service, cutlist_service, fine_service, revision_service
 
     outputs_dir = mgr.tasks_dir / task_id / "outputs"
 
@@ -805,8 +806,8 @@ def _render_rough_compose_zone(task_id: str, t, mgr: TaskManager) -> str:
         actions=(saved or {}).get("actions") if saved else None,
     )
     units = cutlist_service.effective_keep_units(cutlist)
-    intervals = [(int(u["start_ms"]) / 1000, int(u["end_ms"]) / 1000) for u in units]
-    n_merged = len(compose_service.merge_intervals(intervals))
+    intervals_ms = [(int(u["start_ms"]), int(u["end_ms"])) for u in units]
+    n_merged = len(compose_service.merge_intervals_ms(intervals_ms))
     keep_ms = sum(int(u["end_ms"]) - int(u["start_ms"]) for u in units)
 
     artifact = compose_service.rough_compose_path(outputs_dir)
@@ -822,7 +823,8 @@ def _render_rough_compose_zone(task_id: str, t, mgr: TaskManager) -> str:
         mtime = _time.strftime("%Y-%m-%d %H:%M", _time.localtime(stat.st_mtime))
         saved_at = str((saved or {}).get("saved_at") or "")
         rev_at = str((rev or {}).get("saved_at") or "")
-        newer = max(saved_at, rev_at)
+        fine_at = str((fine_service.load_fine(outputs_dir) or {}).get("saved_at") or "")
+        newer = max(saved_at, rev_at, fine_at)
         if newer and newer > _time.strftime("%Y-%m-%dT%H:%M:%S", _time.localtime(stat.st_mtime)):
             stale_note = ('<div class="slirn-cut-stale">⚠️ 切分决策在合成之后有更新 — '
                           "建议重新合成以预览最新效果</div>")
@@ -840,10 +842,11 @@ def _render_rough_compose_zone(task_id: str, t, mgr: TaskManager) -> str:
     return f'''<div class="slirn-card" style="margin-top:16px;">
         <div class="slirn-panel-header"><div class="slirn-panel-title">🎥 粗剪合成 <span class="slirn-wb-stage-optional">可选</span></div></div>
         <div class="slirn-sub-meta">{stats_line}</div>
-        <div class="slirn-form-hint">根据「切分修剪」的保留区间把视频拼接成一版粗剪成片，快速预览切分后的整体效果。
+        <div class="slirn-form-hint">用「处理之后的字幕 + 原视频」走上游 FunClip 的合成方法（VideoClipper）
+        把保留区间拼接成一版粗剪成片，快速预览切分后的整体效果，并附随片字幕 rough_compose.srt。
         本步骤为<b>可选</b> — 不合成也不影响后续阶段；口径与切分修剪面板一致（修订决策实时并入，
-        手工翻转/整条改判以「💾 保存切分决策」之后的为准）。合成需重新编码（边界按字幕级精度，
-        不关键帧对齐）：44 分钟源实测约 6 分钟，请在后台合成期间继续其它操作。</div>
+        手工翻转/整条改判以「💾 保存切分决策」之后的为准），行文本含热词替换已确认的修正。
+        合成需重新编码：44 分钟源实测约 11 分钟，请在后台合成期间继续其它操作。</div>
         <div class="slirn-task-actions" style="margin-top:14px;">
             <button class="slirn-btn slirn-btn-primary" id="slirn-rc-compose" data-action="compose-rough"
                     data-task-id="{_esc(task_id)}">🎬 {'重新合成粗剪视频' if artifact.exists() else '合成粗剪视频'}</button>
@@ -1142,7 +1145,7 @@ _WB_STAGES = [
     ("subtitle",        "SUBTITLE_GENERATED",   "字幕生成", "🎙", "FunASR seaco-paraformer + 热词识别"),
     ("subtitle_review", "SUBTITLE_REVIEWED",    "字幕修订", "📝", "对照视频逐段校对、修改字幕文本与时间"),
     ("rough_cut",       "ROUGH_CUT_DONE",       "切分修剪", "✂️", "按修订决策带入保留/更正段，切分段父编号+子编号"),
-    ("rough_compose",  "FINE_SUBTITLE_DONE",   "粗剪合成", "🎥", "按切分保留内容合成粗剪视频，快速预览整体效果（可选）"),
+    ("rough_compose",  "FINE_SUBTITLE_DONE",   "粗剪合成", "🎥", "按切分保留内容用上游 VideoClipper 合成粗剪视频（含随片字幕）"),
     ("fine_review",     "FINE_SUBTITLE_REVIEWED", "精剪修订", "🔎", "按任务热词替换字幕误识别文字，统计频次并逐处确认"),
     ("fine_cut",        "FINE_CUT_DONE",        "精剪视频", "🎬", "按精剪段生成成品视频"),
     ("mux",             "MUXED",                "字幕合成", "🎞️", "字幕烧录进画面 / 封装输出成品"),
@@ -5250,12 +5253,14 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
 
     @app.app.post("/slirn/api/compose_rough")
     async def compose_rough(body: dict = Body(default_factory=dict)):
-        """启动粗剪合成（REQ-20260916-016，可选步骤）：后台线程拼接保留区间。
+        """启动粗剪合成（REQ-20260916-018，可选步骤）：上游 VideoClipper 方法合成。
 
-        口径与切分修剪面板一致（修订实时 + 已保存手工翻转/改判）；
+        口径与切分修剪面板一致（修订实时 + 已保存手工翻转/改判）；行文本取
+        最新确认版（热词替换未撤销的行用 new_text，REQ-20260916-017）—
+        「处理之后的字幕 + 原视频」交给上游合成方法（video_clip）。
         不推进任务状态。已在跑 → 返回 running 供前端接续轮询。
         """
-        from slirn_home import asr_service, compose_service, cutlist_service, revision_service
+        from slirn_home import asr_service, compose_service, cutlist_service, fine_service, revision_service
 
         tid = (body.get("task_id") or "").strip()
         if not tid:
@@ -5285,16 +5290,24 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         units = cutlist_service.effective_keep_units(cutlist)
         if not units:
             return _err("没有保留内容 — 全部被删除时无需合成")
-        intervals = [(int(u["start_ms"]) / 1000, int(u["end_ms"]) / 1000) for u in units]
+        intervals_ms = [(int(u["start_ms"]), int(u["end_ms"])) for u in units]
+        # 行文本取最新确认版：热词替换（REQ-20260916-017）未撤销的行 → new_text
+        fine = fine_service.load_fine(outputs_dir)
+        fmap = {str(e["id"]): e["new_text"] for e in (fine or {}).get("entries") or []
+                if not e.get("reverted")}
+        lines = [{"id": str(u["id"]), "start_ms": int(u["start_ms"]), "end_ms": int(u["end_ms"]),
+                  "text": fmap.get(str(u["id"]), str(u["text"]))} for u in units]
         video, _label = _resolve_task_video(mgr.get(tid))
         if video is None:
             return _err("任务视频文件缺失，无法合成")
         keep_ms = sum(int(u["end_ms"]) - int(u["start_ms"]) for u in units)
-        started = compose_service.start_compose(tid, video, intervals, compose_service.rough_compose_path(outputs_dir))
+        n_merged = len(compose_service.merge_intervals_ms(intervals_ms))
+        started = compose_service.start_compose(
+            tid, video, intervals_ms, compose_service.rough_compose_path(outputs_dir), lines)
         job = compose_service.job_status(tid) or {}
         return _ok("", running=bool(started), job=job,
                    toast="🎬 合成已启动" if started else "🎬 合成已在进行中",
-                   keep_ms=keep_ms, segments=len(compose_service.merge_intervals(intervals)))
+                   keep_ms=keep_ms, segments=n_merged, raw_segments=len(intervals_ms))
 
     @app.app.post("/slirn/api/compose_rough_status")
     async def compose_rough_status(body: dict = Body(default_factory=dict)):
