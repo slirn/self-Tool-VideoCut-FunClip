@@ -251,8 +251,9 @@ def _render_subtitle_zone(task_id: str, t, mgr: TaskManager) -> str:
         else:
             dur_str = "时长未知"
         hint = f"识别对象：{video_label}（{dur_str}）"
-        if dur and dur > 1800:
-            hint += ' · <span style="color:#c2410c;">⚠️ 长视频识别耗时较长，建议先截取重点片段</span>'
+        # 项目定位就是长视频剪辑：≤5 小时不提示（REQ-20260917-022），仅超支持上限时提醒
+        if dur and dur > 18000:
+            hint += ' · <span style="color:#c2410c;">⚠️ 视频超过 5 小时（支持上限），识别耗时很长，建议先截取重点片段</span>'
     else:
         hint = "⚠️ 任务视频文件缺失（截取段和原视频都不在磁盘上）"
 
