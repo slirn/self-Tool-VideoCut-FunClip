@@ -305,12 +305,16 @@ def _render_subtitle_zone(task_id: str, t, mgr: TaskManager) -> str:
 
 
 def _render_rigor_picker() -> str:
-    """分析严谨性级别单选卡（REQ-20260916-003，用户必选）— 高/中/低 三档。
+    """分析严谨性级别单选卡（REQ-20260916-003，用户必选）— 高/中/低 + 自定义 四档。
 
     每档带定位标题、说明、例子（revision_service.RIGOR_LEVELS），
     让操作者不看文档也能体感三档差别；不预选（必须主动选择），
     上次选择由前端 localStorage 预填（applyRevRigorState）。
+    自定义档（REQ-20260916-007）：默认底稿（高档完整提示词，随 data-default-prompt
+    下发）可编辑 + 一键恢复默认；textarea 服务端置空，由 JS 预填
+    localStorage 草稿（slirnRevCustomPrompt）或底稿。
     """
+    from slirn_home import revision_service
     from slirn_home.revision_service import RIGOR_LEVELS
 
     cards = ""
@@ -324,7 +328,31 @@ def _render_rigor_picker() -> str:
             f'<span class="slirn-rigor-card-example">例：{_esc(cfg["example"])}</span>'
             f'</label>'
         )
-    return f'<div class="slirn-rigor-cards">{cards}</div>'
+    cards += (
+        '<label class="slirn-rigor-card" title="在默认提示词基础上修改修订标准，适合有自己一套规则的老手">'
+        '<input type="radio" name="slirn-rev-rigor" value="custom" />'
+        '<span class="slirn-rigor-card-title">自 · 自定义严谨性</span>'
+        '<span class="slirn-rigor-card-desc">在默认提示词（严格打磨底稿）基础上修改修订标准，'
+        '可附加自有规则</span>'
+        '<span class="slirn-rigor-card-example">例：附加「专业术语保留英文原文」等自有规则</span>'
+        '</label>'
+    )
+    # 自定义提示词编辑区：选「自定义」时由 JS 展开；底稿放 data-default-prompt，
+    # 恢复默认 = textarea.value ← data-default-prompt（与服务端回退逻辑同源）
+    custom = (
+        f'<div class="slirn-rigor-custom" id="slirn-rigor-custom" style="display:none;"'
+        f' data-default-prompt="{_esc(revision_service.default_custom_prompt())}">'
+        '<div class="slirn-rigor-custom-head">'
+        '<span>📝 自定义提示词（默认 = 严格打磨底稿，可直接修改）</span>'
+        '<button type="button" class="slirn-btn" data-action="rigor-prompt-reset">↩️ 恢复默认提示词</button>'
+        '</div>'
+        '<textarea class="slirn-textarea slirn-rigor-custom-text" rows="10"'
+        ' placeholder="在此修改默认提示词…"></textarea>'
+        '<div class="slirn-rigor-custom-tip">请保留「输出要求」中的 JSON 格式部分，否则模型输出无法解析；'
+        '内容更正（fix）判定建议保留。草稿自动保存，仅本机浏览器。</div>'
+        '</div>'
+    )
+    return f'<div class="slirn-rigor-cards">{cards}</div>{custom}'
 
 
 def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
@@ -434,9 +462,12 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
     created = _esc((rev or {}).get("created_at", ""))
     rigor_key = (rev or {}).get("rigor") or ""
     rigor_cfg = revision_service.RIGOR_LEVELS.get(rigor_key)  # 旧数据无 rigor → 不显示
-    rigor_stats = (
-        f" · 严谨性 {rigor_cfg['badge']}（{rigor_cfg['title']}）" if rigor_cfg else ""
-    )
+    if rigor_cfg:
+        rigor_stats = f" · 严谨性 {rigor_cfg['badge']}（{rigor_cfg['title']}）"
+    elif rigor_key == revision_service.CUSTOM_RIGOR_KEY:
+        rigor_stats = " · 严谨性 自定义"  # 实际提示词见 meta.custom_prompt（REQ-20260916-007）
+    else:
+        rigor_stats = ""
     stats = (
         f"📝 {n} 段 · 分析于 {created} · 模型 {model}{rigor_stats} · "
         f"保留 {cat_counts.get('keep', 0)} / 删除 {cat_counts.get('delete', 0)} / "
@@ -1604,13 +1635,44 @@ ROUTER_JS = """
 
   // ===== 严谨性级别：上次选择预填（不发起新分析也可见 — REQ-20260916-003）=====
   function applyRevRigorState() {
-    if (document.querySelector('input[name="slirn-rev-rigor"]:checked')) return;
-    var saved = '';
-    try { saved = localStorage.getItem('slirnRevRigor') || ''; } catch (err) {}
-    if (['high', 'medium', 'low'].indexOf(saved) < 0) return;
-    var el = document.querySelector('input[name="slirn-rev-rigor"][value="' + saved + '"]');
-    if (el) el.checked = true;
+    if (!document.querySelector('input[name="slirn-rev-rigor"]:checked')) {
+      var saved = '';
+      try { saved = localStorage.getItem('slirnRevRigor') || ''; } catch (err) {}
+      if (['high', 'medium', 'low', 'custom'].indexOf(saved) >= 0) {
+        var el = document.querySelector('input[name="slirn-rev-rigor"][value="' + saved + '"]');
+        if (el) el.checked = true;
+      }
+    }
+    syncRigorCustomUI();  // 自定义档编辑区跟随（REQ-20260916-007）
   }
+
+  // ===== 自定义严谨性（REQ-20260916-007）：编辑区展开 + 底稿/草稿预填 =====
+  // 选中「自定义」才展开；textarea 首次展开预填 localStorage 草稿，无草稿用默认底稿
+  // （data-default-prompt 与服务端回退逻辑同源），此后不再覆盖用户编辑
+  function syncRigorCustomUI() {
+    var wrap = document.getElementById('slirn-rigor-custom');
+    if (!wrap) return;
+    var sel = document.querySelector('input[name="slirn-rev-rigor"]:checked');
+    var isCustom = !!(sel && sel.value === 'custom');
+    wrap.style.display = isCustom ? '' : 'none';
+    var ta = wrap.querySelector('.slirn-rigor-custom-text');
+    if (isCustom && ta && !ta.dataset.slirnFilled) {
+      var draft = '';
+      try { draft = localStorage.getItem('slirnRevCustomPrompt') || ''; } catch (err) {}
+      ta.value = draft || wrap.getAttribute('data-default-prompt') || '';
+      ta.dataset.slirnFilled = '1';
+    }
+  }
+  document.addEventListener('change', function(e) {
+    if (e.target && e.target.name === 'slirn-rev-rigor') syncRigorCustomUI();
+  });
+  // 草稿实时保存（仅本机浏览器）— 不依赖点「分析」提交
+  document.addEventListener('input', function(e) {
+    if (e.target && e.target.classList &&
+        e.target.classList.contains('slirn-rigor-custom-text')) {
+      try { localStorage.setItem('slirnRevCustomPrompt', e.target.value); } catch (err) {}
+    }
+  });
 
   function switchWbPane(paneKey) {
     document.querySelectorAll('.slirn-wb-stage').forEach(function(s) {
@@ -2111,6 +2173,18 @@ ROUTER_JS = """
     var action = target.getAttribute('data-action');
     e.preventDefault();
 
+    if (action === 'rigor-prompt-reset') {
+      // 自定义严谨性：恢复默认提示词（REQ-20260916-007）；草稿同步覆盖
+      var wrapR = document.getElementById('slirn-rigor-custom');
+      var taR = wrapR ? wrapR.querySelector('.slirn-rigor-custom-text') : null;
+      if (taR) {
+        taR.value = wrapR.getAttribute('data-default-prompt') || '';
+        try { localStorage.setItem('slirnRevCustomPrompt', taR.value); } catch (err) {}
+        taR.focus();
+        toast('↩️ 已恢复默认提示词');
+      }
+      return;
+    }
     if (action === 'revkeys-open') {
       revKeysOpenModal();
       return;
@@ -2181,6 +2255,11 @@ ROUTER_JS = """
         return;
       }
       var payloadV = {task_id: tidV, rigor: rigorEl.value};
+      if (rigorEl.value === 'custom') {  // 自定义档带上用户提示词（空白 → 服务端回退底稿）
+        var wrapC = document.getElementById('slirn-rigor-custom');
+        var taC = wrapC ? wrapC.querySelector('.slirn-rigor-custom-text') : null;
+        payloadV.custom_prompt = taC ? taC.value : '';
+      }
       try { localStorage.setItem('slirnRevRigor', rigorEl.value); } catch (err) {}
       if (target.getAttribute('data-has-revision') === '1') {
         if (!window.confirm('重新分析将覆盖现有建议，并重置全部手动决策。确定继续？')) return;
@@ -3473,7 +3552,9 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
     async def revise_subtitle(body: dict = Body(default_factory=dict)):
         """启动大模型字幕分析（REQ-20260915-005）。已有建议时须 force（前端二次确认）。
 
-        rigor 必填（REQ-20260916-003）：分析严谨性级别 high|medium|low，注入提示词并留痕。
+        rigor 必填（REQ-20260916-003）：high|medium|low|custom（007 自定义档），
+        注入提示词并留痕；custom 时 custom_prompt 为用户修改后的提示词
+        （空白回退默认底稿），实际使用全文写入 revision.json meta。
         """
         from slirn_home import llm_config, revision_service
 
@@ -3481,8 +3562,10 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         if not tid:
             return _err("缺少 task_id")
         rigor = str(body.get("rigor") or "").strip().lower()
-        if rigor not in revision_service.RIGOR_LEVELS:
-            return _err("请先选择分析严谨性级别（高 / 中 / 低）")
+        custom_prompt = str(body.get("custom_prompt") or "")
+        if (rigor != revision_service.CUSTOM_RIGOR_KEY
+                and rigor not in revision_service.RIGOR_LEVELS):
+            return _err("请先选择分析严谨性级别（高 / 中 / 低 / 自定义）")
         try:
             t = mgr.get(tid)
         except Exception as e:  # noqa: BLE001
@@ -3505,7 +3588,8 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         if entry is None:
             return _err("未注册任何大模型 — 请先点顶栏 ⚙️ 添加模型")
         started = revision_service.start_job(
-            tid, sub_meta["segments"], t.name, hotwords, outputs_dir, entry=entry, rigor=rigor,
+            tid, sub_meta["segments"], t.name, hotwords, outputs_dir,
+            entry=entry, rigor=rigor, custom_prompt=custom_prompt,
         )
         if not started:
             return _ok("", toast="⏳ 该任务已在分析中，请等待完成")

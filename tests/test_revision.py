@@ -253,6 +253,81 @@ def test_start_job_rejects_unknown_rigor(tmp_path: Path):
     assert revision_service.job_status("t9") is None, "不应创建 job"
 
 
+# ---------- 自定义严谨性（REQ-20260916-007）----------
+
+def test_resolve_system_prompt_custom():
+    """resolve：custom 原样使用（空白回退底稿）；三档按级别组装；未知拒绝。
+    底稿 = 高档完整提示词（含 fix 更正与 JSON 输出要求 — 用户在完整底稿上修改）。"""
+    from slirn_home import revision_service as rs
+
+    base = rs.default_custom_prompt()
+    assert base == rs.build_system_prompt("high"), "底稿取高档（判定标准最完整）"
+    assert '"fix"' in base and "输出要求" in base and "必须覆盖输入的每一个 i" in base
+    my_prompt = "我的自定义修订标准：专业术语保留英文原文。\n（输出要求照旧）"
+    assert rs.resolve_system_prompt("custom", my_prompt) == my_prompt
+    assert rs.resolve_system_prompt("custom", "   ") == base, "空白回退默认底稿"
+    assert rs.resolve_system_prompt("custom", None) == base
+    assert rs.resolve_system_prompt("medium") == rs.build_system_prompt("medium")
+    try:
+        rs.resolve_system_prompt("bogus")
+    except ValueError as e:
+        assert "严谨性" in str(e), e
+    else:
+        raise AssertionError("应抛 ValueError")
+
+
+def test_start_job_custom_rigor(tmp_path: Path, monkeypatch):
+    """custom 档：提示词原样注入 LLM；meta 留痕 rigor=custom + 实际使用全文。"""
+    import time
+
+    from slirn_home import revision_service
+
+    outputs = tmp_path / "outputs"
+    captured: dict = {}
+
+    def _fake_llm(system, user, entry=None, retries=2):
+        captured["system"] = system
+        return json.dumps([
+            {"i": 1, "category": "keep", "note": "ok"},
+            {"i": 2, "category": "keep", "note": "ok"},
+            {"i": 3, "category": "keep", "note": "ok"},
+        ])
+
+    monkeypatch.setattr(revision_service, "_call_llm", _fake_llm)
+    my_prompt = "自定义标准：保留所有语气词，仅修正错字。"
+    assert revision_service.start_job(
+        "tc", SEGS, "任务自定义", [], outputs, entry=ENTRY,
+        rigor="custom", custom_prompt=my_prompt,
+    )
+    for _ in range(100):
+        j = revision_service.job_status("tc")
+        if j and j["state"] in ("done", "error"):
+            break
+        time.sleep(0.05)
+    assert j["state"] == "done", j
+    assert captured["system"] == my_prompt, "用户提示词原样注入（不拼接级别模板）"
+    rev = revision_service.load_revision(outputs)
+    assert rev["rigor"] == "custom"
+    assert rev["custom_prompt"] == my_prompt, "实际使用提示词全文留痕"
+
+    # 空白提示词 → 回退默认底稿（meta 留痕的也是底稿）
+    captured.clear()
+    assert revision_service.start_job(
+        "tc2", SEGS, "任务自定义2", [], outputs / "b", entry=ENTRY,
+        rigor="custom", custom_prompt="   ",
+    )
+    for _ in range(100):
+        j2 = revision_service.job_status("tc2")
+        if j2 and j2["state"] in ("done", "error"):
+            break
+        time.sleep(0.05)
+    assert j2["state"] == "done", j2
+    assert captured["system"] == revision_service.default_custom_prompt()
+    rev2 = revision_service.load_revision(outputs / "b")
+    assert rev2["custom_prompt"] == revision_service.default_custom_prompt()
+    # 三档级别 meta 不写 custom_prompt（None，保持向后兼容的键位）
+
+
 # ---------- _chat_completion 响应硬校验（REQ-20260915-007 / 008 OpenAI 兼容层）----------
 
 def _fake_resp(status_code=200, error=None, request_id=None,
@@ -563,13 +638,20 @@ def test_render_revision_zone_states(tmp_path: Path, monkeypatch):
     assert "整行删除" in h2 and "完整保留" in h2 and "切分修剪" in h2 and "人工复核" in h2
     assert "内容更正" in h2 and "原文对照" in h2, "状态2介绍新增内容更正类别（REQ-20260916-006）"
     assert "qwen-max" in h2, "状态2提示应显示当前生效模型"
-    # 严谨性级别单选卡（REQ-20260916-003）：必选、三档、说明 + 例子、不预选
+    # 严谨性级别单选卡（REQ-20260916-003 / 007）：必选、四档（高/中/低/自定义）、不预选
     assert "分析严谨性级别" in h2 and "必选" in h2
-    assert h2.count('name="slirn-rev-rigor"') == 3
+    assert h2.count('name="slirn-rev-rigor"') == 4
     assert 'value="high"' in h2 and 'value="medium"' in h2 and 'value="low"' in h2
+    assert 'value="custom"' in h2 and "自定义严谨性" in h2, "第四档自定义（REQ-20260916-007）"
     assert "严格打磨" in h2 and "意思正确即可" in h2 and "只去严重问题" in h2
-    assert h2.count("例：") == 3, "三档各带一个例子给操作者体感"
+    assert h2.count("例：") == 4, "四档各带一个例子给操作者体感"
     assert "checked" not in h2, "服务端不预选 — 用户必须主动选择"
+    # 自定义提示词编辑区：服务端隐藏（选中自定义由 JS 展开）、textarea 置空（JS 预填草稿/底稿）
+    assert 'id="slirn-rigor-custom" style="display:none;"' in h2
+    assert h2.count('class="slirn-textarea slirn-rigor-custom-text"') == 1
+    assert 'placeholder="在此修改默认提示词…"' in h2
+    assert 'data-action="rigor-prompt-reset"' in h2 and "恢复默认提示词" in h2
+    assert "data-default-prompt=" in h2, "默认底稿随属性下发（恢复默认/服务端回退同源）"
 
     # 状态 3：有建议 → 行式列表（与字幕生成列表同列布局 — REQ-20260916-002）
     outputs = m.tasks_dir / tid / "outputs"
@@ -628,7 +710,7 @@ def test_render_revision_zone_states(tmp_path: Path, monkeypatch):
     assert 'data-action="save-revision"' in h3
     assert 'data-action="revise-subtitle"' in h3 and 'data-has-revision="1"' in h3
     # 重新分析的等级选择收进 <details>；旧数据无 rigor → 统计行不显示严谨性
-    assert 'class="slirn-rigor-box"' in h3 and h3.count('name="slirn-rev-rigor"') == 3
+    assert 'class="slirn-rigor-box"' in h3 and h3.count('name="slirn-rev-rigor"') == 4
     assert " · 严谨性 " not in h3
 
     # meta 带 rigor → 统计行显示级别（正向用例）
@@ -637,6 +719,13 @@ def test_render_revision_zone_states(tmp_path: Path, monkeypatch):
     (outputs / "revision.json").write_text(json.dumps(rev_data, ensure_ascii=False), encoding="utf-8")
     h3b = _render_revision_zone(tid, m.get(tid), m)
     assert " · 严谨性 中（意思正确即可）" in h3b
+
+    # meta rigor=custom → 统计行显示「自定义」（REQ-20260916-007）
+    rev_data["rigor"] = "custom"
+    rev_data["custom_prompt"] = "我的自定义标准"
+    (outputs / "revision.json").write_text(json.dumps(rev_data, ensure_ascii=False), encoding="utf-8")
+    h3c = _render_revision_zone(tid, m.get(tid), m)
+    assert " · 严谨性 自定义" in h3c
 
 
 def test_render_fix_row_and_input_rename(tmp_path: Path):

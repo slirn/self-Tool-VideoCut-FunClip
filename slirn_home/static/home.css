@@ -1398,7 +1398,8 @@ footer { display: none !important; }
 /* 严谨性级别单选卡（REQ-20260916-003）：高/中/低 各带说明+例子；
    选中态用 :has(input:checked) 高亮整卡 */
 .slirn-rigor-cards {
-  display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px;
+  /* 自适应列数：高/中/低 + 自定义 四档（REQ-20260916-007），窄屏自动降列 */
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px;
   margin: 10px 0 2px;
 }
 .slirn-rigor-card {
@@ -1432,6 +1433,24 @@ footer { display: none !important; }
 }
 .slirn-rigor-box summary {
   cursor: pointer; font-size: 13px; font-weight: 600; color: var(--text-secondary);
+}
+/* 自定义严谨性提示词编辑区（REQ-20260916-007）：选「自定义」时由 JS 展开 */
+.slirn-rigor-custom {
+  margin-top: 10px; padding: 10px 12px;
+  border: 1px dashed var(--accent-soft); border-radius: 10px;
+  background: var(--hover-bg);
+}
+.slirn-rigor-custom-head {
+  display: flex; justify-content: space-between; align-items: center;
+  gap: 10px; flex-wrap: wrap; margin-bottom: 8px;
+  font-size: 13px; font-weight: 600; color: var(--text-primary);
+}
+.slirn-rigor-custom-text {
+  width: 100%; min-height: 150px; font-size: 12.5px;
+  font-family: Consolas, Menlo, monospace; line-height: 1.55;
+}
+.slirn-rigor-custom-tip {
+  margin-top: 6px; font-size: 11.5px; line-height: 1.5; color: var(--text-muted);
 }
 @media (max-width: 720px) {
   .slirn-rev-line { grid-template-columns: 32px 1fr 118px 22px; }

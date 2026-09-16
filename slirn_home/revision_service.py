@@ -135,6 +135,30 @@ def build_system_prompt(rigor: str = "high") -> str:
     )
 
 
+# 自定义严谨性（REQ-20260916-007）：第四档 — 用户在默认底稿上自由修改提示词。
+# 底稿取高档（判定标准最完整），fix 更正与 JSON 输出要求都在底稿里，改坏也有解析防御兜底。
+CUSTOM_RIGOR_KEY = "custom"
+
+
+def default_custom_prompt() -> str:
+    """自定义严谨性的默认提示词（底稿 = 高档「严格打磨」完整系统提示词）。"""
+    return build_system_prompt("high")
+
+
+def resolve_system_prompt(rigor: str, custom_prompt: str | None = None) -> str:
+    """rigor → 实际使用的系统提示词。
+
+    - custom：原样使用用户提示词（空白回退默认底稿 — 与前端「恢复默认」闭环）
+    - 高/中/低：按级别组装；未知级别 ValueError（与 start_job 校验口径一致）
+    """
+    if rigor == CUSTOM_RIGOR_KEY:
+        text = str(custom_prompt or "").strip()
+        return text or default_custom_prompt()
+    if rigor not in RIGOR_LEVELS:
+        raise ValueError(f"未知严谨性级别: {rigor!r}（可选 高 / 中 / 低 / 自定义）")
+    return build_system_prompt(rigor)
+
+
 def build_user_prompt(task_name: str, hotwords: list[str], segments: list[dict]) -> str:
     """构造 user 消息：任务上下文 + 热词（保护专有名词不被误删）+ 段列表。"""
     lines = [f"视频任务：{task_name or '（未命名）'}"]
@@ -453,18 +477,19 @@ def start_job(
     on_success: Callable[[list[dict]], None] | None = None,
     entry: dict | None = None,
     rigor: str = "high",
+    custom_prompt: str | None = None,
 ) -> bool:
     """启动大模型分析线程。已在跑 → False。成功后写 revision.json（决策重置 pending）。
 
     entry：本次分析使用的模型注册项 {"id","provider","base_url","api_key_env"}
     （app.py 传入用户选择的当前模型，REQ-20260915-008），全程使用并写入
     revision.json meta 留痕。
-    rigor：分析严谨性级别 high|medium|low（REQ-20260916-003，用户必选），
+    rigor：分析严谨性级别 high|medium|low|custom（REQ-20260916-003 / 007），
     非法值直接拒绝；级别写入 meta 留痕并注入系统提示词。
+    custom_prompt：rigor=custom 时的用户自定义提示词（空白回退默认底稿），
+    实际使用的提示词全文写入 meta.custom_prompt 留痕（REQ-20260916-007）。
     """
-    if rigor not in RIGOR_LEVELS:
-        raise ValueError(f"未知严谨性级别: {rigor!r}（可选 {' / '.join(RIGOR_LEVELS)}）")
-    system_prompt = build_system_prompt(rigor)
+    system_prompt = resolve_system_prompt(rigor, custom_prompt)
     with _JOBS_LOCK:
         existing = _JOBS.get(task_id)
         if existing and existing.get("state") == "running":
@@ -527,6 +552,7 @@ def start_job(
                 "provider": (entry or {}).get("provider", ""),
                 "protocol": (entry or {}).get("protocol", "openai"),
                 "rigor": rigor,
+                "custom_prompt": system_prompt if rigor == CUSTOM_RIGOR_KEY else None,
                 "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 "saved_at": None,
                 "segments_count": len(entries),
