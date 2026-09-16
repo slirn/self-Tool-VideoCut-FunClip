@@ -1801,7 +1801,7 @@ ROUTER_JS = """
     var card = document.getElementById('slirn-player-card');
     var v = document.getElementById('slirn-player');
     // Gradio 6 文件 API：/gradio_api/file=<urlencoded-path>
-    if (card && v) { v.src = '/gradio_api/file=' + encodeURI(info.path); v.load(); card.style.display = ''; }
+    if (card && v) { v.src = '/gradio_api/file=' + encodeURI(info.path); v.load(); card.style.display = ''; bindSpeedControl(v); }  // 倍速控件（REQ-20260916-014）
     // 把 seek 滑块的最大值设为视频时长（默认 HTML 写死 600，需要根据实际视频更新）
     var seek = document.getElementById('slirn-seek');
     if (seek && info.duration_seconds) {
@@ -1820,7 +1820,7 @@ ROUTER_JS = """
     if (msg) msg.innerHTML = '<div class="slirn-status-msg">✅ 待剪辑视频已生成 ' + info.size_mb + ' MB</div>';
     var wrap = document.getElementById('slirn-cut-preview-wrap');
     var v = document.getElementById('slirn-cut-preview');
-    if (wrap && v) { v.src = '/gradio_api/file=' + encodeURI(info.path); v.load(); wrap.style.display = ''; }
+    if (wrap && v) { v.src = '/gradio_api/file=' + encodeURI(info.path); v.load(); wrap.style.display = ''; bindSpeedControl(v); }  // 倍速控件（REQ-20260916-014）
   }
 
   // ===== 字幕生成：后台轮询 + 详情刷新（REQ-20260915-001）=====
@@ -1853,6 +1853,7 @@ ROUTER_JS = """
     if (card && v && url) {
       v.src = url; v.load();
       card.style.display = '';
+      bindSpeedControl(v);  // 倍速控件（REQ-20260916-014）
     }
     var durSec = parseFloat(st.getAttribute('data-duration-seconds')) || 0;
     var seek = document.getElementById('slirn-seek');
@@ -2023,9 +2024,66 @@ ROUTER_JS = """
     else v.addEventListener('loadedmetadata', go, {once: true});
   }
 
+  // ===== 倍速显示与控制（REQ-20260916-014）=====
+  // 背景：全部代码无任何 playbackRate 写入（grep 证实），神秘变速来自 Chrome 原生视频
+  // 菜单（右键/⋮「播放速度」）等外部途径——页面上原本无任何倍速显示，所以"不知道为
+  // 什么变快变慢"。这里把真实速率显示出来并可调大/调小/一键回 1x；ratechange 监听
+  // 捕获任何来源的变速——速率一变必可见，不再是黑盒。
+  var SLIRN_RATE_STEPS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2, 2.5, 3];
+  var slirnRate = 1;  // 会话级倍速：播放器元素随面板重渲染重建（重建后浏览器重置 1x），重绑时重新应用
+  function slirnRateLabel(r) { return parseFloat((+r || 1).toFixed(2)) + 'x'; }
+  function bindSpeedControl(v) {
+    if (!v) return;
+    var wrap = (v.closest ? v.closest('.slirn-video-wrap') : null) || v.parentNode;
+    if (!wrap || !wrap.querySelector) return;
+    var ctl = wrap.querySelector('.slirn-speed');
+    if (!ctl) {
+      ctl = document.createElement('div');
+      ctl.className = 'slirn-speed';
+      ctl.innerHTML = '<span class="slirn-speed-cap">倍速</span>'
+        + '<button type="button" class="slirn-btn slirn-btn-xs" data-rate-act="down" title="调慢（最低 0.5x）">−</button>'
+        + '<button type="button" class="slirn-btn slirn-btn-xs slirn-speed-cur" data-rate-act="reset" title="点击恢复 1x">1x</button>'
+        + '<button type="button" class="slirn-btn slirn-btn-xs" data-rate-act="up" title="调快（最高 3x）">＋</button>';
+      wrap.appendChild(ctl);
+      ctl.addEventListener('click', function(e) {
+        var b = e.target.closest ? e.target.closest('[data-rate-act]') : null;
+        if (!b) return;
+        e.preventDefault();
+        var r = +v.playbackRate || 1;
+        var act = b.getAttribute('data-rate-act');
+        if (act === 'reset') {
+          r = 1;  // 调回原来的值 = 正常速度
+        } else {
+          // 阶梯调大/调小：先找当前速率最近的档位，再上下移动一格
+          var near = 0;
+          for (var i = 1; i < SLIRN_RATE_STEPS.length; i++) {
+            if (Math.abs(SLIRN_RATE_STEPS[i] - r) < Math.abs(SLIRN_RATE_STEPS[near] - r)) near = i;
+          }
+          var nxt = Math.max(0, Math.min(SLIRN_RATE_STEPS.length - 1, near + (act === 'up' ? 1 : -1)));
+          r = SLIRN_RATE_STEPS[nxt];
+        }
+        v.playbackRate = r;  // 触发 ratechange → 下方监听统一同步显示
+      });
+    }
+    if (!ctl.dataset.ratebound) {
+      ctl.dataset.ratebound = '1';
+      // 任何来源的变速（本控件 / Chrome 原生菜单 / 扩展）→ 显示同步为真实速率
+      v.addEventListener('ratechange', function() {
+        slirnRate = +v.playbackRate || 1;
+        var cur = ctl.querySelector('[data-rate-act="reset"]');
+        if (cur) cur.textContent = slirnRateLabel(slirnRate);
+      });
+    }
+    // 元素重渲染后浏览器重置为 1x → 重绑时把会话倍速应用回去（同值赋值不触发 ratechange，手动刷一次显示）
+    try { v.playbackRate = slirnRate; } catch (err) {}
+    var cur0 = ctl.querySelector('[data-rate-act="reset"]');
+    if (cur0) cur0.textContent = slirnRateLabel(v.playbackRate);
+  }
+
   function bindSubPlayer() {
     var v = document.getElementById('slirn-sub-player');
     var list = document.getElementById('slirn-sub-list');
+    bindSpeedControl(v);  // 倍速显示与控制（REQ-20260916-014）
     if (v && list && !v.dataset.bound) {
       v.dataset.bound = '1';
       var rows = Array.prototype.slice.call(list.querySelectorAll('.slirn-sub-row'));
@@ -2376,6 +2434,7 @@ ROUTER_JS = """
   function bindCutPlayer() {
     var v = revVis('slirn-cut-player');
     var list = revVis('slirn-cut-list');
+    bindSpeedControl(v);  // 倍速显示与控制（REQ-20260916-014）
     if (v && list && !v.dataset.bound) {
       v.dataset.bound = '1';
       var rows = Array.prototype.slice.call(list.querySelectorAll('.slirn-cut-row'));
@@ -2432,6 +2491,7 @@ ROUTER_JS = """
   function bindRevPlayer() {
     var v = revVis('slirn-rev-player');
     var list = revVis('slirn-rev-list');
+    bindSpeedControl(v);  // 倍速显示与控制（REQ-20260916-014）
     if (v && list && !v.dataset.bound) {
       v.dataset.bound = '1';
       var rows = Array.prototype.slice.call(list.querySelectorAll('.slirn-rev-row'));
