@@ -192,7 +192,10 @@ def test_start_job_writes_revision(tmp_path: Path, monkeypatch):
     # 每条齐备：建议 + 说明 + 用户决策字段（AC-2）
     for e, seg in zip(entries, SEGS):
         assert e["text"] == seg["text"] and e["category"] and e["note"]
-        assert e["decision"] == "pending" and e["user_note"] == ""
+        assert e["decision"] == "pending"
+    # split 行分析时自动预填建议文本到「切分修剪后内容」（REQ-20260916-010）；其余类别留空
+    assert entries[0]["user_note"] == "" and entries[1]["user_note"] == ""
+    assert entries[2]["user_note"] == "我们开始吧"
     assert entries[2]["keep_text"] == "我们开始吧"
 
 
@@ -680,6 +683,15 @@ def test_render_revision_zone_states(tmp_path: Path, monkeypatch):
     # 主行 ×3：序号|时间|文本+徽章|决策下拉|展开钮 同一行
     assert h3.count("slirn-rev-line") == 3
     assert h3.count("slirn-rev-row") == 3
+    # 过滤 data 属性（REQ-20260916-010）：建议 / 决策 / 实质类别（accept=采纳建议类别）
+    assert 'data-sugg="split"' in h3 and 'data-sugg="keep"' in h3 and 'data-sugg="delete"' in h3
+    assert h3.count('data-decision="pending"') == 2 and 'data-decision="accept"' in h3
+    assert 'data-final="keep"' in h3, "accept + 建议 keep → 实质=keep（与 _final_kind 同源）"
+    assert h3.count('data-final=""') == 2, "pending ×2 → 实质未定（空）"
+    # 状态过滤条（REQ-20260916-010）：建议/决策两维 + chips 容器（计数由 JS 按行 data 属性现算）
+    assert 'id="slirn-rev-filter"' in h3 and h3.count("data-rev-filter-dim=") == 2
+    assert 'data-rev-filter-dim="sugg"' in h3 and 'data-rev-filter-dim="dec"' in h3
+    assert 'id="slirn-rev-filter-chips"' in h3 and 'id="slirn-rev-filter-count"' in h3
     # 有手动说明的行默认展开，其余收起（保持列表紧凑）
     assert h3.count('class="slirn-rev-row open"') == 1
     assert h3.count('class="slirn-rev-row"') == 2
@@ -699,6 +711,9 @@ def test_render_revision_zone_states(tmp_path: Path, monkeypatch):
     assert '<option value="pending">未决策</option>' in h3
     assert '<option value="fix">内容更正</option>' in h3, "决策下拉可手动改判内容更正（REQ-20260916-006）"
     assert 'value="同意"' in h3
+    # split 行「切分修剪后内容」自动预填建议文本（REQ-20260916-010）：
+    # 存量任务 user_note 空 → 渲染时预填 keep_text；已手填（keep 行「同意」）不覆盖
+    assert 'value="大家好"' in h3, "split 预填建议的修剪后文本"
     assert "已决策 <b>1/3</b>" in h3, "统计口径仍是已保存决策（保存后生效）"
     assert "决策列默认「采纳建议」" in h3
     assert "点击行定位播放" in h3 and "展开模型分析与切分修剪后内容" in h3
@@ -773,6 +788,45 @@ def test_render_fix_row_and_input_rename(tmp_path: Path):
     # 输入区改名（用户原话）：手动处理说明 → 切分修剪后内容
     assert h.count('placeholder="切分修剪后内容（可空）"') == 2
     assert "手动处理说明" not in h
+
+
+def test_render_split_autofill_and_final_kind(tmp_path: Path):
+    """split 自动预填优先级 + 决策实质类别（REQ-20260916-010）。
+
+    - 手动填写过「切分修剪后内容」→ 不被建议文本覆盖；fix 行不预填（需求只提切分）
+    - 实质类别 = 手动改判优先；accept = 模型建议；pending = 空（与 _final_kind 同源）
+    """
+    from slirn_home.app import _render_revision_zone
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="预填任务", original_video=video)
+    tid = t.task_id
+    _write_subtitle(m, tid, SEGS)
+    outputs = m.tasks_dir / tid / "outputs"
+    (outputs / "revision.json").write_text(json.dumps({
+        "version": 1, "model": "qwen-plus", "created_at": "2026-09-16T11:00:00",
+        "saved_at": None, "segments_count": 3,
+        "entries": [
+            {"i": 1, "start_ms": 0, "end_ms": 1500, "start": "00:00:00.000", "end": "00:00:01.500",
+             "text": "嗯嗯大家好", "category": "split", "keep_text": "大家好",
+             "note": "「嗯」为语气词", "decision": "split", "user_note": "我的版本"},
+            {"i": 2, "start_ms": 1500, "end_ms": 4000, "start": "00:00:01.500", "end": "00:00:04.000",
+             "text": "神精网络入门", "category": "fix", "keep_text": "神经网络入门",
+             "note": "同音误识别", "decision": "accept", "user_note": ""},
+            {"i": 3, "start_ms": 4000, "end_ms": 7000, "start": "00:00:04.000", "end": "00:00:07.000",
+             "text": "那个就是说我们开始吧", "category": "review", "keep_text": None,
+             "note": "拿不准", "decision": "pending", "user_note": ""},
+        ],
+    }, ensure_ascii=False), encoding="utf-8")
+    h = _render_revision_zone(tid, m.get(tid), m)
+    # split：手填优先（值=「我的版本」而非建议「大家好」）
+    assert 'value="我的版本"' in h and 'value="大家好"' not in h
+    # fix：不预填（需求只提切分；更正文本已收进详情块「✏️ 更正后」）
+    assert 'value="神经网络入门"' not in h and "✏️ 更正后：「神经网络入门」" in h
+    # 实质类别：手动 split → split；accept+建议 fix → fix；pending+复核 → 空
+    assert 'data-final="split"' in h and 'data-final="fix"' in h
+    assert h.count('data-final=""') == 1
+    assert 'data-sugg="review"' in h and 'data-decision="pending"' in h
 
 
 def test_wb_stage_states_with_revision(tmp_path: Path):

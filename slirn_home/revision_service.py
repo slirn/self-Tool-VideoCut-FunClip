@@ -479,7 +479,8 @@ def start_job(
     rigor: str = "high",
     custom_prompt: str | None = None,
 ) -> bool:
-    """启动大模型分析线程。已在跑 → False。成功后写 revision.json（决策重置 pending）。
+    """启动大模型分析线程。已在跑 → False。成功后写 revision.json（决策重置 pending，
+    split 行的「切分修剪后内容」自动预填建议文本 — REQ-20260916-010）。
 
     entry：本次分析使用的模型注册项 {"id","provider","base_url","api_key_env"}
     （app.py 传入用户选择的当前模型，REQ-20260915-008），全程使用并写入
@@ -544,7 +545,10 @@ def start_job(
                     "start": s.get("start", ""), "end": s.get("end", ""),
                     "text": s.get("text", ""),
                     "category": sug["category"], "keep_text": sug["keep_text"], "note": sug["note"],
-                    "decision": "pending", "user_note": "",
+                    "decision": "pending",
+                    # split 行自动预填建议的修剪后文本到「切分修剪后内容」（REQ-20260916-010）：
+                    # 用户在此基础上微调即可；清空则切分清单回退 keep_text，语义自洽
+                    "user_note": (sug["keep_text"] or "") if sug["category"] == "split" else "",
                 })
             meta = {
                 "version": 1,

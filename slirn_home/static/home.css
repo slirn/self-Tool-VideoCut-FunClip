@@ -1394,6 +1394,36 @@ footer { display: none !important; }
   font-family: inherit; font-size: 11px; font-weight: 600;
   line-height: 1.6; text-align: center; vertical-align: 1px;
 }
+/* 状态过滤条（REQ-20260916-010）：建议/决策两维切换 + 计数 chips；
+   决策维度按实质类别匹配（accept 的实质 = 模型建议） */
+.slirn-rev-filter {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 6px; font-size: 12px;
+}
+.slirn-rev-filter-label { color: var(--text-secondary); font-weight: 600; }
+.slirn-rev-filter-dims {
+  display: inline-flex; border: 1px solid var(--border);
+  border-radius: 999px; overflow: hidden;
+}
+.slirn-rev-filter-dim {
+  border: none; background: transparent; color: var(--text-secondary); cursor: pointer;
+  font-size: 12px; padding: 3px 11px; line-height: 1.5;
+  transition: background 0.15s, color 0.15s;
+}
+.slirn-rev-filter-dim.active {
+  background: var(--accent-soft); color: var(--text-primary); font-weight: 600;
+}
+.slirn-rev-filter-chips { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.slirn-rev-chip {
+  border: 1px solid var(--border); background: var(--input-bg); color: var(--text-secondary);
+  cursor: pointer; font-size: 12px; padding: 2px 10px; border-radius: 999px; line-height: 1.6;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.slirn-rev-chip:hover { border-color: var(--accent-solid); color: var(--text-primary); }
+.slirn-rev-chip.active {
+  background: var(--accent-gradient); color: #fff; border-color: transparent; font-weight: 600;
+}
+.slirn-rev-filter-count { color: var(--text-muted); }
 /* 快捷键自定义（REQ-20260916-005）：提示条入口 + 换绑弹窗 */
 .slirn-revkeys-open {
   margin-left: 4px; padding: 0 7px; border-radius: 6px;

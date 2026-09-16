@@ -452,9 +452,24 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
                 extra_html = (
                     f'<div class="slirn-rev-keeptext fix">✏️ 更正后：「{_esc(e["keep_text"])}」</div>'
                 )
+        # split 行「切分修剪后内容」自动预填建议文本（REQ-20260916-010）：手动填写
+        # 优先；未填 → keep_text 作起点（与服务端分析时自动填写、切分清单回退同口径，
+        # 存量任务未重分析也能看到/微调将要生效的修剪后内容）
+        note_val = str(e.get("user_note") or "").strip()
+        if not note_val and cat == "split" and e.get("keep_text"):
+            note_val = str(e["keep_text"])
+        # 决策的实质类别（REQ-20260916-010 过滤口径，与 cutlist_service._final_kind
+        # 同源）：手动改判优先；accept = 模型建议类别；pending = 空（未决策）
+        if decision in ("keep", "delete", "split", "fix"):
+            final_kind = decision
+        elif decision == "accept" and cat in ("keep", "delete", "split", "fix"):
+            final_kind = cat
+        else:
+            final_kind = ""
         rows += (
             f'<div class="slirn-rev-row{" open" if open_detail else ""}" data-task-id="{_esc(task_id)}"'
-            f' data-start-ms="{int(e.get("start_ms", 0))}" data-end-ms="{int(e.get("end_ms", 0))}">'
+            f' data-start-ms="{int(e.get("start_ms", 0))}" data-end-ms="{int(e.get("end_ms", 0))}"'
+            f' data-sugg="{_esc(cat)}" data-decision="{_esc(decision)}" data-final="{_esc(final_kind)}">'
             f'<div class="slirn-rev-line">'
             f'<span class="slirn-sub-idx">{int(e["i"])}</span>'
             f'<span class="slirn-sub-time">{_esc(e.get("start", ""))} → {_esc(e.get("end", ""))}</span>'
@@ -467,7 +482,7 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
             f'<div class="slirn-rev-detail">'
             f'<div class="slirn-rev-note">🤖 {_esc(e.get("note", ""))}</div>{extra_html}'
             f'<input class="slirn-rev-note-input" data-i="{int(e["i"])}"'
-            f' placeholder="切分修剪后内容（可空）" value="{_esc(e.get("user_note") or "")}" />'
+            f' placeholder="切分修剪后内容（可空）" value="{_esc(note_val)}" />'
             f'</div></div>'
         )
 
@@ -500,6 +515,15 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
  · <kbd>R</kbd> 重播本行 · <kbd>K</kbd> 保留 · <kbd>D</kbd> 删除（标记后自动下一条）
  · <kbd>S</kbd> 切分（展开详情聚焦内容） · <kbd>Esc</kbd> 退出输入框
  · <span class="slirn-revkeys-open" data-action="revkeys-open" role="button" tabindex="0">⚙ 自定义</span></div>
+        <div class="slirn-rev-filter" id="slirn-rev-filter">
+          <span class="slirn-rev-filter-label">🔎 筛选</span>
+          <span class="slirn-rev-filter-dims">
+            <button type="button" class="slirn-rev-filter-dim active" data-rev-filter-dim="sugg">建议状态</button>
+            <button type="button" class="slirn-rev-filter-dim" data-rev-filter-dim="dec">决策状态</button>
+          </span>
+          <span class="slirn-rev-filter-chips" id="slirn-rev-filter-chips"></span>
+          <span class="slirn-rev-filter-count" id="slirn-rev-filter-count"></span>
+        </div>
         <div id="slirn-rev-player-wrap" class="slirn-video-wrap slirn-sub-player-wrap" style="display:none;">
             <video id="slirn-rev-player" controls preload="metadata"></video>
         </div>
@@ -1810,6 +1834,22 @@ ROUTER_JS = """
   }
   document.addEventListener('change', function(e) {
     if (e.target && e.target.name === 'slirn-rev-rigor') syncRigorCustomUI();
+    // 决策下拉变化 → 行 data-decision/data-final 跟随（实质口径），过滤
+    // 计数/可见性实时刷新（REQ-20260916-010；未保存前纯前端，刷新即还原）
+    if (e.target && e.target.classList && e.target.classList.contains('slirn-rev-select')) {
+      var rowF = e.target.closest('.slirn-rev-row');
+      if (rowF) {
+        var dv = e.target.value || 'pending';
+        var suggF = rowF.getAttribute('data-sugg') || '';
+        var finF = '';
+        if (dv === 'keep' || dv === 'delete' || dv === 'split' || dv === 'fix') finF = dv;
+        else if (dv === 'accept' && (suggF === 'keep' || suggF === 'delete'
+            || suggF === 'split' || suggF === 'fix')) finF = suggF;
+        rowF.setAttribute('data-decision', dv);
+        rowF.setAttribute('data-final', finF);
+        revFilterSync();
+      }
+    }
   });
   // 草稿实时保存（仅本机浏览器）— 不依赖点「分析」提交
   document.addEventListener('input', function(e) {
@@ -1826,6 +1866,9 @@ ROUTER_JS = """
     document.querySelectorAll('.slirn-wb-pane').forEach(function(p) {
       p.style.display = (p.id === 'slirn-wb-pane-' + paneKey) ? '' : 'none';
     });
+    // 面板显隐切换后过滤计数才可见：重算 chips/可见性（工作台初始打开时
+    // 修订面板可能隐藏，revRows 取不到行 → 计数 0；REQ-20260916-010）
+    revFilterSync();
   }
 
   var subPollTimer = null;
@@ -2024,6 +2067,7 @@ ROUTER_JS = """
     var st = document.getElementById('slirn-rev-status');
     if (st && st.dataset.taskId && st.dataset.state === 'running') startRevPolling(st.dataset.taskId);
     applyRevKeysState();  // 提示条跟随自定义键位（localStorage — REQ-20260916-005）
+    revFilterSync();  // 过滤条：渲染 chips 计数 + 应用上次筛选（localStorage — REQ-20260916-010）
   }
 
   // ===== 字幕修订快捷键（REQ-20260916-004）：听 → 判 → 标记 → 下一条 =====
@@ -2044,7 +2088,7 @@ ROUTER_JS = """
     if (row && row.scrollIntoView) row.scrollIntoView({block: 'nearest'});
   }
   function revSelectRow(idx, seek) {
-    var rows = revRows();
+    var rows = revNavRows();  // 过滤后可见行（REQ-20260916-010）：↑↓ 跳过被筛掉的行
     if (!rows.length) return null;
     var cur = revSelIndex(rows);
     if (cur < 0) idx = (idx < 0) ? rows.length - 1 : 0;  // 无选中：↓ 取第一行，↑ 取最后一行
@@ -2063,7 +2107,7 @@ ROUTER_JS = """
     var v = revVis('slirn-rev-player');
     if (!v) return;
     if (!v.src) {  // 从未播放过：从选中行（或第一行）起点开播
-      var rows = revRows();
+      var rows = revNavRows();
       var row = rows[revSelIndex(rows)] || rows[0];
       if (row) playRevAt(row.getAttribute('data-task-id') || '',
         parseInt(row.getAttribute('data-start-ms'), 10) || 0);
@@ -2073,7 +2117,7 @@ ROUTER_JS = """
     else { v.pause(); }
   }
   function revReplayRow() {
-    var rows = revRows();
+    var rows = revNavRows();
     var row = rows[revSelIndex(rows)];
     if (!row) {
       var kmR = revKeysLoad();
@@ -2083,7 +2127,7 @@ ROUTER_JS = """
     playRevAt(row.getAttribute('data-task-id') || '', parseInt(row.getAttribute('data-start-ms'), 10) || 0);
   }
   function revApplyDecision(val) {
-    var rows = revRows();
+    var rows = revNavRows();
     var idx = revSelIndex(rows);
     if (idx < 0) {
       var kmA = revKeysLoad();
@@ -2111,6 +2155,80 @@ ROUTER_JS = """
       revSelectRow(idx + 1, true);  // 保留/删除：标记即过，自动下一条
     }
   }
+
+  // ===== 修订列表状态过滤（REQ-20260916-010）=====
+  // 两个维度：建议状态（模型判定）/ 决策状态（用户选择）。决策维度按「实质
+  // 类别」匹配 — accept 的实质 = 模型建议类别（与切分清单 _final_kind 同源）：
+  // 筛「切分」时「采纳+建议切分」的行也命中。筛选只藏行不删行，
+  // 「保存修订决策」仍收集全部行（revRows 不受过滤影响）。
+  var REV_FILTER_SUGG = [
+    ['keep', '保留'], ['delete', '删除'], ['split', '切分'],
+    ['fix', '更正'], ['review', '复核'],
+  ];
+  var REV_FILTER_DEC = [
+    ['pending', '未决策'], ['accept', '采纳建议'],
+    ['keep', '保留'], ['delete', '删除'], ['split', '切分'], ['fix', '内容更正'],
+  ];
+  function revFilterLoad() {
+    try { return JSON.parse(localStorage.getItem('slirnRevFilter') || 'null'); }
+    catch (err) { return null; }
+  }
+  var revFilter = revFilterLoad() || { dim: 'sugg', val: 'all' };
+  if (revFilter.dim !== 'sugg' && revFilter.dim !== 'dec') revFilter = { dim: 'sugg', val: 'all' };
+  function revFilterSave() {
+    try { localStorage.setItem('slirnRevFilter', JSON.stringify(revFilter)); } catch (err) {}
+  }
+  function revNavRows() {  // 过滤后仍可见的行（导航/标记走这里；保存收集仍用 revRows 全量）
+    return revRows().filter(function(r) { return r.style.display !== 'none'; });
+  }
+  function revFilterMatch(row) {
+    if (revFilter.val === 'all') return true;
+    if (revFilter.dim === 'sugg') return (row.getAttribute('data-sugg') || '') === revFilter.val;
+    if (revFilter.val === 'pending' || revFilter.val === 'accept')
+      return (row.getAttribute('data-decision') || '') === revFilter.val;
+    return (row.getAttribute('data-final') || '') === revFilter.val;  // 实质口径
+  }
+  function revFilterCountOf(rows, dim, val) {
+    return rows.filter(function(r) {
+      if (val === 'all') return true;
+      if (dim === 'sugg') return (r.getAttribute('data-sugg') || '') === val;
+      if (val === 'pending' || val === 'accept')
+        return (r.getAttribute('data-decision') || '') === val;
+      return (r.getAttribute('data-final') || '') === val;
+    }).length;
+  }
+  function revFilterRender() {
+    var chips = revVis('slirn-rev-filter-chips');
+    if (!chips) return;
+    var rows = revRows();
+    var defs = revFilter.dim === 'sugg' ? REV_FILTER_SUGG : REV_FILTER_DEC;
+    var html = '<button type="button" class="slirn-rev-chip' + (revFilter.val === 'all' ? ' active' : '')
+      + '" data-rev-filter-val="all">全部 ' + rows.length + '</button>';
+    defs.forEach(function(d) {
+      var n = revFilterCountOf(rows, revFilter.dim, d[0]);
+      var solid = revFilter.dim === 'dec' && d[0] !== 'pending' && d[0] !== 'accept';
+      html += '<button type="button" class="slirn-rev-chip' + (revFilter.val === d[0] ? ' active' : '')
+        + '" data-rev-filter-val="' + d[0] + '"'
+        + (solid ? ' title="实质口径：含「采纳建议」且建议为此类的行"' : '')
+        + '>' + d[1] + ' ' + n + '</button>';
+    });
+    chips.innerHTML = html;
+    document.querySelectorAll('[data-rev-filter-dim]').forEach(function(b) {
+      b.classList.toggle('active', b.getAttribute('data-rev-filter-dim') === revFilter.dim);
+    });
+  }
+  function revFilterApply() {
+    if (!revVis('slirn-rev-filter')) return;
+    var rows = revRows(), shown = 0;
+    rows.forEach(function(r) {
+      var ok = revFilterMatch(r);
+      r.style.display = ok ? '' : 'none';
+      if (ok) shown++;
+    });
+    var cnt = revVis('slirn-rev-filter-count');
+    if (cnt) cnt.textContent = '显示 ' + shown + ' / ' + rows.length + ' 条';
+  }
+  function revFilterSync() { revFilterRender(); revFilterApply(); }
 
   // ===== 快捷键自定义（REQ-20260916-005）：localStorage 键 slirnRevKeys =====
   // 每个人习惯不同：点击提示条「⚙ 自定义」→ 点键帽 → 按新键。键位图持久化，
@@ -2268,7 +2386,7 @@ ROUTER_JS = """
     // 文本输入中不劫持（下拉的方向键保留原生行为）
     var t = e.target;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
-    var rows = revRows();
+    var rows = revNavRows();  // 快捷键只作用于过滤后可见的行（REQ-20260916-010）
     if (!rows.length) return;  // 修订列表不可见/无行 → 快捷键不生效
     // 反查当前键位对应的动作（按动作表顺序，先定义者优先）
     var act = null;
@@ -2335,6 +2453,25 @@ ROUTER_JS = """
       e.preventDefault();
       revKeysRec = rk.getAttribute('data-revkey');
       revKeysRenderRows();
+      return;
+    }
+
+    // 状态过滤：维度切换 / 筛选项点选（REQ-20260916-010；chips 无 data-action，先于其判断）
+    var fdim = e.target.closest('[data-rev-filter-dim]');
+    if (fdim) {
+      e.preventDefault();
+      revFilter.dim = fdim.getAttribute('data-rev-filter-dim');
+      revFilter.val = 'all';
+      revFilterSave();
+      revFilterSync();
+      return;
+    }
+    var fval = e.target.closest('[data-rev-filter-val]');
+    if (fval) {
+      e.preventDefault();
+      revFilter.val = fval.getAttribute('data-rev-filter-val');
+      revFilterSave();
+      revFilterSync();
       return;
     }
 
