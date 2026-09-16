@@ -1648,3 +1648,42 @@ footer { display: none !important; }
   .slirn-rev-detail { padding-left: 32px; }
   .slirn-rigor-cards { grid-template-columns: 1fr; }
 }
+
+/* ===== 精剪修订 · 热词替换（REQ-20260916-017）===== */
+.slirn-fw-mark {
+  background: rgba(255, 176, 32, 0.35);  /* 琥珀高亮 — 替换处特殊颜色标识 */
+  color: inherit; border-radius: 3px; padding: 0 1px;
+  font-weight: 600; cursor: help;
+}
+.slirn-fw-stats { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.slirn-fw-word {
+  padding: 3px 10px; border-radius: 999px; font-size: 12.5px; font-weight: 600;
+  background: rgba(255, 176, 32, 0.14); color: #8a5a00;
+}
+.slirn-fw-word b { margin-left: 4px; font-weight: 700; }
+.slirn-fw-list {
+  max-height: 560px; overflow-y: auto; margin-top: 10px;
+  border: 1px solid var(--border); border-radius: 12px; background: var(--input-bg);
+}
+.slirn-fw-row {
+  display: grid; grid-template-columns: 44px 92px 1fr auto; gap: 8px; align-items: center;
+  padding: 7px 10px; cursor: pointer; border-bottom: 1px solid var(--border);
+}
+.slirn-fw-row:last-child { border-bottom: none; }
+.slirn-fw-row:hover { background: var(--accent-soft); }
+.slirn-fw-row .slirn-sub-idx { font-size: 11px; color: var(--text-muted);
+  font-variant-numeric: tabular-nums; text-align: right; }
+.slirn-fw-time { font-size: 10.5px; color: var(--text-muted);
+  font-variant-numeric: tabular-nums; }
+.slirn-fw-text { font-size: 13px; line-height: 1.55; min-width: 0; word-break: break-word; }
+.slirn-fw-orig { display: none; }
+/* 已撤销：显示原文（.orig）、置灰（原文即生效文本，替换不生效） */
+.slirn-fw-row.reverted { opacity: 0.55; }
+.slirn-fw-row.reverted .slirn-fw-live { display: none; }
+.slirn-fw-row.reverted .slirn-fw-orig { display: block; }
+/* 过滤：只看有替换的行（无替换行隐藏） */
+.slirn-fw-list.slirn-fw-only-replaced .slirn-fw-row.plain { display: none; }
+@media (max-width: 720px) {
+  .slirn-fw-row { grid-template-columns: 36px 1fr auto; }
+  .slirn-fw-time { display: none; }
+}

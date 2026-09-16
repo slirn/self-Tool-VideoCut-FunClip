@@ -175,7 +175,11 @@ def test_render_workbench_layout(tmp_path: Path):
     assert "🎥 粗剪合成" in html
     assert "slirn-wb-stage-optional" in html, "可选徽章"
     assert 'id="slirn-wb-pane-rough_compose"' in html
-    assert html.count("规划中 — 该阶段将在后续版本提供") == 3
+    # 精剪修订（REQ-20260916-017）：热词替换真实化 — 未分析时引导/说明态
+    assert "🔎 精剪修订" in html
+    assert "热词替换" in html
+    assert 'id="slirn-wb-pane-fine_review"' in html
+    assert html.count("规划中 — 该阶段将在后续版本提供") == 2
     assert html.count("slirn-wb-pane\"") >= 1  # 面板容器齐备
     # 聚焦 current（字幕生成）→ 字幕面板默认显示
     import re
