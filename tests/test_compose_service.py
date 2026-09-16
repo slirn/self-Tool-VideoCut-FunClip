@@ -182,3 +182,52 @@ def test_delete_rough_compose_both(tmp_path):
     assert res["deleted"] is True
     assert {mp4.name, srt.name} == set(res["removed"])
     assert not mp4.exists() and not srt.exists()
+
+
+# ---- parse_srt（REQ-20260916-020：按 SRT 时间段截取拼接） ----
+
+def test_parse_srt_standard():
+    srt = ("1\n00:00:00,950 --> 00:00:04,270\n有点回音好像\n\n"
+           "2\n00:00:04,270 --> 00:00:06,000\n第二行文本")
+    out = compose_service.parse_srt(srt)
+    assert [(e["start_ms"], e["end_ms"]) for e in out] == [(950, 4270), (4270, 6000)]
+    assert out[0]["text"] == "有点回音好像"
+
+
+def test_parse_srt_dot_millis_crlf_bom_unsorted():
+    """点号毫秒 / CRLF / BOM / 乱序块均容忍，输出按 start_ms 升序。"""
+    srt = ("\ufeff2\r\n00:00:05.500 --> 00:00:07\r\n后块\r\n\r\n"
+           "1\r\n00:00:01.200 --> 00:00:03.450\r\n前块")
+    out = compose_service.parse_srt(srt)
+    assert [(e["start_ms"], e["end_ms"]) for e in out] == [(1200, 3450), (5500, 7000)]
+    assert out[0]["text"] == "前块"
+
+
+def test_parse_srt_multiline_text_joined():
+    srt = "1\n00:00:00,000 --> 00:00:02,000\n第一行\n第二行"
+    out = compose_service.parse_srt(srt)
+    assert out[0]["text"] == "第一行\n第二行"
+
+
+def test_parse_srt_skip_invalid_blocks():
+    """end<=start / 无时间轴块跳过；全非法 → []。"""
+    bad = ("1\n00:00:05,000 --> 00:00:05,000\n零长度\n\n"
+           "没有时间轴的垃圾块\n\n"
+           "2\n00:00:01,000 --> 00:00:02,000\n有效")
+    out = compose_service.parse_srt(bad)
+    assert [(e["start_ms"], e["end_ms"]) for e in out] == [(1000, 2000)]
+    assert compose_service.parse_srt("完全不是SRT") == []
+    assert compose_service.parse_srt("") == []
+
+
+def test_parse_srt_hours_and_short_millis():
+    """小时位 + 毫秒不足 3 位右补零（',7' = 700ms）；毫秒可省略。升序输出。"""
+    srt = ("1\n01:02:03,456 --> 01:02:04,7\n文本A\n\n"
+           "2\n00:00:10 --> 00:00:11\n文本B")
+    out = compose_service.parse_srt(srt)
+    # 00:00:10（10s）在 01:02:03（3723s）之前 → 升序
+    assert [(e["start_ms"], e["end_ms"]) for e in out] == [
+        (10_000, 11_000),
+        ((1 * 3600 + 2 * 60 + 3) * 1000 + 456, (1 * 3600 + 2 * 60 + 4) * 1000 + 700),
+    ]
+    assert out[1]["text"] == "文本A"

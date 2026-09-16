@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -106,6 +107,104 @@ def format_srt(units: list[dict], text_overrides: dict | None = None) -> str:
         text = text_overrides.get(str(u["id"]), str(u.get("text", "")))
         parts.append(f"{i}\n{_ms_to_srt_time(start)} --> {_ms_to_srt_time(end)}\n{text}")
     return "\n\n".join(parts) + ("\n" if parts else "")
+
+
+# ---- 按字幕文件时间段截取拼接（REQ-20260916-020） ----
+
+# SRT 时间轴行：HH:MM:SS,mmm --> HH:MM:SS,mmm（毫秒分隔符兼容 ',' / '.'，可省略）
+_SRT_TIME_RE = re.compile(
+    r"(\d{1,2}):(\d{2}):(\d{2})(?:[,.](\d{1,3}))?"
+    r"\s*-->\s*"
+    r"(\d{1,2}):(\d{2}):(\d{2})(?:[,.](\d{1,3}))?"
+)
+
+
+def _srt_clock_to_ms(h: str, mi: str, s: str, ms: str | None) -> int:
+    """SRT 时钟三元组（+可选毫秒）→ 整数毫秒。毫秒不足 3 位右补零（',5' = 500ms）。"""
+    return (int(h) * 3600 + int(mi) * 60 + int(s)) * 1000 + int((ms or "0").ljust(3, "0"))
+
+
+def parse_srt(srt_text: str) -> list[dict]:
+    """SRT 文本 → [{"start_ms", "end_ms", "text"}]（按 start_ms 升序）。
+
+    每个字幕条目即一个截取区间。容忍 BOM/CRLF/缺编号/乱序块/多行文本；
+    时间轴非法（end <= start）或整块无时间轴的条目跳过；一个都解析不出 → []。
+    """
+    text = srt_text.replace("﻿", "").replace("\r\n", "\n").replace("\r", "\n")
+    entries: list[dict] = []
+    for block in re.split(r"\n\s*\n", text.strip()):
+        lines = [ln for ln in block.split("\n") if ln.strip()]
+        m = None
+        ts_line = -1
+        for i, ln in enumerate(lines):
+            mm = _SRT_TIME_RE.search(ln)
+            if mm:
+                m, ts_line = mm, i
+                break
+        if not m:
+            continue
+        g = m.groups()
+        start_ms = _srt_clock_to_ms(*g[:4])
+        end_ms = _srt_clock_to_ms(*g[4:])
+        if end_ms <= start_ms:
+            continue
+        entries.append({
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "text": "\n".join(lines[ts_line + 1:]).strip(),
+        })
+    entries.sort(key=lambda e: (e["start_ms"], e["end_ms"]))
+    return entries
+
+
+def compose_from_srt(src: Path, srt_path: Path, dst: Path, on_progress=None) -> dict:
+    """按 SRT 字幕文件的时间段从源视频截取片段并拼接（REQ-20260916-020）。
+
+    不经过大语言模型：SRT 每条目即一个截取区间（毫秒级），升序合并相邻后
+    走 compose_rough_cut（上游 VideoClipper 切片拼接 + 随片字幕时间轴平移
+    到成片时间轴，副产物落 dst 同名 .srt）。
+
+    越界处理：end 超视频时长截到时长；整体在视频外（或截后不足 1ms）的
+    条目丢弃并在返回值 dropped 里计数 —— 不会静默丢段。
+
+    Returns:
+        compose_rough_cut 返回值 + {"srt_entries", "dropped", "keep_sec_expected"}
+    """
+    src, srt_path, dst = Path(src), Path(srt_path), Path(dst)
+    if not srt_path.exists():
+        raise RuntimeError(f"字幕文件不存在: {srt_path}")
+    if not src.exists():
+        raise RuntimeError(f"源视频不存在: {src}")
+    entries = parse_srt(srt_path.read_text(encoding="utf-8-sig"))
+    if not entries:
+        raise RuntimeError(
+            "字幕文件未解析到有效时间段（需 SRT 格式：HH:MM:SS,mmm --> HH:MM:SS,mmm）")
+    dur = _probe_duration(src)
+    if not dur:
+        raise RuntimeError(f"读不到源视频时长: {src}")
+    dur_ms = int(dur * 1000)
+
+    kept: list[dict] = []
+    dropped = 0
+    for e in entries:
+        s = e["start_ms"]
+        t = min(e["end_ms"], dur_ms)
+        if s >= dur_ms or t - s < 1:  # 整体越界 / 截后为空
+            dropped += 1
+            continue
+        kept.append({**e, "end_ms": t})
+    if not kept:
+        raise RuntimeError(f"所有时间段都在视频时长（{dur:.1f}s）之外")
+
+    intervals = [(e["start_ms"], e["end_ms"]) for e in kept]
+    result = compose_rough_cut(src, intervals, dst, kept, on_progress=on_progress)
+    merged_total_ms = sum(e - s for s, e in merge_intervals_ms(intervals))
+    result.update({
+        "srt_entries": len(entries),
+        "dropped": dropped,
+        "keep_sec_expected": round(merged_total_ms / 1000.0, 2),
+    })
+    return result
 
 
 def delete_rough_compose(outputs_dir: Path) -> dict:
