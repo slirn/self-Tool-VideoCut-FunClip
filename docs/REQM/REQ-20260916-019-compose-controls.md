@@ -65,6 +65,33 @@ REQ-20260916-018 用上游 VideoClipper 方法合成粗剪成片后，用户需�
   6. 产物未动（`<video>` 仍指 `/slirn/api/video/20260915-001?src=rough_compose`，mp4 + srt 仍在）
   7. 其他面板按钮齐全（rcCompose / fineRevise / cutSave / cutRebuild） + 截图 + 零写请求（仅 `workbench` + `video/20260915-001` 两条 READ）
 
+## 事后修复（b82815d 引入的回归，42a46a3 修复）
+
+**现象**：功能提交后全站按钮（任务列表/热词库/新建任务等）点击无响应。
+
+**根因**：`rcDelete` confirm 文案写在 `ROUTER_JS`（Python **普通**三引号字符串）里，
+源码中的 `\n` 被 Python 解释为**真实换行** → JS 字符串字面量断行 → `SyntaxError`
+→ 整个 `<script>` 块解析失败 → document 级 click 委托监听**从未注册** → 所有
+data-action 按钮失效。修复：`\n` → `\\n`（单行改动）。
+
+**假验证教训**（两处）：
+
+1. regex 从源码提取 JS 文本做校验是**假验证** — 提取的是源码文本，未经 Python
+   转义解释；正确做法是 `ast.literal_eval` 取运行时字符串真实值再编译校验。
+2. E2E 绕过点击层（直接 fetch 端点 + 手动切 tab display）测不出「点击无响应」
+   类 bug；必须真实 `.click()` 并断言 tab 实际切换。
+
+**修复验证**（`work/REQ-20260916-019-compose-controls/_e2e_realclick_test.py`）：
+
+- Chrome `new Function()` 编译对照：修复前(HEAD) `SYNTAX ERROR: Invalid or
+  unexpected token`，修复后 `SYNTAX OK`
+- 真实点击 E2E 七项全过：页面 JS 无语法错误 + confirm 含字面 `\n` →
+  goto-tasks（7 张任务卡片）/ goto-hotwords / goto-create / 返回列表 /
+  open-workbench（3.4MB 工作台）/ wb-stage 粗剪合成面板（SRT 预览 74883
+  chars + 删除/复制按钮存在，未点删除）→ 零写请求（仅 workbench + video 两 READ）
+- ruff clean + pytest 196 passed
+- 服务重启加载修复版（旧 PID 19524 → 新进程）→ HTTP 200
+
 ## 边界说明
 
 - **行集口径**：与 `compose_rough` 完全同源（修订实时 + 已保存手工翻转/改判）— 上游合成与本地预览计算结果一致
@@ -79,4 +106,5 @@ REQ-20260916-018 用上游 VideoClipper 方法合成粗剪成片后，用户需�
 
 - 前置：REQ-20260916-016（粗剪合成可选阶段）、REQ-20260916-018（粗剪合成改用上游 VideoClipper 合成方法，副产物 `rough_compose.srt`）
 - 下游：精剪视频合成阶段（待规划）— 需要拿到粗剪的 `rough_compose.mp4` + 字幕清单（即本 REQ 的 SRT 预览）才能继续
-- 提交：`feat(home): 粗剪合成面板增强——删除产物 + 有效字幕 SRT 预览 (REQ-20260916-019)`
+- 提交：`feat(home): 粗剪合成面板增强——删除产物 + 有效字幕 SRT 预览 (REQ-20260916-019)`（b82815d）
+- 修复：`fix(home): 修复 rcDelete confirm 换行转义导致全站按钮失效 (REQ-20260916-019)`（42a46a3）
