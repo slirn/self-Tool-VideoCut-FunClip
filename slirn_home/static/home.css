@@ -1328,6 +1328,22 @@ footer { display: none !important; }
   border: 1px solid var(--border); border-radius: 8px;
   background: var(--input-bg); color: var(--text-primary);
 }
+/* 键盘选中行（REQ-20260916-004）：左侧实色竖条 + 浅底；与播放高亮（.active 渐变）区分，
+   两者叠加时播放渐变打底、选中竖条在前 */
+.slirn-rev-row.kbsel { box-shadow: inset 3px 0 0 var(--accent-solid); }
+.slirn-rev-row.kbsel:not(.active) { background: var(--accent-soft); }
+/* 快捷键提示条（REQ-20260916-004）：kbd 键帽小芯片 */
+.slirn-rev-kbhint {
+  margin-top: 6px; font-size: 12px; line-height: 2;
+  color: var(--text-secondary);
+}
+.slirn-rev-kbhint kbd {
+  display: inline-block; min-width: 14px; padding: 0 6px; margin: 0 1px;
+  border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 6px;
+  background: var(--input-bg); color: var(--text-primary);
+  font-family: inherit; font-size: 11px; font-weight: 600;
+  line-height: 1.6; text-align: center; vertical-align: 1px;
+}
 /* 严谨性级别单选卡（REQ-20260916-003）：高/中/低 各带说明+例子；
    选中态用 :has(input:checked) 高亮整卡 */
 .slirn-rigor-cards {

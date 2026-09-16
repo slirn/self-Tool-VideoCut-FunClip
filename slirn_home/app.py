@@ -440,6 +440,9 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
     return f'''<div class="slirn-card" style="margin-top:16px;">
         <div class="slirn-panel-header"><div class="slirn-panel-title">🎬 处理剪辑 · 第 2 步：字幕修订</div></div>
         <div class="slirn-sub-meta">{stats}</div>
+        <div class="slirn-rev-kbhint">⌨ 快捷键：<kbd>↑</kbd><kbd>↓</kbd> 上一条 / 下一条 · <kbd>空格</kbd> 播放 / 暂停
+ · <kbd>R</kbd> 重播本行 · <kbd>K</kbd> 保留 · <kbd>D</kbd> 删除（标记后自动下一条）
+ · <kbd>S</kbd> 切分（展开详情聚焦说明） · <kbd>Esc</kbd> 退出输入框</div>
         <div id="slirn-rev-player-wrap" class="slirn-video-wrap slirn-sub-player-wrap" style="display:none;">
             <video id="slirn-rev-player" controls preload="metadata"></video>
         </div>
@@ -1732,9 +1735,17 @@ ROUTER_JS = """
     revPollTimer = setInterval(update, 2000);
   }
 
+  // 详情页与工作台可能同时持有修订区 DOM（隐藏 tab 不清空 innerHTML）→ 一律取
+  // 「可见的」那个元素，避免 id 撞车时操作到隐藏播放器/列表（REQ-20260916-004 顺带修复）
+  function revVis(id) {
+    var els = document.querySelectorAll('#' + id);
+    for (var i = 0; i < els.length; i++) { if (els[i].offsetParent) return els[i]; }
+    return els[0] || null;
+  }
+
   function playRevAt(tid, startMs) {
-    var wrap = document.getElementById('slirn-rev-player-wrap');
-    var v = document.getElementById('slirn-rev-player');
+    var wrap = revVis('slirn-rev-player-wrap');
+    var v = revVis('slirn-rev-player');
     if (!v) { toast('❌ 播放器未就绪', 'error'); return; }
     if (wrap) wrap.style.display = '';
     if (!v.src) { v.src = SLIRN_API + '/video/' + encodeURIComponent(tid); v.load(); }
@@ -1748,8 +1759,8 @@ ROUTER_JS = """
   }
 
   function bindRevPlayer() {
-    var v = document.getElementById('slirn-rev-player');
-    var list = document.getElementById('slirn-rev-list');
+    var v = revVis('slirn-rev-player');
+    var list = revVis('slirn-rev-list');
     if (v && list && !v.dataset.bound) {
       v.dataset.bound = '1';
       var rows = Array.prototype.slice.call(list.querySelectorAll('.slirn-rev-row'));
@@ -1782,6 +1793,109 @@ ROUTER_JS = """
     if (st && st.dataset.taskId && st.dataset.state === 'running') startRevPolling(st.dataset.taskId);
   }
 
+  // ===== 字幕修订快捷键（REQ-20260916-004）：听 → 判 → 标记 → 下一条 =====
+  // ↑↓ 选行（跳到行起点，播放态跟随）· 空格 播放/暂停 · R 重播本行
+  // K 保留 / D 删除（标记后自动下一条）· S 切分（展开详情+聚焦说明，不跳行）
+  // Esc 从手动说明输入框退回列表；输入框/下拉聚焦时不劫持按键
+  function revRows() {
+    var list = revVis('slirn-rev-list');
+    if (!list || !list.offsetParent) return [];  // 列表不可见 → 快捷键整体不生效
+    return Array.prototype.slice.call(list.querySelectorAll('.slirn-rev-row'));
+  }
+  function revSelIndex(rows) {
+    for (var i = 0; i < rows.length; i++) { if (rows[i].classList.contains('kbsel')) return i; }
+    return -1;
+  }
+  function revMarkSel(row) {
+    revRows().forEach(function(r) { r.classList.toggle('kbsel', r === row); });
+    if (row && row.scrollIntoView) row.scrollIntoView({block: 'nearest'});
+  }
+  function revSelectRow(idx, seek) {
+    var rows = revRows();
+    if (!rows.length) return null;
+    var cur = revSelIndex(rows);
+    if (cur < 0) idx = (idx < 0) ? rows.length - 1 : 0;  // 无选中：↓ 取第一行，↑ 取最后一行
+    idx = Math.max(0, Math.min(rows.length - 1, idx));
+    var row = rows[idx];
+    revMarkSel(row);
+    if (seek) {
+      var v = revVis('slirn-rev-player');
+      if (v && v.src) {  // 播放器加载过才跳（暂停时不强制播放，按空格续听）
+        try { v.currentTime = (parseInt(row.getAttribute('data-start-ms'), 10) || 0) / 1000; } catch (err) {}
+      }
+    }
+    return row;
+  }
+  function revTogglePlay() {
+    var v = revVis('slirn-rev-player');
+    if (!v) return;
+    if (!v.src) {  // 从未播放过：从选中行（或第一行）起点开播
+      var rows = revRows();
+      var row = rows[revSelIndex(rows)] || rows[0];
+      if (row) playRevAt(row.getAttribute('data-task-id') || '',
+        parseInt(row.getAttribute('data-start-ms'), 10) || 0);
+      return;
+    }
+    if (v.paused) { var p = v.play(); if (p && p.catch) p.catch(function() {}); }
+    else { v.pause(); }
+  }
+  function revReplayRow() {
+    var rows = revRows();
+    var row = rows[revSelIndex(rows)];
+    if (!row) { toast('⌨ 先用 ↑ / ↓ 选择一条字幕', 'error'); return; }
+    playRevAt(row.getAttribute('data-task-id') || '', parseInt(row.getAttribute('data-start-ms'), 10) || 0);
+  }
+  function revApplyDecision(val) {
+    var rows = revRows();
+    var idx = revSelIndex(rows);
+    if (idx < 0) { toast('⌨ 先用 ↑ / ↓ 选择一条字幕，再按 K / D / S 标记', 'error'); return; }
+    var row = rows[idx];
+    var sel = row.querySelector('.slirn-rev-select');
+    if (!sel) return;
+    sel.value = val;
+    sel.dispatchEvent(new Event('change', {bubbles: true}));
+    if (val === 'split') {
+      // 切分需要人工说明：展开详情块、光标移到输入框，不自动跳行（写完按 Esc 返回）
+      row.classList.add('open');
+      var tg = row.querySelector('.slirn-rev-toggle');
+      if (tg) tg.textContent = '▴';
+      var note = row.querySelector('.slirn-rev-note-input');
+      if (note) {
+        note.focus();
+        try { note.setSelectionRange(note.value.length, note.value.length); } catch (err) {}
+      }
+      toast('✂️ 已标记切分 — 填写手动处理说明后按 Esc 返回列表');
+    } else {
+      revSelectRow(idx + 1, true);  // 保留/删除：标记即过，自动下一条
+    }
+  }
+  document.addEventListener('keydown', function(e) {
+    // Esc：手动说明输入框 → 退回列表快捷键状态
+    if (e.key === 'Escape') {
+      var ae = document.activeElement;
+      if (ae && ae.classList && ae.classList.contains('slirn-rev-note-input')) {
+        ae.blur();
+        e.preventDefault();
+      }
+      return;
+    }
+    // 文本输入中不劫持（下拉的 ↑↓ 保留原生行为）
+    var t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+    // 带修饰键的组合留给浏览器/系统
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    var rows = revRows();
+    if (!rows.length) return;  // 修订列表不可见/无行 → 快捷键不生效
+    var k = (e.key || '').toLowerCase();
+    if (e.key === 'ArrowDown') { e.preventDefault(); revSelectRow(revSelIndex(rows) + 1, true); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); revSelectRow(revSelIndex(rows) - 1, true); }
+    else if (k === ' ') { if (!e.repeat) { e.preventDefault(); revTogglePlay(); } }
+    else if (k === 'r') { if (!e.repeat) { e.preventDefault(); revReplayRow(); } }
+    else if (k === 'k') { if (!e.repeat) { e.preventDefault(); revApplyDecision('keep'); } }
+    else if (k === 'd') { if (!e.repeat) { e.preventDefault(); revApplyDecision('delete'); } }
+    else if (k === 's') { if (!e.repeat) { e.preventDefault(); revApplyDecision('split'); } }
+  });
+
   function handleResp(resp, refreshCellId) {
     if (!resp) { toast('❌ 无响应', 'error'); return; }
     if (!resp.ok) { toast('❌ ' + (resp.error || '操作失败'), 'error'); return; }
@@ -1807,6 +1921,7 @@ ROUTER_JS = """
     var revRow = e.target.closest('.slirn-rev-row');
     if (revRow && !e.target.closest('select, input, button, a, .slirn-rev-detail')) {
       e.preventDefault();
+      revMarkSel(revRow);  // 鼠标与键盘共享「当前行」（REQ-20260916-004）
       var tidR = revRow.getAttribute('data-task-id') || '';
       var startMsR = parseInt(revRow.getAttribute('data-start-ms'), 10) || 0;
       playRevAt(tidR, startMsR);
@@ -1890,7 +2005,7 @@ ROUTER_JS = """
     else if (action === 'save-revision') {
       var tidW = target.getAttribute('data-task-id') || '';
       var decisions = [];
-      document.querySelectorAll('#slirn-rev-list .slirn-rev-row').forEach(function(row) {
+      revRows().forEach(function(row) {  // 只收集可见列表（详情页+工作台同屏时防串数据）
         var sel = row.querySelector('.slirn-rev-select');
         var note = row.querySelector('.slirn-rev-note-input');
         if (sel) {
