@@ -6000,6 +6000,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         hotwords = ordered
         segment = None
         seg_filename = None
+        segment_temp = None  # 无截取参数时不进 if，先定义避免下方 UnboundLocalError
         if start and end:
             # 找最近的截取文件：.temp/（旧路径）+ %TEMP%/gradio/<sha>/（cut_preview 现把
             # 文件放这里过 /gradio_api/file= 白名单）。两处都找，取最新。
