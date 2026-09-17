@@ -1042,22 +1042,20 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
     def _line_html(seg: dict) -> str:
         rid = str(seg.get("i"))
         occs = sorted(occs_by_seg.get(rid, []), key=lambda o: int(o.get("pos", 0)))
-        parts = []
-        occ_chips = []  # REQ-032：替换栏放右侧独立列，正文流不变
-        pos = 0
+        # REQ-032 修订：替换栏放右侧独立列后，正文流不再插入 chip（避免重复显示），
+        # 整段原文连续渲染，删除线 + 箭头 + 输入框全部在替换栏。
         raw = str(seg.get("text", ""))
+        parts = [_esc(raw)]
+        occ_chips = []
         for o in occs:
-            p = int(o.get("pos", 0))
-            parts.append(_esc(raw[pos:p]))
             applied = 1 if o.get("applied", True) else 0
-            # 表达式里的字符串字面量先算好（Python 3.10 f-string 不能复用定界引号）
             occ_id = int(o["occ_id"])
             before_txt = _esc(str(o["before"]))
             after_txt = _esc(str(o["after"]))
             reason_txt = _esc(str(o.get("reason") or "不明确片段"))
             toggle_title = _esc("已采纳（保存时替换）" if applied else "已不采纳（保留原文）")
             toggle_mark = "✓" if applied else "✕"
-            chip = (
+            occ_chips.append(
                 f'<span class="slirn-opt-occ" data-occ="{occ_id}" data-applied="{applied}">'
                 f'<s class="slirn-opt-before" title="{reason_txt}">{before_txt}</s>'
                 f'<span class="slirn-opt-arrow">→</span>'
@@ -1065,10 +1063,6 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
                 f'<button class="slirn-btn slirn-btn-xs slirn-opt-toggle" data-action="opt-occ-toggle" '
                 f'data-occ="{occ_id}" title="{toggle_title}">{toggle_mark}</button></span>'
             )
-            parts.append(chip)
-            occ_chips.append(chip)  # 同一 chip 也用于右侧替换栏
-            pos = p + len(str(o["before"]))
-        parts.append(_esc(raw[pos:]))
         row_words = sorted({str(o["after"]) for o in occs if o.get("applied", True)})
         has_occ = " has-occ" if occs else ""
         occ_col = f'<div class="slirn-opt-col">{"".join(occ_chips)}</div>' if occ_chips else ''
