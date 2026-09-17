@@ -468,10 +468,12 @@ def test_render_cutlist_zone_states(tmp_path: Path):
     assert 'data-cut-act="play-keep"' in h2, "组头试听（keep 连续跳播）"
     assert 'data-cut-act="resplit"' in h2 and "✂️ 重新切分" in h2, "切分组重切入口（M3）"
     assert 'data-target="我们开始吧"' in h2, "组级切分后内容（重切预填/保存校验用）"
-    # 整段组单行（whole）：类别徽章在行内 + 决策徽章默认「维持原状」
+    # 整段组单行（whole）：类别徽章在行内 + 组级决策下拉默认「维持原状」（REQ-20260917-027）
     assert 'slirn-cut-row whole' in h2
     assert 'data-kind="fix">内容更正</span>' in h2 and "神经网络" in h2
-    assert 'data-abadge>维持原状</span>' in h2
+    assert 'class="slirn-cut-abadge slirn-cut-actsel" data-actsel' in h2
+    assert '<option value="" selected>维持原状</option>' in h2
+    assert h2.count("<option value=") >= 4 and '<option value="delete">❌ 改判删除</option>' in h2
     assert "1 条切分段缺少字级时间戳" in h2
     # 播放器 + 按钮动作（保存决策 / 生成清单 / 播放）
     assert 'id="slirn-cut-player"' in h2
@@ -504,7 +506,7 @@ def test_render_cutlist_zone_states(tmp_path: Path):
         manual_marks={"2.1": "delete"}, actions={"1": "delete"})
     cutlist_service.save_cutlist(outputs, cut2)
     h5 = _render_cutlist_zone(tid, m.get(tid), m)
-    assert 'data-act="delete"' in h5 and "已改判删除" in h5
+    assert 'data-act="delete"' in h5 and '<option value="delete" selected>❌ 改判删除</option>' in h5
     assert "❌ 删除 ✏️" in h5, "手工翻转恢复（✏️ 手工标识）"
 
     # 改判切分的整段组（keep 无切分内容 → 防御维持原状）→ 整段行 + ✂️ 入口 + 原文预填
@@ -514,7 +516,7 @@ def test_render_cutlist_zone_states(tmp_path: Path):
         actions={"1": "split"})
     cutlist_service.save_cutlist(outputs, cut3)
     h6 = _render_cutlist_zone(tid, m.get(tid), m)
-    assert 'data-act="split"' in h6 and "已改判切分" in h6
+    assert 'data-act="split"' in h6 and '<option value="split" selected>✂️ 改判切分</option>' in h6
     g1 = h6[h6.find('data-source-i="1"'):h6.find('data-source-i="2"')]
     assert 'slirn-cut-row whole' in g1 and 'data-cut-act="resplit"' in g1
     assert 'data-orig-text="正常一句"' in g1, "整段组原文（改判切分编辑区预填）"

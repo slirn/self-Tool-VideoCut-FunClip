@@ -612,13 +612,25 @@ def _render_cutlist_zone(task_id: str, t, mgr: TaskManager) -> str:
 
     # 按父段分组渲染（REQ-20260916-011 第二步）：keep/fix 整段 = 单行组；
     # split = 组头 + 完整子段表（keep 块 + delete 洞，时间序编号 父.N）
-    ACT_BADGES = {"keep": "✅ 已改判保留", "delete": "❌ 已改判删除", "split": "✂️ 已改判切分"}
     actions_map: dict[int, str] = {}
     for k, v in (cutlist.get("actions") or {}).items():
         try:
             actions_map[int(k)] = str(v)
         except (TypeError, ValueError):
             continue
+    # 组级决策下拉（REQ-20260917-027）：点徽章位置即弹出可选状态——鼠标改判
+    # 与快捷键 K/D/S 同效（原来仅键盘可达；删除后跳播会抢走选中，鼠标无从恢复）
+    ACT_OPTS = [("", "维持原状"), ("keep", "✅ 改判保留"),
+                ("delete", "❌ 改判删除"), ("split", "✂️ 改判切分")]
+
+    def _act_sel(act: str | None) -> str:
+        a = act or ""
+        opts = "".join(
+            f'<option value="{v}"{" selected" if a == v else ""}>{label}</option>'
+            for v, label in ACT_OPTS
+        )
+        return ('<select class="slirn-cut-abadge slirn-cut-actsel" data-actsel'
+                ' title="选择本条字幕的决策（与快捷键 K/D/S 同效）">' + opts + "</select>")
     groups: list[tuple[int, list[dict]]] = []
     for it in cutlist["items"]:
         si = int(it["source_i"])
@@ -638,11 +650,9 @@ def _render_cutlist_zone(task_id: str, t, mgr: TaskManager) -> str:
         first = its[0]
         is_split_group = any(x.get("sub") is not None for x in its)
         act = actions_map.get(si)
-        act_badge = ACT_BADGES.get(act, "维持原状")
         act_attr = f' data-act="{_esc(act)}"' if act else ""
-        act_cls = " changed" if act else ""
         if is_split_group:
-            # 切分组：组头（父编号+原段→切分后文字+决策徽章+重切/试听钮）+ 完整子段表
+            # 切分组：组头（父编号+原段→切分后文字+决策下拉+重切/试听钮）+ 完整子段表
             rows += (
                 f'<div class="slirn-cut-group split" data-source-i="{si}"'
                 f' data-task-id="{_esc(task_id)}"{act_attr}'
@@ -652,7 +662,7 @@ def _render_cutlist_zone(task_id: str, t, mgr: TaskManager) -> str:
                 f'<span class="slirn-rev-badge split" data-kind="split">切分修剪</span>'
                 f'<span class="slirn-cut-gtext">原段：「{_esc(first.get("orig_text", ""))}」'
                 f'<span class="slirn-cut-ptarget">→ 切分后：「{_esc(first.get("target_text") or "")}」</span></span>'
-                f'<span class="slirn-cut-abadge{act_cls}" data-abadge>{act_badge}</span>'
+                f'{_act_sel(act)}'
                 f'<button class="slirn-btn slirn-btn-xs" data-cut-act="resplit"'
                 f' title="修改切分后内容并按新内容重新划分本段">✂️ 重新切分</button>'
                 f'<button class="slirn-btn slirn-btn-xs" data-cut-act="play-keep"'
@@ -701,7 +711,7 @@ def _render_cutlist_zone(task_id: str, t, mgr: TaskManager) -> str:
                 f'<span class="slirn-sub-time">{_esc(first["start"])} → {_esc(first["end"])}</span>'
                 f'<span class="slirn-rev-badge {kind}" data-kind="{kind}">{kind_label}</span>'
                 f'<span class="slirn-sub-text">{text_html}</span>'
-                f'<span class="slirn-cut-abadge{act_cls}" data-abadge>{act_badge}</span>'
+                f'{_act_sel(act)}'
                 f'{resplit_btn}'
                 f'</div></div>'
             )
@@ -2288,6 +2298,16 @@ ROUTER_JS = """
   }
   document.addEventListener('change', function(e) {
     if (e.target && e.target.name === 'slirn-rev-rigor') syncRigorCustomUI();
+    // 切分修剪·组级决策下拉（REQ-20260917-027）：鼠标改判与快捷键 K/D/S 同效；
+    // 选「维持原状」=取消改判，选回当前值 = 无操作（区别于键盘的「再按同键取消」）
+    if (e.target && e.target.classList && e.target.classList.contains('slirn-cut-actsel')) {
+      var gAct = e.target.closest('.slirn-cut-group');
+      if (gAct) {
+        var nvAct = e.target.value || '';
+        if (nvAct && (gAct.getAttribute('data-act') || '') === nvAct) return;
+        cutApplyAct(gAct, nvAct);
+      }
+    }
     // 决策下拉变化 → 行 data-decision/data-final 跟随（实质口径），过滤
     // 计数/可见性实时刷新（REQ-20260916-010；未保存前纯前端，刷新即还原）
     if (e.target && e.target.classList && e.target.classList.contains('slirn-rev-select')) {
@@ -2752,24 +2772,14 @@ ROUTER_JS = """
   }
   // ===== 字幕级改判 K/D/S（REQ-20260916-011 M3）：作用于选中行所属的字幕（组）=====
   // 空=维持原状 · delete=整条删 · keep=原切分不切了整段保留 · split=改为切分（展开编辑区）
-  var CUT_ACT_BADGES = { keep: '✅ 已改判保留', delete: '❌ 已改判删除', split: '✂️ 已改判切分' };
+  // REQ-20260917-027：核心抽 cutApplyAct，组头/整段行的决策下拉（鼠标）与键盘同效
   function cutActBadge(g, val) {
-    var b = g.querySelector('[data-abadge]');
-    if (b) b.textContent = val ? CUT_ACT_BADGES[val] : '维持原状';
+    var b = g.querySelector('[data-actsel]');
+    if (b) b.value = val || '';  // ''=维持原状
   }
-  function cutApplyDecision(val) {
-    var rows = cutRows();
-    var row = rows[cutSelIndex(rows)];
-    if (!row) {
-      var kmA = revKeysLoad();
-      toast('⌨ 先用 ' + revKeyLabel(kmA.prev) + ' / ' + revKeyLabel(kmA.next) + ' 选择一条字幕，再按 '
-        + revKeyLabel(kmA.keep) + ' / ' + revKeyLabel(kmA.del) + ' / ' + revKeyLabel(kmA.split) + ' 改判', 'error');
-      return;
-    }
-    var g = row.closest('.slirn-cut-group');
-    if (!g) return;
+  function cutApplyAct(g, val) {
     cutCloseResplit();  // 任何改判动作先收起重切编辑区（改判 split 时再重开 — 防取消后残留）
-    if ((g.getAttribute('data-act') || '') === val) {  // 再按同键 → 取消，回到维持原状
+    if (!val) {  // 维持原状 → 取消改判
       g.removeAttribute('data-act');
       cutActBadge(g, '');
       toast('已取消改判（维持原状）— 未保存');
@@ -2784,6 +2794,23 @@ ROUTER_JS = """
       toast((val === 'keep' ? '✅ 已改判整条保留' : '❌ 已改判整条删除')
         + '（子段标记不再参与执行）— 未保存');
     }
+  }
+  function cutApplyDecision(val) {
+    var rows = cutRows();
+    var row = rows[cutSelIndex(rows)];
+    if (!row) {
+      var kmA = revKeysLoad();
+      toast('⌨ 先用 ' + revKeyLabel(kmA.prev) + ' / ' + revKeyLabel(kmA.next) + ' 选择一条字幕，再按 '
+        + revKeyLabel(kmA.keep) + ' / ' + revKeyLabel(kmA.del) + ' / ' + revKeyLabel(kmA.split) + ' 改判', 'error');
+      return;
+    }
+    var g = row.closest('.slirn-cut-group');
+    if (!g) return;
+    if ((g.getAttribute('data-act') || '') === val) {  // 再按同键 → 取消，回到维持原状
+      cutApplyAct(g, '');
+      return;
+    }
+    cutApplyAct(g, val);
   }
   // ===== 单段重新切分（REQ-20260916-011 M3）：组头下行内展开编辑区 =====
   function cutOpenResplit(g) {
@@ -3147,7 +3174,9 @@ ROUTER_JS = """
               cutKeepIdx++;
               var nxt = cutKeepSeq[cutKeepIdx];
               try { v.currentTime = nxt.s / 1000; } catch (err) {}
-              cutMarkSel(nxt.row);
+              // 不移动 kbsel（REQ-20260917-027）：跳播/播放位置的高亮由 ② 的
+              // .active 跟随；kbsel 是键盘/鼠标的决策目标，保持在用户选中的行 —
+              // 快捷键删除过的行点击后选中不再被跳播抢走，可立即用下拉改回
               if (cutKeepMode === 'group') cutAuditionBar(v);
               return;  // 跳转后的首个 timeupdate 再走高亮，防旧位置误亮
             }
@@ -3742,7 +3771,7 @@ ROUTER_JS = """
       return;
     }
     var cutRow = e.target.closest('.slirn-cut-row');
-    if (cutRow && !e.target.closest('button, a')) {
+    if (cutRow && !e.target.closest('button, a, select')) {  // select=决策下拉（REQ-20260917-027），点它只开下拉不预播
       e.preventDefault();
       cutMarkSel(cutRow);  // 鼠标与键盘共享「当前行」
       cutPreview(cutRow);
