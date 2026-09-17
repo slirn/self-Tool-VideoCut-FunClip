@@ -37,18 +37,34 @@ BATCH_SIZE = 40
 OPT_SYSTEM = (
     "你是字幕校对助手。用户给你一段视频重新识别出的字幕行列表（JSON 数组，"
     "每项含行 id 与文本），并附一份热词表（专有名词/人名/术语的正确写法，可能为空）。\n"
-    "请逐行检查，提取「不明确的字/词」——疑似语音识别错误的片段：同音/近音误写"
-    "（如「神精网络」应为「神经网络」）、与热词表矛盾、术语可疑、语义不通的可疑字词。\n\n"
+    "这段文本由 ASR 对口语录音转写，常混有同音/近音误写。请逐行仔细检查，"
+    "提取「不明确的字/词」——疑似语音识别错误的片段。\n\n"
+    "重点信号（命中任意一条即标记）：\n"
+    "- 同音/近音误写（如「神精网络」应为「神经网络」）\n"
+    "- 句中突兀的数字/字母（在口语句里说不通）\n"
+    "- 语义不通或与上下文不搭的组合\n"
+    "- 与热词表写法不一致的专有名词\n"
+    "- 疑似重复识别的叠字（如「视频视频」）\n\n"
     "判定标准：\n"
     "- 只标记局部可疑片段：不得整行改写、不得增删其他内容、不得调整语序\n"
-    "- 每处给出建议修正（after）和简短理由（reason）\n"
+    "- 每处给出最合理的猜测修正（after，只写替换后的文字本身，不要带解释/括号）"
+    "和简短理由（reason）\n"
     "- 行内已正确、只是口语化/语气词/书面口语差异 → 不标记\n"
-    "- 拿不准但值得人工核对的可以标记 — 最终由人工分辨，宁多提议不替人决策\n\n"
+    "- 态度：宁多提议不替人决策——拿不准但值得人工核对的也要标记，最终由人工分辨；"
+    "整段录音至少评估出最可疑的几处，确信完全无误才放过\n\n"
     "输出要求：只输出 JSON 数组（没有发现时输出 []），不要任何其他文字。"
     "仅含有发现的行，每项格式：\n"
     '{"id": "行id", "unclear": [{"before": "行内原文片段（必须逐字摘自行文本）", '
     '"after": "建议替换后的文字", "reason": "简短理由"}]}\n'
     "before 必须逐字等于行文本中的一段连续原文；同一行的多个片段互不重叠。"
+)
+
+# 首轮零发现时复检用的追加指令 — 口语转写几乎总有可疑处，零发现多半是漏检而非干净
+OPT_STRICT_SUFFIX = (
+    "\n\n【复检要求】上一轮检查一无所获，但口语 ASR 转写几乎总含可疑片段。"
+    "请降低标记门槛重新逐行检查：叠字重复、突兀数字/字母、语义不通、近音误写，"
+    "哪怕只有三成把握也要提议（人工最终分辨）。整段至少给出 3 处候选；"
+    "若确属完全干净才能输出 []。"
 )
 
 
@@ -270,13 +286,14 @@ def start_job(
             log.info("[opt][%s] 成片识别：%d 行", task_id, len(segments))
 
             # ---- ② 大模型分批提取不明确字词 ----
-            def _analyze(batch: list[dict]) -> dict[str, list[dict]]:
+            def _analyze(batch: list[dict], strict: bool = False) -> dict[str, list[dict]]:
                 """分析一批：解析失败/截断 → 减半重试；单行仍失败 → 放弃该批
                 （提议性质的提取，不阻塞流程，宁缺勿错）。"""
                 from slirn_home.revision_service import _call_llm
 
+                system = OPT_SYSTEM + (OPT_STRICT_SUFFIX if strict else "")
                 try:
-                    raw = _call_llm(OPT_SYSTEM, build_user_prompt(task_name, hotwords, batch), entry)
+                    raw = _call_llm(system, build_user_prompt(task_name, hotwords, batch), entry)
                     return parse_occurrences(raw, batch)
                 except ValueError as e:
                     if len(batch) == 1:
@@ -286,17 +303,27 @@ def start_job(
                     mid = len(batch) // 2
                     log.warning("[opt][%s] 批解析失败，减半重试（%d 行）: %s",
                                 task_id, len(batch), e)
-                    return {**_analyze(batch[:mid]), **_analyze(batch[mid:])}
+                    return {**_analyze(batch[:mid], strict), **_analyze(batch[mid:], strict)}
+
+            def _analyze_all(strict: bool = False) -> dict[str, list[dict]]:
+                found: dict[str, list[dict]] = {}
+                for bi, batch in enumerate(batches):
+                    _stage(f"大模型分析 ({bi + 1}/{len(batches)})" + ("·复检" if strict else ""),
+                           40 + (bi + 1) / max(1, len(batches)) * 50)
+                    found.update(_analyze(batch, strict))
+                    if bi < len(batches) - 1:
+                        time.sleep(0.6)  # 批间间隔，降低限流概率
+                return found
 
             lines = [{"id": str(s["i"]), "text": str(s.get("text", ""))} for s in segments]
             batches = [lines[k:k + BATCH_SIZE] for k in range(0, len(lines), BATCH_SIZE)] or [[]]
-            found: dict[str, list[dict]] = {}
-            for bi, batch in enumerate(batches):
-                _stage(f"大模型分析 ({bi + 1}/{len(batches)})",
-                       40 + (bi + 1) / max(1, len(batches)) * 50)
-                found.update(_analyze(batch))
-                if bi < len(batches) - 1:
-                    time.sleep(0.6)  # 批间间隔，降低限流概率
+            found = _analyze_all()
+            # 全部批次零发现时严格复检一轮 — 大模型抽样波动下可能漏掉整段，
+            # 复检一轮显著降低「点了开始却什么都没提出来」的概率（仍零则视为确实干净）。
+            if not found and len(lines) >= 5:
+                log.info("[opt][%s] 首轮零发现，严格复检一轮（%d 行）", task_id, len(lines))
+                _stage("零发现复检", 92.0)
+                found = _analyze_all(strict=True)
 
             # ---- ③ 落盘（出现项默认全部"待采纳"，applied=True 待人工改判） ----
             _stage("保存结果", 95.0)

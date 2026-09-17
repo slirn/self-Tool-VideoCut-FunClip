@@ -228,7 +228,10 @@ def test_start_job_writes_artifact(tmp_path, monkeypatch):
 
 
 def test_start_job_llm_all_fail_still_writes(tmp_path, monkeypatch):
-    """LLM 全部失败 → 识别结果 + 空出现项仍落盘（提议失败不阻塞流程）。"""
+    """LLM 全部失败 → 识别结果 + 空出现项仍落盘（提议失败不阻塞流程）。
+
+    行数 3 < 5 → 不触发零发现复检，行为与旧版一致。
+    """
     from slirn_home import asr_service, revision_service
 
     monkeypatch.setattr(asr_service, "_run_recognition",
@@ -245,6 +248,44 @@ def test_start_job_llm_all_fail_still_writes(tmp_path, monkeypatch):
     assert j["state"] == "done"
     data = osvc.load_optimize(tmp_path)
     assert data["occurrences"] == [] and data["words"] == []
+
+
+def test_start_job_zero_found_strict_retry(tmp_path, monkeypatch):
+    """首轮零发现（≥5 行）→ 严格复检一轮；复检有发现则落盘（REQ-030 复检逻辑）。"""
+    from slirn_home import asr_service, revision_service
+
+    segs5 = SEGS + [
+        {"i": 4, "start_ms": 9000, "end_ms": 11000, "start": "00:00:09,000",
+         "end": "00:00:11,000", "text": "视频视频积分的福利"},
+        {"i": 5, "start_ms": 12000, "end_ms": 14000, "start": "00:00:12,000",
+         "end": "00:00:14,000", "text": "先把八四这个都开出去"},
+    ]
+    calls = {"n": 0}
+
+    def fake_call(sys_prompt, user, entry):
+        calls["n"] += 1
+        if "复检要求" in sys_prompt:
+            return ('[{"id": "4", "unclear": [{"before": "视频视频", "after": "视频", '
+                    '"reason": "叠字重复"}]}]')
+        return "[]"  # 首轮一无所获
+
+    monkeypatch.setattr(asr_service, "_run_recognition",
+                        lambda vp, hw, sd: {"sentences": "fake"})
+    monkeypatch.setattr(asr_service, "segments_from_sentences", lambda sents: segs5)
+    monkeypatch.setattr(revision_service, "_call_llm", fake_call)
+
+    assert osvc.start_job("t-3", tmp_path / "v.mp4", [], "任务", tmp_path)
+    for _ in range(100):
+        j = osvc.job_status("t-3")
+        if j and j["state"] in ("done", "error"):
+            break
+        time.sleep(0.05)
+    assert j["state"] == "done"
+    assert calls["n"] == 2  # 首轮 1 批 + 复检 1 批（BATCH_SIZE=40，5 行一批）
+    assert j["occurrences"] == 1
+    data = osvc.load_optimize(tmp_path)
+    assert data["occurrences"][0]["before"] == "视频视频"
+    assert data["words"] == [{"word": "视频", "count": 1}]
 
 
 # =============== 面板渲染 ===============
