@@ -417,7 +417,7 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
             <div>🟦 <strong>内容更正</strong> — 错字/别字等文字错误，直接给出更正后字幕（说明附原文对照）</div>
             <div>🟧 <strong>人工复核</strong> — 模型拿不准，交给你判断</div>
         </div>
-        <div class="slirn-form-hint">每段建议都带具体分析说明；你在建议之上逐条决策（采纳/改判，切分行填写切分修剪后内容）。</div>
+        <div class="slirn-form-hint">每段建议都带具体分析说明；你在建议之上逐条决策（采纳/改判；切分行填写切分修剪后内容，更正行填写更正后内容）。</div>
         <div class="slirn-form-hint" style="margin-top:14px;"><b>分析严谨性级别</b>（必选）— 决定大模型按多严格的标准处理字幕：</div>
         {_render_rigor_picker()}
         <div id="slirn-rev-status" class="slirn-status-msg" style="{status_display};"
@@ -453,12 +453,14 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
                 extra_html = (
                     f'<div class="slirn-rev-keeptext fix">✏️ 更正后：「{_esc(e["keep_text"])}」</div>'
                 )
-        # split 行「切分修剪后内容」自动预填建议文本（REQ-20260916-010）：手动填写
-        # 优先；未填 → keep_text 作起点（与服务端分析时自动填写、切分清单回退同口径，
-        # 存量任务未重分析也能看到/微调将要生效的修剪后内容）
+        # split/fix 行输入框自动预填建议文本（REQ-20260916-010 / 20260917-026）：
+        # 手动填写优先；未填 → keep_text 作起点（与服务端分析时自动填写、切分清单
+        # 回退同口径，存量任务未重分析也能看到/微调将要生效的修剪后/更正后内容）
         note_val = str(e.get("user_note") or "").strip()
-        if not note_val and cat == "split" and e.get("keep_text"):
+        if not note_val and cat in ("split", "fix") and e.get("keep_text"):
             note_val = str(e["keep_text"])
+        # 输入框语义按建议类别区分（决策下拉改为 fix/split 时 JS 动态跟随，REQ-20260917-026）
+        note_ph = "更正后内容（可微调）" if cat == "fix" else "切分修剪后内容（可空）"
         # 决策的实质类别（REQ-20260916-010 过滤口径，与 cutlist_service._final_kind
         # 同源）：手动改判优先；accept = 模型建议类别；pending = 空（未决策）
         if decision in ("keep", "delete", "split", "fix"):
@@ -478,12 +480,12 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
             f'{_esc(e.get("text", ""))}</span>'
             f'<select class="slirn-rev-select" data-i="{int(e["i"])}" title="处理决策">{opts}</select>'
             f'<button class="slirn-rev-toggle" data-action="rev-detail" data-i="{int(e["i"])}"'
-            f' title="展开/收起模型分析与切分修剪后内容">{"▴" if open_detail else "▾"}</button>'
+            f' title="展开/收起模型分析与修剪/更正内容">{"▴" if open_detail else "▾"}</button>'
             f'</div>'
             f'<div class="slirn-rev-detail">'
             f'<div class="slirn-rev-note">🤖 {_esc(e.get("note", ""))}</div>{extra_html}'
             f'<input class="slirn-rev-note-input" data-i="{int(e["i"])}"'
-            f' placeholder="切分修剪后内容（可空）" value="{_esc(note_val)}" />'
+            f' placeholder="{_esc(note_ph)}" value="{_esc(note_val)}" />'
             f'</div></div>'
         )
 
@@ -506,7 +508,7 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
         f"保留 {cat_counts.get('keep', 0)} / 删除 {cat_counts.get('delete', 0)} / "
         f"切分 {cat_counts.get('split', 0)} / 更正 {cat_counts.get('fix', 0)} / 复核 {cat_counts.get('review', 0)}"
         f" · ✅ 已决策 <b>{decided}/{n}</b> · 点击行定位播放 · 决策列默认「采纳建议」"
-        f" · ▾ 展开模型分析与切分修剪后内容"
+        f" · ▾ 展开模型分析与修剪/更正内容"
     )
 
     return f'''<div class="slirn-card" style="margin-top:16px;">
@@ -2299,6 +2301,26 @@ ROUTER_JS = """
             || suggF === 'split' || suggF === 'fix')) finF = suggF;
         rowF.setAttribute('data-decision', dv);
         rowF.setAttribute('data-final', finF);
+        // 决策改为切分/内容更正 → 展开详情并把行内输入框备好（REQ-20260917-026）：
+        // 输入框语义跟随决策（split=切分修剪后内容 / fix=更正后内容），为空时从
+        // 详情块的模型建议文本（✂️ 建议保留 / ✏️ 更正后）预填，直接可微调；
+        // 切分修剪阶段自动取输入框值生效（cutlist_service._fix_target/_split_target）
+        var noteF = rowF.querySelector('.slirn-rev-note-input');
+        if (noteF && (dv === 'split' || dv === 'fix')) {
+          noteF.placeholder = dv === 'fix' ? '更正后内容（可微调）' : '切分修剪后内容（可空）';
+          if (!noteF.value.trim()) {
+            var ktF = rowF.querySelector('.slirn-rev-keeptext');
+            var mF = ktF && /「(.+)」/.exec(ktF.textContent || '');
+            if (mF) noteF.value = mF[1];
+          }
+          rowF.classList.add('open');
+          var tgF = rowF.querySelector('.slirn-rev-toggle');
+          if (tgF) tgF.textContent = '▴';
+          try {
+            noteF.focus();
+            noteF.setSelectionRange(noteF.value.length, noteF.value.length);
+          } catch (err) {}
+        }
         revFilterSync();
       }
     }

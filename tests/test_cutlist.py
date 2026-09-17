@@ -170,6 +170,36 @@ def test_build_cutlist_full(tmp_path: Path):
     assert f["kind"] == "fix" and f["text"] == "神经网络入门" and f["orig_text"] == "神精网络入门"
 
 
+def test_build_cutlist_fix_user_note_priority():
+    """REQ-20260917-026 — fix 生效文本三级：输入框微调值（user_note）→ 模型更正（keep_text）→ 原文兜底。"""
+    from slirn_home.cutlist_service import build_cutlist
+
+    segs = [
+        _seg(1, 0, 3000, "神精网络入门"),
+        _seg(2, 3000, 6000, "今天讲第一课"),
+        _seg(3, 6000, 9000, "我们开始吧"),
+    ]
+    rev = {"entries": [
+        # 手动改判 fix + 输入框微调过 → 微调值生效
+        {"i": 1, "category": "fix", "keep_text": "神经网络入门",
+         "decision": "fix", "user_note": "神经网络入门（第一讲）"},
+        # 采纳 fix + 未填 → 模型更正文本生效
+        {"i": 2, "category": "fix", "keep_text": "今天讲·第一课",
+         "decision": "accept", "user_note": ""},
+        # 改判 fix + 建议文本缺失 → 原文兜底
+        {"i": 3, "category": "keep", "keep_text": None,
+         "decision": "fix", "user_note": ""},
+    ]}
+    cut = build_cutlist({"segments": segs}, rev)
+    texts = {it["id"]: it["text"] for it in cut["items"]}
+    assert texts["1"] == "神经网络入门（第一讲）", "输入框微调值优先（下一阶段自动取用）"
+    assert texts["2"] == "今天讲·第一课", "未微调 → 模型更正 keep_text"
+    assert texts["3"] == "我们开始吧", "都缺 → 原文兜底"
+    assert cut["stats"]["fixed"] == 3
+    # orig_text 始终保留原文，供面板对照
+    assert [it["orig_text"] for it in cut["items"]][0] == "神精网络入门"
+
+
 def test_build_cutlist_split_multi_blocks_and_user_note(tmp_path: Path):
     """重复语句 → 完整三段（keep/delete 洞/keep）；手动「切分修剪后内容」优先于模型建议。"""
     from slirn_home.cutlist_service import build_cutlist

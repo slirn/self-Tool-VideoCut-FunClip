@@ -719,7 +719,7 @@ def test_render_revision_zone_states(tmp_path: Path, monkeypatch):
     assert 'value="大家好"' in h3, "split 预填建议的修剪后文本"
     assert "已决策 <b>1/3</b>" in h3, "统计口径仍是已保存决策（保存后生效）"
     assert "决策列默认「采纳建议」" in h3
-    assert "点击行定位播放" in h3 and "展开模型分析与切分修剪后内容" in h3
+    assert "点击行定位播放" in h3 and "展开模型分析与修剪/更正内容" in h3
     # 快捷键提示条（REQ-20260916-004）：键帽芯片 + 动作说明；选中态由 JS 挂 kbsel，不预渲染
     assert 'class="slirn-rev-kbhint"' in h3 and h3.count("<kbd>") == 8
     for kw in ("上一条 / 下一条", "播放 / 暂停", "重播本行", "<kbd>K</kbd> 保留",
@@ -788,15 +788,20 @@ def test_render_fix_row_and_input_rename(tmp_path: Path):
     assert h.count('class="slirn-rev-row open"') == 0 and h.count(">▾</button>") == 2
     # 未决策默认「采纳建议」（fix 行同样，采纳即采用更正文本）
     assert h.count('<option value="accept" selected>采纳建议</option>') == 2
-    # 输入区改名（用户原话）：手动处理说明 → 切分修剪后内容
-    assert h.count('placeholder="切分修剪后内容（可空）"') == 2
+    # 输入区语义（REQ-20260916-006 → 20260917-026）：手动处理说明 → 按行类别区分
+    # —— fix 行「更正后内容（可微调）」且预填模型更正文本（value）；
+    # 其余行仍为「切分修剪后内容（可空）」
+    assert h.count('placeholder="更正后内容（可微调）"') == 1
+    assert h.count('placeholder="切分修剪后内容（可空）"') == 1
+    assert 'value="神经网络入门"' in h, "fix 行输入框预填模型更正文本（REQ-20260917-026）"
     assert "手动处理说明" not in h
 
 
 def test_render_split_autofill_and_final_kind(tmp_path: Path):
     """split 自动预填优先级 + 决策实质类别（REQ-20260916-010）。
 
-    - 手动填写过「切分修剪后内容」→ 不被建议文本覆盖；fix 行不预填（需求只提切分）
+    - 手动填写过「切分修剪后内容」→ 不被建议文本覆盖；fix 行同样预填
+      （REQ-20260917-026：更正行也显示输入框，未手填 → 模型更正作起点）
     - 实质类别 = 手动改判优先；accept = 模型建议；pending = 空（与 _final_kind 同源）
     """
     from slirn_home.app import _render_revision_zone
@@ -824,8 +829,8 @@ def test_render_split_autofill_and_final_kind(tmp_path: Path):
     h = _render_revision_zone(tid, m.get(tid), m)
     # split：手填优先（值=「我的版本」而非建议「大家好」）
     assert 'value="我的版本"' in h and 'value="大家好"' not in h
-    # fix：不预填（需求只提切分；更正文本已收进详情块「✏️ 更正后」）
-    assert 'value="神经网络入门"' not in h and "✏️ 更正后：「神经网络入门」" in h
+    # fix：同样预填（REQ-20260917-026 更正行也显示输入框，未手填 → 模型更正作起点）
+    assert 'value="神经网络入门"' in h and "✏️ 更正后：「神经网络入门」" in h
     # 实质类别：手动 split → split；accept+建议 fix → fix；pending+复核 → 空
     assert 'data-final="split"' in h and 'data-final="fix"' in h
     assert h.count('data-final=""') == 1

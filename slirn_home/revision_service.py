@@ -546,9 +546,10 @@ def start_job(
                     "text": s.get("text", ""),
                     "category": sug["category"], "keep_text": sug["keep_text"], "note": sug["note"],
                     "decision": "pending",
-                    # split 行自动预填建议的修剪后文本到「切分修剪后内容」（REQ-20260916-010）：
-                    # 用户在此基础上微调即可；清空则切分清单回退 keep_text，语义自洽
-                    "user_note": (sug["keep_text"] or "") if sug["category"] == "split" else "",
+                    # split/fix 行自动预填建议文本到行内输入框（REQ-20260916-010 /
+                    # 20260917-026）：split=切分修剪后内容、fix=更正后内容，用户在
+                    # 此基础上微调即可；清空则切分清单回退 keep_text，语义自洽
+                    "user_note": (sug["keep_text"] or "") if sug["category"] in ("split", "fix") else "",
                 })
             meta = {
                 "version": 1,

@@ -134,6 +134,13 @@ def _split_target(entry: dict) -> str:
     return str(entry.get("user_note") or "").strip() or str(entry.get("keep_text") or "").strip()
 
 
+def _fix_target(entry: dict) -> str:
+    """fix 的更正后文字（REQ-20260917-026）：手动填写/微调的「更正后内容」
+    （user_note，修订面板输入框预填模型更正、可直接改）优先，回退模型建议 keep_text。
+    """
+    return str(entry.get("user_note") or "").strip() or str(entry.get("keep_text") or "").strip()
+
+
 def _segment_tokens(seg: dict) -> tuple[list[str], list[list[int]]] | None:
     """段的 (tokens, token_ts) — 仅当两列表非空且等长（字级时间戳可信）。"""
     tokens = seg.get("tokens")
@@ -218,7 +225,8 @@ def build_cutlist(subtitle_meta: dict, revision: dict,
                   manual_marks: dict | None = None, actions: dict | None = None) -> dict:
     """字幕生成 + 修订决策 → 切分修剪清单（纯函数，不落盘）。
 
-    - keep/fix：整段带入，id=原编号（字符串），fix 文本=更正后（keep_text）
+    - keep/fix：整段带入，id=原编号（字符串），fix 文本=更正后
+      （user_note 手动微调优先 → keep_text，REQ-20260917-026）
     - delete：剔除
     - split：完整时间轴划分（keep 块 + delete 洞，REQ-20260916-011），
       id=「父编号.子序号」时间序不分标记；子段 mark 双态建议（keep/delete）
@@ -278,7 +286,8 @@ def build_cutlist(subtitle_meta: dict, revision: dict,
             stats["fallback"] += int(fb)
             continue
         if kind in ("keep", "fix"):
-            text = str(e.get("keep_text") or "").strip() if kind == "fix" else str(seg.get("text", ""))
+            # fix 文本：输入框微调值（user_note）优先 → 模型更正（keep_text）→ 原文兜底
+            text = _fix_target(e) if kind == "fix" else str(seg.get("text", ""))
             if kind == "fix" and not text:
                 text = str(seg.get("text", ""))  # 更正文本缺失 → 原文兜底
             items.append({
