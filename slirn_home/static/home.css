@@ -1699,7 +1699,7 @@ footer { display: none !important; }
   .slirn-rigor-cards { grid-template-columns: 1fr; }
 }
 
-/* ===== 精剪修订 · 热词替换（REQ-20260916-017）===== */
+/* ===== 精剪修订 · 热词替换（REQ-20260916-017；交互已被优化字幕阶段取代，样式沿用）===== */
 .slirn-fw-mark {
   background: rgba(255, 176, 32, 0.35);  /* 琥珀高亮 — 替换处特殊颜色标识 */
   color: inherit; border-radius: 3px; padding: 0 1px;
@@ -1736,6 +1736,58 @@ footer { display: none !important; }
 @media (max-width: 720px) {
   .slirn-fw-row { grid-template-columns: 36px 1fr auto; }
   .slirn-fw-time { display: none; }
+}
+
+/* ===== 优化字幕 · 不明确字词（REQ-20260917-030）===== */
+/* 词频 chips：可点按筛选出现行（active = 筛选中） */
+.slirn-opt-chip {
+  padding: 3px 10px; border-radius: 999px; font-size: 12.5px; font-weight: 600;
+  background: rgba(255, 176, 32, 0.14); color: #8a5a00;
+  border: 1px solid transparent; cursor: pointer;
+}
+.slirn-opt-chip:hover { background: rgba(255, 176, 32, 0.24); }
+.slirn-opt-chip.active {
+  background: rgba(255, 176, 32, 0.3); border-color: #8a5a00;
+}
+.slirn-opt-chip b { margin-left: 4px; font-weight: 700; }
+/* 行内出现项：删除线原文 → 输入框替换值 → 采纳开关 */
+.slirn-opt-row {
+  display: grid; grid-template-columns: 44px 92px 1fr; gap: 8px; align-items: start;
+  padding: 7px 10px; cursor: pointer; border-bottom: 1px solid var(--border);
+}
+.slirn-opt-row:last-child { border-bottom: none; }
+.slirn-opt-row:hover { background: var(--accent-soft); }
+.slirn-opt-row .slirn-sub-idx { font-size: 11px; color: var(--text-muted);
+  font-variant-numeric: tabular-nums; text-align: right; }
+.slirn-opt-occ {
+  display: inline-flex; align-items: center; gap: 4px; margin: 0 2px;
+  padding: 1px 4px; border-radius: 6px; background: rgba(255, 176, 32, 0.12);
+  vertical-align: baseline;
+}
+.slirn-opt-occ .slirn-opt-before {
+  text-decoration: line-through; color: var(--text-muted); font-size: 12.5px;
+}
+.slirn-opt-occ .slirn-opt-arrow { color: var(--text-muted); font-size: 11px; }
+.slirn-opt-occ input.slirn-opt-after {
+  width: 8em; min-width: 4em; max-width: 14em; padding: 1px 6px;
+  font-size: 12.5px; font-weight: 600; line-height: 1.5;
+  border: 1px solid rgba(255, 176, 32, 0.55); border-radius: 6px;
+  background: var(--input-bg); color: var(--text);
+}
+.slirn-opt-occ input.slirn-opt-after:focus { outline: none;
+  border-color: rgba(255, 176, 32, 0.9); }
+.slirn-opt-occ .slirn-opt-toggle { padding: 0 6px; font-size: 11px; line-height: 1.6; }
+/* 不采纳：整项置灰、原文去掉删除线（保留原文即生效文本） */
+.slirn-opt-occ[data-applied="0"] { opacity: 0.55; background: transparent; }
+.slirn-opt-occ[data-applied="0"] .slirn-opt-before { text-decoration: none; color: inherit; }
+.slirn-opt-occ[data-applied="0"] input.slirn-opt-after {
+  text-decoration: line-through; border-color: var(--border); }
+/* 过滤：只看有不明确字词的行 */
+.slirn-opt-list.slirn-opt-only-occ .slirn-opt-row:not(.has-occ) { display: none; }
+@media (max-width: 720px) {
+  .slirn-opt-row { grid-template-columns: 36px 1fr; }
+  .slirn-opt-row .slirn-fw-time { display: none; }
+  .slirn-opt-occ { flex-wrap: wrap; }
 }
 
 /* ============ 粗剪合成 · 有效字幕 SRT 预览（REQ-20260916-019） ============ */

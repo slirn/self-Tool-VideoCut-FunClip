@@ -929,99 +929,83 @@ def _render_rough_compose_zone(task_id: str, t, mgr: TaskManager) -> str:
     </div>'''
 
 
-def _render_fine_review_zone(task_id: str, t, mgr: TaskManager) -> str:
-    """处理剪辑 · 精剪修订：热词替换（REQ-20260916-017）。
+def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
+    """处理剪辑 · 优化字幕（REQ-20260917-030）。
 
-    切分修剪执行口径的保留行交给大模型，按任务热词找出误识别文字并替换。
-    面板展示：任务热词、替换统计（词 → 频次）、行内高亮（<mark> 标替换处）、
-    过滤出有替换的行、逐行撤销误替换；「确认并保存」后阶段完成
-    （saved_at + 推进 FINE_SUBTITLE_REVIEWED）。
+    粗剪成片 + 任务热词 → ASR 重识别（只识别字幕，不区分说话人）→ 大模型
+    提取不明确字/词（附替换建议与理由）→ 人工逐处分辨（采纳/不采纳/改替换值）
+    → 保存替换对应关系 + 优化后字幕（SRT 可导出）。
     """
-    from slirn_home import asr_service, fine_service, revision_service
+    from slirn_home import compose_service, optimize_service
 
     outputs_dir = mgr.tasks_dir / task_id / "outputs"
+    artifact = compose_service.rough_compose_path(outputs_dir)
 
     def _guide(msg: str, btn: str) -> str:
         return f'''<div class="slirn-card" style="margin-top:16px;">
-        <div class="slir-panel-header"><div class="slirn-panel-title">🔎 精剪修订 · 热词替换</div></div>
+        <div class="slir-panel-header"><div class="slirn-panel-title">✨ 优化字幕 · 不明确字词</div></div>
         <div class="slirn-empty"><div class="slirn-empty-icon">🚧</div>
             <div class="slirn-empty-text">{_esc(msg)}</div></div>
         <div class="slirn-task-actions" style="margin-top:14px;">{btn}</div></div>'''
 
-    rev = revision_service.load_revision(outputs_dir)
-    if not ((rev or {}).get("entries")):
+    if not artifact.exists():
         return _guide(
-            "需要先完成「字幕修订」— 热词替换处理切分修剪之后的字幕文本",
+            "需要先合成粗剪成片 — 优化字幕以成片为准重新识别字幕",
             '<button class="slirn-btn slirn-btn-primary" data-action="wb-stage" '
-            'data-pane="subtitle_review">📝 去字幕修订</button>',
+            'data-pane="rough_compose">🎥 去粗剪合成</button>',
         )
-    if not revision_service.all_decided(rev):
-        return _guide(
-            "字幕修订还有未决策条目 — 完成决策后才能确定切分后的字幕行",
-            '<button class="slirn-btn slirn-btn-primary" data-action="wb-stage" '
-            'data-pane="subtitle_review">📝 去完成决策</button>',
-        )
-    sub_meta = asr_service.load_subtitle(outputs_dir)
-    if not (sub_meta and sub_meta.get("segments")):
-        return _guide(
-            "缺少字幕生成产物 — 请先在「字幕生成」阶段生成字幕",
-            '<button class="slirn-btn slirn-btn-primary" data-action="wb-stage" '
-            'data-pane="subtitle">🎙 去生成字幕</button>',
-        )
+
     hotwords: list[str] = []
     try:
         if t.hotwords_path.exists():
             hotwords = [w for w in t.hotwords_path.read_text(encoding="utf-8").split() if w]
     except Exception:  # noqa: BLE001
         pass
-    if not hotwords:
-        return _guide(
-            "任务没有热词 — 热词替换需要先在任务里添加热词（专有名词/人名/术语的正确写法）",
-            '<button class="slirn-btn slirn-btn-primary" data-action="wb-stage" '
-            'data-pane="assets">📦 去添加热词</button>',
-        )
 
-    # 行集口径与切分面板/粗剪合成一致（切分之后的字幕 = 执行口径保留行）
-    from slirn_home import cutlist_service
-    saved = cutlist_service.load_cutlist(outputs_dir)
-    cutlist = cutlist_service.build_cutlist(
-        sub_meta, rev,
-        manual_marks=(saved or {}).get("manual_marks") if saved else None,
-        actions=(saved or {}).get("actions") if saved else None,
-    )
-    units = cutlist_service.effective_keep_units(cutlist)
-
-    fine = fine_service.load_fine(outputs_dir)
-    job = fine_service.job_status(task_id)
-    job_state = job.get("state") if job else ("done" if fine else "idle")
+    data = optimize_service.load_optimize(outputs_dir)
+    job = optimize_service.job_status(task_id)
+    job_state = job.get("state") if job else ("done" if data else "idle")
     hw_chips = "".join(f'<span class="slirn-hw-chip">{_esc(w)}</span>' for w in hotwords)
 
-    # ---- 状态 A：未分析 → 说明 + 热词 + 分析按钮 ----
-    if not fine:
+    # ---- 状态 A：未优化 → 说明 + 热词 + 开始按钮 ----
+    if not data:
         from slirn_home import llm_config
-        cur_model = _esc(llm_config.get_current(mgr.tasks_dir.parent))
+        if llm_config.get_current_entry(mgr.tasks_dir.parent) is None:
+            return _guide("未注册任何大模型 — 请先点顶栏 ⚙️ 添加模型", "")
+        try:
+            size_mb = round(artifact.stat().st_size / 1024 / 1024, 1)
+            art_disp = f"（{size_mb} MB）"
+        except OSError:
+            art_disp = ""
+        hw_block = (f'<div class="slirn-form-hint" style="margin-top:10px;">'
+                    f"<b>任务热词</b>（{len(hotwords)} 个，识别偏置 + 分析参照）：</div>"
+                    f'<div class="slirn-hw-chips">{hw_chips}</div>' if hotwords
+                    else '<div class="slirn-form-hint" style="margin-top:10px;">'
+                         "⚠️ 任务没有热词 — 仍可分析（建议先在「素材准备」补充，"
+                         '专有名词/术语的识别和判定会更准）</div>')
         return f'''<div class="slirn-card" style="margin-top:16px;">
-        <div class="slirn-panel-header"><div class="slirn-panel-title">🔎 精剪修订 · 热词替换</div></div>
-        <div class="slirn-form-hint">把切分修剪之后保留的 <b>{len(units)}</b> 行字幕交给大模型（<b>{cur_model}</b>，可在顶栏 ⚙️ 修改），
-        按下面的任务热词找出<b>误识别文字</b>并替换（如「神精网络」→「神经网络」）。替换只动错误部分，
-        不改写整行；拿不准的一律不动（宁缺勿错）。</div>
-        <div class="slirn-form-hint" style="margin-top:10px;"><b>任务热词</b>（{len(hotwords)} 个）：</div>
-        <div class="slirn-hw-chips">{hw_chips}</div>
-        <div class="slirn-form-hint">分析完成后可查看替换统计、逐处确认（撤销误替换），确认保存后本阶段完成。</div>
+        <div class="slirn-panel-header"><div class="slirn-panel-title">✨ 优化字幕 · 不明确字词</div></div>
+        <div class="slirn-form-hint">把粗剪成片 <b>{_esc(artifact.name)}</b>{_esc(art_disp)} + 任务热词交给 ASR
+        重新识别字幕（只识别文字，不区分说话人），再用大模型做语义分析：提取<b>不明确的字/词</b>
+        （疑似误识别、语义不通、与热词矛盾），统计出现次数并定位位置。替换值可逐处编辑，
+        人工分辨确认后保存替换对应关系，并可导出优化后的成片字幕 SRT。</div>
+        {hw_block}
         <div class="slirn-task-actions" style="margin-top:14px;">
-            <button class="slirn-btn slirn-btn-primary" data-action="fine-revise"
-                    data-task-id="{_esc(task_id)}">🔎 大模型热词替换分析</button>
+            <button class="slirn-btn slirn-btn-primary" data-action="optimize-start"
+                    data-task-id="{_esc(task_id)}">✨ 开始优化字幕</button>
         </div>
-        <div id="slirn-fine-status" class="slirn-status-msg" style="display:none;"
+        <div id="slirn-opt-status" class="slirn-status-msg" style="display:none;"
              data-task-id="{_esc(task_id)}" data-state="{_esc(job_state)}"></div>
     </div>'''
 
-    # ---- 状态 B：替换结果 → 统计 + 高亮行 + 确认 ----
+    # ---- 状态 B：优化结果 → 词频 + 行内出现项（可编辑/采纳）+ 确认保存 ----
     import time as _time
-    est = fine_service.effective_stats(fine)
-    wstats = fine_service.word_stats(fine)
-    by_id = {str(e.get("id")): e for e in (fine.get("entries") or [])}
-    confirmed = bool(fine.get("saved_at"))
+    est = optimize_service.effective_stats(data)
+    words = data.get("words") or []
+    occs_by_seg: dict[str, list[dict]] = {}
+    for o in data.get("occurrences") or []:
+        occs_by_seg.setdefault(str(o.get("seg")), []).append(o)
+    confirmed = bool(data.get("saved_at"))
     running_html = ""
     if job_state == "running":
         elapsed = int((job.get("finished_at") or _time.time()) - job.get("started_at", _time.time()))
@@ -1029,77 +1013,88 @@ def _render_fine_review_zone(task_id: str, t, mgr: TaskManager) -> str:
                         f"{job.get('progress') or 0:.0f}% · 已耗时 {elapsed}s")
 
     stale_note = ""
-    created = str(fine.get("created_at") or "")
-    newer = max(str((saved or {}).get("saved_at") or ""), str((rev or {}).get("saved_at") or ""))
-    if newer and created and newer > created:
-        stale_note = ('<div class="slirn-cut-stale">⚠️ 切分/修订决策在热词替换之后有更新 — '
-                      "建议重新分析以覆盖最新字幕文本</div>")
+    created = str(data.get("created_at") or "")
+    try:
+        mtime = _time.strftime("%Y-%m-%dT%H:%M:%S", _time.localtime(artifact.stat().st_mtime))
+    except OSError:
+        mtime = ""
+    if mtime and created and mtime > created:
+        stale_note = ('<div class="slirn-cut-stale">⚠️ 粗剪成片在优化之后重新合成 — '
+                      "建议重新优化以覆盖最新成片</div>")
 
-    wstats_html = " · ".join(
-        f'<span class="slirn-fw-word">{_esc(w)}<b>×{n}</b></span>' for w, n in wstats
-    ) or '<span class="slirn-sub-meta">没有生效的替换</span>'
+    words_html = "".join(
+        f'<button class="slirn-opt-chip" data-action="opt-word" data-word="{_esc(w["word"])}" '
+        f'title="点按筛选该词的出现行，再点取消">{_esc(w["word"])}<b>×{int(w["count"])}</b></button>'
+        for w in words
+    ) or '<span class="slirn-sub-meta">没有生效的替换（可重新优化或直接保存）</span>'
 
-    def _line_html(u: dict) -> str:
-        rid = str(u.get("id"))
-        e = by_id.get(rid)
-        start = str(u.get("start") or "")
-        text = _esc(str(u.get("text", "")))
-        if not e:
-            return (f'<div class="slirn-fw-row plain" data-id="{_esc(rid)}">'
-                    f'<span class="slirn-sub-idx">{_esc(rid)}</span>'
-                    f'<span class="slirn-fw-time">{_esc(start)}</span>'
-                    f'<div class="slirn-fw-text">{text}</div></div>')
-        reps = sorted(e.get("replacements") or [], key=lambda r: int(r.get("pos", 0)))
-        # 生效文本：高亮替换处（title 悬浮看原文）
-        segs = []
+    def _line_html(seg: dict) -> str:
+        rid = str(seg.get("i"))
+        occs = sorted(occs_by_seg.get(rid, []), key=lambda o: int(o.get("pos", 0)))
+        parts = []
         pos = 0
-        raw = str(e.get("text") or "")
-        for r in reps:
-            p = int(r.get("pos", 0))
-            segs.append(_esc(raw[pos:p]))
-            segs.append(f'<mark class="slirn-fw-mark" title="原文：{_esc(str(r.get("before")))}">'
-                        f"{_esc(str(r.get('after')))}</mark>")
-            pos = p + len(str(r.get("before")))
-        segs.append(_esc(raw[pos:]))
-        live_html = "".join(segs)
-        reverted = bool(e.get("reverted"))
-        return (f'<div class="slirn-fw-row{" reverted" if reverted else ""}" data-id="{_esc(rid)}"'
-                f' data-reverted="{1 if reverted else 0}" data-start-ms="{int(u.get("start_ms", 0))}">'
+        raw = str(seg.get("text", ""))
+        for o in occs:
+            p = int(o.get("pos", 0))
+            parts.append(_esc(raw[pos:p]))
+            applied = 1 if o.get("applied", True) else 0
+            # 表达式里的字符串字面量先算好（Python 3.10 f-string 不能复用定界引号）
+            occ_id = int(o["occ_id"])
+            before_txt = _esc(str(o["before"]))
+            after_txt = _esc(str(o["after"]))
+            reason_txt = _esc(str(o.get("reason") or "不明确片段"))
+            toggle_title = _esc("已采纳（保存时替换）" if applied else "已不采纳（保留原文）")
+            toggle_mark = "✓" if applied else "✕"
+            parts.append(
+                f'<span class="slirn-opt-occ" data-occ="{occ_id}" data-applied="{applied}">'
+                f'<s class="slirn-opt-before" title="{reason_txt}">{before_txt}</s>'
+                f'<span class="slirn-opt-arrow">→</span>'
+                f'<input class="slirn-opt-after" value="{after_txt}">'
+                f'<button class="slirn-btn slirn-btn-xs slirn-opt-toggle" data-action="opt-occ-toggle" '
+                f'data-occ="{occ_id}" title="{toggle_title}">{toggle_mark}</button></span>'
+            )
+            pos = p + len(str(o["before"]))
+        parts.append(_esc(raw[pos:]))
+        row_words = sorted({str(o["after"]) for o in occs if o.get("applied", True)})
+        has_occ = " has-occ" if occs else ""
+        return (f'<div class="slirn-opt-row{has_occ}" data-id="{_esc(rid)}" data-start-ms="{int(seg.get("start_ms", 0))}"'
+                f' data-words="{_esc(chr(10).join(row_words))}">'
                 f'<span class="slirn-sub-idx">{_esc(rid)}</span>'
-                f'<span class="slirn-fw-time">{_esc(start)}</span>'
-                f'<div class="slirn-fw-text">'
-                f'<div class="slirn-fw-live">{live_html}</div>'
-                f'<div class="slirn-fw-orig">{text}</div></div>'
-                f'<button class="slirn-btn slirn-btn-xs" data-action="fine-toggle" '
-                f'data-id="{_esc(rid)}">{"↩️ 已撤销 · 恢复" if reverted else "↩️ 撤销替换"}</button></div>')
+                f'<span class="slirn-fw-time">{_esc(str(seg.get("start") or ""))}</span>'
+                f'<div class="slirn-fw-text">{"".join(parts)}</div></div>')
 
-    rows = "".join(_line_html(u) for u in units)
-    confirm_label = "✅ 确认替换结果" if not confirmed else "✅ 已确认 · 再次保存"
-    model_disp = _esc(fine.get("model") or "")
+    rows = "".join(_line_html(s) for s in (data.get("segments") or []))
+    save_label = "💾 确认替换并保存" if not confirmed else "✅ 已确认 · 再次保存"
+    n_occ_rows = len(occs_by_seg)
+    n_lines = est["lines"]
+    model_disp = _esc(data.get("model") or "")
     return f'''<div class="slirn-card" style="margin-top:16px;">
-        <div class="slirn-panel-header"><div class="slirn-panel-title">🔎 精剪修订 · 热词替换</div></div>
-        <div class="slirn-sub-meta">保留行 {len(units)} · 替换 <b>{est["replacements"]}</b> 处 · 涉及 {est["replaced_lines"]} 行
-        · 已撤销 {est["reverted"]} 行 · 模型 {model_disp}{" · ✅ 已确认" if confirmed else ""}</div>
+        <div class="slirn-panel-header"><div class="slirn-panel-title">✨ 优化字幕 · 不明确字词</div></div>
+        <div class="slirn-sub-meta">识别 {n_lines} 行 · 不明确 {est["occurrences"]} 处（{est["words"]} 个词）
+        · 生效替换 <b>{est["applied"]}</b> 处 · 未采纳 {est["skipped"]} 处 · 模型 {model_disp}
+        {" · ✅ 已确认" if confirmed else ""}</div>
         {stale_note}
-        <div class="slirn-form-hint" style="margin-top:10px;"><b>替换热词频次</b>（撤销的行不计）：</div>
-        <div class="slirn-fw-stats">{wstats_html}</div>
-        <div class="slirn-form-hint">行内 <mark class="slirn-fw-mark">高亮</mark> = 大模型替换处（悬浮可见原文）；
-        点行定位播放，逐处检查替换是否正确 — 错误的点「撤销替换」，确认无误后保存。</div>
+        <div class="slirn-form-hint" style="margin-top:10px;"><b>不明确字词频次</b>（按替换目标词分组，未采纳不计）：</div>
+        <div class="slirn-fw-stats" id="slirn-opt-words">{words_html}</div>
+        <div class="slirn-form-hint">行内 <s class="slirn-opt-before">删除线</s> = 疑似误识别原文，旁边输入框 = 替换值（可直接编辑）；
+        <b>✓</b> 采纳 / <b>✕</b> 不采纳（逐处切换）。点词筛选出现行，点行按成片时间跳播核对。</div>
         <div class="slirn-task-actions" style="margin-top:10px;">
-            <button class="slirn-btn" data-action="fine-filter" data-shown="1"
-                    data-all-text="🔍 只看有替换的行（{len(by_id)}/{len(units)}）">🔍 只看有替换的行（{len(by_id)}/{len(units)}）</button>
+            <button class="slirn-btn" data-action="opt-filter" data-shown="1"
+                    data-all-text="🔍 只看有不明确字词的行（{n_occ_rows}/{n_lines}）">🔍 只看有不明确字词的行（{n_occ_rows}/{n_lines}）</button>
         </div>
-        <div id="slirn-fine-player-wrap" class="slirn-video-wrap slirn-sub-player-wrap" style="display:none;">
-            <video id="slirn-fine-player" controls preload="metadata"></video>
+        <div id="slirn-opt-player-wrap" class="slirn-video-wrap slirn-sub-player-wrap" style="display:none;">
+            <video id="slirn-opt-player" controls preload="metadata"></video>
         </div>
-        <div class="slirn-fw-list" id="slirn-fw-list">{rows}</div>
+        <div class="slirn-fw-list slirn-opt-list" id="slirn-opt-list">{rows}</div>
         <div class="slirn-task-actions" style="margin-top:14px;">
-            <button class="slirn-btn slirn-btn-primary" data-action="save-fine-revision"
-                    data-task-id="{_esc(task_id)}">{confirm_label}</button>
-            <button class="slirn-btn" data-action="fine-revise" data-task-id="{_esc(task_id)}"
-                    data-has-fine="1">🔄 重新分析</button>
+            <button class="slirn-btn slirn-btn-primary" data-action="save-optimize"
+                    data-task-id="{_esc(task_id)}">{save_label}</button>
+            <button class="slirn-btn" data-action="opt-srt-download" data-task-id="{_esc(task_id)}"
+                    {"" if confirmed else 'disabled title="确认保存后可下载"'}>⬇️ 下载优化字幕 SRT</button>
+            <button class="slirn-btn" data-action="optimize-start" data-task-id="{_esc(task_id)}"
+                    data-has="1">🔄 重新优化</button>
         </div>
-        <div id="slirn-fine-status" class="slirn-status-msg" style="{'display:none;' if job_state != 'running' else ''};"
+        <div id="slirn-opt-status" class="slirn-status-msg" style="{'display:none;' if job_state != 'running' else ''};"
              data-task-id="{_esc(task_id)}" data-state="{_esc(job_state)}">{running_html}</div>
     </div>'''
 
@@ -1219,7 +1214,7 @@ _WB_STAGES = [
     ("subtitle_review", "SUBTITLE_REVIEWED",    "字幕修订", "📝", "对照视频逐段校对、修改字幕文本与时间"),
     ("rough_cut",       "ROUGH_CUT_DONE",       "切分修剪", "✂️", "按修订决策带入保留/更正段，切分段父编号+子编号"),
     ("rough_compose",  "FINE_SUBTITLE_DONE",   "粗剪合成", "🎥", "按切分保留内容用上游 VideoClipper 合成粗剪视频（含随片字幕）"),
-    ("fine_review",     "FINE_SUBTITLE_REVIEWED", "精剪修订", "🔎", "按任务热词替换字幕误识别文字，统计频次并逐处确认"),
+    ("fine_review",     "FINE_SUBTITLE_REVIEWED", "优化字幕", "✨", "重识别粗剪成片字幕，大模型提取不明确字词，人工替换并保存对应关系"),
     ("fine_cut",        "FINE_CUT_DONE",        "精剪视频", "🎬", "按精剪段生成成品视频"),
     ("mux",             "MUXED",                "字幕合成", "🎞️", "字幕烧录进画面 / 封装输出成品"),
 ]
@@ -1281,13 +1276,15 @@ def _wb_stage_states(t) -> list[str]:
             composed = _comp_mod.rough_compose_path(outputs_dir).exists()
             states.append("done" if (composed or cur_rank >= rank[status_name]) else "pending")
         elif key == "fine_review":
-            # 热词替换（REQ-20260916-017）：替换结果确认保存（saved_at）即完成；
-            # 已分析未确认 → 仍 pending（current 停在这提示待确认）
+            # 优化字幕（REQ-20260917-030）：替换确认保存（saved_at）即完成；
+            # 兼容旧任务：fine_revision.json 已确认（旧精剪修订流程）同样视为完成
             from slirn_home import fine_service as _fine_mod
+            from slirn_home import optimize_service as _opt_mod
 
+            opt = _opt_mod.load_optimize(outputs_dir)
             fine = _fine_mod.load_fine(outputs_dir)
-            fine_done = bool(fine and fine.get("saved_at"))
-            states.append("done" if (fine_done or cur_rank >= rank[status_name]) else "pending")
+            done = bool((opt and opt.get("saved_at")) or (fine and fine.get("saved_at")))
+            states.append("done" if (done or cur_rank >= rank[status_name]) else "pending")
         else:
             states.append("done" if cur_rank >= rank[status_name] else "pending")
     # current = 第一个 pending
@@ -1361,7 +1358,7 @@ def _render_workbench(task_id: str, mgr: TaskManager) -> str:
         "subtitle_review": _render_revision_zone(task_id, t, mgr),
         "rough_cut": _render_cutlist_zone(task_id, t, mgr),
         "rough_compose": _render_rough_compose_zone(task_id, t, mgr),
-        "fine_review": _render_fine_review_zone(task_id, t, mgr),
+        "fine_review": _render_optimize_zone(task_id, t, mgr),
     }
     for i, (key, _st, _t2, _ic, desc) in enumerate(_WB_STAGES):
         if key in panes:
@@ -2257,12 +2254,12 @@ ROUTER_JS = """
         bindCutPlayer();  // 切分修剪播放器（timeupdate 高亮/自动停/跳播 — REQ-20260916-011）
         var rcPv = document.getElementById('slirn-rc-player');
         if (rcPv) bindSpeedControl(rcPv);  // 粗剪成片预览倍速（REQ-20260916-014 同款）
-        var finePv = revVis('slirn-fine-player');
-        if (finePv) bindSpeedControl(finePv);  // 热词替换行播放倍速（REQ-20260916-017）
-        bindFineRows(tid);
-        var fineSt = revVis('slirn-fine-status');  // 分析 job 还在跑 → 恢复轮询
-        if (fineSt && fineSt.dataset.taskId && fineSt.dataset.state === 'running')
-          startFinePolling(fineSt.dataset.taskId);
+        var optPv = revVis('slirn-opt-player');
+        if (optPv) bindSpeedControl(optPv);  // 优化字幕行播放倍速（REQ-20260917-030）
+        bindOptRows(tid);
+        var optSt = revVis('slirn-opt-status');  // 优化 job 还在跑 → 恢复轮询
+        if (optSt && optSt.dataset.taskId && optSt.dataset.state === 'running')
+          startOptPolling(optSt.dataset.taskId);
         applyWbStagesState();  // 恢复上次收起/展开（跨刷新保持 — REQ-20260916-002）
         applyRevRigorState();  // 上次选过的严谨性级别预填（REQ-20260916-003）
       } else if (r && r.error) {
@@ -3050,126 +3047,163 @@ ROUTER_JS = """
       toast('⬇️ 已下载 ' + (r.lines || 0) + ' 行 SRT');
     });
   }
-  // ===== 精剪修订 · 热词替换（REQ-20260916-017）：轮询 + 行撤销/过滤 + 确认保存 =====
-  var finePollTimer = null;
-  function startFinePolling(tid) {
-    if (finePollTimer) { clearInterval(finePollTimer); finePollTimer = null; }
+  // ===== 优化字幕（REQ-20260917-030）：轮询 + 词过滤 + 出现项采纳/编辑 + 保存 + SRT 下载 =====
+  var optPollTimer = null;
+  function startOptPolling(tid) {
+    if (optPollTimer) { clearInterval(optPollTimer); optPollTimer = null; }
     var update = function() {
-      postJSON(SLIRN_API + '/fine_revise_status', {task_id: tid}).then(function(r) {
+      postJSON(SLIRN_API + '/optimize_subtitle_status', {task_id: tid}).then(function(r) {
         if (!r || !r.ok) return;
         var j = r.job || {};
-        var el = revVis('slirn-fine-status');
+        var el = revVis('slirn-opt-status');
         if (j.state === 'running') {
           if (el) {
             el.style.display = '';
             el.dataset.state = 'running';
-            el.innerHTML = '⏳ ' + escapeHtml(j.stage || '分析中')
+            el.innerHTML = '⏳ ' + escapeHtml(j.stage || '处理中')
               + (j.progress ? ' · ' + Math.round(j.progress) + '%' : '')
               + ' · 已耗时 ' + fmtElapsed(j.elapsed_s || 0);
           }
         } else {
-          if (finePollTimer) { clearInterval(finePollTimer); finePollTimer = null; }
+          if (optPollTimer) { clearInterval(optPollTimer); optPollTimer = null; }
           if (j.state === 'done') {
-            toast('✅ 热词替换分析完成：' + (j.replaced_lines || 0) + ' 行 / '
-              + (j.replacements || 0) + ' 处替换');
-            openWorkbench(tid);  // 刷新面板（统计 + 高亮列表 + 阶段态）
+            toast('✅ 优化字幕完成：识别 ' + (j.lines || 0) + ' 行 · 不明确 '
+              + (j.occurrences || 0) + ' 处');
+            openWorkbench(tid);  // 刷新面板（词频 + 出现项列表 + 阶段态）
           } else if (j.state === 'error') {
             if (el) {
               el.style.display = '';
               el.dataset.state = 'error';
-              el.innerHTML = '❌ ' + escapeHtml(j.error || '分析失败');
+              el.innerHTML = '❌ ' + escapeHtml(j.error || '优化失败');
             }
-            toast('❌ 热词替换分析失败', 'error');
+            toast('❌ 优化字幕失败', 'error');
           }
         }
       });
     };
     update();
-    finePollTimer = setInterval(update, 2000);
+    optPollTimer = setInterval(update, 2000);
   }
-  function fineAnalyze(btn) {
+  function optStart(btn) {
     var tid = btn.getAttribute('data-task-id') || '';
     var payload = {task_id: tid};
-    if (btn.getAttribute('data-has-fine') === '1') {
-      if (!window.confirm('重新分析将覆盖现有替换结果，并重置全部撤销决定。确定继续？')) return;
+    if (btn.getAttribute('data-has') === '1') {
+      if (!window.confirm('重新优化将覆盖现有结果，并重置全部采纳决定。确定继续？')) return;
       payload.force = true;
     }
-    postJSON(SLIRN_API + '/fine_revise', payload).then(function(r) {
+    postJSON(SLIRN_API + '/optimize_subtitle', payload).then(function(r) {
       if (r && r.ok) {
-        toast(r.toast || '已开始分析');
-        var el = revVis('slirn-fine-status');
+        toast(r.toast || '已开始优化');
+        var el = revVis('slirn-opt-status');
         if (el) { el.dataset.state = 'running'; el.style.display = ''; el.innerHTML = '⏳ 已提交…'; }
-        startFinePolling(tid);
+        startOptPolling(tid);
       } else if (r && r.error) {
         toast('❌ ' + r.error, 'error');
       }
     });
   }
-  function fineRow(btn) {
-    var id = btn.getAttribute('data-id') || '';
-    var list = revVis('slirn-fw-list');
-    if (!list) return null;
-    var rows = list.querySelectorAll('.slirn-fw-row[data-id]');
-    for (var i = 0; i < rows.length; i++) {
-      if (rows[i].getAttribute('data-id') === id) return rows[i];
-    }
-    return null;
+  function optOccToggle(btn) {  // 出现项采纳/不采纳（纯前端，保存时统一提交）
+    var w = btn.closest('.slirn-opt-occ');
+    if (!w) return;
+    var now = w.getAttribute('data-applied') === '1' ? 0 : 1;
+    w.setAttribute('data-applied', String(now));
+    btn.textContent = now === 1 ? '✓' : '✕';
+    btn.title = now === 1 ? '已采纳（保存时替换）' : '已不采纳（保留原文）';
   }
-  function fineToggle(btn) {  // 行撤销/恢复（纯前端，保存时统一提交）
-    var row = fineRow(btn);
-    if (!row) return;
-    var now = row.getAttribute('data-reverted') === '1' ? 0 : 1;
-    row.setAttribute('data-reverted', String(now));
-    row.classList.toggle('reverted', now === 1);
-    btn.textContent = now === 1 ? '↩️ 已撤销 · 恢复' : '↩️ 撤销替换';
-  }
-  function fineFilter(btn) {  // 只看有替换的行 / 全部行
-    var list = revVis('slirn-fw-list');
-    if (!list) return;
-    var only = list.classList.toggle('slirn-fw-only-replaced');
-    btn.setAttribute('data-shown', only ? '0' : '1');
-    btn.textContent = only ? '📋 显示全部保留行'
-      : (btn.getAttribute('data-all-text') || '🔍 只看有替换的行');
-  }
-  function fineSave(btn) {
-    var tid = btn.getAttribute('data-task-id') || '';
-    var list = revVis('slirn-fw-list');
-    if (!list) { toast('❌ 无替换结果列表', 'error'); return; }
-    var reverted = [];
-    list.querySelectorAll('.slirn-fw-row[data-reverted="1"]').forEach(function(row) {
-      reverted.push(row.getAttribute('data-id') || '');
+  function optWordFilter(chip) {  // 点词 → 筛选出现行并滚动到首行；再点取消
+    var word = chip.getAttribute('data-word') || '';
+    var list = revVis('slirn-opt-list');
+    if (!list || !word) return;
+    document.querySelectorAll('#slirn-opt-words .slirn-opt-chip').forEach(function(c) {
+      c.classList.remove('active');
     });
-    postJSON(SLIRN_API + '/save_fine_revision', {task_id: tid, reverted_ids: reverted})
+    if (list.getAttribute('data-filter-word') === word) {
+      list.removeAttribute('data-filter-word');
+      list.querySelectorAll('.slirn-opt-row').forEach(function(row) { row.style.display = ''; });
+      return;
+    }
+    list.setAttribute('data-filter-word', word);
+    chip.classList.add('active');
+    var firstHit = null;
+    list.querySelectorAll('.slirn-opt-row').forEach(function(row) {
+      var ws = (row.getAttribute('data-words') || '').split('\n');
+      var hit = ws.indexOf(word) >= 0;
+      row.style.display = hit ? '' : 'none';
+      if (hit && !firstHit) firstHit = row;
+    });
+    if (firstHit) try { firstHit.scrollIntoView({block: 'center', behavior: 'smooth'}); } catch (err) {}
+  }
+  function optFilterBtn(btn) {  // 只看有不明确字词的行 / 全部行
+    var list = revVis('slirn-opt-list');
+    if (!list) return;
+    var only = list.classList.toggle('slirn-opt-only-occ');
+    btn.setAttribute('data-shown', only ? '0' : '1');
+    btn.textContent = only ? '📋 显示全部识别行'
+      : (btn.getAttribute('data-all-text') || '🔍 只看有不明确字词的行');
+  }
+  function optSave(btn) {
+    var tid = btn.getAttribute('data-task-id') || '';
+    var list = revVis('slirn-opt-list');
+    if (!list) { toast('❌ 无优化结果列表', 'error'); return; }
+    var decisions = [];
+    list.querySelectorAll('.slirn-opt-occ').forEach(function(w) {
+      var inp = w.querySelector('input.slirn-opt-after');
+      decisions.push({
+        occ_id: parseInt(w.getAttribute('data-occ'), 10),
+        applied: w.getAttribute('data-applied') === '1',
+        after: inp ? inp.value.trim() : ''
+      });
+    });
+    postJSON(SLIRN_API + '/save_optimize_subtitle', {task_id: tid, decisions: decisions})
       .then(function(r) {
         if (r && r.ok) {
           toast(r.toast || '已确认保存');
-          openWorkbench(tid);  // 刷新阶段态（done）+ 统计
+          openWorkbench(tid);  // 刷新阶段态（done）+ 统计 + 对应关系
         } else if (r && r.error) {
           toast('❌ ' + r.error, 'error');
         }
       });
   }
-  function playFineAt(tid, startMs) {  // 行定位播放（与修订/切分同模式，独立播放器防 id 撞车）
-    var wrap = revVis('slirn-fine-player-wrap');
-    var v = revVis('slirn-fine-player');
+  function optSrtDownload(btn) {  // 下载优化后成片字幕 SRT（粗剪成片时间基）
+    var tid = btn.getAttribute('data-task-id') || '';
+    postJSON(SLIRN_API + '/optimized_srt', {task_id: tid}).then(function(r) {
+      if (!r || !r.ok || !r.srt) {
+        toast('❌ ' + (r && r.error ? r.error : '获取 SRT 失败'), 'error');
+        return;
+      }
+      var blob = new Blob([r.srt], {type: 'text/plain;charset=utf-8'});
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url; a.download = 'optimized_subs_' + tid + '.srt';
+      document.body.appendChild(a); a.click();
+      setTimeout(function() { URL.revokeObjectURL(url); document.body.removeChild(a); }, 100);
+      toast('⬇️ 已下载 ' + (r.lines || 0) + ' 行 SRT');
+    });
+  }
+  function playOptAt(tid, startMs) {  // 行定位播放（成片时间基 — ?src=rough_compose 源）
+    var wrap = revVis('slirn-opt-player-wrap');
+    var v = revVis('slirn-opt-player');
     if (!v) { toast('❌ 播放器未就绪', 'error'); return; }
     if (wrap) wrap.style.display = '';
-    if (!v.src) { v.src = SLIRN_API + '/video/' + encodeURIComponent(tid); v.load(); }
-    var goF = function() {
+    if (!v.src) {
+      v.src = SLIRN_API + '/video/' + encodeURIComponent(tid) + '?src=rough_compose';
+      v.load();
+    }
+    var goO = function() {
       try { v.currentTime = (startMs || 0) / 1000; } catch (err) {}
       var p = v.play();
       if (p && p.catch) p.catch(function() {});
     };
-    if (v.readyState >= 1) goF();
-    else v.addEventListener('loadedmetadata', goF, {once: true});
+    if (v.readyState >= 1) goO();
+    else v.addEventListener('loadedmetadata', goO, {once: true});
   }
-  function bindFineRows(tid) {  // 行点击定位播放（撤销按钮自身不触发）
-    var list = revVis('slirn-fw-list');
+  function bindOptRows(tid) {  // 行点击定位播放（输入框/按钮自身不触发）
+    var list = revVis('slirn-opt-list');
     if (!list) return;
-    list.querySelectorAll('.slirn-fw-row[data-start-ms]').forEach(function(row) {
+    list.querySelectorAll('.slirn-opt-row[data-start-ms]').forEach(function(row) {
       row.addEventListener('click', function(ev) {
-        if (ev.target && ev.target.closest('button')) return;
-        playFineAt(tid, parseInt(row.getAttribute('data-start-ms'), 10) || 0);
+        if (ev.target && ev.target.closest('button,input')) return;
+        playOptAt(tid, parseInt(row.getAttribute('data-start-ms'), 10) || 0);
       });
     });
   }
@@ -4015,18 +4049,24 @@ ROUTER_JS = """
       // 下载有效字幕 SRT（REQ-20260916-019）：拉端点拿 SRT → Blob 下载
       rcSubsDownload(target);
     }
-    else if (action === 'fine-revise') {
-      // 精剪修订热词替换（REQ-20260916-017）：后台分析 → 轮询 → 刷新
-      fineAnalyze(target);
+    else if (action === 'optimize-start') {
+      // 优化字幕（REQ-20260917-030）：成片重识别 + 大模型分析 → 轮询 → 刷新
+      optStart(target);
     }
-    else if (action === 'fine-toggle') {
-      fineToggle(target);
+    else if (action === 'opt-occ-toggle') {
+      optOccToggle(target);
     }
-    else if (action === 'fine-filter') {
-      fineFilter(target);
+    else if (action === 'opt-word') {
+      optWordFilter(target);
     }
-    else if (action === 'save-fine-revision') {
-      fineSave(target);
+    else if (action === 'opt-filter') {
+      optFilterBtn(target);
+    }
+    else if (action === 'save-optimize') {
+      optSave(target);
+    }
+    else if (action === 'opt-srt-download') {
+      optSrtDownload(target);
     }
     else if (action === 'rebuild-cutlist') {
       // 重新执行切分修剪（REQ-20260916-011）：按最新修订决策整单重算落盘，
@@ -5729,16 +5769,13 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         keep_ms = sum(int(u["end_ms"]) - int(u["start_ms"]) for u in units)
         return _ok("", srt=srt, lines=len(units), keep_ms=keep_ms)
 
-    @app.app.post("/slirn/api/fine_revise")
-    async def fine_revise(body: dict = Body(default_factory=dict)):
-        """启动大模型热词替换分析（REQ-20260916-017）。已有结果时须 force（前端二次确认）。
+    @app.app.post("/slirn/api/optimize_subtitle")
+    async def optimize_subtitle(body: dict = Body(default_factory=dict)):
+        """启动优化字幕（REQ-20260917-030）：ASR 重识别粗剪成片 → 大模型提取不明确字词。
 
-        行集 = 切分执行口径的保留行（与切分面板/粗剪合同同口径）；
-        只处理任务热词相关的误识别，替换结果待用户逐处确认。
+        已有优化结果时须 force（前端二次确认）。热词为空不阻塞（提示级）。
         """
-        import time as _time
-
-        from slirn_home import asr_service, cutlist_service, fine_service, llm_config, revision_service
+        from slirn_home import compose_service, llm_config, optimize_service
 
         tid = (body.get("task_id") or "").strip()
         if not tid:
@@ -5748,86 +5785,62 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         except Exception as e:  # noqa: BLE001
             return _err(f"任务不存在: {e}")
         outputs_dir = mgr.tasks_dir / tid / "outputs"
-        rev = revision_service.load_revision(outputs_dir)
-        if not (rev and rev.get("entries")):
-            return _err("请先完成「字幕修订」")
-        if not revision_service.all_decided(rev):
-            return _err("字幕修订还有未决策条目，无法确定切分后的字幕行")
-        sub_meta = asr_service.load_subtitle(outputs_dir)
-        if not (sub_meta and sub_meta.get("segments")):
-            return _err("缺少字幕生成产物，请先生成字幕")
+        artifact = compose_service.rough_compose_path(outputs_dir)
+        if not artifact.exists():
+            return _err("缺少粗剪成片 — 请先在「粗剪合成」阶段合成")
+        if optimize_service.load_optimize(outputs_dir) and not body.get("force"):
+            return _err("已存在优化结果 — 重新优化将覆盖并重置全部采纳决定，请确认后重试")
         hotwords: list[str] = []
         try:
             if t.hotwords_path.exists():
                 hotwords = [w for w in t.hotwords_path.read_text(encoding="utf-8").split() if w]
         except Exception:  # noqa: BLE001
             pass
-        if not hotwords:
-            return _err("任务没有热词 — 请先在「素材准备」阶段为任务添加热词")
-        if fine_service.load_fine(outputs_dir) and not body.get("force"):
-            return _err("已存在热词替换结果 — 重新分析将覆盖并重置全部撤销决定，请确认后重试")
-
-        saved = cutlist_service.load_cutlist(outputs_dir)
-        cutlist = cutlist_service.build_cutlist(
-            sub_meta, rev,
-            manual_marks=(saved or {}).get("manual_marks") if saved else None,
-            actions=(saved or {}).get("actions") if saved else None,
-        )
-        units = cutlist_service.effective_keep_units(cutlist)
-        if not units:
-            return _err("切分执行口径下没有保留行，无需热词替换")
-        lines = [
-            {"id": str(u["id"]), "start_ms": int(u["start_ms"]), "end_ms": int(u["end_ms"]),
-             "text": str(u.get("text", ""))}
-            for u in units
-        ]
         entry = llm_config.get_current_entry(repo_root)
         if entry is None:
             return _err("未注册任何大模型 — 请先点顶栏 ⚙️ 添加模型")
-        started = fine_service.start_job(
-            tid, lines, t.name, hotwords, outputs_dir,
-            entry=entry,
-            cutlist_saved_at=str((saved or {}).get("saved_at")
-                                 or (rev or {}).get("saved_at")
-                                 or _time.strftime("%Y-%m-%dT%H:%M:%S")),
+        started = optimize_service.start_job(
+            tid, artifact, hotwords, t.name, outputs_dir, entry=entry,
         )
         if not started:
-            return _ok("", toast="⏳ 该任务已在分析中，请等待完成")
-        return _ok("", toast="🔎 热词替换分析已开始（后台运行，可离开本页）",
-                   job={"state": "running", "stage": "准备提示词"})
+            return _ok("", toast="⏳ 该任务已在优化中，请等待完成")
+        return _ok("", toast="✨ 优化字幕已开始（先识别成片，再大模型分析，可离开本页）",
+                   job={"state": "running", "stage": "加载模型"})
 
-    @app.app.post("/slirn/api/fine_revise_status")
-    async def fine_revise_status(body: dict = Body(default_factory=dict)):
-        """热词替换分析进度轮询（REQ-20260916-017）。"""
-        from slirn_home import fine_service
+    @app.app.post("/slirn/api/optimize_subtitle_status")
+    async def optimize_subtitle_status(body: dict = Body(default_factory=dict)):
+        """优化字幕进度轮询（REQ-20260917-030）。"""
+        from slirn_home import optimize_service
 
         tid = (body.get("task_id") or "").strip()
         if not tid:
             return _err("缺少 task_id")
-        j = fine_service.job_status(tid)
+        j = optimize_service.job_status(tid)
         if j is None:  # 服务重启后 job 丢失 — 产物在即视为完成
-            fine = fine_service.load_fine(mgr.tasks_dir / tid / "outputs")
-            if fine:
+            data = optimize_service.load_optimize(mgr.tasks_dir / tid / "outputs")
+            if data:
+                st = (data.get("stats") or {})
                 return _ok("", job={
                     "state": "done",
-                    "replaced_lines": (fine.get("stats") or {}).get("replaced_lines", 0),
-                    "replacements": (fine.get("stats") or {}).get("replacements", 0),
+                    "lines": st.get("lines", 0),
+                    "occurrences": st.get("occurrences", 0),
                 })
             return _ok("", job={"state": "idle"})
         import time as _time
         j["elapsed_s"] = int((j.get("finished_at") or _time.time()) - j.get("started_at", _time.time()))
         return _ok("", job=j)
 
-    @app.app.post("/slirn/api/save_fine_revision")
-    async def save_fine_revision(body: dict = Body(default_factory=dict)):
-        """保存热词替换确认（REQ-20260916-017）：撤销决定落盘 + 阶段完成。
+    @app.app.post("/slirn/api/save_optimize_subtitle")
+    async def save_optimize_subtitle(body: dict = Body(default_factory=dict)):
+        """保存优化字幕人工替换决定（REQ-20260917-030）：决定合并落盘 + 阶段完成。
 
-        reverted_ids：用户点「撤销替换」的行 id 列表（全量口径 — 未列出的行
-        一律恢复生效）；幂等推进 FINE_SUBTITLE_REVIEWED。
+        decisions：[{occ_id, applied, after}] 全量口径 — 未列出的出现项一律不
+        采纳；after 可为人工编辑值（生效要求非空且 ≠ 原文）。幂等推进
+        FINE_SUBTITLE_REVIEWED。
         """
         from tasklib.models import TaskStatus
 
-        from slirn_home import fine_service
+        from slirn_home import optimize_service
 
         tid = (body.get("task_id") or "").strip()
         if not tid:
@@ -5836,20 +5849,34 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             mgr.get(tid)
         except Exception as e:  # noqa: BLE001
             return _err(f"任务不存在: {e}")
+        decisions = body.get("decisions")
+        if not isinstance(decisions, list):
+            return _err("decisions 必须是数组")
         outputs_dir = mgr.tasks_dir / tid / "outputs"
-        if fine_service.load_fine(outputs_dir) is None:
-            return _err("还没有热词替换结果 — 请先执行「大模型热词替换分析」")
-        reverted = body.get("reverted_ids")
-        if not isinstance(reverted, list):
-            return _err("reverted_ids 必须是数组")
         try:
-            fine, changed = fine_service.save_decisions(outputs_dir, [str(x) for x in reverted])
+            data, applied_n = optimize_service.save_decisions(outputs_dir, decisions)
         except Exception as e:  # noqa: BLE001
             return _err(f"保存失败: {e}")
-        est = fine_service.effective_stats(fine)
+        est = optimize_service.effective_stats(data)
         mgr.update_status(tid, TaskStatus.FINE_SUBTITLE_REVIEWED)  # 幂等：结果在盘即完成
-        return _ok("", toast=(f"✅ 已确认：生效替换 {est['replacements']} 处"
-                              f"（撤销 {est['reverted']} 行）"), stats=est)
+        return _ok("", toast=(f"✅ 已保存替换对应关系：生效 {applied_n} 处"
+                              f"（未采纳 {est['skipped']} 处）"), stats=est)
+
+    @app.app.post("/slirn/api/optimized_srt")
+    async def optimized_srt(body: dict = Body(default_factory=dict)):
+        """下载优化后成片字幕 SRT（REQ-20260917-030，时间基 = 粗剪成片）。"""
+        from slirn_home import optimize_service
+
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        data = optimize_service.load_optimize(mgr.tasks_dir / tid / "outputs")
+        if data is None:
+            return _err("还没有优化结果 — 请先执行「开始优化字幕」")
+        if not data.get("saved_at"):
+            return _err("尚未确认保存 — 请先「确认替换并保存」")
+        segments = data.get("segments") or []
+        return _ok("", srt=optimize_service.build_srt(segments), lines=len(segments))
 
     @app.app.post("/slirn/api/resplit_segment")
     async def resplit_segment_api(body: dict = Body(default_factory=dict)):

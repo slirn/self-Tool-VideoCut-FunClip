@@ -148,6 +148,31 @@ def test_wb_stage_states_by_status_rank(tmp_path: Path):
     assert states == ["done"] * 4 + ["current"] + ["pending"] * 3
 
 
+def test_wb_stage_states_optimize_done(tmp_path: Path):
+    """优化字幕（REQ-20260917-030）：optimize_subtitle.json 有 saved_at → done；
+    旧 fine_revision.json 已确认（旧精剪修订流程）同样视为 done（兼容）。"""
+    from tasklib.models import TaskStatus
+
+    from slirn_home.app import _wb_stage_states
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="t", original_video=video)
+    m.update_status(t.task_id, TaskStatus.ROUGH_CUT_DONE)  # 前三阶段按状态序 done
+    outputs = tmp_path / "tasks" / t.task_id / "outputs"
+    outputs.mkdir(parents=True, exist_ok=True)
+    (outputs / "rough_compose.mp4").write_bytes(b"fake-mp4")  # 粗剪合成按磁盘产物
+    (outputs / "optimize_subtitle.json").write_text(
+        '{"version":1,"saved_at":"2026-09-17T10:00:00","segments":[],"occurrences":[]}',
+        encoding="utf-8")
+    states = _wb_stage_states(m.get(t.task_id))
+    assert states == ["done"] * 6 + ["current", "pending"]
+
+    (outputs / "optimize_subtitle.json").unlink()
+    (outputs / "fine_revision.json").write_text(
+        '{"version":1,"saved_at":"2026-09-16T10:00:00","entries":[]}', encoding="utf-8")
+    assert _wb_stage_states(m.get(t.task_id))[5] == "done"
+
+
 def test_render_workbench_layout(tmp_path: Path):
     from slirn_home.app import _render_workbench
 
@@ -175,9 +200,9 @@ def test_render_workbench_layout(tmp_path: Path):
     assert "🎥 粗剪合成" in html
     assert "slirn-wb-stage-optional" in html, "可选徽章"
     assert 'id="slirn-wb-pane-rough_compose"' in html
-    # 精剪修订（REQ-20260916-017）：热词替换真实化 — 未分析时引导/说明态
-    assert "🔎 精剪修订" in html
-    assert "热词替换" in html
+    # 优化字幕（REQ-20260917-030）：原「精剪修订·热词替换」改造 — 成片重识别 + 不明确字词
+    assert "✨ 优化字幕" in html
+    assert "不明确字词" in html
     assert 'id="slirn-wb-pane-fine_review"' in html
     assert html.count("规划中 — 该阶段将在后续版本提供") == 2
     assert html.count("slirn-wb-pane\"") >= 1  # 面板容器齐备
