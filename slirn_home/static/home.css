@@ -1784,15 +1784,24 @@ footer { display: none !important; }
   background: rgba(255, 176, 32, 0.3); border-color: #8a5a00;
 }
 .slirn-opt-chip b { margin-left: 4px; font-weight: 700; }
-/* 行内出现项：删除线原文 → 输入框替换值 → 采纳开关 */
+/* 行内出现项：删除线原文 → 输入框替换值 → 采纳开关
+   REQ-032：行模板改为 4 列 grid，替换栏 .slirn-opt-col 放行最右、独立宽度，
+   不再被长正文挤窄。 */
 .slirn-opt-row {
-  display: grid; grid-template-columns: 44px 92px 1fr; gap: 8px; align-items: start;
+  display: grid; grid-template-columns: 44px 92px 1fr 260px; gap: 8px; align-items: start;
   padding: 7px 10px; cursor: pointer; border-bottom: 1px solid var(--border);
 }
 .slirn-opt-row:last-child { border-bottom: none; }
 .slirn-opt-row:hover { background: var(--accent-soft); }
 .slirn-opt-row .slirn-sub-idx { font-size: 11px; color: var(--text-muted);
   font-variant-numeric: tabular-nums; text-align: right; }
+/* 替换栏（REQ-032）：行最右独立列，多处 occ 竖直 stack */
+.slirn-opt-col {
+  display: flex; flex-direction: column; align-items: stretch; gap: 4px;
+  min-width: 0; justify-self: stretch;
+}
+.slirn-opt-row:not(.has-occ) .slirn-opt-col { display: none; }
+.slirn-opt-col .slirn-opt-occ { margin: 0; }
 .slirn-opt-occ {
   display: inline-flex; align-items: center; gap: 4px; margin: 0 2px;
   padding: 1px 4px; border-radius: 6px; background: rgba(255, 176, 32, 0.12);
@@ -1803,7 +1812,7 @@ footer { display: none !important; }
 }
 .slirn-opt-occ .slirn-opt-arrow { color: var(--text-muted); font-size: 11px; }
 .slirn-opt-occ input.slirn-opt-after {
-  width: 8em; min-width: 4em; max-width: 14em; padding: 1px 6px;
+  flex: 1 1 auto; min-width: 0; padding: 1px 6px;
   font-size: 12.5px; font-weight: 600; line-height: 1.5;
   border: 1px solid rgba(255, 176, 32, 0.55); border-radius: 6px;
   background: var(--input-bg); color: var(--text);
@@ -1821,6 +1830,9 @@ footer { display: none !important; }
 @media (max-width: 720px) {
   .slirn-opt-row { grid-template-columns: 36px 1fr; }
   .slirn-opt-row .slirn-fw-time { display: none; }
+  /* REQ-032：窄屏让正文 + 替换栏上下两行；occ chip 允许 wrap */
+  .slirn-opt-row:not(.has-occ) .slirn-opt-col { display: none; }
+  .slirn-opt-col { grid-column: 1 / -1; margin-top: 4px; }
   .slirn-opt-occ { flex-wrap: wrap; }
 }
 
