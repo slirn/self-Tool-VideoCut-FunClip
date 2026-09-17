@@ -192,3 +192,51 @@ def test_find_slirn_standalone_root_via_env(tmp_path: Path, monkeypatch):
 
     root = find_slirn_standalone_root()
     assert root == env_root.resolve()
+
+
+# ---------- 时区显示（UTC 存储转本地，2026-09-17 修复「新建任务显示 8 小时前」） ----------
+
+def test_time_ago_utc_aware_is_now():
+    """tasklib 存的是带时区 UTC — 刚创建的任务应显示「刚刚」，不是「8 小时前」。"""
+    from datetime import datetime, timezone
+
+    from slirn_home.app import _time_ago
+
+    just_now = datetime.now(timezone.utc)
+    assert _time_ago(just_now) == "刚刚"
+
+
+def test_time_ago_utc_iso_string_is_now():
+    from datetime import datetime, timezone
+
+    from slirn_home.app import _time_ago
+    iso = datetime.now(timezone.utc).isoformat()
+    assert _time_ago(iso) == "刚刚"
+
+
+def test_time_ago_naive_treated_as_local():
+    """naive 输入（本地时间）行为不变。"""
+    from datetime import datetime, timedelta
+
+    from slirn_home.app import _time_ago
+
+    assert _time_ago(datetime.now() - timedelta(hours=2)) == "2 小时前"
+
+
+def test_fmt_local_converts_utc_to_local():
+    """_fmt_local 输出本地时间（与本地 now 同一天同一小时），而非 UTC 原值。"""
+    from datetime import datetime, timezone
+
+    from slirn_home.app import _fmt_local
+
+    now_utc = datetime.now(timezone.utc)
+    s = _fmt_local(now_utc)
+    local = now_utc.astimezone().replace(tzinfo=None)
+    assert s == local.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def test_time_ago_invalid_string():
+    from slirn_home.app import _time_ago
+
+    assert _time_ago("not-a-date") == "未知"
+    assert _time_ago(None) == "未知"
