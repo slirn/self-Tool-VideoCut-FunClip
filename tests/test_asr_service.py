@@ -330,6 +330,43 @@ def test_has_audio_track_real(tmp_path: Path):
     assert has_audio_track(silent) is False
 
 
+# ---------- _extract_mono_wav_16k（REQ-20260917-023：长视频识别内存修复） ----------
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="需要 ffmpeg")
+def test_extract_mono_wav_16k_real(tmp_path: Path):
+    """抽轨产物必须是 16k 单声道 PCM16，时长≈源（绕开上游立体声大块分配）。"""
+    import subprocess
+    import wave
+
+    from slirn_home.asr_service import _extract_mono_wav_16k
+
+    vid = tmp_path / "a.mp4"
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=0.5",
+         "-f", "lavfi", "-i", "color=c=black:s=64x64:d=0.5",
+         "-shortest", "-y", str(vid)],
+        check=True, capture_output=True,
+    )
+    wav = tmp_path / "a.wav"
+    _extract_mono_wav_16k(str(vid), wav)
+    with wave.open(str(wav), "rb") as w:
+        assert w.getframerate() == 16000
+        assert w.getnchannels() == 1
+        assert w.getsampwidth() == 2
+        assert abs(w.getnframes() / 16000 - 0.5) < 0.05
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="需要 ffmpeg")
+def test_extract_mono_wav_16k_bad_input(tmp_path: Path):
+    """非视频输入 → 清晰报错（不静默产出空 wav）。"""
+    from slirn_home.asr_service import _extract_mono_wav_16k
+
+    bad = tmp_path / "notavideo.mp4"
+    bad.write_bytes(b"garbage bytes")
+    with pytest.raises(RuntimeError, match="音频提取失败"):
+        _extract_mono_wav_16k(str(bad), tmp_path / "x.wav")
+
+
 def test_ensure_segment_file_recuts_when_missing(tmp_path: Path, monkeypatch):
     """自愈：segment 文件缺失但原视频在 → 重新截取；已存在 → 不重复截。"""
     from tasklib import TaskManager

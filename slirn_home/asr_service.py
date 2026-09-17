@@ -13,6 +13,7 @@ import json
 import logging
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -128,17 +129,48 @@ def has_audio_track(video_path: Path) -> bool:
 
 # =============== 识别入口（拆出便于测试 monkeypatch） ===============
 
+def _extract_mono_wav_16k(video_path: str, wav_path: Path) -> None:
+    """ffmpeg 流式抽 16k 单声道 wav（REQ-20260917-023）。
+
+    上游 video_recog 用 moviepy 抽音轨（保持源采样率 + 立体声），librosa.load
+    内部会整读 float32 (N, 2) 立体声大块——多小时视频是 GiB 级单块连续分配，
+    直接内存不足（实测 2.26h@44.1k 立体声 = 2.68GiB）。ffmpeg -ac 1 -ar 16000
+    流式重采样，内存几十 MB，长视频内存需求降到约 0.7GB/小时。
+    """
+    try:
+        r = subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", video_path,
+             "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(wav_path)],
+            capture_output=True, timeout=7200,
+            encoding="utf-8", errors="replace",
+        )
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("音频提取超时（>2 小时），请检查视频文件") from None
+    if r.returncode != 0 or not wav_path.exists() or wav_path.stat().st_size <= 44:
+        raise RuntimeError(f"音频提取失败: {(r.stderr or '').strip()[-400:]}")
+
+
 def _run_recognition(video_path: str, hotword_str: str) -> tuple[str, dict]:
-    """调上游 funclip VideoClipper.video_recog → (srt 文本, state)。"""
+    """调上游 funclip VideoClipper.recog → (srt 文本, state)。
+
+    与上游 video_recog 的差别仅在「音频从哪来」：16k 单声道 wav 流式抽取
+    （REQ-20260917-023，长视频内存修复）替代 moviepy 立体声抽轨 + librosa
+    重采样；识别链路（seaco-paraformer / sd_switch=no / 热词 / 断句）与上游
+    完全同源（recog 同一入口）。
+    """
+    import librosa  # 上游 videoclipper 同款依赖；懒加载保持服务启动轻量
+
     from funclip.videoclipper import VideoClipper
 
     clipper = VideoClipper(get_model())
     clipper.lang = "zh"
-    _res_text, res_srt, state = clipper.video_recog(
-        video_filename=video_path,
-        sd_switch="no",
-        hotwords=hotword_str,
-        output_dir=None,
+    with tempfile.TemporaryDirectory(prefix="slirn_asr_") as td:
+        wav_path = Path(td) / "audio_16k_mono.wav"
+        _extract_mono_wav_16k(video_path, wav_path)
+        wav = librosa.load(str(wav_path), sr=16000)[0]  # (N,) float32 单声道
+    state = {"video_filename": video_path}
+    _res_text, res_srt, state = clipper.recog(
+        (16000, wav), "no", state, hotword_str, None,
     )
     return res_srt or "", state
 
@@ -229,8 +261,13 @@ def start_job(
             job["finished_at"] = time.time()
         except Exception as e:  # noqa: BLE001 — 后台线程必须全兜底
             log.exception("[asr][%s] 生成失败", task_id)
+            msg = str(e)
+            if isinstance(e, MemoryError) or "Unable to allocate" in msg:
+                # REQ-20260917-023：长视频识别需约 0.7GB/小时连续内存；
+                # 不足时给出可操作建议而不是裸 numpy 报错
+                msg += "（内存不足：请关闭其他应用（如上游 FunClip 服务）后重试）"
             job["state"] = "error"
-            job["error"] = str(e)
+            job["error"] = msg
             job["finished_at"] = time.time()
 
     threading.Thread(target=_run, name=f"asr-{task_id}", daemon=True).start()
