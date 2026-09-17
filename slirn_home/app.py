@@ -787,11 +787,13 @@ def _render_cutlist_zone(task_id: str, t, mgr: TaskManager) -> str:
         <div id="slirn-cut-player-wrap" class="slirn-video-wrap slirn-sub-player-wrap" style="display:none;">
             <video id="slirn-cut-player" controls preload="metadata"></video>
         </div>
+        <div id="slirn-cut-spk-bar" class="slirn-cut-spk-bar" style="display:none;"></div>
         <div class="slirn-cut-list" id="slirn-cut-list">{rows}</div>
         <div class="slirn-task-actions" style="margin-top:14px;">
             {main_btn}
             <button class="slirn-btn" id="slirn-cut-save" data-action="save-cut-decisions"
                     data-task-id="{_esc(task_id)}">💾 保存切分决策</button>
+            <button class="slirn-btn" data-action="cut-spk-link" data-task-id="{_esc(task_id)}">👤 关联人员ID</button>
             <button class="slirn-btn" data-action="play-cut-video" data-task-id="{_esc(task_id)}">▶️ 播放视频</button>
         </div></div>'''
 
@@ -2814,6 +2816,47 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             f"✅ 切分清单已生成（带入 {stats.get('brought', 0)} 段 · 剔除 {stats.get('dropped', 0)} 条"
             f" · 切分子段 {stats.get('split_subs', 0)}）· 切分修剪完成，可进入精剪字幕"
         ), saved_at=saved_at, stats=stats)
+
+    @app.app.post("/slirn/api/cut_speaker_link")
+    async def cut_speaker_link(body: dict = Body(default_factory=dict)):
+        """切分修剪阶段关联人员ID（REQ-20260917-031）：按时间段重叠对齐 subtitle 段级 spk。
+
+        服务端实时重建切分清单预览（与面板同口径：修订实时 + 已保存手工决策并入），
+        返回每行人员编号 + 按人员统计（总数/执行口径保留数）。不落盘 — 再次点击
+        即按最新时间窗重算；删除改判的落盘走既有 save_cut_decisions。
+        """
+        from slirn_home import asr_service, cut_speaker, cutlist_service, revision_service
+
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            mgr.get(tid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+        outputs_dir = mgr.tasks_dir / tid / "outputs"
+        rev = revision_service.load_revision(outputs_dir)
+        if not (rev and rev.get("entries")):
+            return _err("尚无修订建议，请先在「字幕修订」阶段完成大模型分析")
+        if not revision_service.all_decided(rev):
+            pending = sum(1 for e in rev["entries"] if e.get("decision") == "pending")
+            return _err(f"字幕修订还有 {pending} 条未决策，请先保存全部决策")
+        sub_meta = asr_service.load_subtitle(outputs_dir)
+        if not (sub_meta and sub_meta.get("segments")):
+            return _err("缺少字幕生成产物（subtitle.json），请先在「字幕生成」阶段生成字幕")
+        saved = cutlist_service.load_cutlist(outputs_dir)
+        cutlist = cutlist_service.build_cutlist(
+            sub_meta, rev,
+            manual_marks=(saved or {}).get("manual_marks") if saved else None,
+            actions=(saved or {}).get("actions") if saved else None,
+        )
+        link = cut_speaker.link_speakers(sub_meta, cutlist)
+        if not link.get("available"):
+            return _err(
+                "字幕无人员编号 — 该任务生成字幕时未开启说话人分离（或为旧任务）。"
+                "请到「字幕生成」阶段开启「区分说话人」重新生成后再关联"
+            )
+        return _ok("", link=link, rows=len(cutlist.get("items") or []))
 
     @app.app.post("/slirn/api/save_cut_decisions")
     async def save_cut_decisions(body: dict = Body(default_factory=dict)):

@@ -1449,6 +1449,39 @@ footer { display: none !important; }
 .slirn-btn.slirn-btn-xs {
   padding: 1px 10px; font-size: 11.5px; border-radius: 999px; white-space: nowrap;
 }
+/* ===== 关联人员ID（REQ-20260917-031）：行尾人员徽章 + 统计条 ===== */
+.slirn-cut-spk {
+  display: inline-block; padding: 1px 8px; border-radius: 999px;
+  font-size: 11px; font-weight: 600; white-space: nowrap;
+  color: #fff; background: #3178c6; justify-self: end;
+}
+.slirn-cut-row.active .slirn-cut-spk {
+  background: rgba(255, 255, 255, 0.25); color: #fff;
+}
+.slirn-cut-spk-bar {
+  margin: 10px 0 2px 0; padding: 10px 14px;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: rgba(49, 120, 198, 0.06); font-size: 12px;
+}
+.slirn-cut-spk-title { font-weight: 600; color: var(--text-primary); margin-bottom: 6px; }
+.slirn-cut-spk-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.slirn-cut-spk-chip {
+  display: inline-block; padding: 2px 10px; border-radius: 999px;
+  font-size: 11.5px; font-weight: 600; cursor: pointer;
+  color: #3178c6; background: rgba(49, 120, 198, 0.14);
+  border: 1px solid rgba(49, 120, 198, 0.35); white-space: nowrap;
+}
+.slirn-cut-spk-chip:hover { background: rgba(49, 120, 198, 0.26); }
+.slirn-cut-spk-chip b { font-weight: 700; }
+.slirn-cut-spk-find {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  color: var(--text-secondary);
+}
+.slirn-cut-spk-find input {
+  width: 72px; padding: 2px 8px; border-radius: 6px;
+  border: 1px solid var(--border); font-size: 12px;
+}
+.slirn-cut-spk-hint { color: var(--text-muted); font-size: 11px; }
 /* 修订更新 → 已保存清单过期黄条（REQ-20260916-011） */
 .slirn-cut-stale {
   padding: 6px 12px; border-radius: 10px; margin-top: 8px;
@@ -1502,6 +1535,7 @@ footer { display: none !important; }
   .slirn-cut-row { grid-template-columns: 40px 92px 1fr; gap: 8px; }
   .slirn-cut-row .slirn-sub-time { display: none; }
   .slirn-cut-abadge { grid-column: 1 / -1; justify-self: start; }
+  .slirn-cut-spk { grid-column: 1 / -1; justify-self: start; }
 }
 .slirn-rev-select {
   width: 100%; padding: 4px 6px; font-size: 12.5px;
