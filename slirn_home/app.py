@@ -523,9 +523,11 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
             <button type="button" class="slirn-rev-filter-dim" data-rev-filter-dim="dec">决策状态</button>
           </span>
           <span class="slirn-rev-filter-chips" id="slirn-rev-filter-chips"></span>
-          <span class="slirn-rev-jump" title="在完整列表中跳到当前状态的上/下一条记录（显示全部，上下文可见）">
-            <button type="button" class="slirn-rev-jump-btn" data-rev-jump="prev">⬆ 上一条</button>
-            <button type="button" class="slirn-rev-jump-btn" data-rev-jump="next">下一条 ⬇</button>
+          <select class="slirn-rev-jump-sel" id="slirn-rev-jump-sel"
+                  title="跳转目标状态：跳转时整个列表保持显示，只定位到该状态的上/下一条记录（上下文可见）"></select>
+          <span class="slirn-rev-jump">
+            <button type="button" class="slirn-rev-jump-btn" data-rev-jump="prev" title="跳到上一条所选状态的记录">⬆ 上一条</button>
+            <button type="button" class="slirn-rev-jump-btn" data-rev-jump="next" title="跳到下一条所选状态的记录">下一条 ⬇</button>
           </span>
           <span class="slirn-rev-filter-count" id="slirn-rev-filter-count"></span>
         </div>
@@ -3304,21 +3306,16 @@ ROUTER_JS = """
   function revNavRows() {  // 过滤后仍可见的行（导航/标记走这里；保存收集仍用 revRows 全量）
     return revRows().filter(function(r) { return r.style.display !== 'none'; });
   }
-  function revFilterMatch(row) {
-    if (revFilter.val === 'all') return true;
-    if (revFilter.dim === 'sugg') return (row.getAttribute('data-sugg') || '') === revFilter.val;
-    if (revFilter.val === 'pending' || revFilter.val === 'accept')
-      return (row.getAttribute('data-decision') || '') === revFilter.val;
-    return (row.getAttribute('data-final') || '') === revFilter.val;  // 实质口径
+  function revMatchKind(row, dim, val) {  // 统一匹配口径（筛选与跳转共用）
+    if (val === 'all') return true;
+    if (dim === 'sugg') return (row.getAttribute('data-sugg') || '') === val;
+    if (val === 'pending' || val === 'accept')
+      return (row.getAttribute('data-decision') || '') === val;
+    return (row.getAttribute('data-final') || '') === val;  // 实质口径
   }
+  function revFilterMatch(row) { return revMatchKind(row, revFilter.dim, revFilter.val); }
   function revFilterCountOf(rows, dim, val) {
-    return rows.filter(function(r) {
-      if (val === 'all') return true;
-      if (dim === 'sugg') return (r.getAttribute('data-sugg') || '') === val;
-      if (val === 'pending' || val === 'accept')
-        return (r.getAttribute('data-decision') || '') === val;
-      return (r.getAttribute('data-final') || '') === val;
-    }).length;
+    return rows.filter(function(r) { return revMatchKind(r, dim, val); }).length;
   }
   function revFilterRender() {
     var chips = revVis('slirn-rev-filter-chips');
@@ -3351,27 +3348,71 @@ ROUTER_JS = """
     var cnt = revVis('slirn-rev-filter-count');
     if (cnt) cnt.textContent = '显示 ' + shown + ' / ' + rows.length + ' 条';
   }
-  function revFilterSync() { revFilterRender(); revFilterApply(); }
+  function revFilterSync() { revFilterRender(); revFilterApply(); revJumpRenderSel(); }
 
-  // ===== 状态跳转（REQ-20260917-024）：按当前筛选状态在完整列表里跳上/下一条 =====
-  // 与「筛选藏行」互补：跳转时显示全部行（目标行的上下文可见，方便结合前后
-  // 语句决定处理），kbsel 高亮目标行并居中滚动；播放器已加载则定位到行起点
-  // （与 ↑↓ 键同源）。匹配口径与筛选项完全同源（revFilterMatch）；选「全部」
-  // 时退化为整表上一/下一条。
-  var revJumpIdx = -1;  // 上次跳转命中的行（revRows 全量下标）；-1 = 未跳过
+  // ===== 状态跳转（REQ-20260917-025）：独立状态选择列表 + 完整列表内跳上/下一条 =====
+  // 跳转目标由「⬆/⬇ 按钮前」的状态下拉显式指定（与筛选 chips 完全解耦）：
+  // 跳转时显示全部行——目标行的上下文语句可见，便于结合前后文决定处理；
+  // 筛选 chips 仍是纯视图收窄（会藏行）。kbsel 高亮目标行并居中滚动；
+  // 播放器已加载则定位到行起点（与 ↑↓ 键同源）。匹配口径与筛选项完全
+  // 同源（revMatchKind）；选「全部」时退化为整表上一/下一条。
+  var revJumpSel = null;  // {dim, val}：跳转目标状态（localStorage 持久化，与筛选独立）
+  var revJumpIdx = -1;    // 上次跳转命中的行（revRows 全量下标）；-1 = 未跳过
+  function revJumpSelLoad() {
+    try {
+      var s = JSON.parse(localStorage.getItem('slirnRevJump') || 'null');
+      if (s && (s.dim === 'sugg' || s.dim === 'dec') && typeof s.val === 'string') return s;
+    } catch (err) {}
+    return null;
+  }
+  function revJumpSelSave() {
+    try { localStorage.setItem('slirnRevJump', JSON.stringify(revJumpSel)); } catch (err) {}
+  }
   function revJumpLabel() {
-    if (revFilter.val === 'all') return '全部';
-    var defs = revFilter.dim === 'sugg' ? REV_FILTER_SUGG : REV_FILTER_DEC;
-    for (var i = 0; i < defs.length; i++) if (defs[i][0] === revFilter.val) return defs[i][1];
-    return revFilter.val;
+    if (!revJumpSel || revJumpSel.val === 'all')
+      return (revJumpSel && revJumpSel.dim === 'sugg' ? '建议' : '决策') + ' · 全部';
+    var defs = revJumpSel.dim === 'sugg' ? REV_FILTER_SUGG : REV_FILTER_DEC;
+    for (var i = 0; i < defs.length; i++) if (defs[i][0] === revJumpSel.val)
+      return (revJumpSel.dim === 'sugg' ? '建议 · ' : '决策 · ') + defs[i][1];
+    return revJumpSel.val;
+  }
+  function revJumpRenderSel() {  // 渲染/恢复跳转状态下拉（面板重建后幂等）
+    var sel = revVis('slirn-rev-jump-sel');
+    if (!sel) return;
+    if (!revJumpSel) revJumpSel = revJumpSelLoad() || { dim: 'dec', val: 'pending' };
+    if (!sel.options.length) {
+      var html = '<optgroup label="建议状态"><option value="sugg:all">建议 · 全部</option>';
+      REV_FILTER_SUGG.forEach(function(d) {
+        html += '<option value="sugg:' + d[0] + '">建议 · ' + d[1] + '</option>';
+      });
+      html += '</optgroup><optgroup label="决策状态"><option value="dec:all">决策 · 全部</option>';
+      REV_FILTER_DEC.forEach(function(d) {
+        html += '<option value="dec:' + d[0] + '">决策 · ' + d[1] + '</option>';
+      });
+      html += '</optgroup>';
+      sel.innerHTML = html;
+    }
+    sel.value = revJumpSel.dim + ':' + revJumpSel.val;
+    if (!sel.getAttribute('data-bound')) {  // change 监听只绑一次（面板重建后新元素重绑）
+      sel.setAttribute('data-bound', '1');
+      sel.addEventListener('change', function() {
+        var p = (sel.value || 'dec:pending').split(':');
+        revJumpSel = { dim: p[0], val: p[1] };
+        revJumpSelSave();
+        revJumpIdx = -1;  // 换跳转状态：锚点重置
+      });
+    }
   }
   function revJump(dir) {
+    revJumpRenderSel();
+    if (!revJumpSel) return;
     var rows = revRows();
     if (!rows.length) return;
     rows.forEach(function(r) { r.style.display = ''; });  // 显示全部：上下文可见
     var cnt = revVis('slirn-rev-filter-count');
     var matches = [];
-    for (var i = 0; i < rows.length; i++) if (revFilterMatch(rows[i])) matches.push(i);
+    for (var i = 0; i < rows.length; i++)
+      if (revMatchKind(rows[i], revJumpSel.dim, revJumpSel.val)) matches.push(i);
     if (!matches.length) {
       if (cnt) cnt.textContent = '「' + revJumpLabel() + '」无匹配 · 显示全部 ' + rows.length + ' 条';
       toast('没有「' + revJumpLabel() + '」状态的行', 'error');
@@ -3696,12 +3737,12 @@ ROUTER_JS = """
     }
 
     // 状态过滤：维度切换 / 筛选项点选（REQ-20260916-010；chips 无 data-action，先于其判断）
+    // 跳转状态（REQ-20260917-025）独立于筛选：这里不再触碰跳转锚点
     var fdim = e.target.closest('[data-rev-filter-dim]');
     if (fdim) {
       e.preventDefault();
       revFilter.dim = fdim.getAttribute('data-rev-filter-dim');
       revFilter.val = 'all';
-      revJumpIdx = -1;  // 换筛选维度：重置跳转锚点（REQ-20260917-024）
       revFilterSave();
       revFilterSync();
       return;
@@ -3710,12 +3751,11 @@ ROUTER_JS = """
     if (fval) {
       e.preventDefault();
       revFilter.val = fval.getAttribute('data-rev-filter-val');
-      revJumpIdx = -1;  // 换筛选项：重置跳转锚点（REQ-20260917-024）
       revFilterSave();
       revFilterSync();
       return;
     }
-    // 状态跳转（REQ-20260917-024）：按当前状态在完整列表里跳上/下一条（上下文可见）
+    // 状态跳转（REQ-20260917-025）：按「状态下拉」所选状态在完整列表里跳上/下一条（上下文可见）
     var fjmp = e.target.closest('[data-rev-jump]');
     if (fjmp) {
       e.preventDefault();
