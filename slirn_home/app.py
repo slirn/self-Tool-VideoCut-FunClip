@@ -507,7 +507,7 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
         f"📝 {n} 段 · 分析于 {created} · 模型 {model}{rigor_stats} · "
         f"保留 {cat_counts.get('keep', 0)} / 删除 {cat_counts.get('delete', 0)} / "
         f"切分 {cat_counts.get('split', 0)} / 更正 {cat_counts.get('fix', 0)} / 复核 {cat_counts.get('review', 0)}"
-        f" · ✅ 已决策 <b>{decided}/{n}</b> · 点击行定位播放 · 决策列默认「采纳建议」"
+        f" · ✅ 已决策 <b>{decided}/{n}</b> · 点击行连续跳播（本条播完跳下一条，段间空白不播） · 决策列默认「采纳建议」"
         f" · ▾ 展开模型分析与修剪/更正内容"
     )
 
@@ -2568,6 +2568,28 @@ ROUTER_JS = """
     else v.addEventListener('loadedmetadata', go, {once: true});
   }
 
+  // 修订行连续跳播（REQ-20260917-028）：字幕之间常有无声/停顿空白，逐条连播时
+  // 空白也一并播出来。点行后从该行起链式播放：本条到尾 → 直接跳到下一条起点
+  // （段间空白不播），播完最后一条自动停。链随 timeupdate 维护（见 bindRevPlayer），
+  // 用户回拖/前拖按时间自动重定位。
+  var revPlaySeq = null, revPlayIdx = 0;
+  function revPlayFrom(row) {
+    if (!row) return false;
+    var seq = [], started = false;
+    revRows().forEach(function(r) {  // 全量行（时间序）：链按字幕轨推进，与筛选无关
+      if (r === row) started = true;
+      if (!started) return;
+      var s = parseInt(r.getAttribute('data-start-ms'), 10) || 0;
+      var e = parseInt(r.getAttribute('data-end-ms'), 10) || 0;
+      if (e > s) seq.push({ s: s, e: e });
+    });
+    revPlaySeq = seq.length ? seq : null;
+    revPlayIdx = 0;
+    playRevAt(row.getAttribute('data-task-id') || '',
+              revPlaySeq ? revPlaySeq[0].s : (parseInt(row.getAttribute('data-start-ms'), 10) || 0));
+    return true;
+  }
+
   // 切分修剪行定位播放（REQ-20260916-008）— 与修订行同模式，独立播放器防 id 撞车
   function playCutAt(tid, startMs) {
     var wrap = revVis('slirn-cut-player-wrap');
@@ -3214,6 +3236,7 @@ ROUTER_JS = """
     bindSpeedControl(v);  // 倍速显示与控制（REQ-20260916-014）
     if (v && list && !v.dataset.bound) {
       v.dataset.bound = '1';
+      revPlaySeq = null;  // 面板重建（新视频元素）→ 旧链作废，防 stale 行时间戳（REQ-20260917-028）
       var rows = Array.prototype.slice.call(list.querySelectorAll('.slirn-rev-row'));
       var lastHit = -1;
       var setActive = function(idx) {
@@ -3222,6 +3245,25 @@ ROUTER_JS = """
       };
       v.addEventListener('timeupdate', function() {
         var tms = v.currentTime * 1000, hit = -1;
+        // ① 连续跳播（REQ-20260917-028）：本条到尾 → seek 下一条起点（段间空白
+        // 不播）；回拖/前拖按时间重定位链位置；播完最后一条停
+        if (revPlaySeq && revPlaySeq.length) {
+          if (tms < revPlaySeq[revPlayIdx].s - 500) {
+            while (revPlayIdx > 0 && tms < revPlaySeq[revPlayIdx].s) revPlayIdx--;
+          } else {
+            while (revPlayIdx + 1 < revPlaySeq.length && tms >= revPlaySeq[revPlayIdx + 1].s) revPlayIdx++;
+          }
+          var seg = revPlaySeq[revPlayIdx];
+          if (tms >= seg.e - 30) {
+            if (revPlayIdx + 1 < revPlaySeq.length) {
+              revPlayIdx++;
+              try { v.currentTime = revPlaySeq[revPlayIdx].s / 1000; } catch (err) {}
+              return;  // 跳转后的首个 timeupdate 再走高亮，防旧位置误亮
+            }
+            v.pause(); revPlaySeq = null;  // 最后一条播完：自动停
+          }
+        }
+        // ② 高亮跟随（与字幕/切分阶段同款 active：段间缝隙保持前一段亮）
         for (var i = 0; i < rows.length; i++) {
           var s0 = parseInt(rows[i].getAttribute('data-start-ms'), 10) || 0;
           var e0 = parseInt(rows[i].getAttribute('data-end-ms'), 10) || 0;
@@ -3282,11 +3324,10 @@ ROUTER_JS = """
   function revTogglePlay() {
     var v = revVis('slirn-rev-player');
     if (!v) return;
-    if (!v.src) {  // 从未播放过：从选中行（或第一行）起点开播
+    if (!v.src) {  // 从未播放过：从选中行（或第一行）起点开播（连续跳播 — REQ-20260917-028）
       var rows = revNavRows();
       var row = rows[revSelIndex(rows)] || rows[0];
-      if (row) playRevAt(row.getAttribute('data-task-id') || '',
-        parseInt(row.getAttribute('data-start-ms'), 10) || 0);
+      if (row) revPlayFrom(row);
       return;
     }
     if (v.paused) { var p = v.play(); if (p && p.catch) p.catch(function() {}); }
@@ -3300,7 +3341,7 @@ ROUTER_JS = """
       toast('⌨ 先用 ' + revKeyLabel(kmR.prev) + ' / ' + revKeyLabel(kmR.next) + ' 选择一条字幕', 'error');
       return;
     }
-    playRevAt(row.getAttribute('data-task-id') || '', parseInt(row.getAttribute('data-start-ms'), 10) || 0);
+    revPlayFrom(row);  // 重播本条并续链（REQ-20260917-028：播完跳下一条，空白不播）
   }
   function revApplyDecision(val) {
     var rows = revNavRows();
@@ -3725,14 +3766,13 @@ ROUTER_JS = """
       return;
     }
 
-    // 修订行点击定位播放（select/input/button 与详情块上的点击不触发）
+    // 修订行点击连续跳播（select/input/button 与详情块上的点击不触发）：
+    // 本条播完自动跳下一条起点，段间空白不播（REQ-20260917-028）
     var revRow = e.target.closest('.slirn-rev-row');
     if (revRow && !e.target.closest('select, input, button, a, .slirn-rev-detail')) {
       e.preventDefault();
       revMarkSel(revRow);  // 鼠标与键盘共享「当前行」（REQ-20260916-004）
-      var tidR = revRow.getAttribute('data-task-id') || '';
-      var startMsR = parseInt(revRow.getAttribute('data-start-ms'), 10) || 0;
-      playRevAt(tidR, startMsR);
+      revPlayFrom(revRow);
       return;
     }
 
@@ -3892,7 +3932,8 @@ ROUTER_JS = """
       playSubAt(tidP, 0);
     }
     else if (action === 'play-rev-video') {
-      playRevAt(target.getAttribute('data-task-id') || '', 0);
+      // 连续跳播从第一条起（REQ-20260917-028）；无行兜底普通播放
+      if (!revPlayFrom(revRows()[0] || null)) playRevAt(target.getAttribute('data-task-id') || '', 0);
     }
     else if (action === 'play-cut-video') {
       playCutAt(target.getAttribute('data-task-id') || '', 0);

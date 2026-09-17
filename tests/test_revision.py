@@ -719,7 +719,8 @@ def test_render_revision_zone_states(tmp_path: Path, monkeypatch):
     assert 'value="大家好"' in h3, "split 预填建议的修剪后文本"
     assert "已决策 <b>1/3</b>" in h3, "统计口径仍是已保存决策（保存后生效）"
     assert "决策列默认「采纳建议」" in h3
-    assert "点击行定位播放" in h3 and "展开模型分析与修剪/更正内容" in h3
+    assert "点击行定位播放" not in h3 and "点击行连续跳播" in h3, "连续跳播提示（REQ-20260917-028）"
+    assert "展开模型分析与修剪/更正内容" in h3
     # 快捷键提示条（REQ-20260916-004）：键帽芯片 + 动作说明；选中态由 JS 挂 kbsel，不预渲染
     assert 'class="slirn-rev-kbhint"' in h3 and h3.count("<kbd>") == 8
     for kw in ("上一条 / 下一条", "播放 / 暂停", "重播本行", "<kbd>K</kbd> 保留",
