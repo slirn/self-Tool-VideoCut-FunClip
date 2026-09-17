@@ -692,6 +692,8 @@ def test_render_revision_zone_states(tmp_path: Path, monkeypatch):
     assert 'id="slirn-rev-filter"' in h3 and h3.count("data-rev-filter-dim=") == 2
     assert 'data-rev-filter-dim="sugg"' in h3 and 'data-rev-filter-dim="dec"' in h3
     assert 'id="slirn-rev-filter-chips"' in h3 and 'id="slirn-rev-filter-count"' in h3
+    # 状态跳转（REQ-20260917-024）：上一条/下一条按钮（按当前状态在完整列表跳转）
+    assert 'data-rev-jump="prev"' in h3 and 'data-rev-jump="next"' in h3
     # 有手动说明的行默认展开，其余收起（保持列表紧凑）
     assert h3.count('class="slirn-rev-row open"') == 1
     assert h3.count('class="slirn-rev-row"') == 2

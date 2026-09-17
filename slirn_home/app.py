@@ -523,6 +523,10 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
             <button type="button" class="slirn-rev-filter-dim" data-rev-filter-dim="dec">决策状态</button>
           </span>
           <span class="slirn-rev-filter-chips" id="slirn-rev-filter-chips"></span>
+          <span class="slirn-rev-jump" title="在完整列表中跳到当前状态的上/下一条记录（显示全部，上下文可见）">
+            <button type="button" class="slirn-rev-jump-btn" data-rev-jump="prev">⬆ 上一条</button>
+            <button type="button" class="slirn-rev-jump-btn" data-rev-jump="next">下一条 ⬇</button>
+          </span>
           <span class="slirn-rev-filter-count" id="slirn-rev-filter-count"></span>
         </div>
         <div id="slirn-rev-player-wrap" class="slirn-video-wrap slirn-sub-player-wrap" style="display:none;">
@@ -3349,6 +3353,51 @@ ROUTER_JS = """
   }
   function revFilterSync() { revFilterRender(); revFilterApply(); }
 
+  // ===== 状态跳转（REQ-20260917-024）：按当前筛选状态在完整列表里跳上/下一条 =====
+  // 与「筛选藏行」互补：跳转时显示全部行（目标行的上下文可见，方便结合前后
+  // 语句决定处理），kbsel 高亮目标行并居中滚动；播放器已加载则定位到行起点
+  // （与 ↑↓ 键同源）。匹配口径与筛选项完全同源（revFilterMatch）；选「全部」
+  // 时退化为整表上一/下一条。
+  var revJumpIdx = -1;  // 上次跳转命中的行（revRows 全量下标）；-1 = 未跳过
+  function revJumpLabel() {
+    if (revFilter.val === 'all') return '全部';
+    var defs = revFilter.dim === 'sugg' ? REV_FILTER_SUGG : REV_FILTER_DEC;
+    for (var i = 0; i < defs.length; i++) if (defs[i][0] === revFilter.val) return defs[i][1];
+    return revFilter.val;
+  }
+  function revJump(dir) {
+    var rows = revRows();
+    if (!rows.length) return;
+    rows.forEach(function(r) { r.style.display = ''; });  // 显示全部：上下文可见
+    var cnt = revVis('slirn-rev-filter-count');
+    var matches = [];
+    for (var i = 0; i < rows.length; i++) if (revFilterMatch(rows[i])) matches.push(i);
+    if (!matches.length) {
+      if (cnt) cnt.textContent = '「' + revJumpLabel() + '」无匹配 · 显示全部 ' + rows.length + ' 条';
+      toast('没有「' + revJumpLabel() + '」状态的行', 'error');
+      return;
+    }
+    // 起点：上次跳转行 → 键盘选中行 → 首条（下一条）/ 末条（上一条）
+    var start = (revJumpIdx >= 0 && revJumpIdx < rows.length) ? revJumpIdx : revSelIndex(rows);
+    var cur = matches.indexOf(start);
+    var nextPos = cur >= 0 ? (cur + dir + matches.length) % matches.length
+                           : (dir > 0 ? 0 : matches.length - 1);
+    if (cur >= 0 && matches.length > 1 &&
+        ((dir > 0 && nextPos === 0) || (dir < 0 && nextPos === matches.length - 1)))
+      toast('已到「' + revJumpLabel() + '」的' + (dir > 0 ? '最后' : '第一') + '一条，继续将循环跳转');
+    var idx = matches[nextPos];
+    revJumpIdx = idx;
+    revMarkSel(rows[idx]);
+    if (rows[idx].scrollIntoView)
+      rows[idx].scrollIntoView({block: 'center', behavior: 'smooth'});
+    var v = revVis('slirn-rev-player');
+    if (v && v.src) {  // 播放器加载过才定位（暂停时不强制播放，按空格续听）
+      try { v.currentTime = (parseInt(rows[idx].getAttribute('data-start-ms'), 10) || 0) / 1000; } catch (err) {}
+    }
+    if (cnt) cnt.textContent = '跳转「' + revJumpLabel() + '」' + (nextPos + 1) + '/' + matches.length
+      + ' · 显示全部 ' + rows.length + ' 条（上下文可见）';
+  }
+
   // ===== 快捷键自定义（REQ-20260916-005）：localStorage 键 slirnRevKeys =====
   // 每个人习惯不同：点击提示条「⚙ 自定义」→ 点键帽 → 按新键。键位图持久化，
   // 提示条/引导 toast 跟随当前键位渲染；冲突拒绝、可恢复默认。
@@ -3652,6 +3701,7 @@ ROUTER_JS = """
       e.preventDefault();
       revFilter.dim = fdim.getAttribute('data-rev-filter-dim');
       revFilter.val = 'all';
+      revJumpIdx = -1;  // 换筛选维度：重置跳转锚点（REQ-20260917-024）
       revFilterSave();
       revFilterSync();
       return;
@@ -3660,8 +3710,16 @@ ROUTER_JS = """
     if (fval) {
       e.preventDefault();
       revFilter.val = fval.getAttribute('data-rev-filter-val');
+      revJumpIdx = -1;  // 换筛选项：重置跳转锚点（REQ-20260917-024）
       revFilterSave();
       revFilterSync();
+      return;
+    }
+    // 状态跳转（REQ-20260917-024）：按当前状态在完整列表里跳上/下一条（上下文可见）
+    var fjmp = e.target.closest('[data-rev-jump]');
+    if (fjmp) {
+      e.preventDefault();
+      revJump(fjmp.getAttribute('data-rev-jump') === 'prev' ? -1 : 1);
       return;
     }
 
