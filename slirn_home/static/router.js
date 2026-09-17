@@ -83,7 +83,7 @@
   // 解析手动输入的词
   function parseManual(text) {
     if (!text) return [];
-    return (text.replace(/\\n/g, ' ').split(/[\\s,，;；、]+/)).filter(Boolean);
+    return (text.replace(/\n/g, ' ').split(/[\s,，;；、]+/)).filter(Boolean);
   }
 
   // 渲染「最终生效热词」的 chips（继承 + 选中 + 手动，去重）
@@ -196,7 +196,7 @@
         // 如果是手动来源，从 textarea 里去掉这个词
         var manualEl2 = document.getElementById('slirn-hotwords-manual');
         if (manualEl2 && manualEl2.value) {
-          var tokens = manualEl2.value.split(/(\\s+)/);
+          var tokens = manualEl2.value.split(/(\s+)/);
           manualEl2.value = tokens.filter(function(t) { return t.trim() !== w; }).join('');
         }
         renderHwChips();
@@ -207,7 +207,7 @@
 
   function cssEscape(s) {
     if (window.CSS && CSS.escape) return CSS.escape(s);
-    return String(s).replace(/(["\\\\.#:>+~*\\[\\]()'])/g, '\\$1');
+    return String(s).replace(/(["\\.#:>+~*[\]()'])/g, '\\$1');
   }
   window.slirnInitHotwordPicker = initHotwordPicker;
 
@@ -225,7 +225,7 @@
   // 返回 null 表示格式无效
   function hmsToSeconds(str) {
     if (!str) return null;
-    var m = String(str).match(/^(\\d+):(\\d{1,2}):(\\d{1,2})(?:\\.(\\d{1,3}))?$/);
+    var m = String(str).match(/^(\d+):(\d{1,2}):(\d{1,2})(?:\.(\d{1,3}))?$/);
     if (!m) return null;
     var h = parseInt(m[1], 10);
     var mi = parseInt(m[2], 10);
@@ -1427,7 +1427,7 @@
   function rcDelete(btn) {
     var tid = btn.getAttribute('data-task-id') || '';
     if (!tid) { toast('❌ 缺少 task_id', 'error'); return; }
-    if (!window.confirm('删除「粗剪成片」（mp4 + 随片 srt 副产物）？\\n'
+    if (!window.confirm('删除「粗剪成片」（mp4 + 随片 srt 副产物）？\n'
         + '删除后需要重新合成才能预览效果（约 11 分钟）。')) return;
     btn.disabled = true;
     postJSON(SLIRN_API + '/compose_rough_delete', {task_id: tid}).then(function(r) {
@@ -1446,7 +1446,7 @@
     var pre = pane.querySelector('pre.slirn-rc-subs-body');
     var srt = pre ? pre.textContent : '';
     if (!srt) { toast('❌ 没有可复制的字幕', 'error'); return; }
-    var done = function() { toast('📋 已复制 ' + srt.split('\\n\\n').length + ' 段 SRT'); };
+    var done = function() { toast('📋 已复制 ' + srt.split('\n\n').length + ' 段 SRT'); };
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(srt).then(done, function() { fallbackCopy(srt, done); });
     } else {
@@ -2909,7 +2909,7 @@
       return;
     }
     var file = files[0];
-    if (!file.type.startsWith('video/') && !/\\.(mp4|avi|mkv|mov|webm|ts|mpeg|m4v|flv|wmv)$/i.test(file.name)) {
+    if (!file.type.startsWith('video/') && !/\.(mp4|avi|mkv|mov|webm|ts|mpeg|m4v|flv|wmv)$/i.test(file.name)) {
       toast('⚠️ 请拖入视频文件（mp4/avi/mkv/...）', 'warning');
       return;
     }
