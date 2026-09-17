@@ -4,6 +4,9 @@
 后台线程执行 + 内存 job 表 + 阶段级进度。结果双写 tasks/<id>/outputs/：
 subtitle.srt（utf-8-sig）+ subtitle.json（结构化段列表）。
 
+REQ-20260917-029：可选说话人分离（cam++，sd 参数默认开）——逐段 1 起始
+人员编号（首次出现顺序）+ 每人句数统计（meta.speakers）。
+
 设计见 docs/design/DESIGN-20260915-001-subtitle-stage.md。
 """
 
@@ -34,35 +37,80 @@ for _p in (str(_funclip_root), str(_FUNCLIP_PKG)):
 
 # =============== 模型（懒加载单例） ===============
 
+# 无 spk（SD 关闭用）/ 带 cam++ spk（SD 开启用）两个单例：cam++ 未缓存的
+# 离线环境关掉 SD 仍能生成字幕（模型加载不因缺 cam++ 失败）
 _MODEL = None
+_MODEL_SD = None
 _MODEL_LOCK = threading.Lock()
 
 
-def _build_model():
-    """seaco-paraformer（热词优化版）+ VAD + 标点 — 与 skill extract_subtitle.py 的
-    paraformer 分支完全一致（模型已离线缓存于 ~/.cache/modelscope）。"""
+def _local_model_dir(model_id: str) -> str:
+    """model id → 本地 modelscope 缓存目录（缓存优先，离线可加载）。
+
+    funasr 传 model id 时 snapshot_download 必联网核对版本（get_or_download_model_dir），
+    网络不通直接抛 model not registered——但四个模型通常早已完整缓存在
+    ~/.cache/modelscope/hub/models/<org>/<name>。命中缓存就传目录路径加载
+    （funasr 对本地路径只做可忽略的版本检查），未命中回退 id 走正常下载。
+    """
+    try:
+        from modelscope.utils.file_utils import get_modelscope_cache_dir
+
+        base = Path(get_modelscope_cache_dir())
+    except Exception:  # noqa: BLE001 — modelscope 未装/版本差异时用默认缓存路径
+        base = Path.home() / ".cache" / "modelscope" / "hub"
+    # get_modelscope_cache_dir() 返回值可能已含 hub 后缀（实测 v1.x），两种形态都兼容
+    root = base if base.name == "hub" else base / "hub"
+    p = root / "models" / model_id
+    return str(p) if (p / "config.yaml").exists() else model_id
+
+
+def _build_model(with_spk: bool):
+    """seaco-paraformer（热词优化版）+ VAD + 标点；with_spk 再挂 cam++ 说话人。
+
+    与 skill extract_subtitle.py 的 paraformer 分支一致（模型离线缓存于
+    ~/.cache/modelscope，cam++ 首次运行自动下载）。
+    """
     from funasr import AutoModel
 
-    return AutoModel(
-        model="iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
-        vad_model="damo/speech_fsmn_vad_zh-cn-16k-common-pytorch",
-        punc_model="damo/punc_ct-transformer_zh-cn-common-vocab272727-pytorch",
+    kwargs = dict(
+        model=_local_model_dir("iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch"),
+        vad_model=_local_model_dir("damo/speech_fsmn_vad_zh-cn-16k-common-pytorch"),
+        punc_model=_local_model_dir("damo/punc_ct-transformer_zh-cn-common-vocab272727-pytorch"),
     )
+    if with_spk:
+        kwargs["spk_model"] = _local_model_dir("damo/speech_campplus_sv_zh-cn_16k-common")
+    return AutoModel(**kwargs)
 
 
-def get_model():
-    """首次调用加载模型（约 10-30s），之后复用。线程安全。"""
-    global _MODEL
+def get_model(sd: bool = False):
+    """按需取模型单例。首次调用加载（约 10-30s），之后复用。线程安全。
+
+    sd=True → 带 cam++ 的模型；sd=False → 若带 spk 的单例已加载则直接复用
+    （sd_switch='no' 时不返回说话人结果，识别不受影响，省一份 paraformer
+    内存），否则建无 spk 的模型。
+    """
+    global _MODEL, _MODEL_SD
+    if sd:
+        if _MODEL_SD is None:
+            with _MODEL_LOCK:
+                if _MODEL_SD is None:
+                    log.info("[asr] 加载 FunASR 模型（含 cam++ 说话人）…")
+                    _MODEL_SD = _build_model(with_spk=True)
+                    log.info("[asr] 模型就绪")
+        return _MODEL_SD
+    if _MODEL_SD is not None:
+        return _MODEL_SD
     if _MODEL is None:
         with _MODEL_LOCK:
             if _MODEL is None:
                 log.info("[asr] 加载 FunASR 模型…")
-                _MODEL = _build_model()
+                _MODEL = _build_model(with_spk=False)
                 log.info("[asr] 模型就绪")
     return _MODEL
 
 
 # =============== 纯函数：sentence_info → 段列表 ===============
+
 
 def segments_from_sentences(sentence_info: list[dict]) -> list[dict]:
     """funclip state['sentences'] → [{i, start_ms, end_ms, text, start, end}]。
@@ -98,6 +146,13 @@ def segments_from_sentences(sentence_info: list[dict]) -> list[dict]:
             "end": time_convert(t2s.end_sec),
             "text": t2s.text(),
         }
+        spk_raw = sent.get("spk")
+        if spk_raw is not None:
+            try:
+                # FunASR 可能给 numpy 整型（json 不可序列化）→ int() 强转
+                seg["spk_raw"] = int(spk_raw)
+            except (TypeError, ValueError):
+                pass
         raw_text = sent.get("text", "")
         tokens = [str(w) for w in raw_text] if isinstance(raw_text, list) else tokenize(str(raw_text))
         if tokens and len(tokens) == len(ts):
@@ -110,16 +165,80 @@ def segments_from_sentences(sentence_info: list[dict]) -> list[dict]:
     return segs
 
 
+# =============== 说话人编号 + 统计（REQ-20260917-029） ===============
+
+
+def assign_speaker_numbers(segments: list[dict]) -> list[dict]:
+    """把 FunASR 原始簇标签（spk_raw）归一为 1 起始、按首次出现顺序的人员编号。
+
+    cam++ 簇标签序号无语义（不保证按出现顺序、不保证连续），
+    「先说话的人 = 人员1」对课程视频最直观。归一后每段只留 spk（int ≥ 1），
+    spk_raw 剔除；无标签的段不加 spk（与 SD 关闭时的数据形状一致）。
+    """
+    mapping: dict[int, int] = {}
+    for seg in segments:
+        raw = seg.pop("spk_raw", None)
+        if raw is None:
+            continue
+        if raw not in mapping:
+            mapping[raw] = len(mapping) + 1
+        seg["spk"] = mapping[raw]
+    return segments
+
+
+def speaker_stats(segments: list[dict]) -> list[dict]:
+    """每个人员编号说了多少句（口径=字幕段数），按编号升序。
+
+    句数总和 = 带 spk 的段数；与 UI 列表行数、subtitle.srt 块数同口径。
+    """
+    counts: dict[int, int] = {}
+    for seg in segments:
+        spk = seg.get("spk")
+        if spk is None:
+            continue
+        counts[spk] = counts.get(spk, 0) + 1
+    return [{"spk": k, "sentences": counts[k]} for k in sorted(counts)]
+
+
+def segments_to_srt(segments: list[dict]) -> str:
+    """segments → 标准 SRT 文本（块间空行分隔，与 subtitle.json/UI 同源）。
+
+    说话人标签放序号行（`3  spk1`，与上游 FunClip SD 输出同构，编号用归一后
+    人员编号）；无 spk 的段序号行为纯数字。文本行不携带标签，后续字幕清洗/
+    热词替换按文本处理不受影响。
+    """
+    blocks = []
+    for seg in segments:
+        idx = seg["i"]
+        if seg.get("spk") is not None:
+            idx = f"{idx}  spk{seg['spk']}"
+        blocks.append(f"{idx}\n{seg['start']} --> {seg['end']}\n{seg['text']}\n")
+    return "\n".join(blocks)
+
+
 # =============== 预检 ===============
+
 
 def has_audio_track(video_path: Path) -> bool:
     """ffprobe 检查有无音频轨（上游 video_recog 对无音频视频直接 sys.exit）。"""
     try:
         r = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "a",
-             "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(video_path)],
-            capture_output=True, timeout=30,
-            encoding="utf-8", errors="replace",
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "a",
+                "-show_entries",
+                "stream=codec_type",
+                "-of",
+                "csv=p=0",
+                str(video_path),
+            ],
+            capture_output=True,
+            timeout=30,
+            encoding="utf-8",
+            errors="replace",
         )
         return "audio" in (r.stdout or "")
     except Exception as e:  # noqa: BLE001
@@ -128,6 +247,7 @@ def has_audio_track(video_path: Path) -> bool:
 
 
 # =============== 识别入口（拆出便于测试 monkeypatch） ===============
+
 
 def _extract_mono_wav_16k(video_path: str, wav_path: Path) -> None:
     """ffmpeg 流式抽 16k 单声道 wav（REQ-20260917-023）。
@@ -139,10 +259,26 @@ def _extract_mono_wav_16k(video_path: str, wav_path: Path) -> None:
     """
     try:
         r = subprocess.run(
-            ["ffmpeg", "-y", "-loglevel", "error", "-i", video_path,
-             "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(wav_path)],
-            capture_output=True, timeout=7200,
-            encoding="utf-8", errors="replace",
+            [
+                "ffmpeg",
+                "-y",
+                "-loglevel",
+                "error",
+                "-i",
+                video_path,
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-c:a",
+                "pcm_s16le",
+                str(wav_path),
+            ],
+            capture_output=True,
+            timeout=7200,
+            encoding="utf-8",
+            errors="replace",
         )
     except subprocess.TimeoutExpired:
         raise RuntimeError("音频提取超时（>2 小时），请检查视频文件") from None
@@ -150,29 +286,36 @@ def _extract_mono_wav_16k(video_path: str, wav_path: Path) -> None:
         raise RuntimeError(f"音频提取失败: {(r.stderr or '').strip()[-400:]}")
 
 
-def _run_recognition(video_path: str, hotword_str: str) -> tuple[str, dict]:
-    """调上游 funclip VideoClipper.recog → (srt 文本, state)。
+def _run_recognition(video_path: str, hotword_str: str, sd: bool = False) -> dict:
+    """调上游 funclip VideoClipper.recog → state（含 sentences）。
 
     与上游 video_recog 的差别仅在「音频从哪来」：16k 单声道 wav 流式抽取
     （REQ-20260917-023，长视频内存修复）替代 moviepy 立体声抽轨 + librosa
-    重采样；识别链路（seaco-paraformer / sd_switch=no / 热词 / 断句）与上游
-    完全同源（recog 同一入口）。
+    重采样；识别链路（seaco-paraformer / 热词 / 断句）与上游完全同源。
+
+    sd=True 走上游 SD 分支：cam++ 逐句 spk 标签进 state['sentences']。
+    注意上游 recog 判 sd_switch == 'Yes'（大写 Y），传小写 'yes' 会静默
+    走普通分支（skill 脚本 extract_subtitle.py 即中招，见 REQ-20260917-029 非目标）。
     """
     import librosa  # 上游 videoclipper 同款依赖；懒加载保持服务启动轻量
 
     from funclip.videoclipper import VideoClipper
 
-    clipper = VideoClipper(get_model())
+    clipper = VideoClipper(get_model(sd))
     clipper.lang = "zh"
     with tempfile.TemporaryDirectory(prefix="slirn_asr_") as td:
         wav_path = Path(td) / "audio_16k_mono.wav"
         _extract_mono_wav_16k(video_path, wav_path)
         wav = librosa.load(str(wav_path), sr=16000)[0]  # (N,) float32 单声道
     state = {"video_filename": video_path}
-    _res_text, res_srt, state = clipper.recog(
-        (16000, wav), "no", state, hotword_str, None,
+    _res_text, _res_srt, state = clipper.recog(
+        (16000, wav),
+        "Yes" if sd else "no",
+        state,
+        hotword_str,
+        None,
     )
-    return res_srt or "", state
+    return state
 
 
 # =============== 后台 job 管理 ===============
@@ -199,10 +342,13 @@ def start_job(
     outputs_dir: Path,
     source: str = "original",
     base_offset_ms: int = 0,
+    sd: bool = True,
     on_success: Callable[[list[dict]], None] | None = None,
 ) -> bool:
     """启动字幕生成线程。已在跑 → 返回 False（不重复起）。
 
+    sd=True 时同时做说话人分离（cam++），结果带 1 起始人员编号 + 每人句数
+    统计（REQ-20260917-029）。
     on_success(segments) 在 worker 线程内、结果落盘之后调用（app 层用它迁任务状态）。
     """
     with _JOBS_LOCK:
@@ -210,8 +356,12 @@ def start_job(
         if existing and existing.get("state") == "running":
             return False
         _JOBS[task_id] = {
-            "state": "running", "stage": "加载模型", "error": None,
-            "started_at": time.time(), "finished_at": None, "segments_count": 0,
+            "state": "running",
+            "stage": "加载模型",
+            "error": None,
+            "started_at": time.time(),
+            "finished_at": None,
+            "segments_count": 0,
         }
 
     def _run():
@@ -225,16 +375,21 @@ def start_job(
             _stage("加载模型")
             hotword_str = " ".join(w.strip() for w in hotwords if w and w.strip())
             _stage("提取音频 → 识别中")
-            res_srt, state = _run_recognition(str(video_path), hotword_str)
+            state = _run_recognition(str(video_path), hotword_str, sd)
 
             _stage("保存结果")
             segments = segments_from_sentences(state.get("sentences") or [])
+            if sd:
+                assign_speaker_numbers(segments)
+            stats = speaker_stats(segments)
+            srt_text = segments_to_srt(segments)
             outputs_dir.mkdir(parents=True, exist_ok=True)
             srt_path = outputs_dir / SUBTITLE_SRT
-            srt_path.write_text(res_srt, encoding="utf-8-sig")
+            srt_path.write_text(srt_text, encoding="utf-8-sig")
             meta = {
-                "version": 1,
+                "version": 2,
                 "model": "seaco-paraformer",
+                "sd": sd,
                 "source": source,
                 "video_path": str(video_path).replace("\\", "/"),
                 "video_url": f"/slirn/api/video/{task_id}",
@@ -242,14 +397,18 @@ def start_job(
                 "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
                 "segments": segments,
             }
-            (outputs_dir / SUBTITLE_JSON).write_text(
-                json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
+            if stats:
+                meta["speakers"] = {"count": len(stats), "stats": stats}
+            (outputs_dir / SUBTITLE_JSON).write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
             job["segments_count"] = len(segments)
             job["state"] = "done"
             job["stage"] = "完成"
             job["finished_at"] = time.time()
-            log.info("[asr][%s] 完成：%d 段", task_id, len(segments))
+            if stats:
+                summary = "、".join(f"人员{s['spk']} {s['sentences']} 句" for s in stats)
+                log.info("[asr][%s] 完成：%d 段 · %d 位说话人（%s）", task_id, len(segments), len(stats), summary)
+            else:
+                log.info("[asr][%s] 完成：%d 段", task_id, len(segments))
             if on_success:
                 try:
                     on_success(segments)
@@ -275,6 +434,7 @@ def start_job(
 
 
 # =============== 读取既有结果 ===============
+
 
 def load_subtitle(outputs_dir: Path) -> dict | None:
     """读取 subtitle.json（无/损坏 → None）。"""

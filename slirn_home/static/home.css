@@ -1202,8 +1202,38 @@ footer { display: none !important; }
   line-height: 1.55;
   color: var(--text-primary);
 }
+/* 说话人徽标 + 统计（REQ-20260917-029）：徽标 6 色循环，同编号同色 */
+.slirn-sub-spk {
+  align-self: center;
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 1px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+  text-align: center;
+}
+.slirn-sub-spk.spk-c1 { background: #e0e7ff; color: #3730a3; }
+.slirn-sub-spk.spk-c2 { background: #dcfce7; color: #166534; }
+.slirn-sub-spk.spk-c3 { background: #fee2e2; color: #991b1b; }
+.slirn-sub-spk.spk-c4 { background: #fef3c7; color: #92400e; }
+.slirn-sub-spk.spk-c5 { background: #e0f2fe; color: #075985; }
+.slirn-sub-spk.spk-c6 { background: #f3e8ff; color: #6b21a8; }
+/* 播放高亮行（渐变底）上徽标加浅描边保持可读 */
+.slirn-sub-row.active .slirn-sub-spk { outline: 1px solid rgba(255, 255, 255, 0.55); }
+/* 带徽标的行：序号 | 徽标 | 时间 | 文本（时间列收窄给徽标腾位） */
+.slirn-sub-row.has-spk { grid-template-columns: 44px 62px 190px 1fr; }
+.slirn-sd-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
 @media (max-width: 720px) {
   .slirn-sub-row { grid-template-columns: 32px 1fr; }
+  .slirn-sub-row.has-spk { grid-template-columns: 32px 60px 1fr; }
   .slirn-sub-text { grid-column: 1 / -1; }
   .slirn-sub-time { font-size: 10.5px; }
 }

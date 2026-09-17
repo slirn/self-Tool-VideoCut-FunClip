@@ -270,19 +270,34 @@ def _render_subtitle_zone(task_id: str, t, mgr: TaskManager) -> str:
     # 字幕列表（已生成时）
     list_html = ""
     if meta and meta.get("segments"):
-        rows = "".join(
-            f'<div class="slirn-sub-row" data-task-id="{_esc(task_id)}"'
-            f' data-start-ms="{int(s["start_ms"])}" data-end-ms="{int(s["end_ms"])}">'
-            f'<span class="slirn-sub-idx">{int(s["i"])}</span>'
-            f'<span class="slirn-sub-time">{_esc(s["start"])} → {_esc(s["end"])}</span>'
-            f'<span class="slirn-sub-text">{_esc(s["text"])}</span>'
-            f"</div>"
-            for s in meta["segments"]
-        )
+        rows = ""
+        for s in meta["segments"]:
+            spk = s.get("spk")
+            badge = (
+                f'<span class="slirn-sub-spk spk-c{(int(spk) - 1) % 6 + 1}">人员{int(spk)}</span>'
+                if spk else ""
+            )
+            rows += (
+                f'<div class="slirn-sub-row{" has-spk" if spk else ""}"'
+                f' data-task-id="{_esc(task_id)}"'
+                f' data-start-ms="{int(s["start_ms"])}" data-end-ms="{int(s["end_ms"])}">'
+                f'<span class="slirn-sub-idx">{int(s["i"])}</span>'
+                f'{badge}'
+                f'<span class="slirn-sub-time">{_esc(s["start"])} → {_esc(s["end"])}</span>'
+                f'<span class="slirn-sub-text">{_esc(s["text"])}</span>'
+                f"</div>"
+            )
         n = len(meta["segments"])
         created = _esc(meta.get("created_at", ""))
         src_label = "截取段时间轴" if meta.get("source") == "segment" else "原视频时间轴"
-        list_html = f'''<div class="slirn-sub-meta">📝 {n} 段 · 识别于 {created} · {src_label} · 点击任一行定位播放，播放时当前行高亮</div>
+        # 说话人统计行（REQ-20260917-029）：仅 SD 生成的字幕有 speakers
+        speakers = meta.get("speakers") or {}
+        stats_html = ""
+        if speakers.get("stats"):
+            parts = "、".join(f"人员{st['spk']} {st['sentences']} 句" for st in speakers["stats"])
+            stats_html = (f' · 🎙 {speakers.get("count", len(speakers["stats"]))}'
+                          f" 位说话人：{parts}")
+        list_html = f'''<div class="slirn-sub-meta">📝 {n} 段 · 识别于 {created} · {src_label}{stats_html} · 点击任一行定位播放，播放时当前行高亮</div>
         <div class="slirn-sub-list" id="slirn-sub-list">{rows}</div>'''
 
     gen_btn_label = "🔄 重新生成字幕" if (meta and meta.get("segments")) else "🎙 生成字幕"
@@ -301,6 +316,9 @@ def _render_subtitle_zone(task_id: str, t, mgr: TaskManager) -> str:
         <div class="slirn-task-actions" style="margin-top:14px;">
             <button class="slirn-btn slirn-btn-primary" data-action="gen-subtitle" data-task-id="{_esc(task_id)}">{gen_btn_label}</button>
             <button class="slirn-btn" data-action="play-segment" data-task-id="{_esc(task_id)}">▶️ 播放视频</button>
+            <label class="slirn-sd-toggle" title="开启后用 FunASR cam++ 分辨每句话的说话人：字幕带人员编号并统计每人句数；单人视频误分成多人时可关闭重生成">
+                <input type="checkbox" id="slirn-sd-switch" checked /> 区分说话人
+            </label>
         </div>
     </div>'''
 
@@ -2473,6 +2491,25 @@ ROUTER_JS = """
     if (cur0) cur0.textContent = slirnRateLabel(v.playbackRate);
   }
 
+  // ===== SD 开关状态（REQ-20260917-029）：localStorage 记忆，重渲染/换视图后恢复 =====
+  // 服务端默认渲染选中；详情页与工作台各一份同 id 复选框，apply 时同步全部实例
+  function applySdSwitchState() {
+    var saved = null;
+    try { saved = localStorage.getItem('slirnSdSwitch'); } catch (e) {}
+    if (saved === null) return;  // 用户没选过 → 保持服务端默认（开）
+    var boxes = document.querySelectorAll('#slirn-sd-switch');
+    for (var i = 0; i < boxes.length; i++) boxes[i].checked = saved === '1';
+  }
+  if (!window.__slirnSdBound) {
+    window.__slirnSdBound = true;
+    document.addEventListener('change', function(e) {
+      var t = e.target;
+      if (t && t.id === 'slirn-sd-switch') {
+        try { localStorage.setItem('slirnSdSwitch', t.checked ? '1' : '0'); } catch (err) {}
+      }
+    });
+  }
+
   function bindSubPlayer() {
     var v = document.getElementById('slirn-sub-player');
     var list = document.getElementById('slirn-sub-list');
@@ -2508,6 +2545,7 @@ ROUTER_JS = """
     // 详情（重新）打开时，若 job 还在跑 → 恢复轮询
     var st = document.getElementById('slirn-asr-status');
     if (st && st.dataset.taskId && st.dataset.state === 'running') startSubPolling(st.dataset.taskId);
+    applySdSwitchState();  // SD 开关：重渲染后恢复上次选择（REQ-20260917-029）
   }
 
   // ===== 字幕修订：轮询 + 播放器（REQ-20260915-005，与字幕区同模式、独立 id）=====
@@ -3916,7 +3954,12 @@ ROUTER_JS = """
     }
     else if (action === 'gen-subtitle') {
       var tidG = target.getAttribute('data-task-id') || '';
-      postJSON(SLIRN_API + '/gen_subtitle', {task_id: tidG}).then(function(r) {
+      // 同 id 复选框详情页/工作台各一份（两 tab 同在 DOM）→ 从点击按钮所在卡片内
+      // 取开关，避免 getElementById 命中隐藏副本读到旧状态（REQ-20260917-029）
+      var sdCard = target.closest ? target.closest('.slirn-card') : null;
+      var sdEl = sdCard ? sdCard.querySelector('#slirn-sd-switch')
+                        : document.getElementById('slirn-sd-switch');
+      postJSON(SLIRN_API + '/gen_subtitle', {task_id: tidG, sd: sdEl ? sdEl.checked : true}).then(function(r) {
         if (r && r.ok) {
           toast(r.toast || '已开始生成');
           var el = document.getElementById('slirn-asr-status');
@@ -5191,9 +5234,12 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         def _on_success(segs: list[dict]) -> None:
             mgr.update_status(tid, TaskStatus.SUBTITLE_GENERATED)
 
+        # 说话人分离开关（REQ-20260917-029）：默认开；旧客户端不带该字段 → 开
+        sd_val = body.get("sd")
+        sd_on = True if sd_val is None else bool(sd_val)
         started = _asr.start_job(
             tid, video, hotwords, outputs_dir,
-            source=source, base_offset_ms=base_off_ms, on_success=_on_success,
+            source=source, base_offset_ms=base_off_ms, sd=sd_on, on_success=_on_success,
         )
         if not started:
             return _ok("", toast="⏳ 该任务已在生成中，请等待完成")
