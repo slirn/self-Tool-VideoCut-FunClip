@@ -49,7 +49,7 @@
         subtitle_review: {accept_all_suggestions: true, skip_categories: []},
         rough_cut: {delete_speakers: [], default_decision: 'keep'},
         rough_compose: {},
-        optimize: {accept_all_replacements: true},
+        optimize: {accept_all_replacements: false},
         stop_after: 'rough_compose'
       }
     },
@@ -246,7 +246,7 @@
       speaker_diarization: _checked(fieldId('subtitle_generation', 'sd'), false)
     };
     cfg.subtitle_review = {
-      accept_all_suggestions: _checked(fieldId('subtitle_review', 'accept-all'), true),
+      accept_all_suggestions: _checked(fieldId('subtitle_review', 'accept-all'), false),
       skip_categories: _val(fieldId('subtitle_review', 'skip-cats'), '').split(',').map(function(x){return x.trim();}).filter(Boolean)
     };
     cfg.rough_cut = {
@@ -255,7 +255,7 @@
     };
     cfg.rough_compose = {};
     cfg.optimize = {
-      accept_all_replacements: _checked(fieldId('optimize', 'accept-rep'), true)
+      accept_all_replacements: _checked(fieldId('optimize', 'accept-rep'), false)
     };
     // v4 顶层 stop_after："" → null；其他保留原值
     var flowStop = _val('slirn-pipe-flow-stop', '');

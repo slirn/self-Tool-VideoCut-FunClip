@@ -92,13 +92,17 @@ class PipelineJob:
 
 
 def default_config() -> dict:
-    """v4 默认配置：5 阶段都跑，顶层 stop_after='subtitle_review'（字幕修订后停）。"""
+    """v4 默认配置：5 阶段都跑，顶层 stop_after='subtitle_review'（字幕修订后停）。
+
+    accept_all_suggestions / accept_all_replacements 默认 False：避免「已勾选但
+    用户不知道，第一次点反而被取消」的直觉冲突。第一次勾上才生效。
+    """
     return {
         "subtitle_generation": {
             "speaker_diarization": False,
         },
         "subtitle_review": {
-            "accept_all_suggestions": True,
+            "accept_all_suggestions": False,
             "skip_categories": [],
         },
         "rough_cut": {
@@ -107,7 +111,7 @@ def default_config() -> dict:
         },
         "rough_compose": {},
         "optimize": {
-            "accept_all_replacements": True,
+            "accept_all_replacements": False,
         },
         # v4 顶层字段：在哪个阶段完成后停（None = 跑到底）
         "stop_after": "subtitle_review",
