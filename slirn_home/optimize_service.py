@@ -325,7 +325,8 @@ def start_job(
                 _stage("零发现复检", 92.0)
                 found = _analyze_all(strict=True)
 
-            # ---- ③ 落盘（出现项默认全部"待采纳"，applied=True 待人工改判） ----
+            # ---- ③ 落盘（出现项默认全部"待采纳"，applied=True 待人工改判；
+            #      reviewed=False 待人工处理 — REQ-038 词级处理进度口径）----
             _stage("保存结果", 95.0)
             occurrences = []
             for rid in sorted(found, key=int):
@@ -336,6 +337,7 @@ def start_job(
                         "before": str(occ["before"]), "after": str(occ["after"]),
                         "reason": str(occ.get("reason") or ""),
                         "applied": True,
+                        "reviewed": False,
                     })
             data = {
                 "version": 1,
@@ -400,10 +402,10 @@ def load_optimize(outputs_dir: Path) -> dict | None:
 def save_decisions(outputs_dir: Path, decisions: list[dict]) -> tuple[dict, int]:
     """把人工决定合并落盘。返回 (data, 生效条数)。
 
-    decisions：[{"occ_id": int, "applied": bool, "after": str}]（全量口径 —
-    未列出的出现项视为不采纳）。生效要求 after 非空且 != before（人工编辑
-    改回原文 = 不采纳，服务端兜底）。保存时重算各行 new_text、词频与对应关系
-    汇总，saved_at 置当前时间（阶段完成标记）。
+    decisions：[{"occ_id": int, "applied": bool, "after": str, "reviewed": bool}]
+    （全量口径 — 未列出的出现项视为不采纳/未处理）。生效要求 after 非空且
+    != before（人工编辑改回原文 = 不采纳，服务端兜底）。保存时重算各行
+    new_text、词频与对应关系汇总，saved_at 置当前时间（阶段完成标记）。
     """
     data = load_optimize(outputs_dir)
     if data is None:
@@ -419,6 +421,8 @@ def save_decisions(outputs_dir: Path, decisions: list[dict]) -> tuple[dict, int]
         d = dec_by_id.get(int(occ["occ_id"]))
         after = str((d or {}).get("after", occ.get("after")))
         want = bool((d or {}).get("applied"))
+        # REQ-038：处理进度落盘 — 出现处切换过 ✓/✕ 或编辑过替换值即 reviewed
+        occ["reviewed"] = bool((d or {}).get("reviewed"))
         if want and after and after != str(occ.get("before")):
             occ["applied"] = True
             occ["after"] = after  # 人工编辑过的替换值

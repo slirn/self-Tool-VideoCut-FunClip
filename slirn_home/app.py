@@ -1067,7 +1067,6 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
     # ---- 状态 B：优化结果 → 词频 + 行内出现项（可编辑/采纳）+ 确认保存 ----
     import time as _time
     est = optimize_service.effective_stats(data)
-    words = data.get("words") or []
     occs_by_seg: dict[str, list[dict]] = {}
     for o in data.get("occurrences") or []:
         occs_by_seg.setdefault(str(o.get("seg")), []).append(o)
@@ -1088,11 +1087,35 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
         stale_note = ('<div class="slirn-cut-stale">⚠️ 粗剪成片在优化之后重新合成 — '
                       "建议重新优化以覆盖最新成片</div>")
 
+    # REQ-038：不明确字词频次列表 — 按替换目标词分组（全部出现项，含未采纳），
+    # 每词带「处理完成」标识（该词全部出现处都已明确处理 = 采纳/不采纳/编辑过），
+    # 可按标识过滤。词身份取分析时的建议替换值（occ.after 落盘值）。
+    word_agg: dict[str, dict] = {}
+    for o in data.get("occurrences") or []:
+        w = str(o.get("after") or "")
+        if not w:
+            continue
+        r = word_agg.setdefault(w, {"total": 0, "done": 0})
+        r["total"] += 1
+        if o.get("reviewed"):
+            r["done"] += 1
     words_html = "".join(
-        f'<button class="slirn-opt-chip" data-action="opt-word" data-word="{_esc(w["word"])}" '
-        f'title="点按筛选该词的出现行，再点取消">{_esc(w["word"])}<b>×{int(w["count"])}</b></button>'
-        for w in words
+        f'<div class="slirn-opt-word" data-word="{_esc(w)}" data-done="{1 if r["done"] >= r["total"] else 0}">'
+        f'<button class="slirn-opt-chip" data-action="opt-word" data-word="{_esc(w)}" '
+        f'title="点按筛选该词的出现行，再点取消">{_esc(w)}<b>×{r["total"]}</b></button>'
+        f'<span class="slirn-opt-word-prog">{r["done"]}/{r["total"]}</span>'
+        f'<span class="slirn-opt-word-badge{" done" if r["done"] >= r["total"] else ""}"'
+        f' title="{"该词全部出现处都已明确处理（采纳或不采纳）" if r["done"] >= r["total"] else "还有 " + str(r["total"] - r["done"]) + " 处未处理 — 逐处切换 ✓/✕ 或编辑替换值即计为已处理"}">'
+        f'{"✅ 已完成" if r["done"] >= r["total"] else "⬜ 未完成"}</span></div>'
+        for w, r in sorted(word_agg.items(), key=lambda kv: (-kv[1]["total"], kv[0]))
     ) or '<span class="slirn-sub-meta">没有生效的替换（可重新优化或直接保存）</span>'
+    word_filter_html = (
+        '<div class="slirn-opt-word-filters">'
+        '<button class="slirn-btn slirn-btn-xs active" data-action="opt-word-filter" data-mode="all">全部</button>'
+        '<button class="slirn-btn slirn-btn-xs" data-action="opt-word-filter" data-mode="todo">⬜ 未完成</button>'
+        '<button class="slirn-btn slirn-btn-xs" data-action="opt-word-filter" data-mode="done">✅ 已完成</button>'
+        '</div>'
+    ) if word_agg else ""
 
     def _line_html(seg: dict) -> str:
         rid = str(seg.get("i"))
@@ -1111,7 +1134,8 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
             toggle_title = _esc("已采纳（保存时替换）" if applied else "已不采纳（保留原文）")
             toggle_mark = "✓" if applied else "✕"
             occ_chips.append(
-                f'<span class="slirn-opt-occ" data-occ="{occ_id}" data-applied="{applied}">'
+                f'<span class="slirn-opt-occ" data-occ="{occ_id}" data-applied="{applied}"'
+                f' data-word="{after_txt}" data-reviewed="{1 if o.get("reviewed") else 0}">'
                 f'<s class="slirn-opt-before" title="{reason_txt}">{before_txt}</s>'
                 f'<span class="slirn-opt-arrow">→</span>'
                 f'<input class="slirn-opt-after" value="{after_txt}">'
@@ -1139,7 +1163,9 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
         · 生效替换 <b>{est["applied"]}</b> 处 · 未采纳 {est["skipped"]} 处 · 模型 {model_disp}
         {" · ✅ 已确认" if confirmed else ""}</div>
         {stale_note}
-        <div class="slirn-form-hint" style="margin-top:10px;"><b>不明确字词频次</b>（按替换目标词分组，未采纳不计）：</div>
+        <div class="slirn-form-hint" style="margin-top:10px;"><b>不明确字词频次</b>（按替换目标词分组；
+        出现处切换过 ✓/✕ 或编辑过替换值即计「已处理」，全部处理完 → ✅）：</div>
+        {word_filter_html}
         <div class="slirn-fw-stats" id="slirn-opt-words">{words_html}</div>
         <div class="slirn-form-hint">行内 <s class="slirn-opt-before">删除线</s> = 疑似误识别原文，旁边输入框 = 替换值（可直接编辑）；
         <b>✓</b> 采纳 / <b>✕</b> 不采纳（逐处切换）。点词筛选出现行，点行按成片时间跳播核对。</div>

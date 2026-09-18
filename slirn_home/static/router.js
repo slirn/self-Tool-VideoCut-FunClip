@@ -608,6 +608,10 @@
         cutApplyAct(gAct, nvAct);
       }
     }
+    // 优化字幕·替换值被编辑（REQ-20260917-038）：编辑即视为明确处理 → 计入词进度
+    if (e.target && e.target.classList && e.target.classList.contains('slirn-opt-after')) {
+      optOccMarkReviewed(e.target.closest('.slirn-opt-occ'));
+    }
     // 决策下拉变化 → 行 data-decision/data-final 跟随（实质口径），过滤
     // 计数/可见性实时刷新（REQ-20260916-010；未保存前纯前端，刷新即还原）
     if (e.target && e.target.classList && e.target.classList.contains('slirn-rev-select')) {
@@ -1555,6 +1559,30 @@
     w.setAttribute('data-applied', String(now));
     btn.textContent = now === 1 ? '✓' : '✕';
     btn.title = now === 1 ? '已采纳（保存时替换）' : '已不采纳（保留原文）';
+    optOccMarkReviewed(w);  // REQ-038：明确处理过（无论采纳与否）→ 计入词进度
+  }
+  function optOccMarkReviewed(occEl) {  // REQ-038：occ 标记已处理 + 所属词行进度刷新
+    if (!occEl || occEl.getAttribute('data-reviewed') === '1') return;
+    occEl.setAttribute('data-reviewed', '1');
+    optWordRowRefresh(occEl.getAttribute('data-word') || '');
+  }
+  function optWordRowRefresh(word) {  // 重算词行 done 状态（x/y + 徽章 + data-done）
+    if (!word) return;
+    var row = document.querySelector('#slirn-opt-words .slirn-opt-word[data-word="' + cssEscape(word) + '"]');
+    if (!row) return;
+    var occs = document.querySelectorAll('.slirn-opt-occ[data-word="' + cssEscape(word) + '"]');
+    var total = occs.length, done = 0;
+    occs.forEach(function(o) { if (o.getAttribute('data-reviewed') === '1') done += 1; });
+    row.setAttribute('data-done', done >= total && total > 0 ? '1' : '0');
+    var prog = row.querySelector('.slirn-opt-word-prog');
+    if (prog) prog.textContent = done + '/' + total;
+    var badge = row.querySelector('.slirn-opt-word-badge');
+    if (badge) {
+      var ok = done >= total && total > 0;
+      badge.textContent = ok ? '✅ 已完成' : '⬜ 未完成';
+      badge.title = ok ? '该词全部出现处都已明确处理（采纳或不采纳）'
+                       : '还有 ' + (total - done) + ' 处未处理 — 逐处切换 ✓/✕ 或编辑替换值即计为已处理';
+    }
   }
   function optWordFilter(chip) {  // 点词 → 筛选出现行并滚动到首行；再点取消
     var word = chip.getAttribute('data-word') || '';
@@ -1579,6 +1607,18 @@
     });
     if (firstHit) try { firstHit.scrollIntoView({block: 'center', behavior: 'smooth'}); } catch (err) {}
   }
+  function optWordFilterBtn(btn) {  // REQ-038：词列表按处理状态过滤（全部/未完成/已完成）
+    var mode = btn.getAttribute('data-mode') || 'all';
+    var box = document.getElementById('slirn-opt-words');
+    if (!box) return;
+    box.querySelectorAll('button[data-action="opt-word-filter"]').forEach(function(b) {
+      b.classList.toggle('active', b === btn);
+    });
+    box.querySelectorAll('.slirn-opt-word').forEach(function(r) {
+      var done = r.getAttribute('data-done') === '1';
+      r.style.display = (mode === 'all' || (mode === 'done') === done) ? '' : 'none';
+    });
+  }
   function optFilterBtn(btn) {  // 只看有不明确字词的行 / 全部行
     var list = revVis('slirn-opt-list');
     if (!list) return;
@@ -1597,7 +1637,8 @@
       decisions.push({
         occ_id: parseInt(w.getAttribute('data-occ'), 10),
         applied: w.getAttribute('data-applied') === '1',
-        after: inp ? inp.value.trim() : ''
+        after: inp ? inp.value.trim() : '',
+        reviewed: w.getAttribute('data-reviewed') === '1'  // REQ-038：处理进度随保存落盘
       });
     });
     postJSON(SLIRN_API + '/save_optimize_subtitle', {task_id: tid, decisions: decisions})
@@ -2533,6 +2574,9 @@
     else if (action === 'opt-word') {
       optWordFilter(target);
     }
+    else if (action === 'opt-word-filter') {
+      optWordFilterBtn(target);  // REQ-038：词列表按 处理完成 状态过滤
+    }
     else if (action === 'opt-filter') {
       optFilterBtn(target);
     }
@@ -2735,7 +2779,31 @@
     }
     else if (action === 'edit-task') {
       var tidE = target.getAttribute('data-task-id') || '';
+      // REQ-20260917-037：大任务编辑要读视频信息/热词，加载慢 — 点击即给加载态
+      var origTextE = target.textContent;
+      target.disabled = true;
+      target.textContent = '⏳ 加载中…';
+      var cEl = document.getElementById('slirn-tab-create');
+      if (cEl) {
+        cEl.innerHTML = '<div class="slirn-card" style="margin-top:16px;">'
+          + '<div class="slirn-loading-box"><div class="slirn-spinner"></div>'
+          + '<div>⏳ 正在加载任务（读取视频信息与热词，大视频稍慢）…</div></div></div>';
+        cEl.style.display = '';
+        ALL_TABS.forEach(function(id) {
+          if (id !== 'slirn-tab-create') { var el = document.getElementById(id); if (el) el.style.display = 'none'; }
+        });
+      }
+      var restoreTabsE = function() {
+        target.disabled = false;
+        target.textContent = origTextE;
+        var tEl = document.getElementById('slirn-tab-tasks');
+        var c2 = document.getElementById('slirn-tab-create');
+        if (c2) c2.style.display = 'none';
+        if (tEl) tEl.style.display = '';
+      };
       postJSON(SLIRN_API + '/edit_task', {task_id: tidE}).then(function(r) {
+        target.disabled = false;
+        target.textContent = origTextE;
         if (r && r.ok && r.html) {
           var c = document.getElementById('slirn-tab-create');
           if (c) { c.innerHTML = r.html; c.style.display = ''; }
@@ -2746,8 +2814,12 @@
           if (dE) dE.style.display = 'none';
           initTaskEdit();
         } else if (r && r.error) {
+          restoreTabsE();
           toast('❌ ' + r.error, 'error');
         }
+      }, function() {
+        restoreTabsE();
+        toast('❌ 网络错误，请重试', 'error');
       });
     }
     else if (action === 'open-workbench') {

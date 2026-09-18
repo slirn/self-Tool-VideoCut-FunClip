@@ -356,3 +356,45 @@ def test_render_zone_result_state(tmp_path, monkeypatch):
     assert 'data-action="optimize-start"' in html and 'data-has="1"' in html
     # 统计行
     assert "识别 3 行" in html and "不明确 3 处" in html
+
+
+def test_save_decisions_persists_reviewed(tmp_path):
+    """REQ-038：reviewed（处理进度）随保存落盘；未列出/未带 = 未处理。"""
+    _write_opt(tmp_path)
+    data, _ = osvc.save_decisions(tmp_path, [
+        {"occ_id": 0, "applied": True, "after": "神经网络", "reviewed": True},
+        {"occ_id": 1, "applied": False, "after": "AI", "reviewed": True},
+        {"occ_id": 2, "applied": True, "after": "神经网络"},
+    ])
+    assert data["occurrences"][0]["reviewed"] is True
+    assert data["occurrences"][1]["reviewed"] is True
+    assert data["occurrences"][2]["reviewed"] is False
+
+
+def test_render_zone_word_list_done_flags(tmp_path, monkeypatch):
+    """REQ-038：词频列表 + 处理完成标识 + 过滤按钮；occ 带词归属与已处理态。"""
+    from slirn_home import llm_config
+    from slirn_home.app import _render_optimize_zone
+
+    m, t = _make_mgr(tmp_path)
+    outputs = tmp_path / "tasks" / t.task_id / "outputs"
+    outputs.mkdir(parents=True, exist_ok=True)
+    (outputs / "rough_compose.mp4").write_bytes(b"fake-mp4")
+    occs = _occs()
+    occs[0]["reviewed"] = True   # 神经网络 组 1/2 → 未完成
+    occs[1]["reviewed"] = True   # AI 组 1/1 → 已完成
+    _write_opt(outputs, occs=occs)
+    monkeypatch.setattr(llm_config, "get_current_entry",
+                        lambda root: {"id": "qwen-plus", "provider": "dashscope", "protocol": "openai"})
+    html = _render_optimize_zone(t.task_id, m.get(t.task_id), m)
+    # 词行：进度 x/y + 完成标识 + data-done
+    assert 'class="slirn-opt-word" data-word="神经网络" data-done="0"' in html
+    assert 'class="slirn-opt-word" data-word="AI" data-done="1"' in html
+    assert "1/2" in html and "1/1" in html  # 神经网络 1/2 · AI 1/1
+    assert "⬜ 未完成" in html and "✅ 已完成" in html
+    # 过滤按钮（全部/未完成/已完成）
+    for mode in ("all", "todo", "done"):
+        assert f'data-action="opt-word-filter" data-mode="{mode}"' in html
+    # occ 带词归属 + 已处理态（0 已处理 / 2 未处理）
+    assert 'data-word="神经网络" data-reviewed="1"' in html
+    assert 'data-word="神经网络" data-reviewed="0"' in html
