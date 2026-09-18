@@ -3401,14 +3401,16 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             return _err(f"任务不存在: {e}")
         since = body.get("since") or None
         outputs_dir = mgr.tasks_dir / tid / "outputs"
-        # base url：调度器走 in-process HTTP client（同进程同端口）
+        # base url：调度器走 in-process HTTP client（同进程同端口）。
+        # 包含 /slirn/api 前缀 — pipeline_service._http_post(api, "/gen_subtitle")
+        # 直接拼接 base + path，所以 base 必须含 API 前缀，否则 404。
         base_url = _os.environ.get("SLIRN_API_BASE") or ""
         if not base_url:
             try:
-                # Gradio FastAPI 实例：host/port 直接读 app.app
-                base_url = f"http://127.0.0.1:{getattr(app.app, 'port', 7861)}"
+                port = getattr(app.app, "port", 7861)
+                base_url = f"http://127.0.0.1:{port}/slirn/api"
             except Exception:  # noqa: BLE001 — 兜底走默认端口
-                base_url = "http://127.0.0.1:7861"
+                base_url = "http://127.0.0.1:7861/slirn/api"
         started = pipeline_service.run_pipeline(tid, base_url, outputs_dir, since=since)
         if not started:
             return _ok("", started=False,
