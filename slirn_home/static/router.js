@@ -538,6 +538,15 @@
             if (p.style.display !== 'none') prevActive = (p.id || '').replace('slirn-wb-pane-', '');
           });
         }
+        // 保护流程配置面板（REQ-20260918-047）：wb innerHTML 整体替换会销毁
+        // 嵌套在 slirn-tab-workbench-inner 里的 pipe-panel + pipe-status，
+        // 导致用户在面板上的勾选 / 展开 / 下拉状态丢失。detach 后插回，状态完整保留。
+        var _pipePanel = document.getElementById('slirn-pipe-panel');
+        var _pipeStatus = document.getElementById('slirn-pipe-status');
+        var _panelParent = _pipePanel ? _pipePanel.parentNode : null;
+        var _statusParent = _pipeStatus ? _pipeStatus.parentNode : null;
+        if (_pipePanel) _pipePanel.parentNode.removeChild(_pipePanel);
+        if (_pipeStatus) _pipeStatus.parentNode.removeChild(_pipeStatus);
         w.innerHTML = r.html;
         ALL_TABS.forEach(function(id) { var el = document.getElementById(id); if (el) el.style.display = 'none'; });
         var d = document.getElementById('slirn-tab-detail');
@@ -561,7 +570,15 @@
         applyRevRigorState();  // 上次选过的严谨性级别预填（REQ-20260916-003）
         applyWbAutoNextState();  // 自动进下一阶段开关回填（REQ-20260918-046）
         wbAutoNextMaybe(prevDone, hadWb, prevActive);  // 当前阶段刚完成 → 按设置跳下一阶段
+        // 把流程配置面板插回新的 wb-inner（REQ-20260918-047 修复 wb 刷新时面板状态丢失）
+        var _inner = document.getElementById('slirn-tab-workbench-inner');
+        if (_inner) {
+          // pipe-panel 紧跟 wb 顶部信息卡之后（在 slirn-wb-main 之前；位置与模板一致）
+          if (_pipeStatus && _pipeStatus.parentNode !== _inner) _inner.appendChild(_pipeStatus);
+          if (_pipePanel && _pipePanel.parentNode !== _inner) _inner.appendChild(_pipePanel);
+        }
         // 流程配置面板挂载（REQ-20260918-047 v2）：工作台内常驻纵向面板
+        // 面板若已存在（同 tid + 有 innerHTML）→ 不重新加载，状态保留
         if (window.slirnPipelineMount) window.slirnPipelineMount(tid);
       } else if (r && r.error) {
         toast('❌ ' + r.error, 'error');
