@@ -1517,8 +1517,6 @@ def _render_workbench(task_id: str, mgr: TaskManager) -> str:
         <div class="slirn-panel-header">
             <div class="slirn-panel-title">✂️ 剪辑工作台 · {_esc(t.name)}</div>
             <div>
-                <button class="slirn-btn slirn-btn-sm" data-action="pipe-open" data-task-id="{_esc(task_id)}"
-                        title="流程配置 + 自动执行">⚙ 流程</button>
                 <button class="slirn-btn slirn-btn-sm slirn-wb-stages-expand" data-action="wb-toggle-stages"
                         title="展开左侧阶段列表">🧭 展开阶段</button>
                 <button class="slirn-btn slirn-btn-sm" data-action="edit-task" data-task-id="{_esc(task_id)}">✏️ 编辑任务</button>
@@ -1528,9 +1526,9 @@ def _render_workbench(task_id: str, mgr: TaskManager) -> str:
         {top_rows}
         {_render_exec_history_card(task_id, mgr)}
     </div>
-    <!-- 流程配置抽屉 + 状态条挂载点（REQ-20260918-047）-->
+    <!-- 流程配置面板 + 状态条挂载点（REQ-20260918-047，v2：去掉抽屉壳，工作台内常驻纵向面板）-->
     <div id="slirn-pipe-status" class="slirn-pipe-status" data-task-id="{_esc(task_id)}" hidden></div>
-    <aside id="slirn-pipe-drawer" class="slirn-pipe-drawer" data-task-id="{_esc(task_id)}" hidden></aside>
+    <section id="slirn-pipe-panel" class="slirn-pipe-panel" data-task-id="{_esc(task_id)}"></section>
     <div class="slirn-wb-main">
         <div class="slirn-wb-stages-rail" data-action="wb-toggle-stages"
              title="展开左侧阶段列表"><span>🧭</span><span>阶</span><span>段</span><span>»</span></div>

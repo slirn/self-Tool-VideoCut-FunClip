@@ -561,6 +561,8 @@
         applyRevRigorState();  // 上次选过的严谨性级别预填（REQ-20260916-003）
         applyWbAutoNextState();  // 自动进下一阶段开关回填（REQ-20260918-046）
         wbAutoNextMaybe(prevDone, hadWb, prevActive);  // 当前阶段刚完成 → 按设置跳下一阶段
+        // 流程配置面板挂载（REQ-20260918-047 v2）：工作台内常驻纵向面板
+        if (window.slirnPipelineMount) window.slirnPipelineMount(tid);
       } else if (r && r.error) {
         toast('❌ ' + r.error, 'error');
       }
