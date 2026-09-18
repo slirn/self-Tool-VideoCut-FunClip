@@ -92,58 +92,62 @@ class PipelineJob:
 
 
 def default_config() -> dict:
-    """设计文档 §2.1 的默认配置（5 阶段都跑 + 各 stop_after = 自己 + 流程层 stop_after = 跑完）。"""
+    """v4 默认配置：5 阶段都跑，顶层 stop_after='subtitle_review'（字幕修订后停）。"""
     return {
         "subtitle_generation": {
             "speaker_diarization": False,
-            "stop_after": "subtitle_generation",
         },
         "subtitle_review": {
             "accept_all_suggestions": True,
             "skip_categories": [],
-            "stop_after": "subtitle_review",
         },
         "rough_cut": {
             "delete_speakers": [],
             "default_decision": "keep",
-            "stop_after": "rough_cut",
         },
-        "rough_compose": {
-            "stop_after": "rough_compose",
-        },
+        "rough_compose": {},
         "optimize": {
             "accept_all_replacements": True,
-            "stop_after": "optimize",
         },
-        # 流程层 stop_after（null = 跑完；设为具体阶段 key = 跑到该阶段停）
-        "stop_after": None,
+        # v4 顶层字段：在哪个阶段完成后停（None = 跑到底）
+        "stop_after": "subtitle_review",
     }
 
 
 def validate_config(cfg: dict) -> dict:
     """校验 + 补全配置（缺字段用 default_config 兜底）。
 
+    v4 schema：
+    - 阶段 dict 内不再含 stop_after（顶层 stop_after 才是权威源）
+    - 顶层 stop_after 是字符串（STAGE_ORDER 的某个 key）或 None
+    - 兼容旧数据：v3 阶段内 boolean / v2 阶段内 string 字段被丢弃
+    - 兼容 v2 顶层 string：直接当成 v4 顶层 stop_after 接受
+
     返回合法配置（不抛异常 — 任何坏字段都用默认值替换，便于 UI 编辑容错）。
     """
     base = default_config()
     if not isinstance(cfg, dict):
         return base
+    # 顶层 stop_after 校验
+    if "stop_after" in cfg:
+        v = cfg["stop_after"]
+        if v is None:
+            base["stop_after"] = None
+        elif isinstance(v, str) and v in STAGE_INDEX and STAGE_INDEX[v] != 99:
+            base["stop_after"] = v
+        # else: 无效值（None 字符串、未知 key、空串）→ 保留默认
     for stage_key in (s[0] for s in STAGE_ORDER):
         user_stage = cfg.get(stage_key)
         if not isinstance(user_stage, dict):
-            base[stage_key] = base[stage_key]  # 默认
-            continue
-        # 合并：保留 default 的 keys，user_stage 的同名 keys 覆盖
+            continue  # 用默认
         merged = dict(base[stage_key])
         for k, v in user_stage.items():
-            if k in merged:
+            if k == "stop_after":
+                # v3/v2 阶段内 stop_after：丢弃（顶层 stop_after 才是权威）
+                continue
+            elif k in merged:
                 merged[k] = v
         base[stage_key] = merged
-    # 流程层 stop_after：None / 合法 stage key
-    flow_stop = cfg.get("stop_after")
-    if flow_stop not in (None,) + tuple(STAGE_INDEX.keys()):
-        flow_stop = None
-    base["stop_after"] = flow_stop
     return base
 
 
@@ -193,7 +197,7 @@ def load_pipeline(outputs_dir: Path) -> dict | None:
 def save_pipeline(outputs_dir: Path, cfg: dict) -> str:
     """保存配置 + 记录 updated_at；保留 history 最近 10 条。返回 ISO 时间戳。
 
-    cfg 必须含 config 字段（5 阶段 + stop_after）。
+    cfg 必须含 config 字段（5 阶段）。
     """
     cfg_in = cfg.get("config") if isinstance(cfg, dict) else None
     merged = validate_config(cfg_in or cfg)
@@ -201,9 +205,8 @@ def save_pipeline(outputs_dir: Path, cfg: dict) -> str:
     # 保留旧 history
     old = _read(outputs_dir) or {}
     new_data = {
-        "version": 1,
+        "version": 3,  # v4 schema：顶层 stop_after 字符串；阶段内不再含 stop_after
         "config": merged,
-        "stop_after": merged.get("stop_after"),  # 流程层顶层冗余（方便一眼看到）
         "updated_at": ts,
         "history": list(old.get("history") or [])[-10:],
     }
@@ -400,10 +403,11 @@ def handler_subtitle_review(tid: str, cfg: dict, outputs_dir: Path, api: str,
     if state != "done":
         return (False, f"字幕修订{state}：{err}")
     if not accept_all:
-        _log(job, "subtitle_review", "⏸ 配置要求人工决策修订 — 停在字幕修订", "warn")
-        # 把任务 state 标 stopped — 调度器主循环看到停止请求会退出
-        _request_stop(tid)
-        return (True, "人工决策 stop")
+        _log(job, "subtitle_review", "⏸ 配置要求人工决策修订 — 不自动 save_revision，等人工去工作台处理", "info")
+        # v3：accept_all_suggestions=False 时只跑 revise，不自动 save_revision。
+        # 是否停在该阶段由 stage_cfg.stop_after 单独决定（调度器主循环判），
+        # 这里不再 _request_stop。
+        return (True, "revision 待人工决策")
     # 全接受：构造 save_revision payload 把所有 entry 决策为 accept
     rev_path = outputs_dir / "revision.json"
     if not rev_path.exists():
@@ -542,13 +546,14 @@ def run_pipeline(tid: str, api: str, outputs_dir: Path, *,
         try:
             cfg_path_data = load_pipeline(outputs_dir) or {}
             cfg_full = cfg_path_data.get("config") or default_config()
+            # v4 顶层 stop_after：哪个阶段完成后停（None = 跑到底）
             flow_stop = cfg_full.get("stop_after")
-            # since 解析：None 表示从头跑；否则跳过 since 之前的阶段
+            # since 解析：None 表示从头跑；否则「从 since 这一阶段开始」跳过更早的阶段
             since_idx = STAGE_INDEX.get(since, -1) if since else -1
             stages_done: list[str] = []
             for stage_key, stage_label, _pane in STAGE_ORDER:
                 idx = STAGE_INDEX[stage_key]
-                if idx <= since_idx:
+                if idx < since_idx:
                     continue
                 # 用户中途 stop → 立即退出
                 if _consume_stop(tid):
@@ -581,13 +586,10 @@ def run_pipeline(tid: str, api: str, outputs_dir: Path, *,
                     pass  # 跳过不计入 done
                 else:
                     stages_done.append(stage_key)
-                # stop_after 检查：取更严者
-                per_stage_stop = stage_cfg.get("stop_after")
-                eff_stop_idx = min(STAGE_INDEX.get(per_stage_stop, 99),
-                                   STAGE_INDEX.get(flow_stop, 99))
-                if idx >= eff_stop_idx and eff_stop_idx < 99:
-                    _log(job, stage_key, f"⏸ 达到 stop_after ({stage_cfg.get('stop_after')} / 流程 {flow_stop})",
-                         "info")
+                # v4 stop_after：顶层字段（字符串=该阶段后停；None=不停）
+                if flow_stop and stage_key == flow_stop:
+                    _log(job, stage_key,
+                         f"⏸ 顶层配置要求「{stage_label}」后停（等人工）", "info")
                     job.state = "stopped"
                     break
             else:
@@ -604,7 +606,6 @@ def run_pipeline(tid: str, api: str, outputs_dir: Path, *,
                 "status": job.state,
                 "stages_done": stages_done,
                 "since": since,
-                "flow_stop": flow_stop,
                 "error": job.error,
             }
             job.summary = summary

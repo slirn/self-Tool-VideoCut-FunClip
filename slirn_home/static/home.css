@@ -2173,7 +2173,7 @@ input[type="checkbox"]:checked { border-color: var(--accent-solid); }
 
 /* ===== REQ-20260918-047 流程配置 + 自动执行 ===== */
 
-/* 流程配置面板（REQ-20260918-047 v2：工作台内常驻纵向面板；默认全展开） */
+/* 流程配置面板（REQ-20260918-047 v3：内联面板 + 整体可折叠 + 是/否 stop_after） */
 .slirn-pipe-panel {
   margin: 12px 0;
   background: var(--card-bg, rgba(255, 255, 255, 0.85));
@@ -2187,29 +2187,52 @@ input[type="checkbox"]:checked { border-color: var(--accent-solid); }
 }
 .slirn-pipe-panel:empty { display: none; }
 
-.slirn-pipe-head {
+.slirn-pipe-panel-details > summary.slirn-pipe-head {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--border);
+  gap: 10px;
+  padding: 12px 16px;
   background: rgba(255, 255, 255, 0.4);
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
   flex-wrap: wrap;
 }
-.slirn-pipe-title { font-weight: 600; flex: 1; min-width: 120px; }
-.slirn-pipe-template { padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border); background: var(--input-bg, #fff); }
-.slirn-pipe-updated { color: var(--text-muted); font-size: 11px; flex: 1; min-width: 100px; text-align: right; }
+.slirn-pipe-panel-details > summary.slirn-pipe-head::-webkit-details-marker { display: none; }
+.slirn-pipe-panel-details > summary.slirn-pipe-head::before {
+  content: '▾';
+  display: inline-block;
+  font-size: 12px;
+  color: var(--text-muted);
+  transition: transform 0.15s;
+  width: 14px;
+  flex-shrink: 0;
+}
+.slirn-pipe-panel-details:not([open]) > summary.slirn-pipe-head::before {
+  transform: rotate(-90deg);
+}
+
+.slirn-pipe-title { font-weight: 600; font-size: 14px; flex: 1; min-width: 120px; }
+.slirn-pipe-updated { color: var(--text-muted); font-size: 11px; min-width: 120px; }
+.slirn-pipe-head-acts {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.slirn-pipe-template { padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border); background: var(--input-bg, #fff); font-size: 12px; }
 
 .slirn-pipe-sections {
   display: flex;
   flex-direction: column;
   padding: 4px;
+  border-top: 1px solid var(--border);
 }
 
 .slirn-pipe-section {
   border: 1px solid var(--border);
   border-radius: 8px;
-  margin: 4px;
+  margin: 6px;
   background: rgba(255, 255, 255, 0.5);
   transition: background 0.15s;
 }
@@ -2261,7 +2284,7 @@ input[type="checkbox"]:checked { border-color: var(--accent-solid); }
   max-width: 60%;
 }
 .slirn-pipe-section-body { padding: 4px 14px 14px; }
-.slirn-pipe-form { display: flex; flex-direction: column; gap: 12px; }
+.slirn-pipe-form { display: flex; flex-direction: column; gap: 10px; }
 .slirn-pipe-desc {
   color: var(--text-secondary);
   font-size: 12px;
@@ -2271,7 +2294,32 @@ input[type="checkbox"]:checked { border-color: var(--accent-solid); }
   border-left: 3px solid var(--accent-solid, #667eea);
   border-radius: 0 4px 4px 0;
 }
+/* v4：删除 v3 per-stage stop_after checkbox 强调块（改用顶部全局下拉） */
 .slirn-pipe-hint { color: var(--text-muted); font-size: 11px; }
+/* v4：顶部「完成到哪个阶段停」全局下拉 */
+.slirn-pipe-flow-stop-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.slirn-pipe-flow-stop {
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--input-bg, #fff);
+  font-size: 12px;
+  color: var(--text-primary);
+}
+/* v4：每阶段 summary 行内的「▶ 从本阶段开始」按钮 */
+.slirn-pipe-stage-run {
+  margin-left: 8px;
+  flex-shrink: 0;
+  padding: 3px 10px;
+  font-size: 11.5px;
+  white-space: nowrap;
+}
 .slirn-pipe-field {
   display: flex;
   align-items: center;
@@ -2289,19 +2337,6 @@ input[type="checkbox"]:checked { border-color: var(--accent-solid); }
   background: var(--input-bg, #fff);
   font-size: 12px;
 }
-
-.slirn-pipe-foot {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 14px;
-  border-top: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.4);
-  flex-wrap: wrap;
-}
-.slirn-pipe-foot-spacer { flex: 1; min-width: 8px; }
-.slirn-pipe-flow-stop { display: flex; align-items: center; gap: 4px; font-size: 12px; }
-.slirn-pipe-flow-stop select { padding: 3px 6px; border-radius: 4px; border: 1px solid var(--border); background: var(--input-bg); }
 
 /* 状态条（仍浮在右上 — 与 panel 解耦） */
 .slirn-pipe-status {
@@ -2389,7 +2424,7 @@ input[type="checkbox"]:checked { border-color: var(--accent-solid); }
     background: rgba(30, 41, 59, 0.92);
     border-color: rgba(148, 163, 184, 0.2);
   }
-  .slirn-pipe-head, .slirn-pipe-foot, .slirn-pipe-status-head {
+  .slirn-pipe-head, .slirn-pipe-status-head {
     background: rgba(30, 41, 59, 0.5);
   }
   .slirn-pipe-section, .slirn-pipe-section[open] {
@@ -2405,7 +2440,6 @@ input[type="checkbox"]:checked { border-color: var(--accent-solid); }
   border-color: rgba(148, 163, 184, 0.2);
 }
 :root[data-theme="dark"] .slirn-pipe-head,
-:root[data-theme="dark"] .slirn-pipe-foot,
 :root[data-theme="dark"] .slirn-pipe-status-head {
   background: rgba(30, 41, 59, 0.5);
 }

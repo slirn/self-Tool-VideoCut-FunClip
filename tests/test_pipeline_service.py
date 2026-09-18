@@ -1,11 +1,12 @@
-"""REQ-20260918-047 — pipeline_service 单测。
+"""REQ-20260918-047 — pipeline_service 单测（v4 schema）。
 
 覆盖：
-- default_config / validate_config schema
+- default_config / validate_config schema（v4：顶层 stop_after 字符串；阶段 dict 不再含 stop_after）
 - 持久化（load/save/atomic/concurrent/corrupt）
 - 内存 job 管理（idle / running / stop / status）
-- stop_after min 语义（设计文档 §2.4）
+- stop_after 顶层字段语义（v4：字符串 stage key 或 None）
 - run_pipeline stop 标志位
+- v3/v2 旧数据兼容（阶段内 stop_after 字段被丢弃；顶层 stop_after string 提升）
 """
 from __future__ import annotations
 
@@ -30,29 +31,33 @@ def _outputs(tmp_path: Path) -> Path:
 
 
 def test_default_config_keys():
-    """默认配置 5 个阶段都有可选项。"""
+    """v4 默认配置：5 个阶段 + 顶层 stop_after 字符串。"""
     cfg = P.default_config()
     assert set(cfg.keys()) == {
         "subtitle_generation", "subtitle_review", "rough_cut",
         "rough_compose", "optimize", "stop_after",
     }
+    # 阶段 dict 不再含 stop_after
     for stage_key in ("subtitle_generation", "subtitle_review", "rough_cut",
                       "rough_compose", "optimize"):
-        assert "stop_after" in cfg[stage_key]
+        assert "stop_after" not in cfg[stage_key], f"{stage_key} 不应含 stop_after"
 
 
-def test_default_config_stop_after_null_means_run_all():
-    """默认流程层 stop_after = None → 跑完。"""
-    assert P.default_config()["stop_after"] is None
+def test_default_config_has_flow_level_stop_after():
+    """v4：顶层 stop_after 是 STAGE_INDEX 中的字符串。"""
+    cfg = P.default_config()
+    assert isinstance(cfg["stop_after"], str)
+    assert cfg["stop_after"] in P.STAGE_INDEX
 
 
 def test_validate_config_accepts_valid_full():
     """完整合法配置 → 原样保留。"""
     cfg = P.default_config()
+    cfg["subtitle_generation"]["speaker_diarization"] = True
     cfg["stop_after"] = "rough_compose"
     out = P.validate_config(cfg)
+    assert out["subtitle_generation"]["speaker_diarization"] is True
     assert out["stop_after"] == "rough_compose"
-    assert out["subtitle_generation"]["stop_after"] == "subtitle_generation"
 
 
 def test_validate_config_fills_missing_stage_keys():
@@ -60,7 +65,6 @@ def test_validate_config_fills_missing_stage_keys():
     user = {
         "subtitle_generation": {"speaker_diarization": True},
         # 其他阶段缺
-        "stop_after": None,
     }
     out = P.validate_config(user)
     # 补全
@@ -69,12 +73,41 @@ def test_validate_config_fills_missing_stage_keys():
     assert out["rough_cut"]["default_decision"] == "keep"
 
 
-def test_validate_config_rejects_invalid_flow_stop():
-    """非法流程层 stop_after → 兜底 None。"""
+def test_validate_config_drops_legacy_per_stage_stop_after():
+    """v3 兼容：每阶段内 stop_after 字段（boolean / string）被丢弃（顶层才是权威）。"""
+    user = P.default_config()
+    # 模拟 v3 数据：每阶段含 boolean stop_after
+    for s in user:
+        if isinstance(user[s], dict):
+            user[s]["stop_after"] = True
+    out = P.validate_config(user)
+    for s in user:
+        if isinstance(out[s], dict):
+            assert "stop_after" not in out[s], f"{s} 仍含 stop_after"
+
+
+def test_validate_config_accepts_top_level_stop_after_string():
+    """v4 顶层 stop_after 字符串 → 保留。"""
+    user = P.default_config()
+    user["stop_after"] = "rough_cut"
+    out = P.validate_config(user)
+    assert out["stop_after"] == "rough_cut"
+
+
+def test_validate_config_accepts_top_level_stop_after_null():
+    """v4 顶层 stop_after=None → 跑到底，保留 null。"""
+    user = P.default_config()
+    user["stop_after"] = None
+    out = P.validate_config(user)
+    assert out["stop_after"] is None
+
+
+def test_validate_config_rejects_invalid_top_level_string():
+    """v4 顶层 stop_after 非法字符串 → 回退默认。"""
     user = P.default_config()
     user["stop_after"] = "not_a_stage"
     out = P.validate_config(user)
-    assert out["stop_after"] is None
+    assert out["stop_after"] == P.default_config()["stop_after"]
 
 
 def test_validate_config_non_dict_returns_default():
@@ -125,19 +158,38 @@ def test_save_pipeline_atomic_no_tmp_leftover(tmp_path: Path):
     assert not (out / (P.PIPELINE_FILENAME + ".tmp")).exists()
 
 
+def test_save_pipeline_writes_top_level_stop_after(tmp_path: Path):
+    """v4 save 后落盘文件含顶层 stop_after 字符串 + version=3。"""
+    out = _outputs(tmp_path)
+    cfg = P.default_config()
+    cfg["stop_after"] = "rough_cut"
+    P.save_pipeline(out, {"config": cfg})
+    raw = json.loads((out / P.PIPELINE_FILENAME).read_text(encoding="utf-8"))
+    assert raw["version"] == 3
+    assert raw["config"]["stop_after"] == "rough_cut"
+    # 阶段 dict 内不再含 stop_after
+    for s in ("subtitle_generation", "subtitle_review", "rough_cut",
+              "rough_compose", "optimize"):
+        assert "stop_after" not in raw["config"][s]
+
+
 def test_concurrent_save_pipeline_does_not_lose(tmp_path: Path):
     """并发 save：文件长度合理（不丢更新）。"""
     out = _outputs(tmp_path)
+    stop_keys = ["subtitle_generation", "subtitle_review", "rough_cut",
+                 "rough_compose", "optimize", None]
+
     def _worker(i: int):
         cfg = P.default_config()
-        cfg["stop_after"] = "rough_cut" if i % 2 == 0 else None
+        cfg["stop_after"] = stop_keys[i % len(stop_keys)]
         P.save_pipeline(out, {"config": cfg})
+
     threads = [threading.Thread(target=_worker, args=(i,)) for i in range(10)]
     for t in threads: t.start()  # noqa: E701
     for t in threads: t.join()  # noqa: E701
-    # 不抛 + 文件可读
     data = json.loads((out / P.PIPELINE_FILENAME).read_text(encoding="utf-8"))
     assert "config" in data
+    assert "stop_after" in data["config"]
 
 
 def test_append_history_truncates_to_10(tmp_path: Path):
@@ -164,44 +216,33 @@ def test_stop_pipeline_without_job_returns_false():
     assert P.stop_pipeline("no-such-task") is False
 
 
-# =============== stop_after min 语义 ===============
+# =============== stop_after 顶层字段语义 ===============
 
 
-def test_effective_stop_after_per_stage_only():
-    """per_stage 单独生效：rough_cut stop → 跑到 rough_cut 后停。"""
-    cfg = P.default_config()
-    cfg["subtitle_generation"]["stop_after"] = "subtitle_generation"
-    cfg["subtitle_review"]["stop_after"] = "subtitle_review"
-    cfg["rough_cut"]["stop_after"] = "rough_cut"
-    cfg["rough_compose"]["stop_after"] = "rough_compose"
-    cfg["optimize"]["stop_after"] = "optimize"
-    cfg["stop_after"] = None
-    # 验证每阶段 stop_after 与 STAGE_INDEX 对齐
-    for k, _label, _pane in P.STAGE_ORDER:
-        idx = P.STAGE_INDEX[k]
-        assert P.STAGE_INDEX[cfg[k]["stop_after"]] == idx
-
-
-def test_effective_stop_after_flow_strict():
-    """流程层 stop_after 更严 → 调度器应停在该阶段。"""
-    cfg = P.default_config()
-    cfg["stop_after"] = "rough_cut"  # 流程层 stop
-    cfg["rough_compose"]["stop_after"] = "optimize"  # 节点层更晚
-    cfg["optimize"]["stop_after"] = "optimize"
-    # min(per_stage[rough_compose], flow) = min(STAGE_INDEX['optimize'], STAGE_INDEX['rough_cut'])
-    # = 2
-    assert min(P.STAGE_INDEX["optimize"], P.STAGE_INDEX["rough_cut"]) == 2
-
-
-def test_effective_stop_after_per_strict():
-    """节点层 stop_after 更严 → 调度器应停在该阶段。"""
+def test_effective_stop_after_runs_to_end_when_null():
+    """v4：顶层 stop_after=None → 跑到底（不因 stop_after 停）。"""
     cfg = P.default_config()
     cfg["stop_after"] = None
-    cfg["rough_cut"]["stop_after"] = "subtitle_review"  # 节点层更严
-    # 当阶段跑到 rough_cut(idx=2) → min(idx 3 (节点), 99 (None)) = 3，但 idx=2 < 3 不停
-    # 跑到 stage_idx >= eff_stop 才停；这里 eff_stop=3 → 跑到 optimize(idx=4) 才停
-    eff = min(P.STAGE_INDEX["subtitle_review"], P.STAGE_INDEX.get(None, 99))
-    assert eff == 1
+    out = P.validate_config(cfg)
+    assert out["stop_after"] is None
+
+
+def test_effective_stop_after_stops_at_named_stage():
+    """v4：顶层 stop_after='rough_cut' → 跑到 rough_cut 后停。"""
+    cfg = P.default_config()
+    cfg["stop_after"] = "rough_cut"
+    out = P.validate_config(cfg)
+    assert out["stop_after"] == "rough_cut"
+
+
+def test_effective_stop_after_mixed():
+    """混合：每个值都正确通过 validate。"""
+    for v in ("subtitle_generation", "subtitle_review", "rough_cut",
+              "rough_compose", "optimize"):
+        cfg = P.default_config()
+        cfg["stop_after"] = v
+        out = P.validate_config(cfg)
+        assert out["stop_after"] == v
 
 
 # =============== run_pipeline stop 行为 ===============
@@ -212,7 +253,6 @@ def test_run_pipeline_returns_false_when_already_running(tmp_path: Path):
 
     用一个永不完成的 mock handler 触发。
     """
-    # 替换 HANDLERS 中的 handler_subtitle_generation 为一个 sleep 永不结束的 mock
     orig = P.HANDLERS["subtitle_generation"]
 
     def _slow(tid, cfg, outputs_dir, api, job):
@@ -228,7 +268,6 @@ def test_run_pipeline_returns_false_when_already_running(tmp_path: Path):
         ok2 = P.run_pipeline("test-tid-running", api, out)
         assert ok1 is True
         assert ok2 is False
-        # 清理：让后台线程能自然结束（daemon=True → 不影响进程退出）
     finally:
         P.HANDLERS["subtitle_generation"] = orig
 
@@ -241,7 +280,7 @@ def test_stop_pipeline_sets_stop_flag(tmp_path: Path):
         # 模拟：handler 看到 stop 标志位就退出
         for _ in range(10):
             if P._consume_stop(tid):
-                return (True, "人工决策 stop")
+                return (True, "用户停止")
             time.sleep(0.1)
         return (True, "")
 
@@ -250,11 +289,9 @@ def test_stop_pipeline_sets_stop_flag(tmp_path: Path):
         out = _outputs(tmp_path)
         api = "http://127.0.0.1:1"
         P.run_pipeline("test-tid-stop", api, out)
-        # 等线程启动 + 进入 _consume_stop 轮询
         time.sleep(0.3)
         ok = P.stop_pipeline("test-tid-stop")
         assert ok is True
-        # 等调度器主循环消费 stop 标志
         deadline = time.time() + 3.0
         while time.time() < deadline:
             st = P.pipeline_status("test-tid-stop")
@@ -268,17 +305,143 @@ def test_stop_pipeline_sets_stop_flag(tmp_path: Path):
         P.HANDLERS["subtitle_generation"] = orig
 
 
+def test_run_pipeline_stops_at_top_level_stop_after(tmp_path: Path):
+    """v4：顶层 stop_after='subtitle_generation' → 跑完字幕生成就停。"""
+    orig = P.HANDLERS["subtitle_generation"]
+
+    def _ok(tid, cfg, outputs_dir, api, job):
+        return (True, "")
+
+    P.HANDLERS["subtitle_generation"] = _ok
+    P.HANDLERS["subtitle_review"] = _ok
+    P.HANDLERS["rough_cut"] = _ok
+    P.HANDLERS["rough_compose"] = _ok
+    P.HANDLERS["optimize"] = _ok
+    try:
+        out = _outputs(tmp_path)
+        cfg = P.default_config()
+        cfg["stop_after"] = "subtitle_generation"
+        P.save_pipeline(out, {"config": cfg})
+        api = "http://127.0.0.1:1"
+        ok = P.run_pipeline("test-tid-v4-stop", api, out)
+        assert ok is True
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            st = P.pipeline_status("test-tid-v4-stop")
+            if st and st["state"] != "running":
+                break
+            time.sleep(0.05)
+        st = P.pipeline_status("test-tid-v4-stop")
+        assert st is not None
+        assert st["state"] == "stopped", f"期望 stopped，实际 {st['state']}"
+        assert st["summary"]["stages_done"] == ["subtitle_generation"]
+    finally:
+        P.HANDLERS["subtitle_generation"] = orig
+        P.HANDLERS["subtitle_review"] = orig
+        P.HANDLERS["rough_cut"] = orig
+        P.HANDLERS["rough_compose"] = orig
+        P.HANDLERS["optimize"] = orig
+
+
+def test_run_pipeline_starts_from_since_stage(tmp_path: Path):
+    """since='rough_cut' → 跳过前 2 阶段，从 rough_cut 开始跑；stop_after=rough_compose → 跑完 rough_cut 又跑 rough_compose，然后停。"""
+    orig_g = P.HANDLERS["subtitle_generation"]
+    orig_r = P.HANDLERS["subtitle_review"]
+    orig_c = P.HANDLERS["rough_cut"]
+    orig_p = P.HANDLERS["rough_compose"]
+    orig_o = P.HANDLERS["optimize"]
+
+    called = []
+
+    def _track(name):
+        def _h(tid, cfg, outputs_dir, api, job):
+            called.append(name)
+            return (True, "")
+        return _h
+
+    P.HANDLERS["subtitle_generation"] = _track("subtitle_generation")
+    P.HANDLERS["subtitle_review"] = _track("subtitle_review")
+    P.HANDLERS["rough_cut"] = _track("rough_cut")
+    P.HANDLERS["rough_compose"] = _track("rough_compose")
+    P.HANDLERS["optimize"] = _track("optimize")
+    try:
+        out = _outputs(tmp_path)
+        cfg = P.default_config()
+        cfg["stop_after"] = "rough_compose"
+        P.save_pipeline(out, {"config": cfg})
+        api = "http://127.0.0.1:1"
+        P.run_pipeline("test-tid-since", api, out, since="rough_cut")
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            st = P.pipeline_status("test-tid-since")
+            if st and st["state"] != "running":
+                break
+            time.sleep(0.05)
+        st = P.pipeline_status("test-tid-since")
+        assert st is not None
+        # since 跳过前 2 个；跑 rough_cut + rough_compose 后停
+        assert "subtitle_generation" not in called
+        assert "subtitle_review" not in called
+        assert "rough_cut" in called
+        assert "rough_compose" in called
+        assert "optimize" not in called
+        assert st["state"] == "stopped"
+        assert st["summary"]["stages_done"] == ["rough_cut", "rough_compose"]
+    finally:
+        P.HANDLERS["subtitle_generation"] = orig_g
+        P.HANDLERS["subtitle_review"] = orig_r
+        P.HANDLERS["rough_cut"] = orig_c
+        P.HANDLERS["rough_compose"] = orig_p
+        P.HANDLERS["optimize"] = orig_o
+
+
+def test_run_pipeline_runs_to_end_when_stop_after_null(tmp_path: Path):
+    """v4：顶层 stop_after=None → 5 阶段全部跑完。"""
+    orig_g = P.HANDLERS["subtitle_generation"]
+    orig_r = P.HANDLERS["subtitle_review"]
+    orig_c = P.HANDLERS["rough_cut"]
+    orig_p = P.HANDLERS["rough_compose"]
+    orig_o = P.HANDLERS["optimize"]
+
+    def _ok(tid, cfg, outputs_dir, api, job):
+        return (True, "")
+
+    P.HANDLERS["subtitle_generation"] = _ok
+    P.HANDLERS["subtitle_review"] = _ok
+    P.HANDLERS["rough_cut"] = _ok
+    P.HANDLERS["rough_compose"] = _ok
+    P.HANDLERS["optimize"] = _ok
+    try:
+        out = _outputs(tmp_path)
+        cfg = P.default_config()
+        cfg["stop_after"] = None
+        P.save_pipeline(out, {"config": cfg})
+        api = "http://127.0.0.1:1"
+        ok = P.run_pipeline("test-tid-null", api, out)
+        assert ok is True
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            st = P.pipeline_status("test-tid-null")
+            if st and st["state"] != "running":
+                break
+            time.sleep(0.05)
+        st = P.pipeline_status("test-tid-null")
+        assert st is not None
+        assert st["state"] == "done", f"期望 done，实际 {st['state']}"
+        assert len(st["summary"]["stages_done"]) == 5
+    finally:
+        P.HANDLERS["subtitle_generation"] = orig_g
+        P.HANDLERS["subtitle_review"] = orig_r
+        P.HANDLERS["rough_cut"] = orig_c
+        P.HANDLERS["rough_compose"] = orig_p
+        P.HANDLERS["optimize"] = orig_o
+
+
 # =============== handler 行为（mock）==============
 
 
 def test_handler_subtitle_generation_skips_when_already_done(tmp_path: Path):
-    """subtitle 已存在 → handler 不调 HTTP，直接 ok（如果想跳过；当前实现总是调）。
-
-    当前实现：永远调 /gen_subtitle，由服务端判断已存在时返回 ok（覆盖）。
-    这里仅验证 handler 函数可调用、不抛异常。
-    """
-    # 用一个不可达的 url + 短超时测试 — handler 应该 catch 异常
-    # 这里不真跑 handler（避免依赖服务端）；只验证函数签名 + 模块 import
+    """handler 函数可调用、不抛异常（v4 schema）。"""
     assert callable(P.handler_subtitle_generation)
     assert callable(P.handler_subtitle_review)
     assert callable(P.handler_rough_cut)

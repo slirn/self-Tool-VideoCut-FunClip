@@ -1,14 +1,14 @@
-// Slirn 流程配置 + 自动执行 — REQ-20260918-047（v2：去抽屉，工作台内常驻纵向面板）
+// Slirn 流程配置 + 自动执行 — REQ-20260918-047（v4：全局停止阶段下拉 + 每阶段从本阶段起跑）
 //
-// 设计：
-// - 去掉「右侧滑入抽屉」外壳；改成工作台内一个常驻 <section id="slirn-pipe-panel">
-// - 默认打开工作台就自动渲染；5 个阶段每个是 <details open>（可折叠、可全部展开）
-// - 每阶段表单字段独立命名，可一次性读全部（不再依赖 tab 切换）
-// - 顶部状态条（进度 + 日志最近 3 条）继续浮在右上，独立于面板
+// 设计要点：
+// - 整个面板用 <details> 包裹，summary 是头部（含标题 + 模板 + 全局停止阶段下拉 + 主操作 + 折叠箭头）
+// - 5 个阶段每个内部又是一个 <details open>，可独立折叠
+// - 顶部「完成到哪个阶段停」下拉：6 个选项（5 阶段后停 + 不停跑到底），替换 v3 的 per-stage checkbox
+// - 每阶段 summary 右侧加「▶ 从本阶段开始往下执行」按钮，调 /pipeline_run?since=<stage_key>
+// - 模板切换：3 套内置模板对应不同顶层 stop_after
+// - checkbox click 委托用 closest('label') 早退，确保不被外层 click 抢
 //
 // 与 router.js 互不依赖：复用其 postJSON / toast / refreshDetail 等 window.* 全局即可。
-// 独立 <script src> 注入（同 router.js 的 _build_head 路径），不放在 head= 内联
-// （反斜杠转义解码 bug，见 ROUTER_JS 注释）。
 (function() {
   if (window.__slirnPipelineBound) return;
   window.__slirnPipelineBound = true;
@@ -16,7 +16,6 @@
   var SLIRN_API = '/slirn/api';
 
   // ---- stage label/cfg schema ----
-  // 与 pipeline_service.STAGE_ORDER 对齐；label 用中文展示
   var STAGES = [
     {key: 'subtitle_generation', label: '字幕生成', desc: 'FunASR 识别视频字幕；勾选「区分说话人」可识别人员编号'},
     {key: 'subtitle_review', label: '字幕修订', desc: '大模型分析字幕；可设「默认接受所有建议」'},
@@ -28,42 +27,42 @@
   var STAGE_LABELS = {};
   STAGES.forEach(function(s) { STAGE_LABELS[s.key] = s.label; });
 
-  // ---- 3 套内置模板 ----
+  // ---- 3 套内置模板（v4：顶层 stop_after 字符串；null = 跑到底）----
   var TEMPLATES = {
-    // 人工全审：所有阶段停 = 全部要人工看一眼
+    // 人工全审：字幕修订后停（让用户审 LLM 建议）
     default_tpl: {
-      label: '人工全审（默认）',
+      label: '人工全审（字幕修订后停）',
       config: {
-        subtitle_generation: {speaker_diarization: false, stop_after: 'subtitle_generation'},
-        subtitle_review: {accept_all_suggestions: false, skip_categories: [], stop_after: 'subtitle_review'},
-        rough_cut: {delete_speakers: [], default_decision: 'keep', stop_after: 'rough_cut'},
-        rough_compose: {stop_after: 'rough_compose'},
-        optimize: {accept_all_replacements: false, stop_after: 'optimize'},
-        stop_after: 'optimize'
+        subtitle_generation: {speaker_diarization: false},
+        subtitle_review: {accept_all_suggestions: false, skip_categories: []},
+        rough_cut: {delete_speakers: [], default_decision: 'keep'},
+        rough_compose: {},
+        optimize: {accept_all_replacements: false},
+        stop_after: 'subtitle_review'
       }
     },
-    // 半自动：字幕修订人工、粗剪合成自动
+    // 半自动：粗剪合成后停（让人看完粗剪再决定后续）
     semi: {
-      label: '半自动（修订人工，合成自动）',
+      label: '半自动（粗剪合成后停）',
       config: {
-        subtitle_generation: {speaker_diarization: false, stop_after: 'subtitle_generation'},
-        subtitle_review: {accept_all_suggestions: false, skip_categories: [], stop_after: 'subtitle_review'},
-        rough_cut: {delete_speakers: [], default_decision: 'keep', stop_after: 'rough_cut'},
-        rough_compose: {stop_after: 'optimize'},  // 跑到优化前停（让人看粗剪）
-        optimize: {accept_all_replacements: true, stop_after: 'optimize'},
-        stop_after: 'rough_compose'  // 流程层：粗剪合成后停
+        subtitle_generation: {speaker_diarization: false},
+        subtitle_review: {accept_all_suggestions: true, skip_categories: []},
+        rough_cut: {delete_speakers: [], default_decision: 'keep'},
+        rough_compose: {},
+        optimize: {accept_all_replacements: true},
+        stop_after: 'rough_compose'
       }
     },
-    // 全自动：所有阶段跑完
+    // 全自动：跑到底
     full: {
-      label: '全自动',
+      label: '全自动（跑到底）',
       config: {
-        subtitle_generation: {speaker_diarization: false, stop_after: 'subtitle_generation'},
-        subtitle_review: {accept_all_suggestions: true, skip_categories: [], stop_after: 'subtitle_review'},
-        rough_cut: {delete_speakers: [], default_decision: 'keep', stop_after: 'rough_cut'},
-        rough_compose: {stop_after: 'rough_compose'},
-        optimize: {accept_all_replacements: true, stop_after: 'optimize'},
-        stop_after: null  // 跑完
+        subtitle_generation: {speaker_diarization: false},
+        subtitle_review: {accept_all_suggestions: true, skip_categories: []},
+        rough_cut: {delete_speakers: [], default_decision: 'keep'},
+        rough_compose: {},
+        optimize: {accept_all_replacements: true},
+        stop_after: null
       }
     }
   };
@@ -78,8 +77,8 @@
   }
   function escapeHtml(s) {
     return String(s == null ? '' : s)
-      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+      .replace(/&/g, '&').replace(/</g, '<').replace(/>/g, '>')
+      .replace(/"/g, '"').replace(/'/g, '&#39;');
   }
   function toast(msg, type) {
     if (window.slirnToast) window.slirnToast(msg, type || 'success');
@@ -88,25 +87,23 @@
     var panel = document.getElementById('slirn-pipe-panel');
     return panel ? (panel.getAttribute('data-task-id') || '') : '';
   }
-  function fmtDur(ms) {
-    if (!ms || ms < 0) return '-';
-    var s = Math.floor(ms / 1000);
-    if (s < 60) return s + 's';
-    var m = Math.floor(s / 60), ss = s % 60;
-    if (m < 60) return m + 'm' + (ss < 10 ? '0' : '') + ss + 's';
-    var h = Math.floor(m / 60), mm = m % 60;
-    return h + 'h' + (mm < 10 ? '0' : '') + mm + 'm';
-  }
 
-  // ---- 阶段字段 ID 前缀（避免和其它工作台控件冲突）----
+  // ---- 阶段字段 ID 命名 ----
   function fieldId(stageKey, fieldName) { return 'slirn-pipe-' + stageKey + '-' + fieldName; }
 
-  // ---- 单个 stage 的表单 ----
+  // ---- 渲染「全局停止阶段」下拉 option 列表 ----
+  function renderFlowStopOptions(selectedValue) {
+    var opts = '<option value="">不停（跑到底）</option>';
+    STAGES.forEach(function(s) {
+      var sel = (selectedValue === s.key) ? ' selected' : '';
+      opts += '<option value="' + s.key + '"' + sel + '>'
+            + escapeHtml(s.label) + '后停</option>';
+    });
+    return opts;
+  }
+
+  // ---- 单个 stage 的表单（v4：不再有 stop_after 字段）----
   function renderStageForm(stage, stageCfg) {
-    // 每阶段显示「说明 + 该阶段可选项 + 本阶段 stop_after」
-    var commonStop = '<label class="slirn-pipe-field"><span>本阶段完成后停：</span>'
-      + stopAfterSelect(stageCfg.stop_after, 'stage-' + stage.key + '-stop')
-      + '</label>';
     if (stage.key === 'subtitle_generation') {
       var sdOn = stageCfg.speaker_diarization ? ' checked' : '';
       return '<div class="slirn-pipe-form">'
@@ -114,7 +111,6 @@
         + '<label class="slirn-pipe-field">'
         + '<input type="checkbox" id="' + fieldId(stage.key, 'sd') + '"' + sdOn + '> 区分说话人（默认关 — 单人视频减少误分）'
         + '</label>'
-        + commonStop
         + '</div>';
     }
     if (stage.key === 'subtitle_review') {
@@ -128,7 +124,6 @@
         + '<label class="slirn-pipe-field"><span>跳过建议类别（逗号分隔，空 = 全接受）：</span>'
         + '<input type="text" id="' + fieldId(stage.key, 'skip-cats') + '" value="' + escapeHtml(skip) + '" placeholder="delete,review">'
         + '</label>'
-        + commonStop
         + '</div>';
     }
     if (stage.key === 'rough_cut') {
@@ -144,14 +139,12 @@
         + '<option value="keep"' + (defDec === 'keep' ? ' selected' : '') + '>保留</option>'
         + '<option value="delete"' + (defDec === 'delete' ? ' selected' : '') + '>删除</option>'
         + '</select></label>'
-        + commonStop
         + '</div>';
     }
     if (stage.key === 'rough_compose') {
       return '<div class="slirn-pipe-form">'
         + '<div class="slirn-pipe-desc">' + escapeHtml(stage.desc) + '</div>'
         + '<div class="slirn-pipe-hint">粗剪合成无需额外选项；按切分保留区间拼接。必做阶段（REQ-20260918-045）。</div>'
-        + commonStop
         + '</div>';
     }
     if (stage.key === 'optimize') {
@@ -161,24 +154,12 @@
         + '<label class="slirn-pipe-field">'
         + '<input type="checkbox" id="' + fieldId(stage.key, 'accept-rep') + '"' + aaR + '> 默认接受所有替换（跑完后自动 save_optimize_subtitle 全量 applied）'
         + '</label>'
-        + commonStop
         + '</div>';
     }
-    return '<div class="slirn-pipe-form">' + commonStop + '</div>';
+    return '<div class="slirn-pipe-form"></div>';
   }
 
-  function stopAfterSelect(cur, idBase) {
-    var html = '<select id="' + idBase + '">';
-    STAGE_KEYS.forEach(function(k, i) {
-      html += '<option value="' + k + '"' + (cur === k ? ' selected' : '') + '>'
-        + escapeHtml(STAGE_LABELS[k]) + '（完成后停）</option>';
-    });
-    html += '<option value=""' + (!cur ? ' selected' : '') + '>— 跑完 —</option>';
-    html += '</select>';
-    return html;
-  }
-
-  // ---- 整个面板渲染（v2：纵向 5 个 <details open>）----
+  // ---- 整个面板渲染（v4：details 包裹整个面板 + 头部下拉 + 每阶段 run-since 按钮）----
   function renderPanel(taskId, data) {
     var panel = document.getElementById('slirn-pipe-panel');
     if (!panel) return;
@@ -186,13 +167,9 @@
     var cfg = (data && data.config) || {};
     var updatedAt = (data && data.updated_at) || '';
 
-    // 流程层 stop_after 下拉
-    var flowStop = cfg.stop_after || '';
-    var flowOpts = '<option value=""' + (flowStop === '' ? ' selected' : '') + '>— 跑完 —</option>';
-    STAGE_KEYS.forEach(function(k) {
-      var sel = flowStop === k ? ' selected' : '';
-      flowOpts += '<option value="' + k + '"' + sel + '>' + escapeHtml(STAGE_LABELS[k]) + '（完成后停）</option>';
-    });
+    // v4 兼容：v3 per-stage boolean / v2 per-stage string 字段丢弃；顶层 stop_after 提升
+    cfg = normalizeCfg(cfg);
+    var flowStopValue = cfg.stop_after || '';
 
     var sectionsHtml = STAGES.map(function(stage, idx) {
       return '<details class="slirn-pipe-section" data-pipe-section="' + stage.key + '" open>'
@@ -200,33 +177,56 @@
         + '<span class="slirn-pipe-section-num">' + (idx + 1) + '</span>'
         + '<span class="slirn-pipe-section-label">' + escapeHtml(stage.label) + '</span>'
         + '<span class="slirn-pipe-section-hint">' + escapeHtml(stage.desc) + '</span>'
+        + '<button type="button" class="slirn-btn slirn-btn-primary slirn-btn-sm slirn-pipe-stage-run"'
+        + ' data-action="pipe-run-since" data-since="' + stage.key + '"'
+        + ' title="保存并从本阶段开始往后执行（跳过之前所有阶段）">▶ 从本阶段开始</button>'
         + '</summary>'
         + '<div class="slirn-pipe-section-body">' + renderStageForm(stage, cfg[stage.key] || {}) + '</div>'
         + '</details>';
     }).join('');
 
     panel.innerHTML =
-      '<header class="slirn-pipe-head">'
+      '<details class="slirn-pipe-panel-details" open>'
+      + '<summary class="slirn-pipe-head">'
       + '<span class="slirn-pipe-title">⚙ 流程配置</span>'
-      + '<select class="slirn-pipe-template" id="slirn-pipe-template">'
+      + '<span class="slirn-pipe-updated">'
+      + (updatedAt ? '最近保存：' + escapeHtml(updatedAt) : '尚未保存')
+      + '</span>'
+      + '<span class="slirn-pipe-head-acts">'
+      + '<label class="slirn-pipe-flow-stop-label">'
+      + '完成到哪个阶段停：'
+      + '<select class="slirn-pipe-flow-stop" id="slirn-pipe-flow-stop">'
+      + renderFlowStopOptions(flowStopValue)
+      + '</select>'
+      + '</label>'
+      + '<select class="slirn-pipe-template" id="slirn-pipe-template" data-pipe-action="template">'
       + '<option value="default_tpl">内置：人工全审</option>'
       + '<option value="semi">内置：半自动</option>'
       + '<option value="full">内置：全自动</option>'
       + '<option value="custom">自定义</option>'
       + '</select>'
-      + '<span class="slirn-pipe-updated">'
-      + (updatedAt ? '最近保存：' + escapeHtml(updatedAt) : '尚未保存')
+      + '<button type="button" class="slirn-btn slirn-btn-danger slirn-btn-sm" data-action="pipe-stop">⏹ 停止</button>'
+      + '<button type="button" class="slirn-btn slirn-btn-sm" data-action="pipe-save">💾 保存配置</button>'
+      + '<button type="button" class="slirn-btn slirn-btn-primary slirn-btn-sm" data-action="pipe-run" title="保存并按当前配置顺序执行所有阶段">▶ 运行流程</button>'
       + '</span>'
-      + '</header>'
+      + '</summary>'
       + '<div class="slirn-pipe-sections">' + sectionsHtml + '</div>'
-      + '<footer class="slirn-pipe-foot">'
-      + '<label class="slirn-pipe-flow-stop">流程层总停点：'
-      + '<select id="slirn-pipe-flow-stop">' + flowOpts + '</select></label>'
-      + '<span class="slirn-pipe-foot-spacer"></span>'
-      + '<button type="button" class="slirn-btn slirn-btn-danger" data-action="pipe-stop">⏹ 停止</button>'
-      + '<button type="button" class="slirn-btn" data-action="pipe-save">💾 保存配置</button>'
-      + '<button type="button" class="slirn-btn slirn-btn-primary" data-action="pipe-run">▶ 从当前节点运行</button>'
-      + '</footer>';
+      + '</details>';
+  }
+
+  // ---- v4 兼容：把 v3 per-stage boolean / v2 per-stage string 字段丢弃；顶层 stop_after 保留 ----
+  function normalizeCfg(cfg) {
+    if (!cfg || typeof cfg !== 'object') return cfg;
+    // 顶层 stop_after 已经就是 v4 权威字段，无需迁移
+    // 阶段内旧字段（v3 boolean / v2 string）会被 validate_config 在 backend 丢弃；
+    // 这里也预处理以保持前端 config 一致
+    STAGE_KEYS.forEach(function(k) {
+      var s = cfg[k];
+      if (s && typeof s === 'object' && 'stop_after' in s) {
+        delete s.stop_after;
+      }
+    });
+    return cfg;
   }
 
   // ---- 表单 → config ----
@@ -243,28 +243,23 @@
     if (!panel) return null;
     var cfg = {};
     cfg.subtitle_generation = {
-      speaker_diarization: _checked(fieldId('subtitle_generation', 'sd'), false),
-      stop_after: _val('stage-subtitle_generation-stop', 'subtitle_generation') || 'subtitle_generation'
+      speaker_diarization: _checked(fieldId('subtitle_generation', 'sd'), false)
     };
     cfg.subtitle_review = {
       accept_all_suggestions: _checked(fieldId('subtitle_review', 'accept-all'), true),
-      skip_categories: _val(fieldId('subtitle_review', 'skip-cats'), '').split(',').map(function(x){return x.trim();}).filter(Boolean),
-      stop_after: _val('stage-subtitle_review-stop', 'subtitle_review') || 'subtitle_review'
+      skip_categories: _val(fieldId('subtitle_review', 'skip-cats'), '').split(',').map(function(x){return x.trim();}).filter(Boolean)
     };
     cfg.rough_cut = {
       delete_speakers: _val(fieldId('rough_cut', 'del-spk'), '').split(',').map(function(x){return parseInt(x.trim(), 10);}).filter(function(x){return !isNaN(x);}),
-      default_decision: _val(fieldId('rough_cut', 'def-dec'), 'keep') || 'keep',
-      stop_after: _val('stage-rough_cut-stop', 'rough_cut') || 'rough_cut'
+      default_decision: _val(fieldId('rough_cut', 'def-dec'), 'keep') || 'keep'
     };
-    cfg.rough_compose = {
-      stop_after: _val('stage-rough_compose-stop', 'rough_compose') || 'rough_compose'
-    };
+    cfg.rough_compose = {};
     cfg.optimize = {
-      accept_all_replacements: _checked(fieldId('optimize', 'accept-rep'), true),
-      stop_after: _val('stage-optimize-stop', 'optimize') || 'optimize'
+      accept_all_replacements: _checked(fieldId('optimize', 'accept-rep'), true)
     };
-    var flowV = _val('slirn-pipe-flow-stop', '');
-    cfg.stop_after = flowV || null;
+    // v4 顶层 stop_after："" → null；其他保留原值
+    var flowStop = _val('slirn-pipe-flow-stop', '');
+    cfg.stop_after = flowStop || null;
     return cfg;
   }
 
@@ -349,10 +344,8 @@
         toast(r.toast || '⚙️ 已保存');
         var panel = document.getElementById('slirn-pipe-panel');
         if (panel) {
-          // 标记当前配置为 custom
           var sel = document.getElementById('slirn-pipe-template');
           if (sel) sel.value = 'custom';
-          // 刷新 updated_at
           var u = panel.querySelector('.slirn-pipe-updated');
           if (u && r.updated_at) u.textContent = '最近保存：' + r.updated_at;
         }
@@ -361,15 +354,27 @@
       }
     });
   }
-  function runPipeline(taskId) {
-    postJSON(SLIRN_API + '/pipeline_run', {task_id: taskId}).then(function(r) {
-      if (!r || !r.ok) { toast('启动失败：' + (r && r.error || '未知错误'), 'error'); return; }
-      if (!r.started) {
-        toast(r.toast || '已在运行');
+  function runPipeline(taskId, since) {
+    var cfg = readCurrentConfig();
+    if (!cfg) { toast('未读取到配置', 'error'); return; }
+    // 运行前先保存（确保服务端拿到的是表单最新值）
+    postJSON(SLIRN_API + '/pipeline_save', {task_id: taskId, config: cfg}).then(function(s) {
+      if (!s || !s.ok) {
+        toast('保存失败，无法启动：' + (s && s.error || '未知错误'), 'error');
         return;
       }
-      toast(r.toast || '▶ 已启动');
-      showStatus(taskId);
+      var payload = {task_id: taskId};
+      if (since) payload.since = since;
+      postJSON(SLIRN_API + '/pipeline_run', payload).then(function(r) {
+        if (!r || !r.ok) { toast('启动失败：' + (r && r.error || '未知错误'), 'error'); return; }
+        if (!r.started) {
+          toast(r.toast || '已在运行');
+          return;
+        }
+        var msg = since ? ('▶ 已从「' + (STAGE_LABELS[since] || since) + '」开始') : '▶ 已启动';
+        toast(r.toast || msg);
+        showStatus(taskId);
+      });
     });
   }
   function stopPipeline(taskId) {
@@ -382,20 +387,30 @@
     });
   }
 
-  // ---- 全局事件委托（与 router.js 同模式）----
+  // ---- 全局 click 委托 ----
+  // v4：每阶段 summary 内有「▶ 从本阶段开始」按钮（data-action="pipe-run-since"），
+  // 不放 data-pipe-action，因此不会被 closest('button[data-pipe-action]') 早退抢走。
   document.addEventListener('click', function(ev) {
     var t = ev.target;
     if (!t || !t.getAttribute) return;
-    // 点击命中具体控件（input/select/option/details summary）→ 不抢
-    if (t.closest && t.closest('input,select,option,textarea')) return;
-    // details summary 自身 → 浏览器原生切换，不抢
+    // label / input / select / option / textarea 内部点击 → 早退（让浏览器原生行为生效）
+    if (t.closest && t.closest('label,input,select,option,textarea,button[data-pipe-action]')) {
+      return;
+    }
+    // details summary（折叠/展开）→ 浏览器原生处理
     if (t.tagName === 'SUMMARY') return;
 
     var tid = t.getAttribute('data-task-id') || curTaskId();
     var action = t.getAttribute('data-action');
     if (!action) return;
     if (action === 'pipe-save') { ev.preventDefault(); saveConfig(tid); return; }
-    if (action === 'pipe-run') { ev.preventDefault(); runPipeline(tid); return; }
+    if (action === 'pipe-run') { ev.preventDefault(); runPipeline(tid, null); return; }
+    if (action === 'pipe-run-since') {
+      ev.preventDefault();
+      var since = t.getAttribute('data-since') || null;
+      runPipeline(tid, since);
+      return;
+    }
     if (action === 'pipe-stop') { ev.preventDefault(); stopPipeline(tid); return; }
     if (action === 'pipe-open') { ev.preventDefault(); loadPanel(tid); return; }
     if (action === 'pipe-status-collapse') {
@@ -405,7 +420,7 @@
     }
   });
 
-  // ---- 模板切换 ----
+  // ---- 模板切换：v4 直接重渲染整个面板 ----
   document.addEventListener('change', function(ev) {
     var t = ev.target;
     if (!t || !t.getAttribute) return;
@@ -416,8 +431,7 @@
       if (tplKey !== 'custom' && TEMPLATES[tplKey]) {
         var cfg = TEMPLATES[tplKey].config;
         var taskId = panel.getAttribute('data-task-id');
-        // 重新渲染整个面板（cfg 来自模板）
-        renderPanel(taskId, {config: cfg, updated_at: '模板 ' + TEMPLATES[tplKey].label});
+        renderPanel(taskId, {config: cfg, updated_at: '模板 ' + TEMPLATES[tplKey].label, _fromTemplate: true});
         toast('已载入模板：' + TEMPLATES[tplKey].label);
       }
     }
@@ -429,9 +443,6 @@
   });
 
   // ---- 工作台加载时自动渲染面板 ----
-  // 触发点：router.js 在刷新工作台 HTML 后会调用 initWorkbench(...)
-  // 我们提供 window.slirnPipelineMount(taskId) 让 router 调用；
-  // 若没注册，则监听 DOM 变化兜底（见 observer）。
   function tryMount(taskId) {
     var panel = document.getElementById('slirn-pipe-panel');
     if (!panel) return false;
@@ -443,8 +454,8 @@
   }
   window.slirnPipelineMount = tryMount;
 
-  // 兜底：监听 <section id="slirn-pipe-panel"> 出现（路由异步插入时）
-  var observer = new MutationObserver(function(muts) {
+  // 兜底：监听 DOM 变化，捕获路由异步插入的情况
+  var observer = new MutationObserver(function() {
     var panel = document.getElementById('slirn-pipe-panel');
     if (!panel) return;
     var tid = panel.getAttribute('data-task-id') || '';
