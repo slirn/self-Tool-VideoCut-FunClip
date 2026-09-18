@@ -212,6 +212,15 @@ def test_render_cutlist_zone_persists_link(tmp_path: Path):
     assert 'data-spk="1"' in h and 'class="slirn-cut-spk"' in h and ">👤1</span>" in h
     # 按钮变「重新关联」
     assert "重新关联人员ID" in h
+    # REQ-035：统计带「跳过已删除」勾选框（服务端渲染，与 JS 重渲染一致）
+    assert 'id="slirn-cut-spk-skipdel" type="checkbox"' in h
+    assert "跳过已删除" in h
+    # REQ-036：徽章位于序号之后、时间戳之前（同一行不折行）
+    row1 = h[h.index('data-spk="1"'):]
+    assert row1.index('class="slirn-cut-spk"') < row1.index("slirn-sub-time"), \
+        "徽章应在时间戳之前"
+    assert row1.index("slirn-sub-idx") < row1.index('class="slirn-cut-spk"'), \
+        "徽章应在序号之后"
 
     # 数据兼容（REQ-1.6）：subtitle 重新生成后无 spk → 静默回普通态
     (outputs / "subtitle.json").write_text(json.dumps(

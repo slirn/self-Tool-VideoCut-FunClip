@@ -1235,6 +1235,9 @@
     var keepQ = '';
     var prevQ = bar.querySelector('#slirn-cut-spk-q');
     if (prevQ) keepQ = prevQ.value;
+    var keepSkip = false;
+    var prevSkip = bar.querySelector('#slirn-cut-spk-skipdel');
+    if (prevSkip) keepSkip = prevSkip.checked;
     var chips = cutSpkStats().map(function(c) {
       return '<span class="slirn-cut-spk-chip" data-action="cut-spk-chip" data-spk="' + c.spk + '"'
         + ' title="点击填入查找框（统计仅计未删除记录）">👤' + c.spk + ' · <b>' + c.count + '</b> 条</span>';
@@ -1244,6 +1247,8 @@
       + '<div class="slirn-cut-spk-chips">' + chips + '</div>'
       + '<div class="slirn-cut-spk-find">按人员ID查找：'
       + '<input id="slirn-cut-spk-q" type="number" min="1" step="1" placeholder="如 2">'
+      + '<label class="slirn-cut-spk-skiplbl" title="勾选后「上一条/下一条」只在未删除的记录间跳转">'
+      + '<input id="slirn-cut-spk-skipdel" type="checkbox">跳过已删除</label>'
       + '<button class="slirn-btn slirn-btn-xs" data-action="cut-spk-prev">⬆️ 上一条</button>'
       + '<button class="slirn-btn slirn-btn-xs" data-action="cut-spk-next">⬇️ 下一条</button>'
       + '<button class="slirn-btn slirn-btn-xs" data-action="cut-spk-delete">❌ 删除该人员全部记录</button>'
@@ -1253,6 +1258,8 @@
     bar.dataset.linked = '1';
     var q = bar.querySelector('#slirn-cut-spk-q');
     if (q) q.value = keepQ;
+    var skipEl = bar.querySelector('#slirn-cut-spk-skipdel');
+    if (skipEl) skipEl.checked = keepSkip;
   }
   function cutSpkLink(btn) {  // 👤 关联人员ID → POST cut_speaker_link → 注入徽章 + 统计条
     var tid = btn.getAttribute('data-task-id') || '';
@@ -1276,7 +1283,10 @@
           b.className = 'slirn-cut-spk';
           b.textContent = '👤' + spk;
           b.title = '人员 ' + spk + '（时间段重叠最大的字幕段说话人）';
-          row.appendChild(b);
+          // REQ-20260917-036：徽章放序号之后、时间戳之前（同行不折行 — CSS 显式第2轨）
+          var anchor = row.querySelector('.slirn-sub-idx');
+          if (anchor && anchor.nextSibling) row.insertBefore(b, anchor.nextSibling);
+          else row.appendChild(b);
           n += 1;
         } else {
           row.removeAttribute('data-spk');
@@ -1304,17 +1314,26 @@
     return v;
   }
   function cutSpkNav(dir) {  // 上一条/下一条：该人员行间循环跳转，kbsel 高亮 + 滚动定位
-    var spk = cutSpkQuery();
+    var spk = cutSpkQuery();          // REQ-20260917-035：勾选「跳过已删除」→ 只在未删除记录间跳
     if (spk === null) return;
-    var rows = cutSpkRows().filter(function(r) { return r.getAttribute('data-spk') === spk; });
-    if (!rows.length) { toast('👤' + spk + ' 无匹配字幕记录', 'error'); return; }
+    var skipEl = document.getElementById('slirn-cut-spk-skipdel');
+    var skipDel = !!(skipEl && skipEl.checked);
+    var rows = cutSpkRows().filter(function(r) {
+      return r.getAttribute('data-spk') === spk && (!skipDel || cutRowKept(r));
+    });
+    if (!rows.length) {
+      var any = cutSpkRows().some(function(r) { return r.getAttribute('data-spk') === spk; });
+      toast(any ? '👤' + spk + ' 的记录已全部删除 — 取消勾选「跳过已删除」可继续翻看'
+                : '👤' + spk + ' 无匹配字幕记录', 'error');
+      return;
+    }
     var curRow = document.querySelector('#slirn-cut-list .slirn-cut-row.kbsel');
     var idx = rows.indexOf(curRow);  // 当前选中不在该人员行内 → 从头/尾起
     var next = idx < 0 ? (dir > 0 ? 0 : rows.length - 1)
                        : (idx + dir + rows.length) % rows.length;
     cutMarkSel(rows[next]);
     toast('👤' + spk + ' 第 ' + (next + 1) + '/' + rows.length + ' 条（编号 '
-      + rows[next].getAttribute('data-id') + '）');
+      + rows[next].getAttribute('data-id') + '）' + (skipDel ? ' · 已跳过删除' : ''));
   }
   function cutSpkDelete() {  // 删除该人员全部记录：整段 → 组 act=delete；子段 → mark=delete
     var spk = cutSpkQuery();
@@ -2698,7 +2717,16 @@
       if (d) d.style.display = 'none';
     }
     else if (action === 'delete-task') {
+      // REQ-20260917-034：删除不可恢复 + 整目录真删 — 必须先确认（含任务名）
       var tid2 = target.getAttribute('data-task-id') || '';
+      var name2 = target.getAttribute('data-task-name') || tid2;
+      if (!window.confirm('🗑️ 确认删除任务「' + name2 + '」？\n\n'
+          + '任务目录的全部文件（原视频链接、字幕、切分决策、合成产物等）'
+          + '将从磁盘永久删除，不可恢复。')) return;
+      // 释放正在预览的任务视频（Windows 下句柄未松开会 rmtree 失败）
+      document.querySelectorAll('video').forEach(function(v) {
+        try { v.pause(); v.removeAttribute('src'); v.load(); } catch (err) {}
+      });
       postJSON(SLIRN_API + '/delete_task', {task_id: tid2}).then(function(r) {
         handleResp(r, 'slirn-tab-tasks');
         var d = document.getElementById('slirn-tab-detail');

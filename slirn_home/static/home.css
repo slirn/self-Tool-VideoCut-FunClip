@@ -1393,10 +1393,10 @@ footer { display: none !important; }
 .slirn-cut-ghead .slirn-sub-idx { font-size: 13px; font-weight: 700; color: var(--text-primary); }
 .slirn-cut-gtext { flex: 1; min-width: 220px; }
 .slirn-cut-ptarget { color: #7c5cd6; font-weight: 600; }
-/* 行（整段 whole / 子段 sub 统一）：序号 | 时间 | 徽章 | 文本 | 决策徽章 */
+/* 行（整段 whole / 子段 sub 统一）：序号 | 人员 | 时间 | 徽章 | 文本 | 决策 | 操作 */
 .slirn-cut-row {
   display: grid;
-  grid-template-columns: 44px 190px 92px 1fr auto;
+  grid-template-columns: 44px auto 190px 92px 1fr auto auto;
   gap: 10px;
   padding: 6px 14px;
   align-items: center;
@@ -1405,6 +1405,16 @@ footer { display: none !important; }
   border-bottom: 1px solid var(--border);
   transition: background var(--transition);
 }
+/* REQ-20260917-036：显式列位 — 人员徽章固定第 2 轨（序号后、时间戳前），
+   与其他信息同一行不折行；未关联时该轨无内容塌缩为 0，布局与无徽章时一致 */
+.slirn-cut-row > .slirn-sub-idx   { grid-column: 1; }
+.slirn-cut-row > .slirn-cut-spk   { grid-column: 2; }
+.slirn-cut-row > .slirn-sub-time  { grid-column: 3; }
+.slirn-cut-row > .slirn-cut-mark,
+.slirn-cut-row > .slirn-rev-badge { grid-column: 4; }
+.slirn-cut-row > .slirn-sub-text  { grid-column: 5; }
+.slirn-cut-row > .slirn-cut-actsel { grid-column: 6; }
+.slirn-cut-row > .slirn-btn[data-cut-act="resplit"] { grid-column: 7; }
 .slirn-cut-row:last-child { border-bottom: none; }
 .slirn-cut-row:hover { background: var(--accent-soft); }
 /* 子段行紫竖条（归属切分组）；整段行绿竖条 */
@@ -1449,11 +1459,11 @@ footer { display: none !important; }
 .slirn-btn.slirn-btn-xs {
   padding: 1px 10px; font-size: 11.5px; border-radius: 999px; white-space: nowrap;
 }
-/* ===== 关联人员ID（REQ-20260917-031）：行尾人员徽章 + 统计条 ===== */
+/* ===== 关联人员ID（REQ-20260917-031）：行内人员徽章（第2轨，036 起不折行）+ 统计条 ===== */
 .slirn-cut-spk {
   display: inline-block; padding: 1px 8px; border-radius: 999px;
   font-size: 11px; font-weight: 600; white-space: nowrap;
-  color: #fff; background: #3178c6; justify-self: end;
+  color: #fff; background: #3178c6; justify-self: start;
 }
 .slirn-cut-row.active .slirn-cut-spk {
   background: rgba(255, 255, 255, 0.25); color: #fff;
@@ -1480,6 +1490,12 @@ footer { display: none !important; }
 .slirn-cut-spk-find input {
   width: 72px; padding: 2px 8px; border-radius: 6px;
   border: 1px solid var(--border); font-size: 12px;
+}
+/* 「跳过已删除」勾选（REQ-20260917-035）：不套 72px 输入框宽度 */
+.slirn-cut-spk-find input[type="checkbox"] { width: auto; margin: 0; }
+.slirn-cut-spk-find label {
+  display: inline-flex; align-items: center; gap: 4px;
+  cursor: pointer; white-space: nowrap; color: var(--text-secondary);
 }
 .slirn-cut-spk-hint { color: var(--text-muted); font-size: 11px; }
 /* 修订更新 → 已保存清单过期黄条（REQ-20260916-011） */
@@ -1532,10 +1548,10 @@ footer { display: none !important; }
 .slirn-cut-resplit-input:focus { outline: 2px solid rgba(124, 92, 214, 0.35); outline-offset: 0; }
 .slirn-cut-resplit-hint { flex-basis: 100%; font-size: 11.5px; color: var(--text-muted); }
 @media (max-width: 900px) {
-  .slirn-cut-row { grid-template-columns: 40px 92px 1fr; gap: 8px; }
+  /* 036 列位方案在窄屏沿用：隐藏时间戳（第3轨 auto 塌缩），徽章仍跟序号同行 */
+  .slirn-cut-row { grid-template-columns: 40px auto auto 92px 1fr auto auto; gap: 8px; }
   .slirn-cut-row .slirn-sub-time { display: none; }
-  .slirn-cut-abadge { grid-column: 1 / -1; justify-self: start; }
-  .slirn-cut-spk { grid-column: 1 / -1; justify-self: start; }
+  .slirn-cut-row .slirn-cut-abadge { grid-column: 1 / -1; justify-self: start; }
 }
 .slirn-rev-select {
   width: 100%; padding: 4px 6px; font-size: 12.5px;

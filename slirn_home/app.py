@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import html
+import logging
 from pathlib import Path
 from typing import Any
 
 import gradio as gr
+
+log = logging.getLogger(__name__)
 
 # 确保 tasklib 可导入（slirn-standalone 在 sibling 或子模块挂载点）
 # 必须在 from slirn_home.task_list import 之前调用，因为 task_list.py 顶层 import tasklib
@@ -14,7 +17,7 @@ from slirn_home.paths import ensure_tasklib_importable
 
 ensure_tasklib_importable()
 
-from tasklib import TaskManager, TaskStatus  # noqa: E402
+from tasklib import TaskManager, TaskNotFoundError, TaskStatus  # noqa: E402
 from tasklib.hotword_lib import HotwordLibrary  # noqa: E402
 
 from slirn_home.task_list import (
@@ -185,7 +188,7 @@ def _render_task_list(mgr: TaskManager) -> str:
                 <button class="slirn-btn slirn-btn-sm" data-action="view-task" data-task-id="{_esc(s.task_id)}">📄 详情</button>
                 <button class="slirn-btn slirn-btn-sm" data-action="edit-task" data-task-id="{_esc(s.task_id)}">✏️ 编辑</button>
                 <button class="slirn-btn slirn-btn-sm slirn-btn-primary" data-action="open-workbench" data-task-id="{_esc(s.task_id)}">✂️ 剪辑</button>
-                <button class="slirn-btn slirn-btn-sm slirn-btn-danger" data-action="delete-task" data-task-id="{_esc(s.task_id)}">🗑️ 删除</button>
+                <button class="slirn-btn slirn-btn-sm slirn-btn-danger" data-action="delete-task" data-task-id="{_esc(s.task_id)}" data-task-name="{_esc(s.name)}">🗑️ 删除</button>
             </div>
         </div>'''
 
@@ -689,6 +692,7 @@ def _render_cutlist_zone(task_id: str, t, mgr: TaskManager) -> str:
         spk = spk_rows.get(str(rid))
         if not spk:
             return ""
+        # REQ-20260917-036：紧跟序号渲染（第2轨），与其他信息同行不折行
         return (f'<span class="slirn-cut-spk"'
                 f' title="人员 {int(spk)}（时间段重叠最大的字幕段说话人）">👤{int(spk)}</span>')
 
@@ -726,10 +730,10 @@ def _render_cutlist_zone(task_id: str, t, mgr: TaskManager) -> str:
                     f' data-id="{_esc(it["id"])}" data-mark="{mk}" data-mark-init="{mk}" data-source-i="{si}"'
                     f' data-start-ms="{int(it["start_ms"])}" data-end-ms="{int(it["end_ms"])}"{_spk_attr(it["id"])}{fb_title}>'
                     f'<span class="slirn-sub-idx">{_esc(it["id"])}</span>'
+                    f'{_spk_badge(it["id"])}'
                     f'<span class="slirn-sub-time">{_esc(it["start"])} → {_esc(it["end"])}</span>'
                     f'<span class="slirn-cut-mark" title="点击翻转 保留/删除">{mk_label}</span>'
                     f'<span class="slirn-sub-text">{_esc(it["text"])}{fb_mark}</span>'
-                    f'{_spk_badge(it["id"])}'
                     f'</div>'
                 )
             rows += "</div>"
@@ -756,12 +760,12 @@ def _render_cutlist_zone(task_id: str, t, mgr: TaskManager) -> str:
                 f' data-id="{_esc(first["id"])}" data-source-i="{si}"'
                 f' data-start-ms="{int(first["start_ms"])}" data-end-ms="{int(first["end_ms"])}"{_spk_attr(first["id"])}>'
                 f'<span class="slirn-sub-idx">{si}</span>'
+                f'{_spk_badge(first["id"])}'
                 f'<span class="slirn-sub-time">{_esc(first["start"])} → {_esc(first["end"])}</span>'
                 f'<span class="slirn-rev-badge {kind}" data-kind="{kind}">{kind_label}</span>'
                 f'<span class="slirn-sub-text">{text_html}</span>'
                 f'{_act_sel(act)}'
                 f'{resplit_btn}'
-                f'{_spk_badge(first["id"])}'
                 f'</div></div>'
             )
     # fallback 提示（有降级子段时在统计行下提醒）
@@ -795,6 +799,8 @@ def _render_cutlist_zone(task_id: str, t, mgr: TaskManager) -> str:
             f'<div class="slirn-cut-spk-chips">{chips}</div>'
             '<div class="slirn-cut-spk-find">按人员ID查找：'
             '<input id="slirn-cut-spk-q" type="number" min="1" step="1" placeholder="如 2">'
+            '<label class="slirn-cut-spk-skiplbl" title="勾选后「上一条/下一条」只在未删除的记录间跳转">'
+            '<input id="slirn-cut-spk-skipdel" type="checkbox">跳过已删除</label>'
             '<button class="slirn-btn slirn-btn-xs" data-action="cut-spk-prev">⬆️ 上一条</button>'
             '<button class="slirn-btn slirn-btn-xs" data-action="cut-spk-next">⬇️ 下一条</button>'
             '<button class="slirn-btn slirn-btn-xs" data-action="cut-spk-delete">❌ 删除该人员全部记录</button>'
@@ -1258,7 +1264,7 @@ def _render_task_detail(task_id: str, mgr: TaskManager) -> str:
         </div>
         {detail_rows}
         <div class="slirn-task-actions" style="margin-top:20px;">
-            <button class="slirn-btn slirn-btn-danger" data-action="delete-task" data-task-id="{_esc(task_id)}">🗑️ 删除任务</button>
+            <button class="slirn-btn slirn-btn-danger" data-action="delete-task" data-task-id="{_esc(task_id)}" data-task-name="{_esc(t.name)}">🗑️ 删除任务</button>
         </div>
     </div>
     {_render_subtitle_zone(task_id, t, mgr)}'''
@@ -2452,13 +2458,22 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
 
     @app.app.post("/slirn/api/delete_task")
     async def delete_task(body: dict = Body(default_factory=dict)):
+        """删除任务（REQ-20260917-034）— 真删：整个任务目录从磁盘移除，不可恢复。
+
+        失败必须如实报错（旧版吞异常假报「已删除」，任务刷新后复活）；
+        Windows 下文件被占用（如视频预览握着句柄）是常见失败原因。
+        """
         tid = (body.get("task_id") or "").strip()
-        if tid:
-            try:
-                mgr.delete(tid)
-            except Exception:
-                pass
-        return _ok(_render_task_list(mgr), toast="✅ 已删除")
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            mgr.delete(tid)
+        except TaskNotFoundError as e:
+            return _err(f"任务不存在或已删除: {e}")
+        except OSError as e:
+            log.exception("删除任务 %s 失败（真删未完成）", tid)
+            return _err(f"删除失败: {e} — 可能有文件正被预览/占用，关闭预览后重试")
+        return _ok(_render_task_list(mgr), toast="✅ 已删除（任务文件已从磁盘移除）")
 
     # ---------- 字幕生成（REQ-20260915-001）----------
 
