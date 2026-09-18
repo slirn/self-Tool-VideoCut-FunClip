@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 from typing import Callable
 
+from slirn_home import execution_history
 from slirn_home.paths import find_repo_root as _find_repo_root
 
 log = logging.getLogger(__name__)
@@ -364,6 +365,11 @@ def start_job(
             "segments_count": 0,
         }
 
+    # REQ-20260918-048：执行历史（落盘，单写锁）。开始即记一条 running；完成/失败回填。
+    exec_id = execution_history.record_start(
+        outputs_dir, execution_history.KIND_SUBTITLE_GENERATION,
+        extra={"sd": sd, "source": source})
+
     def _run():
         job = _JOBS[task_id]
 
@@ -414,10 +420,18 @@ def start_job(
                     on_success(segments)
                 except Exception as e:  # noqa: BLE001 — 回调失败不影响结果
                     log.warning("[asr][%s] on_success 回调失败: %s", task_id, e)
+            # REQ-20260918-048：执行历史成功回填（extra 补 segments / speakers 统计）
+            execution_history.patch_extra(outputs_dir, exec_id,
+                                          {"segments": len(segments),
+                                           "speakers": len(stats) if stats else 0})
+            execution_history.record_finish(outputs_dir, exec_id, success=True,
+                                            error="")
         except SystemExit as e:  # 上游 video_recog 对无音频视频 sys.exit(1)
             job["state"] = "error"
             job["error"] = f"视频没有音频轨（无法识别）: exit={e.code}"
             job["finished_at"] = time.time()
+            execution_history.record_finish(outputs_dir, exec_id, success=False,
+                                            error=job["error"])
         except Exception as e:  # noqa: BLE001 — 后台线程必须全兜底
             log.exception("[asr][%s] 生成失败", task_id)
             msg = str(e)
@@ -428,6 +442,8 @@ def start_job(
             job["state"] = "error"
             job["error"] = msg
             job["finished_at"] = time.time()
+            execution_history.record_finish(outputs_dir, exec_id, success=False,
+                                            error=msg)
 
     threading.Thread(target=_run, name=f"asr-{task_id}", daemon=True).start()
     return True

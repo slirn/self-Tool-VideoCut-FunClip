@@ -196,9 +196,9 @@ def test_render_workbench_layout(tmp_path: Path):
     assert "✂️ 切分修剪" in html, "阶段名「粗剪」改为「切分修剪」（REQ-20260916-008）"
     assert "处理剪辑 · 第 3 步：切分修剪" in html
     assert 'id="slirn-wb-pane-rough_cut"' in html
-    # 粗剪合成（REQ-20260916-016）：原「精剪字幕」占位真实化 — 可选步骤，产物驱动 done
+    # 粗剪合成（REQ-20260916-016 → REQ-20260918-045 由可选改为必做）：占位真实化 — 必做阶段，可选徽章移除
     assert "🎥 粗剪合成" in html
-    assert "slirn-wb-stage-optional" in html, "可选徽章"
+    assert "slirn-wb-stage-optional" not in html, "REQ-20260918-045：粗剪合成不再是可选徽章"
     assert 'id="slirn-wb-pane-rough_compose"' in html
     # 优化字幕（REQ-20260917-030）：原「精剪修订·热词替换」改造 — 成片重识别 + 不明确字词
     assert "✨ 优化字幕" in html
@@ -210,6 +210,22 @@ def test_render_workbench_layout(tmp_path: Path):
     import re
     assert re.search(r'id="slirn-wb-pane-subtitle"(?![^>]*display:none)', html)
     assert 'id="slirn-wb-pane-assets" style="display:none;"' in html
+
+
+def test_render_workbench_autonext_switch(tmp_path: Path):
+    """REQ-20260918-046 — 完成后自动进下一阶段开关在顶部阶段列表内渲染，未勾选，
+    标题解释语义；由 JS 读 localStorage 并按之前已 done 的节点决定是否触发跳转。"""
+    from slirn_home.app import _render_workbench
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="autonext", original_video=video)
+    html = _render_workbench(t.task_id, m)
+    assert 'class="slirn-wb-autonext"' in html
+    assert 'id="slirn-wb-autonext"' in html
+    # 默认未勾选（用户主动开启后才生效）
+    assert '<input type="checkbox" id="slirn-wb-autonext">' in html
+    assert "完成后自动进下一阶段" in html
+    assert "title=" in html and "自动切换到下一阶段" in html.replace("&#39;", "'")
 
 
 def test_render_workbench_missing_task(tmp_path: Path):

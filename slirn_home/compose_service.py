@@ -34,6 +34,8 @@ from typing import Callable
 
 import proglog  # moviepy 1.0.3 自带依赖（帧进度协议）
 
+from slirn_home import execution_history
+
 log = logging.getLogger(__name__)
 
 ROUGH_COMPOSE_NAME = "rough_compose.mp4"
@@ -424,6 +426,12 @@ def start_compose(task_id: str, video_path: Path, intervals_ms: list[tuple[int, 
             "started_at": time.time(), "finished_at": None, "result": None,
         }
 
+    # REQ-20260918-048：执行历史（落盘，单写锁）
+    outputs_dir = dst.parent
+    exec_id = execution_history.record_start(
+        outputs_dir, execution_history.KIND_ROUGH_COMPOSE,
+        extra={"intervals": len(intervals_ms), "lines": len(lines)})
+
     def _run():
         job = _JOBS[task_id]
 
@@ -437,11 +445,16 @@ def start_compose(task_id: str, video_path: Path, intervals_ms: list[tuple[int, 
             job["state"] = "done"
             job["finished_at"] = time.time()
             log.info("[compose][%s] 完成：%s 段 → %s", task_id, result["segments"], dst.name)
+            execution_history.patch_extra(outputs_dir, exec_id,
+                                          {"segments": result.get("segments"),
+                                           "output": dst.name})
+            execution_history.record_finish(outputs_dir, exec_id, success=True, error="")
         except Exception as e:  # noqa: BLE001 — 后台线程必须全兜底
             job["state"] = "error"
             job["error"] = str(e)
             job["finished_at"] = time.time()
             log.exception("[compose][%s] 合成失败", task_id)
+            execution_history.record_finish(outputs_dir, exec_id, success=False, error=str(e))
 
     threading.Thread(target=_run, name=f"rough-compose-{task_id}", daemon=True).start()
     return True
