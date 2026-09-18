@@ -32,7 +32,11 @@ def _outputs(tmp_path: Path) -> Path:
 def test_record_start_then_finish_success(tmp_path: Path):
     """启动 → 完成成功：status=success、duration_ms > 0、finished_at 已回填。"""
     from slirn_home.execution_history import (
-        HISTORY_FILENAME, KIND_SUBTITLE_GENERATION, load_history, record_finish, record_start,
+        HISTORY_FILENAME,
+        KIND_SUBTITLE_GENERATION,
+        load_history,
+        record_finish,
+        record_start,
     )
 
     out = _outputs(tmp_path)
@@ -61,7 +65,10 @@ def test_record_start_then_finish_success(tmp_path: Path):
 def test_record_finish_failed_writes_error(tmp_path: Path):
     """失败分支：error 字段写入、status=failed；error 截断到 500 字符。"""
     from slirn_home.execution_history import (
-        KIND_ROUGH_COMPOSE, load_history, record_finish, record_start,
+        KIND_ROUGH_COMPOSE,
+        load_history,
+        record_finish,
+        record_start,
     )
 
     out = _outputs(tmp_path)
@@ -90,7 +97,11 @@ def test_record_finish_with_unknown_id_appends(tmp_path: Path):
 def test_patch_extra_merges_into_running_record(tmp_path: Path):
     """patch_extra 合并覆写：原 extra 的字段保留、新字段并入。"""
     from slirn_home.execution_history import (
-        KIND_SUBTITLE_GENERATION, load_history, patch_extra, record_finish, record_start,
+        KIND_SUBTITLE_GENERATION,
+        load_history,
+        patch_extra,
+        record_finish,
+        record_start,
     )
 
     out = _outputs(tmp_path)
@@ -127,7 +138,9 @@ def test_load_history_corrupt_file_returns_empty(tmp_path: Path):
 def test_history_writes_are_atomic_no_tmp_leftover(tmp_path: Path):
     """原子写：tmp 写入后 rename，不应残留 .tmp 文件。"""
     from slirn_home.execution_history import (
-        HISTORY_FILENAME, KIND_SUBTITLE_GENERATION, record_start,
+        HISTORY_FILENAME,
+        KIND_SUBTITLE_GENERATION,
+        record_start,
     )
 
     out = _outputs(tmp_path)
@@ -140,13 +153,15 @@ def test_history_writes_are_atomic_no_tmp_leftover(tmp_path: Path):
 def test_concurrent_record_start_does_not_lose(tmp_path: Path):
     """并发 20 线程同时 record_start → 最终列表应有 20 条（无丢失）。"""
     from slirn_home.execution_history import (
-        KIND_SUBTITLE_GENERATION, load_history, record_start,
+        KIND_SUBTITLE_GENERATION,
+        load_history,
+        record_start,
     )
 
     out = _outputs(tmp_path)
     threads = [threading.Thread(target=lambda: record_start(out, KIND_SUBTITLE_GENERATION)) for _ in range(20)]
-    for t in threads: t.start()
-    for t in threads: t.join()
+    for t in threads: t.start()  # noqa: E701
+    for t in threads: t.join()  # noqa: E701
 
     items = load_history(out)
     assert len(items) == 20, f"并发丢写: 期望 20 条，实际 {len(items)}"
@@ -155,7 +170,10 @@ def test_concurrent_record_start_does_not_lose(tmp_path: Path):
 def test_hard_limit_truncates_oldest(tmp_path: Path):
     """超过 _HARD_LIMIT（5000）→ 截掉最旧的，保留最新 N 条。"""
     from slirn_home.execution_history import (
-        KIND_SUBTITLE_GENERATION, _HARD_LIMIT, load_history, record_start,
+        _HARD_LIMIT,
+        KIND_SUBTITLE_GENERATION,
+        load_history,
+        record_start,
     )
 
     out = _outputs(tmp_path)
@@ -193,12 +211,14 @@ def test_format_duration_human_readable():
 def test_execution_history_endpoint(tmp_path: Path):
     """服务端 API：按 task_id 返回倒序历史。"""
     from fastapi.testclient import TestClient
+    from tasklib import TaskManager
 
     from slirn_home import build_app
     from slirn_home.execution_history import (
-        KIND_SUBTITLE_GENERATION, record_finish, record_start,
+        KIND_SUBTITLE_GENERATION,
+        record_finish,
+        record_start,
     )
-    from tasklib import TaskManager
 
     video = tmp_path / "v.mp4"
     video.write_bytes(b"v")
@@ -225,11 +245,15 @@ def test_execution_history_endpoint(tmp_path: Path):
 
 def test_render_workbench_exec_card(tmp_path: Path):
     """工作台顶部渲染执行历史卡片：折叠壳 + 倒序行 + 空态文案。"""
+    from tasklib import TaskManager
+
     from slirn_home.app import _render_workbench
     from slirn_home.execution_history import (
-        KIND_SUBTITLE_GENERATION, KIND_ROUGH_COMPOSE, record_finish, record_start,
+        KIND_ROUGH_COMPOSE,
+        KIND_SUBTITLE_GENERATION,
+        record_finish,
+        record_start,
     )
-    from tasklib import TaskManager
 
     video = tmp_path / "v.mp4"
     video.write_bytes(b"v")
@@ -258,8 +282,9 @@ def test_render_workbench_exec_card(tmp_path: Path):
 
 def test_render_workbench_exec_card_empty_state(tmp_path: Path):
     """无任何执行记录 → 友好空态（不显示空列表）。"""
-    from slirn_home.app import _render_workbench
     from tasklib import TaskManager
+
+    from slirn_home.app import _render_workbench
 
     video = tmp_path / "v.mp4"
     video.write_bytes(b"v")

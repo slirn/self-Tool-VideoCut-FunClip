@@ -1517,6 +1517,8 @@ def _render_workbench(task_id: str, mgr: TaskManager) -> str:
         <div class="slirn-panel-header">
             <div class="slirn-panel-title">✂️ 剪辑工作台 · {_esc(t.name)}</div>
             <div>
+                <button class="slirn-btn slirn-btn-sm" data-action="pipe-open" data-task-id="{_esc(task_id)}"
+                        title="流程配置 + 自动执行">⚙ 流程</button>
                 <button class="slirn-btn slirn-btn-sm slirn-wb-stages-expand" data-action="wb-toggle-stages"
                         title="展开左侧阶段列表">🧭 展开阶段</button>
                 <button class="slirn-btn slirn-btn-sm" data-action="edit-task" data-task-id="{_esc(task_id)}">✏️ 编辑任务</button>
@@ -1526,6 +1528,9 @@ def _render_workbench(task_id: str, mgr: TaskManager) -> str:
         {top_rows}
         {_render_exec_history_card(task_id, mgr)}
     </div>
+    <!-- 流程配置抽屉 + 状态条挂载点（REQ-20260918-047）-->
+    <div id="slirn-pipe-status" class="slirn-pipe-status" data-task-id="{_esc(task_id)}" hidden></div>
+    <aside id="slirn-pipe-drawer" class="slirn-pipe-drawer" data-task-id="{_esc(task_id)}" hidden></aside>
     <div class="slirn-wb-main">
         <div class="slirn-wb-stages-rail" data-action="wb-toggle-stages"
              title="展开左侧阶段列表"><span>🧭</span><span>阶</span><span>段</span><span>»</span></div>
@@ -1944,6 +1949,8 @@ def _render_create_task(repo_root: Path, edit=None) -> str:
 # ============================================================
 
 ROUTER_JS = '<script defer src="/slirn/static/router.js"></script>'
+# REQ-20260918-047：流程配置 + 自动执行 JS（与 router.js 同模式走静态文件）
+PIPELINE_JS = '<script defer src="/slirn/static/pipeline.js"></script>'
 # 说明：ROUTER_JS 原本是 ~115KB 的内联 JS 字符串，通过 gr.HTML(head=...) 注入。
 # Gradio 6.17.3 的 head 传输链路会把脚本文本里的反斜杠转义解码
 # （\n -> 换行、\x20 -> 空格、\\ -> \、孤立的 \ 被删除），内联 JS 因此产生
@@ -1984,7 +1991,7 @@ def _build_head() -> str:
     })();
     </script>
     """
-    return theme_js + ROUTER_JS
+    return theme_js + ROUTER_JS + PIPELINE_JS
 
 
 def _inject_css_and_js(app: gr.Blocks) -> None:
@@ -2265,6 +2272,17 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
     async def serve_router_js():
         return FileResponse(
             router_js_path,
+            media_type="text/javascript; charset=utf-8",
+            headers={"Cache-Control": "no-cache"},
+        )
+
+    # REQ-20260918-047：流程配置 + 自动执行 JS
+    pipeline_js_path = Path(__file__).parent / "static" / "pipeline.js"
+
+    @app.app.get("/slirn/static/pipeline.js")
+    async def serve_pipeline_js():
+        return FileResponse(
+            pipeline_js_path,
             media_type="text/javascript; charset=utf-8",
             headers={"Cache-Control": "no-cache"},
         )
@@ -3323,6 +3341,113 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         # 倒序（最新在前）；同秒多条按 id 倒序兜底
         items.sort(key=lambda x: (float(x.get("started_at") or 0), str(x.get("id") or "")), reverse=True)
         return _ok("", items=items)
+
+    # ---------- 流程配置 + 自动执行（REQ-20260918-047）----------
+    # 工作台顶部「⚙ 流程」按钮 → 抽屉编辑器 → 配置存 tasks/<tid>/outputs/pipeline.json
+    # 后台守护线程（pipeline_service）按 STAGE_ORDER 顺序跑，每步调本组原 stage API
+    # （/gen_subtitle、/revise_subtitle、/build_cutlist、/compose_rough、/optimize_subtitle）。
+    # 任何阶段报错即停，错误信息写 pipeline.json history；手动按钮始终可用。
+    from slirn_home import pipeline_service
+
+    @app.app.post("/slirn/api/pipeline_get")
+    async def pipeline_get(body: dict = Body(default_factory=dict)):
+        """读取任务的 pipeline 配置 + 当前 job 状态 + 历史 summary。
+
+        没写过 pipeline.json → 返回默认配置（AC-1）。
+        """
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            mgr.get(tid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+        outputs_dir = mgr.tasks_dir / tid / "outputs"
+        data = pipeline_service.load_pipeline(outputs_dir)
+        if data is None:
+            # 还没写过 → 返回默认
+            data = {
+                "version": 1,
+                "config": pipeline_service.default_config(),
+                "updated_at": None,
+                "history": [],
+            }
+        status = pipeline_service.pipeline_status(tid)
+        return _ok("", config=data["config"], updated_at=data.get("updated_at"),
+                   history=data.get("history") or [], status=status)
+
+    @app.app.post("/slirn/api/pipeline_save")
+    async def pipeline_save(body: dict = Body(default_factory=dict)):
+        """保存 pipeline 配置；缺字段用默认值补全（容错）。"""
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            mgr.get(tid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+        outputs_dir = mgr.tasks_dir / tid / "outputs"
+        cfg = body.get("config") or {}
+        ts = pipeline_service.save_pipeline(outputs_dir, cfg)
+        return _ok("", saved_at=ts, toast="⚙️ 流程配置已保存")
+
+    @app.app.post("/slirn/api/pipeline_run")
+    async def pipeline_run(body: dict = Body(default_factory=dict)):
+        """启动后台自动执行（守护线程）；已有 running job → False。"""
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            mgr.get(tid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+        since = body.get("since") or None
+        outputs_dir = mgr.tasks_dir / tid / "outputs"
+        # base url：调度器走 in-process HTTP client（同进程同端口）
+        base_url = _os.environ.get("SLIRN_API_BASE") or ""
+        if not base_url:
+            try:
+                # Gradio FastAPI 实例：host/port 直接读 app.app
+                base_url = f"http://127.0.0.1:{getattr(app.app, 'port', 7861)}"
+            except Exception:  # noqa: BLE001 — 兜底走默认端口
+                base_url = "http://127.0.0.1:7861"
+        started = pipeline_service.run_pipeline(tid, base_url, outputs_dir, since=since)
+        if not started:
+            return _ok("", started=False,
+                       toast="⏳ 流程已在运行 — 等待完成或先点 ⏹ 停止")
+        return _ok("", started=True, toast="▶ 流程已启动（后台运行，可在状态条查看进度）")
+
+    @app.app.post("/slirn/api/pipeline_status")
+    async def pipeline_status_endpoint(body: dict = Body(default_factory=dict)):
+        """读取当前 job 状态：state / current_stage / percent / log / history。"""
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            mgr.get(tid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+        status = pipeline_service.pipeline_status(tid)
+        # 同步补一次 history（落盘数据，状态条初始显示用）
+        outputs_dir = mgr.tasks_dir / tid / "outputs"
+        disk_data = pipeline_service.load_pipeline(outputs_dir)
+        disk_history = (disk_data or {}).get("history") or []
+        if status is None:
+            # 从未跑过 → state=idle
+            return _ok("", state="idle", current_stage=None, percent=0.0,
+                       log=[], error=None, history=disk_history)
+        return _ok("", **status, history=status.get("history") or disk_history)
+
+    @app.app.post("/slirn/api/pipeline_stop")
+    async def pipeline_stop(body: dict = Body(default_factory=dict)):
+        """请求停止（设置标志位，下次循环检查时退出）。无 running job → False。"""
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        stopped = pipeline_service.stop_pipeline(tid)
+        if not stopped:
+            return _ok("", stopped=False, toast="没有正在运行的流程")
+        return _ok("", stopped=True, toast="⏹ 已请求停止（当前阶段完成后退出）")
 
     @app.app.post("/slirn/api/optimize_subtitle")
     async def optimize_subtitle(body: dict = Body(default_factory=dict)):

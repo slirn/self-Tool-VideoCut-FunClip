@@ -2170,3 +2170,218 @@ input[type="checkbox"]:checked { border-color: var(--accent-solid); }
   font-size: 12px;
   padding: 4px 0;
 }
+
+/* ===== REQ-20260918-047 流程配置 + 自动执行 ===== */
+
+/* 抽屉：从右侧滑入，宽 480px */
+.slirn-pipe-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 480px;
+  max-width: 95vw;
+  background: var(--card-bg, rgba(255, 255, 255, 0.85));
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-left: 1px solid var(--border);
+  box-shadow: -8px 0 32px rgba(31, 38, 135, 0.12);
+  z-index: 9990;
+  display: flex;
+  flex-direction: column;
+  font-size: 13px;
+}
+.slirn-pipe-drawer[hidden] { display: none !important; }
+.slirn-pipe-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.4);
+}
+.slirn-pipe-title { font-weight: 600; flex: 1; }
+.slirn-pipe-template { padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border); background: var(--input-bg, #fff); }
+.slirn-pipe-tabs {
+  display: flex;
+  gap: 0;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+.slirn-pipe-tab {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 6px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: 12px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  overflow: hidden;
+}
+.slirn-pipe-tab.active {
+  color: var(--accent-solid, #667eea);
+  border-bottom-color: var(--accent-solid, #667eea);
+  font-weight: 600;
+}
+.slirn-pipe-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px;
+}
+.slirn-pipe-form { display: flex; flex-direction: column; gap: 12px; }
+.slirn-pipe-desc {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 8px 10px;
+  background: rgba(102, 126, 234, 0.06);
+  border-left: 3px solid var(--accent-solid, #667eea);
+  border-radius: 0 4px 4px 0;
+}
+.slirn-pipe-hint { color: var(--text-muted); font-size: 11px; }
+.slirn-pipe-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+.slirn-pipe-field > span:first-child { color: var(--text-secondary); }
+.slirn-pipe-field input[type="text"],
+.slirn-pipe-field input[type="number"],
+.slirn-pipe-field select {
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--input-bg, #fff);
+  font-size: 12px;
+}
+.slirn-pipe-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.4);
+  flex-wrap: wrap;
+}
+.slirn-pipe-flow-stop { display: flex; align-items: center; gap: 4px; font-size: 12px; }
+.slirn-pipe-flow-stop select { padding: 3px 6px; border-radius: 4px; border: 1px solid var(--border); background: var(--input-bg); }
+.slirn-pipe-updated { color: var(--text-muted); font-size: 11px; flex: 1; min-width: 100px; }
+
+/* 状态条 */
+.slirn-pipe-status {
+  position: fixed;
+  top: 60px;
+  right: 16px;
+  width: 420px;
+  max-width: 90vw;
+  background: var(--card-bg, rgba(255, 255, 255, 0.92));
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(31, 38, 135, 0.15);
+  z-index: 9985;
+  font-size: 12px;
+  overflow: hidden;
+}
+.slirn-pipe-status[hidden] { display: none !important; }
+.slirn-pipe-status-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: rgba(255, 255, 255, 0.5);
+}
+.slirn-pipe-status-state {
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-weight: 600;
+  font-size: 11px;
+}
+.slirn-pipe-status-state-running { background: rgba(59, 130, 246, 0.15); color: #2563eb; }
+.slirn-pipe-status-state-done { background: rgba(34, 197, 94, 0.15); color: #16a34a; }
+.slirn-pipe-status-state-error { background: rgba(239, 68, 68, 0.15); color: #dc2626; }
+.slirn-pipe-status-state-stopped { background: rgba(148, 163, 184, 0.15); color: #475569; }
+.slirn-pipe-status-state-idle { background: rgba(148, 163, 184, 0.1); color: #64748b; }
+.slirn-pipe-status-stage { color: var(--text-secondary); flex: 1; }
+.slirn-pipe-status-bar {
+  width: 80px;
+  height: 6px;
+  border-radius: 3px;
+  overflow: hidden;
+}
+.slirn-pipe-status-bar::-webkit-progress-bar { background: rgba(148, 163, 184, 0.2); border-radius: 3px; }
+.slirn-pipe-status-bar::-webkit-progress-value { background: var(--accent-solid, #667eea); border-radius: 3px; }
+.slirn-pipe-status-collapse {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--text-muted);
+}
+.slirn-pipe-status-log {
+  padding: 6px 12px 8px;
+  border-top: 1px dashed var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 90px;
+  overflow-y: auto;
+}
+.slirn-pipe-status-log-row {
+  display: flex;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+.slirn-pipe-status-log-sign { flex-shrink: 0; }
+.slirn-pipe-status-log-error .slirn-pipe-status-log-msg { color: #dc2626; }
+.slirn-pipe-status-log-ok .slirn-pipe-status-log-msg { color: #16a34a; }
+.slirn-pipe-status-log-warn .slirn-pipe-status-log-msg { color: #d97706; }
+.slirn-pipe-status-err {
+  padding: 6px 12px;
+  background: rgba(239, 68, 68, 0.08);
+  color: #dc2626;
+  font-size: 11px;
+  border-top: 1px solid rgba(239, 68, 68, 0.2);
+}
+
+/* 暗主题 */
+@media (prefers-color-scheme: dark) {
+  .slirn-pipe-drawer, .slirn-pipe-status {
+    background: rgba(30, 41, 59, 0.92);
+    border-color: rgba(148, 163, 184, 0.2);
+  }
+  .slirn-pipe-head, .slirn-pipe-foot {
+    background: rgba(30, 41, 59, 0.5);
+  }
+  .slirn-pipe-desc {
+    background: rgba(102, 126, 234, 0.15);
+  }
+  .slirn-pipe-status-head {
+    background: rgba(30, 41, 59, 0.5);
+  }
+}
+:root[data-theme="dark"] .slirn-pipe-drawer,
+:root[data-theme="dark"] .slirn-pipe-status {
+  background: rgba(30, 41, 59, 0.92);
+  border-color: rgba(148, 163, 184, 0.2);
+}
+:root[data-theme="dark"] .slirn-pipe-head,
+:root[data-theme="dark"] .slirn-pipe-foot {
+  background: rgba(30, 41, 59, 0.5);
+}
+:root[data-theme="dark"] .slirn-pipe-desc {
+  background: rgba(102, 126, 234, 0.15);
+}
+:root[data-theme="dark"] .slirn-pipe-status-head {
+  background: rgba(30, 41, 59, 0.5);
+}
