@@ -94,3 +94,63 @@ def test_render_cut_zone_batch_bar(tmp_path: Path):
     assert '<option value="">↩️ 维持原状</option>' in h
     # 批量条在清单前（先见批量条再见行）
     assert h.index('id="slirn-cut-batch"') < h.index('id="slirn-cut-list"')
+
+
+# ---------- REQ-20260918-040 字幕内容搜索定位 ----------
+
+def test_render_rev_zone_search_bar(tmp_path: Path):
+    """REQ-040：字幕修订 — 搜索条（输入框 + 计数 + 上/下一条 + 提示）渲染于批量条之后、清单之前。
+    行 data-text 暴露当前 text（小写归一化在 JS 完成），便于 JS 在筛选后匹配可见行。"""
+    from slirn_home.app import _render_revision_zone
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="搜索修订", original_video=video)
+    tid = t.task_id
+    outputs = _write_subtitle(m, tid)
+    (outputs / "revision.json").write_text(json.dumps(
+        {"version": 1, "model": "qwen-plus", "created_at": "2026-09-18T10:00:00",
+         "saved_at": None, "segments_count": len(ENTRIES), "entries": ENTRIES},
+        ensure_ascii=False), encoding="utf-8")
+
+    h = _render_revision_zone(tid, m.get(tid), m)
+    # 搜索条
+    assert 'id="slirn-rev-search"' in h
+    assert 'id="slirn-rev-search-q"' in h and 'placeholder=' in h
+    assert 'id="slirn-rev-search-count"' in h
+    assert 'data-action="rev-search-prev"' in h
+    assert 'data-action="rev-search-next"' in h
+    # 顺序：批量条 < 搜索条 < 清单
+    assert h.index('id="slirn-rev-batch"') < h.index('id="slirn-rev-search"') < h.index('id="slirn-rev-list"')
+    # 行 data-text（HTML 属性 escape 在 _esc 完成；保留中文字符）
+    assert 'data-text="嗯嗯大家好"' in h
+    assert 'data-text="今天讲第一课"' in h
+
+
+def test_render_cut_zone_search_bar_with_orig(tmp_path: Path):
+    """REQ-040：切分修剪 — 搜索条带「整段按原文、子段按子段」提示。
+    整段行 data-text 是 keep_text/原 text；切分子段行 data-text 是子段文本、data-orig 是原整段文本。"""
+    from slirn_home.app import _render_cutlist_zone
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="搜索切分", original_video=video)
+    tid = t.task_id
+    outputs = _write_subtitle(m, tid)
+    decided = [dict(e, decision="accept") for e in ENTRIES]
+    (outputs / "revision.json").write_text(json.dumps(
+        {"version": 1, "model": "qwen-plus", "created_at": "2026-09-18T10:00:00",
+         "saved_at": "2026-09-18T10:05:00", "segments_count": len(decided),
+         "entries": decided},
+        ensure_ascii=False), encoding="utf-8")
+
+    h = _render_cutlist_zone(tid, m.get(tid), m)
+    assert 'id="slirn-cut-search"' in h
+    assert 'id="slirn-cut-search-q"' in h
+    assert 'id="slirn-cut-search-count"' in h
+    assert 'data-action="cut-search-prev"' in h
+    assert 'data-action="cut-search-next"' in h
+    # 顺序：批量条 < 搜索条 < 清单
+    assert h.index('id="slirn-cut-batch"') < h.index('id="slirn-cut-search"') < h.index('id="slirn-cut-list"')
+    # 切分修剪 — 段3 split，行应同时暴露子段文本与原文
+    assert 'data-text="我们开始吧"' in h, "子段行 data-text 暴露子段文本"
+    # 段1 整段保留 + 段2 整段保留 → data-text 是原 text
+    assert 'data-text="嗯嗯大家好"' in h or 'data-text="今天讲第一课"' in h, "整段行 data-text 暴露显示文本"

@@ -213,7 +213,8 @@ def test_render_cutlist_zone_persists_link(tmp_path: Path):
     # 按钮变「重新关联」
     assert "重新关联人员ID" in h
     # REQ-035：统计带「跳过已删除」勾选框（服务端渲染，与 JS 重渲染一致）
-    assert 'id="slirn-cut-spk-skipdel" type="checkbox"' in h
+    # REQ-20260918-041：默认勾选；勾选框必须显著可见（CSS 由全局 input[type=checkbox] 规则负责）
+    assert 'id="slirn-cut-spk-skipdel" type="checkbox" checked' in h
     assert "跳过已删除" in h
     # REQ-036：徽章位于序号之后、时间戳之前（同一行不折行）
     row1 = h[h.index('data-spk="1"'):]

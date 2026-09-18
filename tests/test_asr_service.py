@@ -560,8 +560,9 @@ def test_render_detail_with_speaker_badges_and_stats(tmp_path: Path):
     # 统计行：人数 + 每人句数
     assert "2 位说话人" in html
     assert "人员1 2 句" in html and "人员2 1 句" in html
-    # 开关存在且默认开
-    assert 'id="slirn-sd-switch" checked' in html
+    # REQ-20260918-041：区分说话人默认不勾选（性能 / 噪音敏感），但勾选框必须可见
+    assert 'id="slirn-sd-switch"' in html
+    assert 'id="slirn-sd-switch" checked' not in html, "默认应未勾选"
 
 
 def test_render_detail_legacy_subtitle_without_spk(detail_mgr):

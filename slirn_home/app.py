@@ -329,7 +329,7 @@ def _render_subtitle_zone(task_id: str, t, mgr: TaskManager) -> str:
             <button class="slirn-btn slirn-btn-primary" data-action="gen-subtitle" data-task-id="{_esc(task_id)}">{gen_btn_label}</button>
             <button class="slirn-btn" data-action="play-segment" data-task-id="{_esc(task_id)}">▶️ 播放视频</button>
             <label class="slirn-sd-toggle" title="开启后用 FunASR cam++ 分辨每句话的说话人：字幕带人员编号并统计每人句数；单人视频误分成多人时可关闭重生成">
-                <input type="checkbox" id="slirn-sd-switch" checked /> 区分说话人
+                <input type="checkbox" id="slirn-sd-switch" /> 区分说话人
             </label>
         </div>
     </div>'''
@@ -502,7 +502,8 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
         rows += (
             f'<div class="slirn-rev-row{" open" if open_detail else ""}" data-task-id="{_esc(task_id)}"'
             f' data-start-ms="{int(e.get("start_ms", 0))}" data-end-ms="{int(e.get("end_ms", 0))}"'
-            f' data-sugg="{_esc(cat)}" data-decision="{_esc(decision)}" data-final="{_esc(final_kind)}">'
+            f' data-sugg="{_esc(cat)}" data-decision="{_esc(decision)}" data-final="{_esc(final_kind)}"'
+            f' data-text="{_esc(e.get("text", ""))}">'
             f'<div class="slirn-rev-line">'
             f'<span class="slirn-sub-idx">{int(e["i"])}</span>'
             f'<span class="slirn-sub-time">{_esc(e.get("start", ""))} → {_esc(e.get("end", ""))}</span>'
@@ -576,6 +577,15 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
           <button type="button" class="slirn-btn slirn-btn-xs" data-action="rev-batch-apply"
                   title="把区间内字幕的决策批量改为所选状态（确认后应用，保存前可继续调整）">🧮 批量应用</button>
           <span class="slirn-batch-hint">区间内所有行一次改判 — 应用后记得「💾 保存修订决策」</span>
+        </div>
+        <div class="slirn-batch-bar" id="slirn-rev-search">
+          <span class="slirn-batch-label">🔎 搜索</span>
+          <input class="slirn-search-q" id="slirn-rev-search-q" type="text"
+                 placeholder="输入字幕内容片段定位（回车下一条，Shift+回车上一条）">
+          <span class="slirn-search-count" id="slirn-rev-search-count"></span>
+          <button type="button" class="slirn-btn slirn-btn-xs" data-action="rev-search-prev">⬆ 上一条</button>
+          <button type="button" class="slirn-btn slirn-btn-xs" data-action="rev-search-next">下一条 ⬇</button>
+          <span class="slirn-batch-hint">按内容定位字幕（不区分大小写）；筛选生效时只在可见行中搜</span>
         </div>
         <div id="slirn-rev-player-wrap" class="slirn-video-wrap slirn-sub-player-wrap" style="display:none;">
             <video id="slirn-rev-player" controls preload="metadata"></video>
@@ -735,6 +745,7 @@ def _render_cutlist_zone(task_id: str, t, mgr: TaskManager) -> str:
             )
             for it in its:
                 mk = str(it.get("mark") or "keep")
+                sub_orig_text = str(first.get("orig_text") or "")  # 子段共用父段原文（搜原文命中用）
                 mk_manual = " ✏️" if it.get("mark_manual") else ""
                 mk_label = ("✅ 保留" if mk == "keep" else "❌ 删除") + mk_manual
                 fb_title = ' title="无字级时间戳（旧字幕数据）或切分后文字无法对齐 — 已整段带入，可重新生成字幕后重试"' if it.get("fallback") else ""
@@ -742,7 +753,8 @@ def _render_cutlist_zone(task_id: str, t, mgr: TaskManager) -> str:
                 rows += (
                     f'<div class="slirn-cut-row sub mark-{mk}" data-task-id="{_esc(task_id)}"'
                     f' data-id="{_esc(it["id"])}" data-mark="{mk}" data-mark-init="{mk}" data-source-i="{si}"'
-                    f' data-start-ms="{int(it["start_ms"])}" data-end-ms="{int(it["end_ms"])}"{_spk_attr(it["id"])}{fb_title}>'
+                    f' data-start-ms="{int(it["start_ms"])}" data-end-ms="{int(it["end_ms"])}"{_spk_attr(it["id"])}{fb_title}'
+                    f' data-text="{_esc(it["text"])}" data-orig="{_esc(sub_orig_text)}">'
                     f'<span class="slirn-sub-idx">{_esc(it["id"])}</span>'
                     f'{_spk_badge(it["id"])}'
                     f'<span class="slirn-sub-time">{_esc(it["start"])} → {_esc(it["end"])}</span>'
@@ -772,7 +784,8 @@ def _render_cutlist_zone(task_id: str, t, mgr: TaskManager) -> str:
                 f' data-target="{_esc(note_by_i.get(si, ""))}">'
                 f'<div class="slirn-cut-row whole" data-task-id="{_esc(task_id)}"'
                 f' data-id="{_esc(first["id"])}" data-source-i="{si}"'
-                f' data-start-ms="{int(first["start_ms"])}" data-end-ms="{int(first["end_ms"])}"{_spk_attr(first["id"])}>'
+                f' data-start-ms="{int(first["start_ms"])}" data-end-ms="{int(first["end_ms"])}"{_spk_attr(first["id"])}'
+                f' data-text="{_esc(first.get("text", ""))}" data-orig="{_esc(orig_text)}">'
                 f'<span class="slirn-sub-idx">{si}</span>'
                 f'{_spk_badge(first["id"])}'
                 f'<span class="slirn-sub-time">{_esc(first["start"])} → {_esc(first["end"])}</span>'
@@ -814,7 +827,7 @@ def _render_cutlist_zone(task_id: str, t, mgr: TaskManager) -> str:
             '<div class="slirn-cut-spk-find">按人员ID查找：'
             '<input id="slirn-cut-spk-q" type="number" min="1" step="1" placeholder="如 2">'
             '<label class="slirn-cut-spk-skiplbl" title="勾选后「上一条/下一条」只在未删除的记录间跳转">'
-            '<input id="slirn-cut-spk-skipdel" type="checkbox">跳过已删除</label>'
+            '<input id="slirn-cut-spk-skipdel" type="checkbox" checked>跳过已删除</label>'
             '<button class="slirn-btn slirn-btn-xs" data-action="cut-spk-prev">⬆️ 上一条</button>'
             '<button class="slirn-btn slirn-btn-xs" data-action="cut-spk-next">⬇️ 下一条</button>'
             '<button class="slirn-btn slirn-btn-xs" data-action="cut-spk-delete">❌ 删除该人员全部记录</button>'
@@ -872,6 +885,15 @@ def _render_cutlist_zone(task_id: str, t, mgr: TaskManager) -> str:
                   title="把区间内行的状态批量改为所选目标（整段行=组级决策，子段行=去留标记；确认后应用，保存前可继续调整）">🧮 批量应用</button>
           <span class="slirn-batch-hint">整段行改组级决策、子段行改去留 — 应用后记得「💾 保存切分决策」</span>
         </div>
+        <div class="slirn-batch-bar" id="slirn-cut-search">
+          <span class="slirn-batch-label">🔎 搜索</span>
+          <input class="slirn-search-q" id="slirn-cut-search-q" type="text"
+                 placeholder="输入字幕内容片段定位（回车下一条，Shift+回车上一条）">
+          <span class="slirn-search-count" id="slirn-cut-search-count"></span>
+          <button type="button" class="slirn-btn slirn-btn-xs" data-action="cut-search-prev">⬆ 上一条</button>
+          <button type="button" class="slirn-btn slirn-btn-xs" data-action="cut-search-next">下一条 ⬇</button>
+          <span class="slirn-batch-hint">整段行按显示文本与原文匹配，子段行按子段文本匹配（不区分大小写）</span>
+        </div>
         <div class="slirn-cut-list" id="slirn-cut-list">{rows}</div>
         <div class="slirn-task-actions" style="margin-top:14px;">
             {main_btn}
@@ -883,13 +905,12 @@ def _render_cutlist_zone(task_id: str, t, mgr: TaskManager) -> str:
 
 
 def _render_rough_compose_zone(task_id: str, t, mgr: TaskManager) -> str:
-    """可选步骤 · 粗剪合成（REQ-20260916-016 → REQ-20260916-018 改用上游合成方法）。
+    """必做阶段 · 粗剪合成（REQ-20260916-016 → REQ-20260918-045 由可选改为必做）。
 
     根据切分修剪的执行口径（保留区间）用上游 VideoClipper 方法合成一版粗剪
-    视频，快速预览切分后的整体效果。可选：不推进任务状态、不合成不影响后续
-    阶段；产物 outputs/rough_compose.mp4 存在即视为本阶段完成（附随片字幕
-    rough_compose.srt）。口径与切分修剪面板完全一致（修订决策实时 + 已保存
-    的手工翻转/改判），行文本并入热词替换已确认的修正。
+    视频，快速预览切分后的整体效果。不推进任务状态，产物 outputs/rough_compose.mp4
+    存在即视为本阶段完成（附随片字幕 rough_compose.srt）。口径与切分修剪面板
+    完全一致（修订决策实时 + 已保存的手工翻转/改判），行文本并入热词替换已确认的修正。
     """
     from slirn_home import asr_service, compose_service, cutlist_service, fine_service, revision_service
 
@@ -903,7 +924,7 @@ def _render_rough_compose_zone(task_id: str, t, mgr: TaskManager) -> str:
 
     def _guide(msg: str, btn: str) -> str:
         return f'''<div class="slirn-card" style="margin-top:16px;">
-        <div class="slirn-panel-header"><div class="slirn-panel-title">🎥 粗剪合成 <span class="slirn-wb-stage-optional">可选</span></div></div>
+        <div class="slirn-panel-header"><div class="slirn-panel-title">🎥 粗剪合成</div></div>
         <div class="slirn-empty"><div class="slirn-empty-icon">🚧</div>
             <div class="slirn-empty-text">{_esc(msg)}</div></div>
         <div class="slirn-task-actions" style="margin-top:14px;">{btn}</div></div>'''
@@ -1006,11 +1027,11 @@ def _render_rough_compose_zone(task_id: str, t, mgr: TaskManager) -> str:
         )
 
     return f'''<div class="slirn-card" style="margin-top:16px;">
-        <div class="slirn-panel-header"><div class="slirn-panel-title">🎥 粗剪合成 <span class="slirn-wb-stage-optional">可选</span></div></div>
+        <div class="slirn-panel-header"><div class="slirn-panel-title">🎥 粗剪合成</div></div>
         <div class="slirn-sub-meta">{stats_line}</div>
         <div class="slirn-form-hint">用「处理之后的字幕 + 原视频」走上游 FunClip 的合成方法（VideoClipper）
         把保留区间拼接成一版粗剪成片，快速预览切分后的整体效果，并附随片字幕 rough_compose.srt。
-        本步骤为<b>可选</b> — 不合成也不影响后续阶段；口径与切分修剪面板一致（修订决策实时并入，
+        本步骤为<b>必做</b>阶段 — 成片交付前需在此完成合成；口径与切分修剪面板一致（修订决策实时并入，
         手工翻转/整条改判以「💾 保存切分决策」之后的为准），行文本含热词替换已确认的修正。
         合成需重新编码：44 分钟源实测约 11 分钟，请在后台合成期间继续其它操作。</div>
         <div class="slirn-task-actions" style="margin-top:14px;">
@@ -1389,8 +1410,8 @@ def _wb_stage_states(t) -> list[str]:
         elif key == "rough_cut":
             states.append("done" if (cut_done or cur_rank >= rank[status_name]) else "pending")
         elif key == "rough_compose":
-            # 可选步骤（REQ-20260916-016）：不推进任务状态，产物存在即完成；
-            # 未合成也不阻塞后续阶段（current 停留于此仅是建议）
+            # 必做阶段（REQ-20260916-016 可选 → REQ-20260918-045 改必做）：
+            # 不推进任务状态，产物存在即完成；current 停留于此提示尽快合成
             from slirn_home import compose_service as _comp_mod
 
             composed = _comp_mod.rough_compose_path(outputs_dir).exists()
@@ -1446,7 +1467,7 @@ def _render_workbench(task_id: str, mgr: TaskManager) -> str:
     for i, (key, _st, title, icon, desc) in enumerate(_WB_STAGES):
         state = states[i]
         mark = "✓" if state == "done" else ("▶" if state == "current" else str(i + 1))
-        opt_chip = '<span class="slirn-wb-stage-optional">可选</span>' if key == "rough_compose" else ""
+        opt_chip = ""  # REQ-20260918-045：粗剪合成由可选改为必做，不再显示「可选」徽章
         stage_items += (
             f'<div class="slirn-wb-stage {state}{" active" if i == focus else ""}" '
             f'data-action="wb-stage" data-pane="{key}">'
@@ -1503,6 +1524,7 @@ def _render_workbench(task_id: str, mgr: TaskManager) -> str:
             </div>
         </div>
         {top_rows}
+        {_render_exec_history_card(task_id, mgr)}
     </div>
     <div class="slirn-wb-main">
         <div class="slirn-wb-stages-rail" data-action="wb-toggle-stages"
@@ -1511,6 +1533,9 @@ def _render_workbench(task_id: str, mgr: TaskManager) -> str:
             <div class="slirn-wb-stages-head"><span class="slirn-wb-stages-title">🧭 阶段</span>
                 <button class="slirn-btn-mini" data-action="wb-toggle-stages"
                         title="收起阶段列表，加宽右侧工作区">« 收起</button></div>
+            <label class="slirn-wb-autonext" title="开启后：当前阶段的工作完成（识别/保存/合成完成）时，自动切换到下一阶段页面">
+                <input type="checkbox" id="slirn-wb-autonext"> 完成后自动进下一阶段
+            </label>
             {stage_items}
         </div>
         <div class="slirn-wb-panes">{pane_html}</div>
@@ -1519,6 +1544,84 @@ def _render_workbench(task_id: str, mgr: TaskManager) -> str:
 
 
 # =============== 热词库 ===============
+
+def _render_exec_history_card(task_id: str, mgr) -> str:
+    """REQ-20260918-048 — 工作台顶部的执行历史折叠卡片（字幕生成 + 粗剪合成）。
+
+    读 outputs/execution_history.json 倒序最多 10 条；落盘数据，无需实时刷新。
+    复用 REQ-20260918-044 的 .slirn-col 折叠壳：JS 自动 wrap，零新逻辑。
+    """
+    from slirn_home import execution_history
+
+    outputs_dir = mgr.tasks_dir / task_id / "outputs"
+    items = execution_history.load_history(outputs_dir)
+    # 倒序：最新在前；空文件 → 友好空态
+    items.sort(key=lambda x: (float(x.get("started_at") or 0), str(x.get("id") or "")), reverse=True)
+    total = len(items)
+    shown = items[:10]
+
+    if not shown:
+        body = ('<div class="slirn-form-hint slirn-exec-empty">'
+                '尚无执行记录。点击「字幕生成 / 粗剪合成」开始第一次执行后，这里会出现历史。'
+                '</div>')
+    else:
+        KIND_LABEL = {
+            execution_history.KIND_SUBTITLE_GENERATION: ("🎙 字幕生成", "字幕生成"),
+            execution_history.KIND_ROUGH_COMPOSE: ("🎥 粗剪合成", "粗剪合成"),
+        }
+        rows = []
+        # 倒序：shown[0] 是最近一次；真实序号 = total - i（最大 = 最新）
+        for i_row, it in enumerate(shown):
+            real_n = total - i_row
+            kind_icon, _kind_text = KIND_LABEL.get(it.get("kind") or "", ("⚙ 操作", "操作"))
+            status = it.get("status") or "running"
+            if status == "success":
+                badge = '<span class="slirn-exec-ok">✅ 成功</span>'
+            elif status == "failed":
+                badge = '<span class="slirn-exec-fail">❌ 失败</span>'
+            else:
+                badge = '<span class="slirn-exec-running">⏳ 运行中</span>'
+            start_iso = (it.get("started_at_iso") or "").replace("T", " ")[:19]
+            end_iso = (it.get("finished_at_iso") or "").replace("T", " ")[:19] or "—"
+            duration = execution_history.format_duration(it.get("duration_ms"))
+            # extra 摘要：subtitle → segments/speakers；compose → segments/output
+            extra = it.get("extra") or {}
+            extra_bits = []
+            if "segments" in extra:
+                extra_bits.append(f"{extra['segments']} 段")
+            if extra.get("speakers"):
+                extra_bits.append(f"{extra['speakers']} 位说话人")
+            if extra.get("intervals"):
+                extra_bits.append(f"{extra['intervals']} 区间")
+            extra_str = (" · " + " / ".join(extra_bits)) if extra_bits else ""
+            err_html = ""
+            if it.get("error"):
+                err_html = (f'<div class="slirn-exec-err">{_esc(str(it["error"])[:300])}</div>')
+            rows.append(
+                f'<div class="slirn-exec-row" data-status="{_esc(status)}">'
+                f'  <span class="slirn-exec-idx">#{real_n}</span>'
+                f'  <span class="slirn-exec-kind">{_esc(kind_icon)} · {_esc(start_iso)} → {_esc(end_iso)}</span>'
+                f'  <span class="slirn-exec-dur">{_esc(duration)}</span>'
+                f'  {badge}{extra_str}'
+                f'  {err_html}'
+                f'</div>'
+            )
+
+        more = (f'<div class="slirn-form-hint">共 {total} 次记录，仅展示最近 {len(shown)} 次</div>'
+                if total > len(shown) else '')
+        body = "".join(rows) + more
+
+    # 折叠壳：与 REQ-20260918-044 的 .slirn-col 自动 wrap 兼容；key 用 exec:history
+    return (
+        f'<div class="slirn-col slirn-exec-card" data-col-key="exec:history">'
+        f'  <div class="slirn-col-head"><button type="button" class="slirn-col-btn" data-action="col-toggle">'
+        f'    <span class="slirn-col-chev">▾</span>📜 执行历史'
+        f'    <span class="slirn-exec-count">{total} 次</span>'
+        f'  </button></div>'
+        f'  <div class="slirn-exec-body">{body}</div>'
+        f'</div>'
+    )
+
 
 def _render_hotword_picker(repo_root: Path) -> str:
     """渲染公共库的「选择器」网格（用于「新建任务」页：点击切换选中状态，无 X / 无批量按钮）。"""
@@ -3064,7 +3167,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
 
     @app.app.post("/slirn/api/compose_rough")
     async def compose_rough(body: dict = Body(default_factory=dict)):
-        """启动粗剪合成（REQ-20260916-018，可选步骤）：上游 VideoClipper 方法合成。
+        """启动粗剪合成（REQ-20260916-018，必做阶段）：上游 VideoClipper 方法合成。
 
         口径与切分修剪面板一致（修订实时 + 已保存手工翻转/改判）；行文本取
         最新确认版（热词替换未撤销的行用 new_text，REQ-20260916-017）—
@@ -3198,6 +3301,28 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         srt = compose_service.format_srt(units, fmap)
         keep_ms = sum(int(u["end_ms"]) - int(u["start_ms"]) for u in units)
         return _ok("", srt=srt, lines=len(units), keep_ms=keep_ms)
+
+    @app.app.post("/slirn/api/execution_history")
+    async def execution_history_endpoint(body: dict = Body(default_factory=dict)):
+        """REQ-20260918-048 — 执行历史记录（字幕生成 + 粗剪合成）。
+
+        返回该任务 outputs/execution_history.json 的全部记录（按 started_at 倒序）。
+        工作台面板初始化时调用渲染折叠区，无需实时刷新（落盘数据，下次进入自然新）。
+        """
+        from slirn_home import execution_history
+
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            mgr.get(tid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+        outputs_dir = mgr.tasks_dir / tid / "outputs"
+        items = execution_history.load_history(outputs_dir)
+        # 倒序（最新在前）；同秒多条按 id 倒序兜底
+        items.sort(key=lambda x: (float(x.get("started_at") or 0), str(x.get("id") or "")), reverse=True)
+        return _ok("", items=items)
 
     @app.app.post("/slirn/api/optimize_subtitle")
     async def optimize_subtitle(body: dict = Body(default_factory=dict)):

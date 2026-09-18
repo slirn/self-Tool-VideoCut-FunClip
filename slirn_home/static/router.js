@@ -526,6 +526,18 @@
       if (r && r.ok && r.html) {
         var w = document.getElementById('slirn-tab-workbench');
         if (!w) return;
+        // 刷新前快照（REQ-20260918-046）：哪些阶段已完成 + 用户当前所在面板 —
+        // 供刷新后判断「当前阶段刚完成 → 自动进下一阶段」
+        var prevDone = {}, prevActive = '';
+        var hadWb = !!document.querySelector('#slirn-tab-workbench .slirn-wb-stage');
+        if (hadWb) {
+          document.querySelectorAll('#slirn-tab-workbench .slirn-wb-stage.done').forEach(function(s) {
+            prevDone[s.getAttribute('data-pane') || ''] = 1;
+          });
+          document.querySelectorAll('#slirn-tab-workbench .slirn-wb-pane').forEach(function(p) {
+            if (p.style.display !== 'none') prevActive = (p.id || '').replace('slirn-wb-pane-', '');
+          });
+        }
         w.innerHTML = r.html;
         ALL_TABS.forEach(function(id) { var el = document.getElementById(id); if (el) el.style.display = 'none'; });
         var d = document.getElementById('slirn-tab-detail');
@@ -547,6 +559,8 @@
           startOptPolling(optSt.dataset.taskId);
         applyWbStagesState();  // 恢复上次收起/展开（跨刷新保持 — REQ-20260916-002）
         applyRevRigorState();  // 上次选过的严谨性级别预填（REQ-20260916-003）
+        applyWbAutoNextState();  // 自动进下一阶段开关回填（REQ-20260918-046）
+        wbAutoNextMaybe(prevDone, hadWb, prevActive);  // 当前阶段刚完成 → 按设置跳下一阶段
       } else if (r && r.error) {
         toast('❌ ' + r.error, 'error');
       }
@@ -564,6 +578,43 @@
       try { localStorage.removeItem('slirnWbStagesCollapsed'); } catch (err) {}
     }
     host.classList.toggle('wb-stages-collapsed', collapsed === '1');
+  }
+
+  // ===== 完成后自动进下一阶段（REQ-20260918-046）=====
+  // 阶段条上方的开关（localStorage 记忆，默认关）。开启后：工作台刷新时若
+  // 「用户当前所在阶段」刚变为完成 → 自动切到下一阶段并提示。关着时行为不变。
+  function wbAutoNextOn() {
+    try { return localStorage.getItem('slirnWbAutoNext') === '1'; } catch (err) { return false; }
+  }
+  function applyWbAutoNextState() {
+    var el = document.getElementById('slirn-wb-autonext');
+    if (el) el.checked = wbAutoNextOn();
+  }
+  document.addEventListener('change', function(e) {
+    if (e.target && e.target.id === 'slirn-wb-autonext') {
+      try {
+        localStorage.setItem('slirnWbAutoNext', e.target.checked ? '1' : '');
+      } catch (err) {}
+      toast(e.target.checked ? '✅ 已开启：当前阶段完成后自动进入下一阶段'
+                             : '↩️ 已关闭自动进入下一阶段');
+    }
+  });
+  function wbAutoNextMaybe(prevDone, hadWb, prevActive) {
+    if (!hadWb || !wbAutoNextOn() || !prevActive) return;
+    var stages = [];
+    document.querySelectorAll('#slirn-tab-workbench .slirn-wb-stage').forEach(function(s) {
+      stages.push(s.getAttribute('data-pane') || '');
+    });
+    var justDone = '';
+    stages.forEach(function(pk) {
+      var el = document.querySelector('#slirn-tab-workbench .slirn-wb-stage[data-pane="' + pk + '"]');
+      if (el && el.classList.contains('done') && !prevDone[pk] && pk === prevActive) justDone = pk;
+    });
+    if (!justDone) return;
+    var idx = stages.indexOf(justDone);
+    if (idx < 0 || idx + 1 >= stages.length) return;  // 最后一个阶段：没有下一阶段
+    switchWbPane(stages[idx + 1]);
+    toast('✅ 本阶段完成 — 已自动进入下一阶段（可在阶段上方关闭自动跳转）');
   }
 
   // ===== 严谨性级别：上次选择预填（不发起新分析也可见 — REQ-20260916-003）=====
@@ -705,11 +756,176 @@
     subPollTimer = setInterval(update, 2000);
   }
 
+  // ===== 功能区折叠（REQ-20260918-044）=====
+  // 各阶段顶部的说明/统计/快捷键/筛选/跳转/批量/搜索条：外包一层可折叠壳，
+  // 点胶囊头收起只留一行、再点展开 — 用户按需留出空间、聚焦当前要做的事。
+  // 折叠状态记在本机（按区独立记忆）。MutationObserver 兜底：面板（服务端
+  // innerHTML）或条内容（JS 重渲染）更新后自动补壳，条内重渲染不破坏壳。
+  function colState() {
+    try { return JSON.parse(localStorage.getItem('slirnCols') || '{}'); } catch (err) { return {}; }
+  }
+  function colSet(key, off) {
+    if (!key) return;
+    var s = colState();
+    if (off) s[key] = 1; else delete s[key];
+    try { localStorage.setItem('slirnCols', JSON.stringify(s)); } catch (err) {}
+  }
+  function colWrap(bar, key, title) {
+    if (!bar || bar.dataset.slirnCol !== undefined) return;
+    bar.dataset.slirnCol = '1';
+    var off = !!colState()[key];
+    var wrap = document.createElement('div');
+    wrap.className = 'slirn-col' + (off ? ' off' : '');
+    wrap.setAttribute('data-col-key', key);
+    var head = document.createElement('div');
+    head.className = 'slirn-col-head';
+    head.innerHTML = '<button type="button" class="slirn-col-btn" data-action="col-toggle"><span class="slirn-col-chev">'
+      + (off ? '▸' : '▾') + '</span>' + title + '</button>';
+    bar.parentNode.insertBefore(wrap, bar);
+    wrap.appendChild(head);
+    wrap.appendChild(bar);
+  }
+  function colPaneKey(bar, suffix) {
+    var pane = bar.closest ? bar.closest('.slirn-wb-pane') : null;
+    return ((pane && pane.id ? pane.id.replace('slirn-wb-pane-', '') : 'x') + ':' + suffix);
+  }
+  function colEnhance(root) {
+    var scope = root || document;
+    // 说明文案：连续的 form-hint 并成一组（一条折叠头收起整段说明）
+    Array.prototype.forEach.call(scope.querySelectorAll('.slirn-wb-pane .slirn-form-hint'), function(h) {
+      if (h.dataset.slirnCol !== undefined) return;
+      colWrap(h, colPaneKey(h, 'hint'), 'ℹ️ 说明');
+      var wrapH = h.parentNode;  // colWrap 已把 h 挪进壳
+      var nxt = wrapH.nextElementSibling;
+      while (nxt && nxt.classList && nxt.classList.contains('slirn-form-hint')
+             && nxt.dataset.slirnCol === undefined) {
+        nxt.dataset.slirnCol = '1';
+        wrapH.appendChild(nxt);
+        nxt = wrapH.nextElementSibling;
+      }
+    });
+    Array.prototype.forEach.call(scope.querySelectorAll('.slirn-wb-pane .slirn-sub-meta'), function(m) {
+      colWrap(m, colPaneKey(m, 'meta'), '📊 统计');
+    });
+    Array.prototype.forEach.call(scope.querySelectorAll('.slirn-wb-pane .slirn-rev-kbhint'), function(k) {
+      colWrap(k, colPaneKey(k, 'kb'), '⌨ 快捷键');
+    });
+    var singles = [
+      ['#slirn-rev-filter',       'rev:filter',  '🔎 筛选 / 跳转'],
+      ['#slirn-rev-batch',        'rev:batch',   '🧮 批量修改'],
+      ['#slirn-rev-search',       'rev:search',  '🔎 搜索定位'],
+      ['#slirn-cut-spk-bar',      'cut:spk',     '👥 人员统计 / 查找'],
+      ['#slirn-cut-batch',        'cut:batch',   '🧮 批量修改'],
+      ['#slirn-cut-search',       'cut:search',  '🔎 搜索定位'],
+      ['#slirn-opt-words',        'opt:words',   '🔤 词频列表'],
+      ['.slirn-opt-word-filters', 'opt:wfilter', '🎚 词频筛选']
+    ];
+    singles.forEach(function(z) {
+      Array.prototype.forEach.call(scope.querySelectorAll(z[0]), function(bar) {
+        colWrap(bar, z[1], z[2]);
+      });
+    });
+  }
+  var colObs = new MutationObserver(function() {
+    clearTimeout(colObs._t);
+    colObs._t = setTimeout(function() { colEnhance(document); }, 60);  // 去抖：一次渲染多次 DOM 变更
+  });
+  colObs.observe(document.body, { childList: true, subtree: true });
+  colEnhance(document);
+
+  // ===== 视频浮层（REQ-20260918-043）=====
+  // 无论哪个阶段：视频一开始播放就挪进可拖动的悬浮层 — 页面不再因插入
+  // 播放器而整体位移，编辑信息不被顶开。✕ 只是收起（暂停），再次播放
+  // 自动弹回；拖动位置记在本机。详情页/弹窗里的成片预览不搬（观看场景，
+  // 不挤编辑区）。
+  var vfLayer = null;
+  function vfPlace(layer, x, y) {
+    var w = layer.offsetWidth || 440;
+    var minX = -(w - 76), maxX = window.innerWidth - 76;  // 标题条至少留 76px 可抓回
+    var minY = 0, maxY = window.innerHeight - 44;
+    layer.style.left = Math.round(Math.min(maxX, Math.max(minX, x))) + 'px';
+    layer.style.top = Math.round(Math.min(maxY, Math.max(minY, y))) + 'px';
+  }
+  function vfPlaceSaved(layer) {
+    var pos = null;
+    try { pos = JSON.parse(localStorage.getItem('slirnVfPos') || 'null'); } catch (err) {}
+    if (pos && typeof pos.l === 'number' && typeof pos.t === 'number') {
+      vfPlace(layer, pos.l, pos.t);
+    } else {
+      vfPlace(layer, window.innerWidth - 464, 24);  // 默认右上角
+    }
+  }
+  function vfDragBind(layer) {
+    var bar = layer.querySelector('.slirn-vf-bar');
+    if (!bar) return;
+    bar.addEventListener('pointerdown', function(ev) {
+      if (ev.target.closest('.slirn-vf-close')) return;  // 关闭按钮不触发拖动
+      var r = layer.getBoundingClientRect();
+      var ox = ev.clientX - r.left, oy = ev.clientY - r.top;
+      var move = function(e2) { vfPlace(layer, e2.clientX - ox, e2.clientY - oy); };
+      var up = function() {
+        document.removeEventListener('pointermove', move);
+        document.removeEventListener('pointerup', up);
+        try {
+          localStorage.setItem('slirnVfPos',
+            JSON.stringify({ l: layer.offsetLeft, t: layer.offsetTop }));
+        } catch (err) {}
+      };
+      document.addEventListener('pointermove', move);
+      document.addEventListener('pointerup', up);
+      ev.preventDefault();
+    });
+  }
+  function vfEnsureLayer() {
+    if (vfLayer && vfLayer.isConnected) return vfLayer;
+    vfLayer = document.createElement('div');
+    vfLayer.id = 'slirn-video-float';
+    vfLayer.className = 'slirn-video-float';
+    vfLayer.hidden = true;
+    vfLayer.innerHTML = '<div class="slirn-vf-bar">'
+      + '<span class="slirn-vf-grip">⠿</span><span class="slirn-vf-title">▶ 视频预览（可拖动）</span>'
+      + '<button type="button" class="slirn-vf-close" data-action="vf-close" '
+      + 'title="收起浮层（视频暂停；再次播放自动弹回）">✕</button></div>'
+      + '<div class="slirn-vf-body"></div>';
+    document.body.appendChild(vfLayer);
+    vfDragBind(vfLayer);
+    return vfLayer;
+  }
+  function vfShow(wrap) {
+    if (!wrap) return;
+    var layer = vfEnsureLayer();
+    var body = layer.querySelector('.slirn-vf-body');
+    if (wrap.parentNode !== body) {
+      // 浮层里只留当前播放器：面板重渲染后的旧节点直接清掉
+      Array.prototype.forEach.call(body.children, function(el) { if (el !== wrap) el.remove(); });
+      body.appendChild(wrap);
+    }
+    wrap.style.display = '';
+    layer.hidden = false;
+    vfPlaceSaved(layer);  // 记忆位置；隐藏期间视口可能变化 → 重新夹取进屏
+  }
+  // 兜底：不走 playXxx 助手的视频（如粗剪成片预览）一播放也进浮层
+  document.addEventListener('play', function(ev) {
+    var v = ev.target;
+    if (!v || v.tagName !== 'VIDEO' || !v.closest) return;
+    if (!v.closest('.slirn-wb-pane')) return;  // 仅工作台阶段；详情页/弹窗预览原地不动
+    var wrap = v.closest('.slirn-video-wrap');
+    if (!wrap) {  // 无包裹 → 就地包一层再搬，原位不留洞
+      wrap = document.createElement('div');
+      wrap.className = 'slirn-video-wrap';
+      v.parentNode.insertBefore(wrap, v);
+      wrap.appendChild(v);
+      bindSpeedControl(v);
+    }
+    vfShow(wrap);
+  }, true);
+
   // ===== 字幕播放器：定位播放 + 播放高亮跟随 =====
   function playSubAt(tid, startMs) {
     var wrap = document.getElementById('slirn-sub-player-wrap');
     var v = document.getElementById('slirn-sub-player');
     if (!v) { toast('❌ 播放器未就绪', 'error'); return; }
+    if (wrap) vfShow(wrap);
     if (wrap) wrap.style.display = '';
     if (!v.src) { v.src = SLIRN_API + '/video/' + encodeURIComponent(tid); v.load(); }
     var go = function() {
@@ -881,7 +1097,7 @@
     var wrap = revVis('slirn-rev-player-wrap');
     var v = revVis('slirn-rev-player');
     if (!v) { toast('❌ 播放器未就绪', 'error'); return; }
-    if (wrap) wrap.style.display = '';
+    if (wrap) vfShow(wrap);
     if (!v.src) { v.src = SLIRN_API + '/video/' + encodeURIComponent(tid); v.load(); }
     var go = function() {
       try { v.currentTime = (startMs || 0) / 1000; } catch (err) {}
@@ -919,7 +1135,7 @@
     var wrap = revVis('slirn-cut-player-wrap');
     var v = revVis('slirn-cut-player');
     if (!v) { toast('❌ 播放器未就绪', 'error'); return; }
-    if (wrap) wrap.style.display = '';
+    if (wrap) vfShow(wrap);
     if (!v.src) { v.src = SLIRN_API + '/video/' + encodeURIComponent(tid); v.load(); }
     var goCut = function() {
       try { v.currentTime = (startMs || 0) / 1000; } catch (err) {}
@@ -1239,7 +1455,7 @@
     var keepQ = '';
     var prevQ = bar.querySelector('#slirn-cut-spk-q');
     if (prevQ) keepQ = prevQ.value;
-    var keepSkip = false;
+    var keepSkip = true;  // REQ-20260918-041：默认勾选「跳过已删除」
     var prevSkip = bar.querySelector('#slirn-cut-spk-skipdel');
     if (prevSkip) keepSkip = prevSkip.checked;
     var chips = cutSpkStats().map(function(c) {
@@ -1252,7 +1468,7 @@
       + '<div class="slirn-cut-spk-find">按人员ID查找：'
       + '<input id="slirn-cut-spk-q" type="number" min="1" step="1" placeholder="如 2">'
       + '<label class="slirn-cut-spk-skiplbl" title="勾选后「上一条/下一条」只在未删除的记录间跳转">'
-      + '<input id="slirn-cut-spk-skipdel" type="checkbox">跳过已删除</label>'
+      + '<input id="slirn-cut-spk-skipdel" type="checkbox" checked>跳过已删除</label>'
       + '<button class="slirn-btn slirn-btn-xs" data-action="cut-spk-prev">⬆️ 上一条</button>'
       + '<button class="slirn-btn slirn-btn-xs" data-action="cut-spk-next">⬇️ 下一条</button>'
       + '<button class="slirn-btn slirn-btn-xs" data-action="cut-spk-delete">❌ 删除该人员全部记录</button>'
@@ -1265,6 +1481,56 @@
     var skipEl = bar.querySelector('#slirn-cut-spk-skipdel');
     if (skipEl) skipEl.checked = keepSkip;
   }
+  // ===== 搜索定位（REQ-20260918-040）：内容片段输入 → 匹配行间循环定位 =====
+  // 行上服务端渲染 data-text（显示文本）+ data-orig（切分整段行附原文，更正行搜原文可命中）；
+  // 修订只在过滤后可见行中搜，切分全量行（无过滤）。
+  function searchTextOf(row) {
+    return ((row.getAttribute('data-text') || '') + '\n'
+          + (row.getAttribute('data-orig') || '')).toLowerCase();
+  }
+  function searchQuery(boxId) {
+    var q = ((document.getElementById(boxId) || {}).value || '').trim().toLowerCase();
+    if (!q) { toast('❌ 请先输入要搜索的字幕内容', 'error'); return null; }
+    return q;
+  }
+  function searchCountSync(boxId, rowsFn) {
+    var cnt = document.getElementById(boxId.replace('-q', '-count'));
+    if (!cnt) return;
+    var q = ((document.getElementById(boxId) || {}).value || '').trim().toLowerCase();
+    if (!q) { cnt.textContent = ''; return; }
+    var n = rowsFn().filter(function(r) { return searchTextOf(r).indexOf(q) >= 0; }).length;
+    cnt.textContent = n ? (n + ' 处') : '无匹配';
+  }
+  function searchNavTo(boxId, rowsFn, dir2, markSel) {
+    var q = searchQuery(boxId);
+    if (!q) return;
+    var rows = rowsFn().filter(function(r) { return searchTextOf(r).indexOf(q) >= 0; });
+    if (!rows.length) { toast('❌ 没有匹配「' + q + '」的字幕行'); return; }
+    var cur = rows.filter(function(r) { return r.classList.contains('kbsel'); })[0];
+    var idx = cur ? rows.indexOf(cur) : -1;
+    var next = idx < 0 ? (dir2 > 0 ? 0 : rows.length - 1) : (idx + dir2 + rows.length) % rows.length;
+    var row = rows[next];
+    markSel(row);
+    var idxTxt = (row.querySelector('.slirn-sub-idx') || {textContent: row.getAttribute('data-id') || ''}).textContent.trim();
+    toast('🔎「' + q + '」第 ' + (next + 1) + '/' + rows.length + ' 条（序号 ' + idxTxt + '）');
+    searchCountSync(boxId, rowsFn);
+  }
+  document.addEventListener('input', function(e) {
+    if (!e.target) return;
+    if (e.target.id === 'slirn-rev-search-q') searchCountSync('slirn-rev-search-q', revNavRows);
+    else if (e.target.id === 'slirn-cut-search-q') searchCountSync('slirn-cut-search-q', cutRows);
+  });
+  document.addEventListener('keydown', function(e) {
+    if (!e.target) return;
+    if (e.target.id !== 'slirn-rev-search-q' && e.target.id !== 'slirn-cut-search-q') return;
+    if (e.key === 'Enter') {
+      if (e.target.id === 'slirn-rev-search-q')
+        searchNavTo('slirn-rev-search-q', revNavRows, e.shiftKey ? -1 : 1, revMarkSel);
+      else
+        searchNavTo('slirn-cut-search-q', cutRows, e.shiftKey ? -1 : 1, cutMarkSel);
+      e.preventDefault();
+    }
+  });
   function cutSpkLink(btn) {  // 👤 关联人员ID → POST cut_speaker_link → 注入徽章 + 统计条
     var tid = btn.getAttribute('data-task-id') || '';
     btn.disabled = true;
@@ -1377,7 +1643,7 @@
   function rcInjectPreview(tid, result) {
     var pane = document.getElementById('slirn-wb-pane-rough_compose');
     if (!pane) return;
-    var old = pane.querySelector('#slirn-rc-player');
+    var old = document.getElementById('slirn-rc-player');  // 可能已浮层化（REQ-20260918-043），全文档找
     if (old && old.closest('.slirn-video-wrap')) {  // 已有预览 → 换源刷新即可
       old.src = '/slirn/api/video/' + encodeURIComponent(tid) + '?src=rough_compose&t=' + Date.now();
       old.load();
@@ -1671,7 +1937,7 @@
     var wrap = revVis('slirn-opt-player-wrap');
     var v = revVis('slirn-opt-player');
     if (!v) { toast('❌ 播放器未就绪', 'error'); return; }
-    if (wrap) wrap.style.display = '';
+    if (wrap) vfShow(wrap);
     if (!v.src) {
       v.src = SLIRN_API + '/video/' + encodeURIComponent(tid) + '?src=rough_compose';
       v.load();
@@ -2209,6 +2475,20 @@
   ];
   var REV_KEY_ALLOWED = ['arrowup', 'arrowdown', 'arrowleft', 'arrowright', 'escape',
     'enter', 'backspace', 'delete', 'home', 'end', 'pageup', 'pagedown'];  // 单字符键另判
+  // REQ-20260918-042：视频播放器原生快捷键（Chrome/Edge，视频获得焦点时生效）。
+  // 应用键与之重叠 → 弹窗内亮 ⚠ 徽章 + 绑定时 toast 提醒（允许绑定，仅提醒）：
+  // 列表可见时应用键优先，该键在视频聚焦时不再触发原生播放控制。
+  var REV_VIDEO_KEYS = {
+    ' ': '播放 / 暂停', 'k': '播放 / 暂停',
+    'arrowleft': '后退 5 秒', 'arrowright': '前进 5 秒',
+    'j': '后退 10 秒', 'l': '前进 10 秒',
+    'arrowup': '音量 +', 'arrowdown': '音量 -',
+    'm': '静音切换', 'f': '全屏切换', 'c': '字幕开关',
+    '0': '跳到 0%', '1': '跳到 10%', '2': '跳到 20%', '3': '跳到 30%',
+    '4': '跳到 40%', '5': '跳到 50%', '6': '跳到 60%', '7': '跳到 70%',
+    '8': '跳到 80%', '9': '跳到 90%',
+    'home': '回到开头', 'end': '跳到片尾'
+  };
   function revKeysLoad() {
     var km = {};
     REV_KEY_ACTIONS.forEach(function(a) { km[a.id] = a.def; });
@@ -2261,6 +2541,7 @@
       + '<div class="slirn-revkeys-title">⌨ 快捷键自定义'
       + '<span class="slirn-revkeys-sub">点击键帽 → 按新键更换</span></div>'
       + '<div class="slirn-revkeys-rows"></div>'
+      + '<div class="slirn-revkeys-vlist"></div>'
       + '<div class="slirn-revkeys-foot">'
       + '<span class="slirn-revkeys-tip">Esc 取消录制 · 不支持组合键</span>'
       + '<button class="slirn-btn" data-action="revkeys-reset">↩️ 恢复默认</button>'
@@ -2270,6 +2551,7 @@
     document.body.appendChild(bd);
     revKeysRec = null;
     revKeysRenderRows();
+    revKeysRenderVideo();
   }
   function revKeysCloseModal() {
     var m = document.getElementById('slirn-revkeys-modal');
@@ -2285,11 +2567,36 @@
       var cls = 'slirn-revkeys-key';
       if (revKeysRec === a.id) cls += ' rec';
       if (flashConflict === a.id) cls += ' conflict';
+      // REQ-20260918-042：当前键与视频播放键重叠 → 行内 ⚠ 徽章
+      var vhit = REV_VIDEO_KEYS[km[a.id]];
       html += '<div class="slirn-revkeys-row"><span class="slirn-revkeys-name">' + a.name
+        + (vhit ? '<i class="slirn-revkeys-vwarn">⚠ 视频键 · ' + vhit + '</i>' : '')
         + '</span><span class="' + cls + '" data-revkey="' + a.id + '">'
         + (revKeysRec === a.id ? '按新键…' : revKeyLabel(km[a.id])) + '</span></div>';
     });
     box.innerHTML = html;
+  }
+  // REQ-20260918-042：视频播放快捷键对照表（每个键什么意思 + 是否已被应用键占用）
+  function revKeysRenderVideo(hlKey) {
+    var box = document.querySelector('#slirn-revkeys-modal .slirn-revkeys-vlist');
+    if (!box) return;
+    var km = revKeysLoad();
+    var html = '<div class="slirn-revkeys-vtitle">▶ 视频播放快捷键'
+      + '<span class="slirn-revkeys-vsub">视频画面获得焦点时生效（Chrome/Edge 原生播放器）</span></div>'
+      + '<div class="slirn-revkeys-vgrid">';
+    Object.keys(REV_VIDEO_KEYS).forEach(function(k) {
+      var usedBy = '';
+      REV_KEY_ACTIONS.forEach(function(a) {
+        if (!usedBy && km[a.id] === k) usedBy = a.name;
+      });
+      html += '<span class="slirn-revkeys-vitem' + (hlKey === k ? ' hl' : '')
+        + (usedBy ? ' used' : '') + '"><kbd>' + revKeyLabel(k) + '</kbd>'
+        + REV_VIDEO_KEYS[k]
+        + (usedBy ? '<em>已绑：' + usedBy + '</em>' : '') + '</span>';
+    });
+    box.innerHTML = html + '</div>'
+      + '<div class="slirn-revkeys-vnote">⚠ 把上表中的键绑成应用快捷键时：列表可见则应用动作优先，'
+      + '该键在视频聚焦时不再触发原生播放控制 — 绑定会弹提醒，可自行权衡。</div>';
   }
   // 录制监听（capture）：弹窗打开时接管全部按键，列表快捷键让位
   document.addEventListener('keydown', function(e) {
@@ -2327,9 +2634,17 @@
     }
     km[revKeysRec] = k;
     try { localStorage.setItem('slirnRevKeys', JSON.stringify(km)); } catch (err) {}
+    var boundName = '';
+    REV_KEY_ACTIONS.forEach(function(a) { if (a.id === revKeysRec) boundName = a.name; });
     revKeysRec = null;
     revKeysRenderRows();
-    applyRevKeysState();  // 提示条立即跟随新键位
+    revKeysRenderVideo(k);  // 对照表同步「已绑」标记
+    applyRevKeysState();
+    // REQ-20260918-042：与视频播放键重叠 → 提醒（允许绑定；列表可见时应用键优先）
+    if (REV_VIDEO_KEYS[k]) {
+      toast('⚠️ 「' + revKeyLabel(k) + '」是视频播放快捷键（' + REV_VIDEO_KEYS[k]
+        + '）—「' + boundName + '」绑定后，视频聚焦时此键将优先执行应用动作', 'warning');
+    }
   }, true);
 
   document.addEventListener('keydown', function(e) {
@@ -2548,10 +2863,34 @@
       revKeysCloseModal();
       return;
     }
+    if (action === 'vf-close') {  // 视频浮层收起（REQ-20260918-043）：暂停 + 隐藏，再播放自动弹回
+      var vfL = document.getElementById('slirn-video-float');
+      if (vfL) {
+        vfL.querySelectorAll('video').forEach(function(vv) { try { vv.pause(); } catch (err) {} });
+        vfL.hidden = true;
+      }
+      return;
+    }
+    if (action === 'col-toggle') {  // 功能区折叠（REQ-20260918-044）：收起只留胶囊头，再点展开
+      var colBox = target.closest('.slirn-col');
+      if (colBox) {
+        var colOff = !colBox.classList.contains('off');
+        colBox.classList.toggle('off', colOff);
+        colSet(colBox.getAttribute('data-col-key') || '', colOff);
+        var chevEl = colBox.querySelector('.slirn-col-chev');
+        if (chevEl) chevEl.textContent = colOff ? '▸' : '▾';
+      }
+      return;
+    }
+    if (action === 'rev-search-prev') { searchNavTo('slirn-rev-search-q', revNavRows, -1, revMarkSel); return; }
+    if (action === 'rev-search-next') { searchNavTo('slirn-rev-search-q', revNavRows, 1, revMarkSel); return; }
+    if (action === 'cut-search-prev') { searchNavTo('slirn-cut-search-q', cutRows, -1, cutMarkSel); return; }
+    if (action === 'cut-search-next') { searchNavTo('slirn-cut-search-q', cutRows, 1, cutMarkSel); return; }
     if (action === 'revkeys-reset') {
       try { localStorage.removeItem('slirnRevKeys'); } catch (err) {}
       revKeysRec = null;
       revKeysRenderRows();
+      revKeysRenderVideo();
       applyRevKeysState();
       toast('↩️ 快捷键已恢复默认键位');
       return;
