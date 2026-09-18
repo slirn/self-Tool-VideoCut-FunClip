@@ -2296,21 +2296,37 @@ input[type="checkbox"]:checked { border-color: var(--accent-solid); }
 }
 /* v4：删除 v3 per-stage stop_after checkbox 强调块（改用顶部全局下拉） */
 .slirn-pipe-hint { color: var(--text-muted); font-size: 11px; }
-/* v4：顶部「完成到哪个阶段停」全局下拉 */
+/* v4：顶部「完成到哪个阶段停」全局下拉 — 突出显示（橙色强调 + 背景色块） */
 .slirn-pipe-flow-stop-label {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
-  color: var(--text-secondary);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #b45309;
+  padding: 6px 10px;
+  background: rgba(245, 158, 11, 0.10);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 6px;
+}
+[data-theme="dark"] .slirn-pipe-flow-stop-label {
+  color: #fbbf24;
+  background: rgba(245, 158, 11, 0.15);
+  border-color: rgba(245, 158, 11, 0.40);
 }
 .slirn-pipe-flow-stop {
   padding: 4px 8px;
   border-radius: 4px;
-  border: 1px solid var(--border);
+  border: 1px solid rgba(245, 158, 11, 0.45);
   background: var(--input-bg, #fff);
-  font-size: 12px;
+  font-size: 12.5px;
+  font-weight: 600;
   color: var(--text-primary);
+  cursor: pointer;
+}
+.slirn-pipe-flow-stop:focus {
+  outline: 2px solid rgba(245, 158, 11, 0.55);
+  outline-offset: 1px;
 }
 /* v4：每阶段 summary 行内的「▶ 从本阶段开始」按钮 */
 .slirn-pipe-stage-run {

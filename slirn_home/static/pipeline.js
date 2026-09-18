@@ -186,7 +186,7 @@
     }).join('');
 
     panel.innerHTML =
-      '<details class="slirn-pipe-panel-details" open>'
+      '<details class="slirn-pipe-panel-details">'
       + '<summary class="slirn-pipe-head">'
       + '<span class="slirn-pipe-title">⚙ 流程配置</span>'
       + '<span class="slirn-pipe-updated">'
