@@ -540,6 +540,11 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
         f" · ✅ 已决策 <b>{decided}/{n}</b> · 点击行连续跳播（本条播完跳下一条，段间空白不播） · 决策列默认「采纳建议」"
         f" · ▾ 展开模型分析与修剪/更正内容"
     )
+    # REQ-20260918-039：批量改判目标 = 决策下拉全部状态（与单条决策同口径）
+    rev_batch_opts = "".join(
+        f'<option value="{k}"{" selected" if k == "keep" else ""}>{v}</option>'
+        for k, v in revision_service.USER_DECISIONS.items()
+    )
 
     return f'''<div class="slirn-card" style="margin-top:16px;">
         <div class="slirn-panel-header"><div class="slirn-panel-title">🎬 处理剪辑 · 第 2 步：字幕修订</div></div>
@@ -562,6 +567,15 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
             <button type="button" class="slirn-rev-jump-btn" data-rev-jump="next" title="跳到下一条所选状态的记录">下一条 ⬇</button>
           </span>
           <span class="slirn-rev-filter-count" id="slirn-rev-filter-count"></span>
+        </div>
+        <div class="slirn-batch-bar" id="slirn-rev-batch">
+          <span class="slirn-batch-label">🧮 批量</span>
+          序号 <input class="slirn-batch-num" id="slirn-rev-batch-start" type="number" min="1" step="1">
+          ～ <input class="slirn-batch-num" id="slirn-rev-batch-end" type="number" min="1" step="1">
+          改为 <select class="slirn-batch-sel" id="slirn-rev-batch-sel">{rev_batch_opts}</select>
+          <button type="button" class="slirn-btn slirn-btn-xs" data-action="rev-batch-apply"
+                  title="把区间内字幕的决策批量改为所选状态（确认后应用，保存前可继续调整）">🧮 批量应用</button>
+          <span class="slirn-batch-hint">区间内所有行一次改判 — 应用后记得「💾 保存修订决策」</span>
         </div>
         <div id="slirn-rev-player-wrap" class="slirn-video-wrap slirn-sub-player-wrap" style="display:none;">
             <video id="slirn-rev-player" controls preload="metadata"></video>
@@ -843,6 +857,21 @@ def _render_cutlist_zone(task_id: str, t, mgr: TaskManager) -> str:
             <video id="slirn-cut-player" controls preload="metadata"></video>
         </div>
         {spk_bar}
+        <div class="slirn-batch-bar" id="slirn-cut-batch">
+          <span class="slirn-batch-label">🧮 批量</span>
+          行号 <input class="slirn-batch-num" id="slirn-cut-batch-start" type="number" min="1" step="any"
+                 title="支持子段行号，如 10.1">
+          ～ <input class="slirn-batch-num" id="slirn-cut-batch-end" type="number" min="1" step="any"
+                 title="支持子段行号，如 10.2；区间覆盖父段号时含其全部子段">
+          改为 <select class="slirn-batch-sel" id="slirn-cut-batch-sel">
+            <option value="keep">✅ 保留</option>
+            <option value="delete">❌ 删除</option>
+            <option value="">↩️ 维持原状</option>
+          </select>
+          <button type="button" class="slirn-btn slirn-btn-xs" data-action="cut-batch-apply"
+                  title="把区间内行的状态批量改为所选目标（整段行=组级决策，子段行=去留标记；确认后应用，保存前可继续调整）">🧮 批量应用</button>
+          <span class="slirn-batch-hint">整段行改组级决策、子段行改去留 — 应用后记得「💾 保存切分决策」</span>
+        </div>
         <div class="slirn-cut-list" id="slirn-cut-list">{rows}</div>
         <div class="slirn-task-actions" style="margin-top:14px;">
             {main_btn}

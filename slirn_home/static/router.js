@@ -2001,6 +2001,110 @@
   }
   function revFilterSync() { revFilterRender(); revFilterApply(); revJumpRenderSel(); }
 
+  // ===== 批量改判（REQ-20260918-039）：起止序号 + 目标状态，确认后一次改一批 =====
+  // 与单条修改同口径：纯前端状态（保存前可继续调整），落盘走各阶段既有保存按钮
+  function batchRange(box, sId, eId) {  // 读起止输入 → {s,e} | null（非法先 toast 报错）
+    var sEl = box.querySelector('#' + sId), eEl = box.querySelector('#' + eId);
+    var s = parseFloat(sEl && sEl.value), e = parseFloat(eEl && eEl.value);
+    if (!isFinite(s) || !isFinite(e) || s > e || s < 0) {
+      toast('❌ 批量区间不正确：起止都要是数字，且 起 ≤ 止', 'error');
+      return null;
+    }
+    return { s: s, e: e };
+  }
+  function revBatchApply() {  // 字幕修改：区间内行决策 → 目标（data-final 实质口径同步）
+    var box = document.getElementById('slirn-rev-batch');
+    if (!box) return;
+    var rg = batchRange(box, 'slirn-rev-batch-start', 'slirn-rev-batch-end');
+    if (!rg) return;
+    var selT = box.querySelector('#slirn-rev-batch-sel');
+    var tv = selT ? selT.value : '';
+    if (!tv) { toast('❌ 请选择目标状态', 'error'); return; }
+    var label = (selT && selT.options[selT.selectedIndex])
+      ? selT.options[selT.selectedIndex].textContent : tv;
+    var rows = [];
+    var all = document.querySelectorAll('#slirn-rev-list .slirn-rev-row');
+    for (var i = 0; i < all.length; i++) {
+      var sel = all[i].querySelector('.slirn-rev-select');
+      var si = parseInt(sel && sel.getAttribute('data-i'), 10);
+      if (isFinite(si) && si >= rg.s && si <= rg.e) rows.push(all[i]);
+    }
+    if (!rows.length) {
+      toast('❌ 区间 ' + rg.s + ' ～ ' + rg.e + ' 内没有字幕行', 'error');
+      return;
+    }
+    if (!window.confirm('把第 ' + rg.s + ' ～ ' + rg.e + ' 条（共 ' + rows.length
+        + ' 条）的决策改为「' + label + '」？\n（未保存 — 保存前可继续调整）')) return;
+    rows.forEach(function(row) {
+      var selR = row.querySelector('.slirn-rev-select');
+      if (selR) selR.value = tv;
+      var sugg = row.getAttribute('data-sugg') || '';
+      var fin = '';  // 实质口径 — 与决策 change 委托同算法
+      if (tv === 'keep' || tv === 'delete' || tv === 'split' || tv === 'fix') fin = tv;
+      else if (tv === 'accept' && (sugg === 'keep' || sugg === 'delete'
+          || sugg === 'split' || sugg === 'fix')) fin = sugg;
+      row.setAttribute('data-decision', tv);
+      row.setAttribute('data-final', fin);
+      // split/fix：空备注从模型建议预填（与单条 change 同源；不展开不聚焦 — 批量不抢焦点）
+      var note = row.querySelector('.slirn-rev-note-input');
+      if (note && (tv === 'split' || tv === 'fix') && !note.value.trim()) {
+        var kt = row.querySelector('.slirn-rev-keeptext');
+        var m = kt && /「(.+)」/.exec(kt.textContent || '');
+        if (m) note.value = m[1];
+      }
+    });
+    revFilterSync();
+    toast('🧮 已批量设置 ' + rows.length + ' 条 →「' + label + '」（未保存 — 记得保存修订决策）');
+  }
+  function cutBatchApply() {  // 切分修剪：整段行=组级决策 / 子段行=去留标记
+    var box = document.getElementById('slirn-cut-batch');
+    if (!box) return;
+    var rg = batchRange(box, 'slirn-cut-batch-start', 'slirn-cut-batch-end');
+    if (!rg) return;
+    var selT = box.querySelector('#slirn-cut-batch-sel');
+    var tv = selT ? selT.value : 'keep';
+    var label = (selT && selT.options[selT.selectedIndex])
+      ? selT.options[selT.selectedIndex].textContent : tv;
+    // 行命中：行号数值（10 / 10.1）∈ 区间，或所属父段号 ∈ 区间
+    //（"第 10 到 10 条"覆盖该段全部子段 — 与界面所见编号对应）
+    var wholes = [], subs = [];
+    var all = document.querySelectorAll('#slirn-cut-list .slirn-cut-row');
+    for (var i = 0; i < all.length; i++) {
+      var r = all[i];
+      var id = parseFloat(r.getAttribute('data-id'));
+      var src = parseInt(r.getAttribute('data-source-i'), 10);
+      var hit = (isFinite(id) && id >= rg.s && id <= rg.e)
+             || (isFinite(src) && src >= rg.s && src <= rg.e);
+      if (!hit) continue;
+      if (r.classList.contains('sub')) subs.push(r);
+      else wholes.push(r);
+    }
+    var n = wholes.length + subs.length;
+    if (!n) {
+      toast('❌ 区间 ' + rg.s + ' ～ ' + rg.e + ' 内没有切分行', 'error');
+      return;
+    }
+    var parts = [];
+    if (wholes.length) parts.push('整段行 ' + wholes.length + ' 条（改组级决策）');
+    if (subs.length) parts.push('子段行 ' + subs.length + ' 条（改去留标记）');
+    if (!window.confirm('把第 ' + rg.s + ' ～ ' + rg.e + ' 条改为「' + label + '」？\n'
+        + parts.join(' · ') + '\n（未保存 — 保存前可继续调整）')) return;
+    wholes.forEach(function(r) {  // 整段行 → 组级决策（与 actsel 同效；静默不逐条 toast）
+      var g = r.closest('.slirn-cut-group');
+      if (!g) return;
+      if (tv) g.setAttribute('data-act', tv);
+      else g.removeAttribute('data-act');  // 维持原状 = 取消改判
+      var b = g.querySelector('[data-actsel]');
+      if (b) b.value = tv;
+    });
+    subs.forEach(function(r) {  // 子段行 → 去留（维持原状 = 回初始建议标记）
+      cutSpkSetMark(r, tv || r.getAttribute('data-mark-init') || 'keep');
+    });
+    var spkBar = document.getElementById('slirn-cut-spk-bar');  // 仅计未删除口径跟随刷新
+    if (spkBar && spkBar.getAttribute('data-linked') === '1') cutSpkBarRender();
+    toast('🧮 已批量设置 ' + n + ' 条 →「' + label + '」（未保存 — 记得保存切分决策）');
+  }
+
   // ===== 状态跳转（REQ-20260917-025）：独立状态选择列表 + 完整列表内跳上/下一条 =====
   // 跳转目标由「⬆/⬇ 按钮前」的状态下拉显式指定（与筛选 chips 完全解耦）：
   // 跳转时显示全部行——目标行的上下文语句可见，便于结合前后文决定处理；
@@ -2547,6 +2651,12 @@
         cutSpkBarRender();
         toast('🧮 已按当前去留状态重新统计');
       }
+    }
+    else if (action === 'rev-batch-apply') {
+      revBatchApply();  // REQ-20260918-039：字幕修改批量改判
+    }
+    else if (action === 'cut-batch-apply') {
+      cutBatchApply();  // REQ-20260918-039：切分修剪批量改判
     }
     else if (action === 'compose-rough') {
       // 粗剪合成（REQ-20260916-016，可选）：后台拼接保留区间成片
