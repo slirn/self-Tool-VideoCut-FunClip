@@ -1203,9 +1203,10 @@
     var acted = !!document.querySelector('#slirn-cut-list .slirn-cut-group[data-act]');
     return flipped || acted;
   }
-  // ===== 关联人员ID（REQ-20260917-031）：subtitle 段级 spk 按时间重叠对齐到切分行 =====
-  // 关联即时计算不落盘：徽章/data-spk 只在前端 DOM；删除改判走既有组 act / 子段 mark
-  // 口径（保存才落盘）；「重新统计」纯前端按 DOM 现算（未保存改判也计入）。
+  // ===== 关联人员ID（REQ-20260917-031 / 033）：subtitle 段级 spk 按时间重叠对齐到切分行 =====
+  // REQ-033：关联状态落盘 speaker_link.json（端点写）；面板重进时服务端直接渲染徽章 +
+  // 统计条（容器 data-linked=1）。统计口径 = 仅计未删除记录（删除状态完全不计入，
+  // 用于确认非主讲人员已清除）；删除改判走既有组 act / 子段 mark 口径，保存才落盘。
   function cutSpkRows() {
     return cutRows().filter(function(r) { return !!r.getAttribute('data-spk'); });
   }
@@ -1216,17 +1217,16 @@
     if (el) el.textContent = (mk === 'keep' ? '✅ 保留' : '❌ 删除')
       + ((el.textContent || '').indexOf('✏️') >= 0 ? ' ✏️' : '');
   }
-  function cutSpkStats() {  // 按 DOM 现算 → [{spk,total,kept,deleted}]（spk 升序）
+  function cutSpkStats() {  // 按 DOM 现算 → [{spk, count}]（spk 升序；count=未删除行数）
     var m = {};
     cutSpkRows().forEach(function(r) {
       var s = r.getAttribute('data-spk');
       if (!s) return;
-      var c = m[s] || (m[s] = {n: s, total: 0, kept: 0});
-      c.total += 1;
-      if (cutRowKept(r)) c.kept += 1;
+      if (!(s in m)) m[s] = 0;  // 有行即入表 — 全删光也显示 0 条（清零反馈）
+      if (cutRowKept(r)) m[s] += 1;  // 删除状态不计入统计（REQ-033）
     });
     return Object.keys(m).map(function(k) {
-      return {spk: m[k].n, total: m[k].total, kept: m[k].kept, deleted: m[k].total - m[k].kept};
+      return {spk: k, count: m[k]};
     }).sort(function(a, b) { return parseInt(a.spk, 10) - parseInt(b.spk, 10); });
   }
   function cutSpkBarRender() {  // 统计条（chips + 查找/导航/删除/重算），保留输入值
@@ -1236,12 +1236,11 @@
     var prevQ = bar.querySelector('#slirn-cut-spk-q');
     if (prevQ) keepQ = prevQ.value;
     var chips = cutSpkStats().map(function(c) {
-      return '<span class="slirn-cut-spk-chip" data-spk-chip="' + c.spk + '"'
-        + ' title="点击填入查找框">👤' + c.spk + ' · 共 <b>' + c.total + '</b> · 保留 <b>'
-        + c.kept + '</b>' + (c.deleted ? ' · 已删 <b>' + c.deleted + '</b>' : '') + '</span>';
+      return '<span class="slirn-cut-spk-chip" data-action="cut-spk-chip" data-spk="' + c.spk + '"'
+        + ' title="点击填入查找框（统计仅计未删除记录）">👤' + c.spk + ' · <b>' + c.count + '</b> 条</span>';
     }).join('');
     bar.innerHTML =
-      '<div class="slirn-cut-spk-title">👥 人员统计（按时间段重叠对齐字幕生成阶段说话人 · 即时计算不落盘）</div>'
+      '<div class="slirn-cut-spk-title">👥 人员统计（仅计未删除记录 · 关联已保存，重进任务自动显示）</div>'
       + '<div class="slirn-cut-spk-chips">' + chips + '</div>'
       + '<div class="slirn-cut-spk-find">按人员ID查找：'
       + '<input id="slirn-cut-spk-q" type="number" min="1" step="1" placeholder="如 2">'
@@ -1249,16 +1248,11 @@
       + '<button class="slirn-btn slirn-btn-xs" data-action="cut-spk-next">⬇️ 下一条</button>'
       + '<button class="slirn-btn slirn-btn-xs" data-action="cut-spk-delete">❌ 删除该人员全部记录</button>'
       + '<button class="slirn-btn slirn-btn-xs" data-action="cut-spk-recount">🧮 重新统计</button>'
-      + '<span class="slirn-cut-spk-hint">删除 = 整段行改判删除 / 切分子段标记删除（未保存，可逐条翻回）</span></div>';
+      + '<span class="slirn-cut-spk-hint">统计只计未删除记录 — 删除非主讲人员后重算即可确认清零；删除改判需「💾 保存切分决策」落盘</span></div>';
     bar.style.display = '';
+    bar.dataset.linked = '1';
     var q = bar.querySelector('#slirn-cut-spk-q');
     if (q) q.value = keepQ;
-    bar.querySelectorAll('[data-spk-chip]').forEach(function(chip) {
-      chip.addEventListener('click', function() {
-        var el = bar.querySelector('#slirn-cut-spk-q');
-        if (el) { el.value = chip.getAttribute('data-spk-chip'); el.focus(); }
-      });
-    });
   }
   function cutSpkLink(btn) {  // 👤 关联人员ID → POST cut_speaker_link → 注入徽章 + 统计条
     var tid = btn.getAttribute('data-task-id') || '';
@@ -1294,7 +1288,8 @@
       btn.textContent = '🔄 重新关联人员ID';
       var barEl = document.getElementById('slirn-cut-spk-bar');
       if (barEl) barEl.dataset.linked = '1';  // 已关联标记（重新统计守卫用）
-      toast('👥 已标注 ' + n + ' 行（共 ' + (r.link.stats || []).length + ' 位人员）— 查找/删除后记得「💾 保存切分决策」');
+      toast('👥 已标注 ' + n + ' 行（' + (r.link.stats || []).length + ' 位人员）· 关联已保存，重进任务自动显示'
+        + ' — 删除后记得「💾 保存切分决策」');
     }, function() {
       btn.disabled = false;
       btn.textContent = '👤 关联人员ID';
@@ -1348,7 +1343,7 @@
     });
     cutSpkBarRender();
     toast('❌ 👤' + spk + ' 已改判删除：整段 ' + nWhole + ' + 子段 ' + nSub
-      + '（未保存 — 可翻回；保存后不进入粗剪合成）');
+      + '（未保存 — 可翻回；其记录已不计入统计，点「🧮 重新统计」可确认清零）');
   }
   // 粗剪合成（REQ-20260916-016，可选步骤）：启动后台拼接 → 轮询进度 → 完成注入预览
   function rcFmtDur(sec) {
@@ -2477,6 +2472,11 @@
     }
     else if (action === 'cut-spk-delete') {
       cutSpkDelete();
+    }
+    else if (action === 'cut-spk-chip') {
+      // 统计条 chip 点击 → 填入查找框（服务端渲染 / JS 重渲染的 chips 都走此委托）
+      var qEl = document.getElementById('slirn-cut-spk-q');
+      if (qEl) { qEl.value = target.getAttribute('data-spk') || ''; qEl.focus(); }
     }
     else if (action === 'cut-spk-recount') {
       // 重新统计：按当前 DOM 去留现算（未保存改判也计入）；未关联过 → 引导

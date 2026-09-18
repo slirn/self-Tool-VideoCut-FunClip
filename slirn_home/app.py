@@ -585,7 +585,7 @@ def _render_cutlist_zone(task_id: str, t, mgr: TaskManager) -> str:
     面板打开即服务端现算预览（不落盘）；「生成切分清单」才落盘 +
     推进 ROUGH_CUT_DONE。
     """
-    from slirn_home import asr_service, cutlist_service, revision_service
+    from slirn_home import asr_service, cut_speaker, cutlist_service, revision_service
 
     outputs_dir = mgr.tasks_dir / task_id / "outputs"
 
@@ -672,6 +672,26 @@ def _render_cutlist_zone(task_id: str, t, mgr: TaskManager) -> str:
         except (KeyError, TypeError, ValueError):
             continue
 
+    # 人员关联（REQ-033）：已落盘 enabled → 现算对齐（与端点同口径；快照备查），
+    # 行上直接渲染 👤 徽章 + data-spk；subtitle 已无 spk（重新生成过）→ 静默回普通态
+    spk_link = None
+    if cut_speaker.load_link(outputs_dir):
+        spk_link = cut_speaker.link_speakers(sub_meta, cutlist)
+        if not spk_link.get("available"):
+            spk_link = None
+    spk_rows: dict[str, int] = (spk_link or {}).get("rows") or {}
+
+    def _spk_attr(rid) -> str:
+        spk = spk_rows.get(str(rid))
+        return f' data-spk="{int(spk)}"' if spk else ""
+
+    def _spk_badge(rid) -> str:
+        spk = spk_rows.get(str(rid))
+        if not spk:
+            return ""
+        return (f'<span class="slirn-cut-spk"'
+                f' title="人员 {int(spk)}（时间段重叠最大的字幕段说话人）">👤{int(spk)}</span>')
+
     rows = ""
     for si, its in groups:
         first = its[0]
@@ -704,11 +724,12 @@ def _render_cutlist_zone(task_id: str, t, mgr: TaskManager) -> str:
                 rows += (
                     f'<div class="slirn-cut-row sub mark-{mk}" data-task-id="{_esc(task_id)}"'
                     f' data-id="{_esc(it["id"])}" data-mark="{mk}" data-mark-init="{mk}" data-source-i="{si}"'
-                    f' data-start-ms="{int(it["start_ms"])}" data-end-ms="{int(it["end_ms"])}"{fb_title}>'
+                    f' data-start-ms="{int(it["start_ms"])}" data-end-ms="{int(it["end_ms"])}"{_spk_attr(it["id"])}{fb_title}>'
                     f'<span class="slirn-sub-idx">{_esc(it["id"])}</span>'
                     f'<span class="slirn-sub-time">{_esc(it["start"])} → {_esc(it["end"])}</span>'
                     f'<span class="slirn-cut-mark" title="点击翻转 保留/删除">{mk_label}</span>'
                     f'<span class="slirn-sub-text">{_esc(it["text"])}{fb_mark}</span>'
+                    f'{_spk_badge(it["id"])}'
                     f'</div>'
                 )
             rows += "</div>"
@@ -733,13 +754,14 @@ def _render_cutlist_zone(task_id: str, t, mgr: TaskManager) -> str:
                 f' data-target="{_esc(note_by_i.get(si, ""))}">'
                 f'<div class="slirn-cut-row whole" data-task-id="{_esc(task_id)}"'
                 f' data-id="{_esc(first["id"])}" data-source-i="{si}"'
-                f' data-start-ms="{int(first["start_ms"])}" data-end-ms="{int(first["end_ms"])}">'
+                f' data-start-ms="{int(first["start_ms"])}" data-end-ms="{int(first["end_ms"])}"{_spk_attr(first["id"])}>'
                 f'<span class="slirn-sub-idx">{si}</span>'
                 f'<span class="slirn-sub-time">{_esc(first["start"])} → {_esc(first["end"])}</span>'
                 f'<span class="slirn-rev-badge {kind}" data-kind="{kind}">{kind_label}</span>'
                 f'<span class="slirn-sub-text">{text_html}</span>'
                 f'{_act_sel(act)}'
                 f'{resplit_btn}'
+                f'{_spk_badge(first["id"])}'
                 f'</div></div>'
             )
     # fallback 提示（有降级子段时在统计行下提醒）
@@ -757,6 +779,33 @@ def _render_cutlist_zone(task_id: str, t, mgr: TaskManager) -> str:
         if rev_at and cut_at and rev_at > cut_at:
             stale_note = ('<div class="slirn-form-hint slirn-cut-stale">'
                           "📝 修订决策已更新，已保存的切分清单可能过期 — 可「🔄 重新执行切分修剪」按最新决策重算</div>")
+
+    # 人员统计条（REQ-033）：已关联 → 服务端直接渲染（结构与 router.cutSpkBarRender
+    # 一致），chips 走事件委托（data-action="cut-spk-chip"），容器 data-linked=1
+    # 让「重新统计」守卫直接放行。统计口径：仅计未删除记录。
+    if spk_link:
+        chips = "".join(
+            f'<span class="slirn-cut-spk-chip" data-action="cut-spk-chip" data-spk="{s["spk"]}"'
+            f' title="点击填入查找框（统计仅计未删除记录）">👤{s["spk"]} · <b>{s["count"]}</b> 条</span>'
+            for s in spk_link["stats"]
+        )
+        spk_bar = (
+            '<div id="slirn-cut-spk-bar" class="slirn-cut-spk-bar" data-linked="1">'
+            '<div class="slirn-cut-spk-title">👥 人员统计（仅计未删除记录 · 关联已保存，重进任务自动显示）</div>'
+            f'<div class="slirn-cut-spk-chips">{chips}</div>'
+            '<div class="slirn-cut-spk-find">按人员ID查找：'
+            '<input id="slirn-cut-spk-q" type="number" min="1" step="1" placeholder="如 2">'
+            '<button class="slirn-btn slirn-btn-xs" data-action="cut-spk-prev">⬆️ 上一条</button>'
+            '<button class="slirn-btn slirn-btn-xs" data-action="cut-spk-next">⬇️ 下一条</button>'
+            '<button class="slirn-btn slirn-btn-xs" data-action="cut-spk-delete">❌ 删除该人员全部记录</button>'
+            '<button class="slirn-btn slirn-btn-xs" data-action="cut-spk-recount">🧮 重新统计</button>'
+            '<span class="slirn-cut-spk-hint">统计只计未删除记录 — 删除非主讲人员后重算即可确认清零；'
+            '删除改判需「💾 保存切分决策」落盘</span></div></div>'
+        )
+        spk_btn_label = "🔄 重新关联人员ID"
+    else:
+        spk_bar = '<div id="slirn-cut-spk-bar" class="slirn-cut-spk-bar" style="display:none;"></div>'
+        spk_btn_label = "👤 关联人员ID"
 
     total_in = len(entries)
     stats_line = (
@@ -787,13 +836,13 @@ def _render_cutlist_zone(task_id: str, t, mgr: TaskManager) -> str:
         <div id="slirn-cut-player-wrap" class="slirn-video-wrap slirn-sub-player-wrap" style="display:none;">
             <video id="slirn-cut-player" controls preload="metadata"></video>
         </div>
-        <div id="slirn-cut-spk-bar" class="slirn-cut-spk-bar" style="display:none;"></div>
+        {spk_bar}
         <div class="slirn-cut-list" id="slirn-cut-list">{rows}</div>
         <div class="slirn-task-actions" style="margin-top:14px;">
             {main_btn}
             <button class="slirn-btn" id="slirn-cut-save" data-action="save-cut-decisions"
                     data-task-id="{_esc(task_id)}">💾 保存切分决策</button>
-            <button class="slirn-btn" data-action="cut-spk-link" data-task-id="{_esc(task_id)}">👤 关联人员ID</button>
+            <button class="slirn-btn" data-action="cut-spk-link" data-task-id="{_esc(task_id)}">{spk_btn_label}</button>
             <button class="slirn-btn" data-action="play-cut-video" data-task-id="{_esc(task_id)}">▶️ 播放视频</button>
         </div></div>'''
 
@@ -2855,7 +2904,10 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
                 "字幕无人员编号 — 该任务生成字幕时未开启说话人分离（或为旧任务）。"
                 "请到「字幕生成」阶段开启「区分说话人」重新生成后再关联"
             )
-        return _ok("", link=link, rows=len(cutlist.get("items") or []))
+        # REQ-033：关联状态落盘 — 重进面板时徽章 + 统计条直接渲染（渲染端现算，快照备查）
+        saved_link = cut_speaker.save_link(outputs_dir, link)
+        return _ok("", link=link, rows=len(cutlist.get("items") or []),
+                   linked_at=saved_link.get("linked_at"))
 
     @app.app.post("/slirn/api/save_cut_decisions")
     async def save_cut_decisions(body: dict = Body(default_factory=dict)):

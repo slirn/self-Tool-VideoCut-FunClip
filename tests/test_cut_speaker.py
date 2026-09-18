@@ -1,8 +1,9 @@
-"""测试切分修剪阶段关联人员ID — REQ-20260917-031。
+"""测试切分修剪阶段关联人员ID — REQ-20260917-031 / REQ-20260917-033。
 
 单元层（纯函数，无网络/无 ASR）：时间重叠对齐（整段/子段/无重叠/并列取早）、
-按人员统计（执行口径保留数）、无 spk 引导、面板按钮渲染、API 端点（有/无 spk）。
-完整浏览器链路走 E2E（真实页面点击）。
+按人员统计**未删除**记录数（REQ-033 口径：删除状态不计入）、无 spk 引导、
+关联落盘往返（speaker_link.json）、面板渲染（未关联普通态 / 已关联持久态）、
+API 端点（有/无 spk + 落盘）。完整浏览器链路走 E2E（真实页面点击）。
 """
 
 from __future__ import annotations
@@ -80,18 +81,18 @@ def test_link_speakers_whole_and_sub():
     assert link["available"] is True
     assert link["rows"] == {"10.1": 1, "10.2": 1, "20": 2}, "子段与整段都标注"
     assert link["stats"] == [
-        {"spk": 1, "total": 2, "kept": 1, "deleted": 1},  # 10.1 删除洞
-        {"spk": 2, "total": 1, "kept": 1, "deleted": 0},
+        {"spk": 1, "count": 1},  # 10.1 删除洞不计入（REQ-033：仅计未删除）
+        {"spk": 2, "count": 1},
     ]
 
-    # 改判：段20 组级 delete + 10.2 手工翻转 delete → spk2 全删、spk1 全删
+    # 改判：段20 组级 delete + 10.2 手工翻转 delete → 两人全部清零
     cut2 = build_cutlist({"segments": segs}, rev,
                          manual_marks={"10.2": "delete"}, actions={"20": "delete"})
     link2 = link_speakers({"segments": segs}, cut2)
     assert link2["stats"] == [
-        {"spk": 1, "total": 2, "kept": 0, "deleted": 2},
-        {"spk": 2, "total": 1, "kept": 0, "deleted": 1},
-    ], "执行口径：组级 delete / 子段 mark=delete 均剔除"
+        {"spk": 1, "count": 0},
+        {"spk": 2, "count": 0},
+    ], "执行口径：组级 delete / 子段 mark=delete 均不计入统计"
 
 
 def test_link_speakers_no_overlap_and_tie():
@@ -110,7 +111,7 @@ def test_link_speakers_no_overlap_and_tie():
     ]}
     link = link_speakers({"segments": segs}, cutlist)
     assert link["rows"] == {"7": 1}, "并列取更早段；无重叠（行8）不标注"
-    assert link["stats"] == [{"spk": 1, "total": 1, "kept": 1, "deleted": 0}]
+    assert link["stats"] == [{"spk": 1, "count": 1}]
 
     # 重叠不等 → 大者胜：行 [4000, 5400] 与段2 重叠 600ms > 段1 200ms → spk2
     cutlist2 = {"items": [
@@ -130,6 +131,26 @@ def test_link_speakers_unavailable_without_spk():
     for meta in ({"segments": segs}, {"segments": segs_spk0}, None, {}):
         link = link_speakers(meta, cutlist)
         assert link == {"available": False, "rows": {}, "stats": []}
+
+
+# ---------- 落盘往返（REQ-033） ----------
+
+def test_save_and_load_link(tmp_path: Path):
+    from slirn_home.cut_speaker import LINK_FILENAME, load_link, save_link
+
+    assert load_link(tmp_path) is None, "无文件 → None（面板普通态）"
+    payload = save_link(tmp_path, {"rows": {"1": 1}, "stats": [{"spk": 1, "count": 1}]})
+    assert payload["enabled"] is True and payload["linked_at"]
+    data = json.loads((tmp_path / LINK_FILENAME).read_text(encoding="utf-8"))
+    assert data["rows"] == {"1": 1} and data["stats"] == [{"spk": 1, "count": 1}]
+    assert load_link(tmp_path) == data, "落盘往返一致"
+
+    # 坏文件 / enabled=False → None（容错回普通态）
+    (tmp_path / LINK_FILENAME).write_text("{bad json", encoding="utf-8")
+    assert load_link(tmp_path) is None
+    (tmp_path / LINK_FILENAME).write_text(
+        json.dumps({"version": 1, "enabled": False}), encoding="utf-8")
+    assert load_link(tmp_path) is None
 
 
 # ---------- 面板渲染 ----------
@@ -158,6 +179,47 @@ def test_render_cutlist_zone_has_spk_button(tmp_path: Path):
     btn_pos = h.find('data-action="cut-spk-link"')
     list_pos = h.find('id="slirn-cut-list"')
     assert 0 < bar_pos < list_pos < btn_pos, "统计条在列表上方、按钮在操作行（列表下方）"
+
+
+def test_render_cutlist_zone_persists_link(tmp_path: Path):
+    """REQ-033：已关联（speaker_link.json enabled）→ 面板直接渲染徽章 + 统计条。"""
+    from slirn_home.app import _render_cutlist_zone
+    from slirn_home.cut_speaker import save_link
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="持久关联", original_video=video)
+    tid = t.task_id
+    outputs = m.tasks_dir / tid / "outputs"
+    outputs.mkdir(parents=True, exist_ok=True)
+    segs = [_seg(1, 0, 900, "讲师说", spk=1), _seg(2, 900, 1800, "学生说", spk=2)]
+    (outputs / "subtitle.json").write_text(
+        json.dumps({"version": 1, "segments": segs}, ensure_ascii=False), encoding="utf-8")
+    (outputs / "revision.json").write_text(json.dumps(_rev(
+        [{"i": 1, "category": "keep", "keep_text": None, "decision": "accept", "user_note": ""},
+         {"i": 2, "category": "keep", "keep_text": None, "decision": "accept", "user_note": ""}]),
+        ensure_ascii=False), encoding="utf-8")
+    save_link(outputs, {"rows": {"1": 1, "2": 2}, "stats": [{"spk": 1, "count": 1},
+                                                            {"spk": 2, "count": 1}]})
+
+    h = _render_cutlist_zone(tid, m.get(tid), m)
+    # 统计条可见（无 display:none）+ data-linked（重新统计守卫放行）
+    assert 'id="slirn-cut-spk-bar"' in h and 'data-linked="1"' in h
+    assert 'id="slirn-cut-spk-bar" class="slirn-cut-spk-bar" data-linked="1"' in h
+    # chips：仅计未删除口径 + 委托点击
+    assert 'data-action="cut-spk-chip" data-spk="1"' in h and "👤1 · <b>1</b> 条" in h
+    assert "👤2 · <b>1</b> 条" in h
+    # 行徽章 + data-spk（JS 统计/导航依赖）
+    assert 'data-spk="1"' in h and 'class="slirn-cut-spk"' in h and ">👤1</span>" in h
+    # 按钮变「重新关联」
+    assert "重新关联人员ID" in h
+
+    # 数据兼容（REQ-1.6）：subtitle 重新生成后无 spk → 静默回普通态
+    (outputs / "subtitle.json").write_text(json.dumps(
+        {"version": 1, "segments": [_seg(1, 0, 900, "无说话人")]}, ensure_ascii=False),
+        encoding="utf-8")
+    h2 = _render_cutlist_zone(tid, m.get(tid), m)
+    assert "display:none" in h2 and "重新关联人员ID" not in h2, "已无 spk → 回到未关联普通态"
+    assert 'data-spk="1"' not in h2, "不残留徽章"
 
 
 # ---------- API 端点 ----------
@@ -191,24 +253,28 @@ def test_cut_speaker_link_endpoint(tmp_path: Path):
     keep_entry = [{"i": 1, "category": "keep", "keep_text": None,
                    "decision": "accept", "user_note": ""}]
 
-    # 1) 有 spk：行标注 + 统计 + rows 数
-    tid1, _ = _seed_task(m, [_seg(1, 0, 900, "讲师开场", spk=1),
-                             _seg(2, 900, 1800, "同学提问", spk=2)],
-                         keep_entry + [{"i": 2, "category": "keep", "keep_text": None,
-                                        "decision": "accept", "user_note": ""}])
+    # 1) 有 spk：行标注 + 统计 + rows 数 + 落盘（REQ-033）
+    tid1, outputs1 = _seed_task(m, [_seg(1, 0, 900, "讲师开场", spk=1),
+                                    _seg(2, 900, 1800, "同学提问", spk=2)],
+                                keep_entry + [{"i": 2, "category": "keep", "keep_text": None,
+                                               "decision": "accept", "user_note": ""}])
     r = client.post("/slirn/api/cut_speaker_link", json={"task_id": tid1})
     assert r.status_code == 200, r.text
     d = r.json()
     assert d["ok"] and d["rows"] == 2
     assert d["link"]["available"] is True
     assert d["link"]["rows"] == {"1": 1, "2": 2}
-    assert d["link"]["stats"][0] == {"spk": 1, "total": 1, "kept": 1, "deleted": 0}
+    assert d["link"]["stats"][0] == {"spk": 1, "count": 1}
+    assert d.get("linked_at"), "响应带落盘时间"
+    saved1 = json.loads((outputs1 / "speaker_link.json").read_text(encoding="utf-8"))
+    assert saved1["enabled"] is True and saved1["rows"] == {"1": 1, "2": 2}, "关联状态已落盘"
 
-    # 2) 无 spk：引导重新生成（不 500）
-    tid2, _ = _seed_task(m, [_seg(1, 0, 900, "旧任务无说话人")], keep_entry)
+    # 2) 无 spk：引导重新生成（不 500，也不落盘）
+    tid2, outputs2 = _seed_task(m, [_seg(1, 0, 900, "旧任务无说话人")], keep_entry)
     r2 = client.post("/slirn/api/cut_speaker_link", json={"task_id": tid2})
     d2 = r2.json()
     assert d2["ok"] is False and "说话人" in d2["error"] and "重新生成" in d2["error"]
+    assert not (outputs2 / "speaker_link.json").exists()
 
     # 3) 缺 task_id / 任务不存在 / 无修订
     assert "缺少 task_id" in client.post(
