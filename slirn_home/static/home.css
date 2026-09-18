@@ -455,19 +455,57 @@ footer { display: none !important; }
 }
 .slirn-textarea { resize: vertical; min-height: 60px; line-height: 1.5; }
 
-/* 全局复选框可见性（REQ-20260918-041）：亮/暗主题都用 1.5px 实线边框 + 主题强调色描边 + accent 勾选色，
-   避免白底白框看不见；尺寸 15×15 让光标易于命中。 */
+/* 全局复选框可见性（REQ-20260918-041）：亮/暗主题都用 1.5px 实线边框 + 主题强调色填充 + 自绘打勾，
+   避免白底白框看不见 + 修复 accent-color 在部分浏览器/主题下不渲染打勾的问题。
+   用 appearance: none + ::after 伪元素自绘打勾，所有浏览器、所有主题都保证视觉与 :checked 同步。
+   尺寸 16×16 让光标易于命中。 */
 input[type="checkbox"] {
-  width: 15px; height: 15px;
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px; height: 16px;
   margin: 0; flex: none;
-  accent-color: var(--accent-solid);
   border: 1.5px solid var(--chk-border);
   border-radius: 4px;
   background: var(--input-bg);
   cursor: pointer;
   vertical-align: middle;
+  position: relative;
+  transition: background-color 0.12s ease, border-color 0.12s ease;
 }
-input[type="checkbox"]:checked { border-color: var(--accent-solid); }
+input[type="checkbox"]:hover { border-color: var(--accent-solid); }
+input[type="checkbox"]:checked {
+  background: var(--accent-solid);
+  border-color: var(--accent-solid);
+}
+input[type="checkbox"]:checked::after {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 0px;
+  width: 4px;
+  height: 9px;
+  border: solid #fff;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+input[type="checkbox"]:indeterminate {
+  background: var(--accent-solid);
+  border-color: var(--accent-solid);
+}
+input[type="checkbox"]:indeterminate::after {
+  content: '';
+  position: absolute;
+  left: 2px;
+  top: 6px;
+  width: 8px;
+  height: 2px;
+  background: #fff;
+  border-radius: 1px;
+}
+input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--accent-soft);
+  outline-offset: 1px;
+}
 .slirn-form-row { margin-bottom: 16px; }
 .slirn-form-label {
   display: block;
@@ -676,7 +714,13 @@ input[type="checkbox"]:checked { border-color: var(--accent-solid); }
   width: 18px;
   height: 18px;
   cursor: pointer;
-  accent-color: var(--accent-solid);
+}
+.slirn-hw-inherit-row input[type="checkbox"]:checked::after {
+  left: 5px;
+  top: 1px;
+  width: 5px;
+  height: 10px;
+  border-width: 0 2.5px 2.5px 0;
 }
 .slirn-hw-inherit-row span strong {
   color: var(--accent-solid);
