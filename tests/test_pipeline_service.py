@@ -488,8 +488,9 @@ def test_handler_subtitle_review_passes_rigor_from_cfg(tmp_path: Path, monkeypat
 
     captured = []
 
-    def fake_http_post(api, path, payload, *, timeout=30.0):
-        captured.append({"api": api, "path": path, "payload": payload})
+    def fake_http_post(api, path, payload, *, timeout=30.0, auto_session_id=""):
+        captured.append({"api": api, "path": path, "payload": payload,
+                         "auto_session_id": auto_session_id})
         return {"ok": True}
 
     monkeypatch.setattr(P, "_http_post", fake_http_post)
@@ -518,7 +519,7 @@ def test_handler_subtitle_review_normalizes_invalid_rigor(tmp_path: Path, monkey
 
     captured = []
 
-    def fake_http_post(api, path, payload, *, timeout=30.0):
+    def fake_http_post(api, path, payload, *, timeout=30.0, auto_session_id=""):
         captured.append(payload)
         return {"ok": True}
 
@@ -702,3 +703,107 @@ def test_compute_next_since_unknown_stage_ignored():
     history = [{"stages_done": ["subtitle_generation", "unknown_stage"], "status": "stopped"}]
     # 'unknown_stage' 不在 STAGE_KEYS 里 → last_idx 仍是 0
     assert _compute_next_since_py(history) == "subtitle_review"
+
+
+# ---------- REQ-20260920-081：auto_session_id 透传 ----------
+
+def test_run_pipeline_generates_unique_auto_session_id(tmp_path: Path, monkeypatch):
+    """REQ-20260920-081：每次 run_pipeline 启动生成新的 12 字符 session_id；写到 job。"""
+    from slirn_home import pipeline_service as P
+
+    outputs_dir = tmp_path / "outputs"
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    api = "http://stub"
+
+    # stub 所有 handler：返回 (True, "") 即 succeed
+    monkeypatch.setattr(P, "HANDLERS",
+                        {k: (lambda *a, **kw: (True, "")) for k in P.HANDLERS})
+    # prereq：subtitle.json + revision.json（避免 skip）
+    (outputs_dir / "subtitle.json").write_text("{}", encoding="utf-8")
+    (outputs_dir / "revision.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(P, "_poll_status", lambda *a, **kw: ("done", ""))
+
+    seen_sids = []
+    for tid in ["tid-sess-a", "tid-sess-b"]:
+        assert P.run_pipeline(tid, api, outputs_dir) is True
+        job = P._PIPELINE_JOBS.get(tid)
+        assert job is not None
+        sid = job.auto_session_id
+        assert len(sid) == 12, f"session_id 应为 12 字符：{sid!r}"
+        seen_sids.append(sid)
+        # 等守护线程退出
+        t0 = time.time()
+        while P._is_running(tid) and time.time() - t0 < 5:
+            time.sleep(0.05)
+
+    # 两次 run_pipeline 的 session_id 不同
+    assert seen_sids[0] != seen_sids[1], "不同次自动流的 session_id 应不同"
+
+
+def test_http_post_attaches_session_header(monkeypatch):
+    """REQ-20260920-081：_http_post 接 auto_session_id 时附加 X-Slirn-Auto-Session header。"""
+    from slirn_home import pipeline_service as P
+
+    captured_requests = []
+
+    class _FakeResp:
+        def __init__(self): self._b = b'{"ok": true}'
+        def read(self): return self._b
+        def __enter__(self): return self
+        def __exit__(self, *a): pass
+
+    def fake_urlopen(req, timeout=None):
+        # 把整个 req 存下来，调用后再读 header
+        captured_requests.append(req)
+        return _FakeResp()
+
+    import urllib.request as _ur
+    monkeypatch.setattr(_ur, "urlopen", fake_urlopen)
+    # 不传 auto_session_id → 不带 X-Slirn-Auto-Session
+    P._http_post("http://x", "/y", {"a": 1})
+    assert len(captured_requests) == 1
+    headers1 = {k.lower(): v for k, v in captured_requests[-1].headers.items()}
+    assert "x-slirn-auto-session" not in headers1
+    assert headers1.get("x-slirn-auto") == "1"
+    # 传 auto_session_id → 带上 header
+    P._http_post("http://x", "/y", {"a": 1}, auto_session_id="sid123abc456")
+    assert len(captured_requests) == 2
+    headers2 = {k.lower(): v for k, v in captured_requests[-1].headers.items()}
+    assert headers2.get("x-slirn-auto-session") == "sid123abc456"
+
+
+def test_handler_propagates_auto_session_id_to_http_post(tmp_path: Path, monkeypatch):
+    """REQ-20260920-081：handler 调 _http_post 时透传 job.auto_session_id。"""
+    from slirn_home import pipeline_service as P
+
+    outputs_dir = tmp_path / "outputs"
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    # 准备 prereq 文件让 handler 跳过 skip
+    (outputs_dir / "subtitle.json").write_text("{}", encoding="utf-8")
+    (outputs_dir / "revision.json").write_text("{}", encoding="utf-8")
+
+    captured = []
+
+    def fake_http_post(api, path, payload, *, timeout=30.0, auto_session_id=""):
+        captured.append({"path": path, "auto_session_id": auto_session_id})
+        return {"ok": True}
+
+    def fake_poll(*a, **kw):
+        return ("done", "")
+
+    job = P.PipelineJob(state="running", started_at=time.time(),
+                       current_stage=None, percent=0.0,
+                       auto_session_id="sess-handler-1")
+
+    monkeypatch.setattr(P, "_http_post", fake_http_post)
+    monkeypatch.setattr(P, "_poll_status", fake_poll)
+
+    ok, msg = P.handler_rough_cut("tid-prop", {}, outputs_dir, "http://x", job)
+    assert ok is True
+
+    # fake_http_post 应被调用，且传了 session_id
+    assert len(captured) >= 1
+    for call in captured:
+        assert call["auto_session_id"] == "sess-handler-1", (
+            f"所有 _http_post 调用应透传 session_id: {call}"
+        )

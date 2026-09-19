@@ -5675,3 +5675,200 @@ def test_import_fine_params_accepts_v2_schema(tmp_path):
     # v2 没有 detected_region → 保持 None（不被覆盖）
     assert fc["detected_region"] is None, \
         "v2 schema 不带 detected_region 时应保持 None"
+
+
+# ---------- REQ-20260920-081：list_logs API + endpoint session 透传 ----------
+
+def test_list_logs_endpoint_returns_history(tmp_path: Path):
+    """REQ-20260920-081：/slirn/api/list_logs 返回当前任务的执行历史列表。"""
+    from slirn_home import execution_history
+    from slirn_home.app import build_app
+    from fastapi.testclient import TestClient
+
+    m, _ = _make_mgr(tmp_path)
+    t = m.create(name="t-logs", original_video=tmp_path / "lecture.mp4")
+    outputs_dir = m.tasks_dir / t.task_id / "outputs"
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    # 写 3 条历史
+    e1 = execution_history.record_start(outputs_dir, execution_history.KIND_FINE_PREVIEW)
+    execution_history.record_finish(outputs_dir, e1, success=True)
+    e2 = execution_history.record_start(outputs_dir, execution_history.KIND_FINE_EXPORT,
+                                         auto=True, auto_session_id="sess-abc")
+    execution_history.record_finish(outputs_dir, e2, success=False, error="ffmpeg crashed")
+    e3 = execution_history.record_start(outputs_dir, execution_history.KIND_ROUGH_COMPOSE,
+                                         auto=True, auto_session_id="sess-abc")
+    execution_history.record_finish(outputs_dir, e3, success=True)
+
+    built = build_app(tmp_path)
+    client = TestClient(built.app)
+    resp = client.post("/slirn/api/list_logs", json={"task_id": t.task_id})
+    body = resp.json()
+    assert body["ok"] is True, body
+    assert body["total"] == 3
+    items = body["items"]
+    assert {it["id"] for it in items} == {e1, e2, e3}
+
+
+def test_list_logs_filters_by_kinds_and_statuses(tmp_path: Path):
+    """REQ-20260920-081：按 kinds + statuses 过滤。"""
+    from slirn_home import execution_history
+    from slirn_home.app import build_app
+    from fastapi.testclient import TestClient
+
+    m, _ = _make_mgr(tmp_path)
+    t = m.create(name="t-filter", original_video=tmp_path / "lecture.mp4")
+    outputs_dir = m.tasks_dir / t.task_id / "outputs"
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    e1 = execution_history.record_start(outputs_dir, execution_history.KIND_FINE_PREVIEW)
+    execution_history.record_finish(outputs_dir, e1, success=True)
+    e2 = execution_history.record_start(outputs_dir, execution_history.KIND_FINE_EXPORT)
+    execution_history.record_finish(outputs_dir, e2, success=False, error="x")
+
+    built = build_app(tmp_path)
+    client = TestClient(built.app)
+    # kinds=["fine_export"] → 只 e2
+    resp = client.post("/slirn/api/list_logs", json={
+        "task_id": t.task_id, "kinds": ["fine_export"]})
+    items = resp.json()["items"]
+    assert len(items) == 1
+    assert items[0]["kind"] == "fine_export"
+    # statuses=["failed"] → 只 e2
+    resp = client.post("/slirn/api/list_logs", json={
+        "task_id": t.task_id, "statuses": ["failed"]})
+    items = resp.json()["items"]
+    assert len(items) == 1
+    assert items[0]["id"] == e2
+
+
+def test_list_logs_isolates_by_task_id(tmp_path: Path):
+    """REQ-20260920-081：list_logs 严格按 task_id 隔离，不混其他任务。"""
+    from slirn_home import execution_history
+    from slirn_home.app import build_app
+    from fastapi.testclient import TestClient
+
+    m, _ = _make_mgr(tmp_path)
+    tA = m.create(name="t-A", original_video=tmp_path / "lecture.mp4")
+    tB = m.create(name="t-B", original_video=tmp_path / "lecture.mp4")
+    outA = m.tasks_dir / tA.task_id / "outputs"
+    outB = m.tasks_dir / tB.task_id / "outputs"
+    outA.mkdir(parents=True, exist_ok=True)
+    outB.mkdir(parents=True, exist_ok=True)
+    eA = execution_history.record_start(outA, execution_history.KIND_FINE_PREVIEW)
+    execution_history.record_finish(outA, eA, success=True)
+    eB = execution_history.record_start(outB, execution_history.KIND_FINE_PREVIEW)
+    execution_history.record_finish(outB, eB, success=True)
+
+    built = build_app(tmp_path)
+    client = TestClient(built.app)
+    resp = client.post("/slirn/api/list_logs", json={"task_id": tA.task_id})
+    items = resp.json()["items"]
+    assert len(items) == 1
+    assert items[0]["id"] == eA
+    # B 的 history 不应出现在 A 的 list_logs 里
+    assert all(it["id"] != eB for it in items)
+
+
+def test_list_logs_filters_by_auto_session_id(tmp_path: Path):
+    """REQ-20260920-081：auto='manual' 只返 auto=False；auto='auto' 只返 auto=True。"""
+    from slirn_home import execution_history
+    from slirn_home.app import build_app
+    from fastapi.testclient import TestClient
+
+    m, _ = _make_mgr(tmp_path)
+    t = m.create(name="t-mode", original_video=tmp_path / "lecture.mp4")
+    outputs_dir = m.tasks_dir / t.task_id / "outputs"
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    e_manual = execution_history.record_start(outputs_dir,
+                                              execution_history.KIND_FINE_PREVIEW,
+                                              auto=False)
+    execution_history.record_finish(outputs_dir, e_manual, success=True)
+    e_auto = execution_history.record_start(outputs_dir,
+                                            execution_history.KIND_FINE_EXPORT,
+                                            auto=True, auto_session_id="sess-1")
+    execution_history.record_finish(outputs_dir, e_auto, success=True)
+
+    built = build_app(tmp_path)
+    client = TestClient(built.app)
+    resp = client.post("/slirn/api/list_logs", json={
+        "task_id": t.task_id, "auto": "manual"})
+    items = resp.json()["items"]
+    assert len(items) == 1
+    assert items[0]["id"] == e_manual
+    assert items[0]["auto"] is False
+
+    resp = client.post("/slirn/api/list_logs", json={
+        "task_id": t.task_id, "auto": "auto"})
+    items = resp.json()["items"]
+    assert len(items) == 1
+    assert items[0]["id"] == e_auto
+    assert items[0]["auto_session_id"] == "sess-1"
+
+
+def test_list_logs_requires_task_id(tmp_path: Path):
+    """REQ-20260920-081：list_logs 缺 task_id → 400。"""
+    from slirn_home.app import build_app
+    from fastapi.testclient import TestClient
+
+    built = build_app(tmp_path)
+    client = TestClient(built.app)
+    resp = client.post("/slirn/api/list_logs", json={})
+    assert resp.json()["ok"] is False
+    assert "task_id" in resp.json()["error"]
+
+
+def test_render_fine_preview_writes_history(tmp_path: Path, monkeypatch):
+    """REQ-20260920-081：调 render_fine_preview 后执行历史有 KIND_FINE_PREVIEW 条目。"""
+    from slirn_home import execution_history
+    from slirn_home.app import build_app
+    from fastapi.testclient import TestClient
+
+    m, _ = _make_mgr(tmp_path)
+    t = m.create(name="t-prev", original_video=tmp_path / "lecture.mp4")
+    outputs_dir = m.tasks_dir / t.task_id / "outputs"
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    # 让 _run_fine_render 不实际跑 ffmpeg（避免缺 ffmpeg）
+    def fake_run(task_id, mgr, out_path, duration, preview_start=0.0):
+        return {"ok": True, "path": "fake.mp4"}
+    monkeypatch.setattr("slirn_home.app._run_fine_render", fake_run)
+    built = build_app(tmp_path)
+    client = TestClient(built.app)
+    resp = client.post("/slirn/api/render_fine_preview",
+                       json={"task_id": t.task_id, "duration": 5})
+    assert resp.json()["ok"] is True
+
+    items = execution_history.query_history(outputs_dir,
+                                            kinds=[execution_history.KIND_FINE_PREVIEW])
+    assert len(items) == 1
+    assert items[0]["status"] == "success"
+    # patch_extra 写入 duration_sec
+    eid = items[0]["id"]
+    detail = execution_history.load_history(outputs_dir)
+    item = next(it for it in detail if it["id"] == eid)
+    assert item["extra"].get("duration_sec") == 5
+
+
+def test_render_fine_preview_propagates_session_header(tmp_path: Path, monkeypatch):
+    """REQ-20260920-081：手动调 render_fine_preview 走 X-Slirn-Auto-Session 头时写入 session_id。"""
+    from slirn_home import execution_history
+    from slirn_home.app import build_app
+    from fastapi.testclient import TestClient
+
+    m, _ = _make_mgr(tmp_path)
+    t = m.create(name="t-prev-sess", original_video=tmp_path / "lecture.mp4")
+    outputs_dir = m.tasks_dir / t.task_id / "outputs"
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr("slirn_home.app._run_fine_render",
+                        lambda *a, **kw: {"ok": True, "path": "fake.mp4"})
+    built = build_app(tmp_path)
+    client = TestClient(built.app)
+    # 无 header → auto=False + session_id=""
+    resp = client.post("/slirn/api/render_fine_preview",
+                       json={"task_id": t.task_id, "duration": 5})
+    assert resp.json()["ok"] is True
+
+    items = execution_history.load_history(outputs_dir)
+    fine_prev = [it for it in items
+                 if it["kind"] == execution_history.KIND_FINE_PREVIEW]
+    assert len(fine_prev) == 1
+    assert fine_prev[0]["auto"] is False
+    assert fine_prev[0]["auto_session_id"] == ""

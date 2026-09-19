@@ -604,3 +604,126 @@ def test_old_history_files_load_with_defaults(tmp_path: Path):
     assert items[0].get("description", "") == ""
     assert items[0].get("auto", False) is False
     assert items[0].get("stage", "") == ""
+
+
+# ---------- REQ-20260920-081：auto_session_id + 时间段 + 模式过滤 ----------
+
+def test_record_start_writes_auto_session_id(tmp_path: Path):
+    """REQ-20260920-081：传 auto_session_id 时记录里写入该值。"""
+    from slirn_home.execution_history import (
+        KIND_FINE_EXPORT, load_history, record_start,
+    )
+
+    out = _outputs(tmp_path)
+    record_start(out, KIND_FINE_EXPORT, auto=True, auto_session_id="abc123def456")
+
+    items = load_history(out)
+    assert len(items) == 1
+    assert items[0]["auto"] is True
+    assert items[0]["auto_session_id"] == "abc123def456"
+
+
+def test_record_start_default_auto_session_id_empty(tmp_path: Path):
+    """REQ-20260920-081：不传 auto_session_id 时默认为空字符串（区分手动）。"""
+    from slirn_home.execution_history import (
+        KIND_ROUGH_COMPOSE, load_history, record_start,
+    )
+
+    out = _outputs(tmp_path)
+    record_start(out, KIND_ROUGH_COMPOSE, auto=False)
+
+    items = load_history(out)
+    assert items[0]["auto"] is False
+    assert items[0]["auto_session_id"] == ""
+
+
+def test_query_history_filters_by_time_range(tmp_path: Path):
+    """REQ-20260920-081：time_from_ts / time_to_ts 按 started_at 区间过滤。"""
+    from slirn_home.execution_history import (
+        KIND_OPTIMIZE, query_history, record_finish, record_start,
+    )
+
+    out = _outputs(tmp_path)
+    e1 = record_start(out, KIND_OPTIMIZE)
+    record_finish(out, e1, success=True)
+    time.sleep(0.1)
+    boundary = time.time()
+    time.sleep(0.1)
+    e2 = record_start(out, KIND_OPTIMIZE)
+    record_finish(out, e2, success=True)
+
+    # 只取 boundary 之后 → 只 e2
+    items = query_history(out, time_from_ts=boundary)
+    assert len(items) == 1
+    assert items[0]["id"] == e2
+
+    # 只取 boundary 之前 → 只 e1
+    items = query_history(out, time_to_ts=boundary)
+    assert len(items) == 1
+    assert items[0]["id"] == e1
+
+    # time_from > time_to → 空列表（不抛异常）
+    items = query_history(out, time_from_ts=boundary + 1, time_to_ts=boundary)
+    assert items == []
+
+
+def test_query_history_filters_by_auto_manual(tmp_path: Path):
+    """REQ-20260920-081：auto='manual' 只返 auto=False；auto='auto' 只返 auto=True。"""
+    from slirn_home.execution_history import (
+        KIND_OPTIMIZE, query_history, record_finish, record_start,
+    )
+
+    out = _outputs(tmp_path)
+    e_manual = record_start(out, KIND_OPTIMIZE, auto=False, auto_session_id="")
+    record_finish(out, e_manual, success=True)
+    e_auto = record_start(out, KIND_OPTIMIZE, auto=True, auto_session_id="sess-001")
+    record_finish(out, e_auto, success=True)
+
+    # auto='manual'
+    items = query_history(out, auto="manual")
+    assert len(items) == 1
+    assert items[0]["id"] == e_manual
+    assert items[0]["auto"] is False
+
+    # auto='auto'
+    items = query_history(out, auto="auto")
+    assert len(items) == 1
+    assert items[0]["id"] == e_auto
+    assert items[0]["auto_session_id"] == "sess-001"
+
+    # auto='any' → 全返
+    items = query_history(out, auto="any")
+    assert len(items) == 2
+
+
+def test_query_history_keyword_search_includes_session_id(tmp_path: Path):
+    """REQ-20260920-081：关键词搜错误信息 + auto_session_id。"""
+    from slirn_home.execution_history import (
+        KIND_OPTIMIZE, query_history, record_finish, record_start,
+    )
+
+    out = _outputs(tmp_path)
+    e1 = record_start(out, KIND_OPTIMIZE, auto=True, auto_session_id="abc-unique-123")
+    record_finish(out, e1, success=False, error="network")
+    e2 = record_start(out, KIND_OPTIMIZE, auto=True, auto_session_id="xyz")
+    record_finish(out, e2, success=False, error="network")
+
+    # 用 session_id 子串搜 → 命中 e1
+    items = query_history(out, keyword="abc-unique")
+    assert len(items) == 1
+    assert items[0]["id"] == e1
+
+
+def test_record_start_preserves_session_id_through_finish(tmp_path: Path):
+    """REQ-20260920-081：record_finish 不应清除 auto_session_id。"""
+    from slirn_home.execution_history import (
+        KIND_FINE_EXPORT, load_history, record_finish, record_start,
+    )
+
+    out = _outputs(tmp_path)
+    eid = record_start(out, KIND_FINE_EXPORT, auto=True, auto_session_id="sess-xyz")
+    record_finish(out, eid, success=True)
+
+    items = load_history(out)
+    assert items[0]["status"] == "success"
+    assert items[0]["auto_session_id"] == "sess-xyz"
