@@ -1735,6 +1735,58 @@ def _ass_force_style(font: dict) -> str:
     return ",".join(parts)
 
 
+# REQ-20260920-079：bg/cover/reference 超大图自动缩放（防 ffmpeg OOM 卡死）
+# 触发：源图长边 > _PRESCALE_THRESHOLD_PX 才缩；缩到 fit target_w×target_h 后 pad。
+# 不动用户原图（写 .<label>_req079_<stem>_<W>x<H><.ext> 临时文件）。
+_PIL_IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".webp", ".bmp"})
+_PRESCALE_THRESHOLD_PX = 4096  # 4K 横向分辨率；超过即视为「可能 OOM」
+
+
+def _maybe_prescale_image(path: Path, target_w: int, target_h: int, label: str,
+                          threshold: int = _PRESCALE_THRESHOLD_PX) -> Path:
+    """如果图片长边 > threshold，按 LANCZOS 缩放至 fit target_w × target_h，
+    黑边/透明 pad 到精确尺寸，写到源同目录的 .<label>_req079_<stem>_<W>x<H><.ext>。
+
+    返回 ffmpeg 应该使用的路径：
+    - 不需要缩放 → 返回原 path（无任何操作）
+    - 缩放成功   → 返回临时文件 path
+    - 缩放失败   → log.warning + 返回原 path（兜底不阻塞）
+
+    RGBA 透明 PNG 保留 mode=RGBA + 透明 canvas，让 ffmpeg 继续按 alpha 合成
+    （与 REQ-20260919-063 `_build_bg_layer_chain` 的黑底 overlay 链行为一致）。
+    """
+    if path.suffix.lower() not in _PIL_IMAGE_EXTS:
+        return path
+    try:
+        from PIL import Image as _PILImage
+        with _PILImage.open(path) as im:
+            iw, ih = im.size
+            if max(iw, ih) <= threshold:
+                return path
+            tmp = path.with_name(
+                f".{label}_req079_{path.stem}_{target_w}x{target_h}{path.suffix}"
+            )
+            # RGBA/LA 保留 alpha；其他转 RGB
+            mode = "RGBA" if im.mode in ("RGBA", "LA") else "RGB"
+            im2 = im.convert(mode)
+            # thumbnail 保比例 fit（max(target_w, target_h) 上限）
+            im2.thumbnail((target_w, target_h), _PILImage.LANCZOS)
+            bg = (0, 0, 0, 0) if mode == "RGBA" else (0, 0, 0)
+            canvas = _PILImage.new(mode, (target_w, target_h), bg)
+            x = (target_w - im2.size[0]) // 2
+            y = (target_h - im2.size[1]) // 2
+            canvas.paste(im2, (x, y))
+            canvas.save(tmp, optimize=True)
+            log.warning(
+                "[REQ-079] %s: %dx%d → %dx%d (%s) → tmp=%s",
+                label, iw, ih, target_w, target_h, path.name, tmp.name,
+            )
+            return tmp
+    except Exception as e:
+        log.warning("[REQ-079] %s pre-scale failed, using original: %s", label, e)
+        return path
+
+
 def _build_bg_layer_chain(bg_idx: int, W: int, H: int) -> list[str]:
     """REQ-20260919-063：bg 图透明区黑底 alpha 合成链。
 
@@ -1924,6 +1976,47 @@ def _assemble_fine_filter(
             fc["audio"] = audio_cfg
             audio_input_enabled = False
 
+    # REQ-20260920-079：超大图片预缩放（跟随 fc.output.resolution；不动原图）
+    # 720p→1280×720；1080p→1920×1080；source→1920×1080（最长边 ≤ 1920 防 OOM）
+    image_tmp_paths: list[Path] = []
+    if res == "720p":
+        _ps_target_w, _ps_target_h = 1280, 720
+    else:
+        _ps_target_w, _ps_target_h = 1920, 1080
+
+    # 当前 input_args 里有几个 -i（用于判断 bg_idx / cover_idx）
+    _ps_inputs_count = sum(1 for i_, _ in enumerate(input_args) if input_args[i_] == "-i")
+
+    def _replace_input_path(old: Path, new: Path) -> None:
+        """把 input_args 中 old 路径替换成 new（按 -i 之后的下个 token 匹配）。"""
+        for i_, tok in enumerate(input_args):
+            if tok == "-i" and i_ + 1 < len(input_args) and input_args[i_ + 1] == str(old):
+                input_args[i_ + 1] = str(new)
+                return
+
+    if layout["bg"]["enabled"] and _ps_inputs_count >= 2:
+        bg_abs = _resolve_mat_abs(mgr, task_id, materials, "bg")
+        if bg_abs and bg_abs.exists():
+            new_bg = _maybe_prescale_image(bg_abs, _ps_target_w, _ps_target_h, "bg")
+            if new_bg != bg_abs:
+                _replace_input_path(bg_abs, new_bg)
+                image_tmp_paths.append(new_bg)
+    if cover_input_enabled:
+        cover_abs = _resolve_mat_abs(mgr, task_id, materials, "cover")
+        if cover_abs and cover_abs.exists():
+            new_cover = _maybe_prescale_image(cover_abs, _ps_target_w, _ps_target_h, "cover")
+            if new_cover != cover_abs:
+                _replace_input_path(cover_abs, new_cover)
+                image_tmp_paths.append(new_cover)
+    ref_mat_pre = materials.get("reference") or {}
+    if ref_mat_pre.get("path"):
+        ref_abs = _resolve_mat_abs(mgr, task_id, materials, "reference")
+        if ref_abs and ref_abs.exists():
+            new_ref = _maybe_prescale_image(ref_abs, _ps_target_w, _ps_target_h, "ref")
+            if new_ref != ref_abs:
+                _replace_input_path(ref_abs, new_ref)
+                image_tmp_paths.append(new_ref)
+
     # 4. filter_complex
     chain: list[str] = []
     inputs_count = sum(1 for i, _ in enumerate(input_args) if input_args[i] == "-i")
@@ -2024,13 +2117,15 @@ def _assemble_fine_filter(
         vol = float(audio_cfg.get("volume", 0.4))
         fade_in = float(audio_cfg.get("fade_in", 0.0))
         fade_out = float(audio_cfg.get("fade_out", 0.0))
-        bgm_filters = [f"[{audio_idx}:a]aloop=loop=-1:size=2e9,volume={vol:.2f}"]
+        # REQ-20260920-080 修复：label [bgm] 必须紧接过滤器链尾部，不能 ",[bgm]"
+        # （之前用 list + ",".join 会把 label 当成 filter name → No such filter: ''）
+        bgm_chain = f"[{audio_idx}:a]aloop=loop=-1:size=2e9,volume={vol:.2f}"
         if fade_in > 0:
-            bgm_filters.append(f"afade=t=in:st=0:d={fade_in:.2f}")
+            bgm_chain += f",afade=t=in:st=0:d={fade_in:.2f}"
         if fade_out > 0:
-            bgm_filters.append(f"afade=t=out:st=0:d={fade_out:.2f}")
-        bgm_filters.append("[bgm]")
-        chain.append(",".join(bgm_filters))
+            bgm_chain += f",afade=t=out:st=0:d={fade_out:.2f}"
+        bgm_chain += "[bgm]"
+        chain.append(bgm_chain)
         chain.append(
             "[voice][bgm]amix=inputs=2:duration=first:normalize=0[aout]"
         )
@@ -2044,6 +2139,7 @@ def _assemble_fine_filter(
         "filter_complex": filter_complex,
         "final_map": cur,
         "sub_input_tmp": sub_input_tmp,
+        "image_tmp_paths": image_tmp_paths,  # REQ-20260920-079：预缩临时文件
         "out_w": out_w,
         "out_h": out_h,
     }
@@ -2068,6 +2164,7 @@ def _run_fine_render(
     if not asm.get("ok"):
         return asm
     sub_input_tmp = asm["sub_input_tmp"]
+    image_tmp_paths = asm.get("image_tmp_paths") or []  # REQ-20260920-079
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
@@ -2095,6 +2192,12 @@ def _run_fine_render(
         if sub_input_tmp is not None:
             try:
                 sub_input_tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+        # REQ-20260920-079：同步渲染也清理预缩临时文件
+        for _p in image_tmp_paths:
+            try:
+                _p.unlink(missing_ok=True)
             except Exception:
                 pass
     if result.returncode != 0:
@@ -2220,6 +2323,7 @@ def _run_fine_render_async(job: _RenderJob, tid: str, mgr, out_path: Path) -> No
         return
 
     sub_input_tmp = asm["sub_input_tmp"]
+    image_tmp_paths = asm.get("image_tmp_paths") or []  # REQ-20260920-079
 
     # 拿总时长（百分比 + ETA 计算依赖）
     job.total_duration_ms = _probe_video_duration_ms(mgr, tid)
@@ -2261,6 +2365,10 @@ def _run_fine_render_async(job: _RenderJob, tid: str, mgr, out_path: Path) -> No
         job.wall_finished_at = time.time()
         if sub_input_tmp:
             try: sub_input_tmp.unlink(missing_ok=True)
+            except Exception: pass
+        # REQ-20260920-079：ffmpeg 启动失败也要清理预缩临时文件
+        for _p in image_tmp_paths:
+            try: _p.unlink(missing_ok=True)
             except Exception: pass
         return
 
@@ -2342,6 +2450,11 @@ def _run_fine_render_async(job: _RenderJob, tid: str, mgr, out_path: Path) -> No
     # 清理临时 SRT
     if sub_input_tmp:
         try: sub_input_tmp.unlink(missing_ok=True)
+        except Exception: pass
+
+    # REQ-20260920-079：清理预缩临时文件（bg/cover/reference）
+    for _p in image_tmp_paths:
+        try: _p.unlink(missing_ok=True)
         except Exception: pass
 
     if job.state == "cancelled":
@@ -5770,7 +5883,27 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             "source": "upload",
         }
         _save_fine_compose(mgr, task_id, fc)
-        return _ok(path=fc["materials"][kind]["path"], toast=f"{_FINE_MATERIAL_LABELS[kind][1]}已上传")
+        # REQ-20260920-079：超大图片上传提示（前端 toast；不动原图）
+        warning: str | None = None
+        if kind in ("bg", "cover", "reference") and save_path.suffix.lower() in _PIL_IMAGE_EXTS:
+            try:
+                from PIL import Image as _PILImage2
+                with _PILImage2.open(save_path) as _im:
+                    iw, ih = _im.size
+                    if max(iw, ih) > _PRESCALE_THRESHOLD_PX:
+                        res = (fc.get("output") or {}).get("resolution", "1080p")
+                        tw, th = (1280, 720) if res == "720p" else (1920, 1080)
+                        warning = (
+                            f"💡 上传图片 {iw}×{ih} 较大，合成视频时会自动缩放至 "
+                            f"{tw}×{th}（源文件保留原图）"
+                        )
+            except Exception:
+                pass  # 损坏的图片 / PIL 异常 → 不警告，让后续渲染兜底
+        return _ok(
+            path=fc["materials"][kind]["path"],
+            toast=f"{_FINE_MATERIAL_LABELS[kind][1]}已上传",
+            warning=warning,
+        )
 
     # REQ-20260919-063 用户反馈：每个素材都要可预览（图片/视频/音频/SRT 文本）。
     # 直接 GET 这个端点拿到素材文件本体（带正确 Content-Type），前端用 <img>/<video>/<audio>
