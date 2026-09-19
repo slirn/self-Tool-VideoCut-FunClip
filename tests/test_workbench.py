@@ -5047,6 +5047,39 @@ def test_export_fine_video_returns_job_id_immediately(tmp_path):
     assert elapsed < 2.0, f"导出端点应 <2 秒返回，实际 {elapsed:.2f}s"
 
 
+def test_render_fine_cut_zone_includes_inline_export_status(tmp_path):
+    """REQ-20260920-077：_render_fine_cut_zone 应在导出按钮旁新增 inline 状态元素。
+
+    替代原 REQ-074 的模态框（openFineExportProgress），改为按钮右侧
+    #slirn-fine-export-status 显示状态文字 + 迷你进度条，不弹模态框。
+    """
+    from slirn_home.app import _render_fine_cut_zone
+    # 复用 test_workbench.py 里的 _make_mgr helper
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="inline-export-test", original_video=video)
+    html = _render_fine_cut_zone(t.task_id, t, m)
+
+    # 1. 按钮 ID 应存在（新加 id="slirn-fine-export-btn"）
+    assert 'id="slirn-fine-export-btn"' in html, (
+        "REQ-077：_render_fine_cut_zone 应给导出按钮加 id='slirn-fine-export-btn'"
+    )
+    # 2. cell 包裹应存在（按钮 + status 同行）
+    assert 'slirn-fine-export-cell' in html, (
+        "REQ-077：导出按钮应在 .slirn-fine-export-cell 内（与 status 元素同行）"
+    )
+    # 3. inline status 元素应存在，默认 hidden
+    assert 'id="slirn-fine-export-status"' in html, (
+        "REQ-077：应有 #slirn-fine-export-status 状态元素"
+    )
+    assert 'data-state="idle" hidden' in html, (
+        "REQ-077：inline status 元素默认 data-state='idle' 且 hidden（不占空间）"
+    )
+    # 4. 原 data-action="fine-export" 仍在（不破坏 handler 路由）
+    assert 'data-action="fine-export"' in html, (
+        "REQ-077：导出按钮 data-action='fine-export' 应保留"
+    )
+
+
 def test_render_status_reports_progress(tmp_path):
     """REQ-20260919-074：GET /slirn/api/render_status 应返回实时进度。
 

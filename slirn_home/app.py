@@ -2974,9 +2974,17 @@ def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
         f'<span class="slirn-fine-actions-label">秒（2–30）</span>'
         f'</span>'
     )
+    # REQ-20260920-077：导出按钮 + 右侧 inline 状态元素（替代 REQ-074 的进度模态框）。
+    # 包成 cell：按钮 + 状态元素同行，flex 容器由 .slirn-fine-actions-bar 提供。
     export_btn = (
-        f'<button class="slirn-btn slirn-btn-primary" data-action="fine-export" data-task-id="{_esc(task_id)}" '
-        f'{export_btn_disabled} title="{_esc(export_btn_title)}">💾 导出最终视频</button>'
+        f'<span class="slirn-fine-export-cell">'
+        f'<button class="slirn-btn slirn-btn-primary" id="slirn-fine-export-btn" '
+        f'data-action="fine-export" data-task-id="{_esc(task_id)}" '
+        f'{export_btn_disabled} title="{_esc(export_btn_title)}">'
+        f'💾 导出最终视频</button>'
+        f'<span class="slirn-fine-export-status" id="slirn-fine-export-status" '
+        f'data-state="idle" hidden></span>'
+        f'</span>'
     )
     preview_box = (
         # REQ-20260919-062 v10 用户反馈：去掉页面内的预览框（设计空间画布），
