@@ -3573,10 +3573,19 @@ def _render_workbench(task_id: str, mgr: TaskManager) -> str:
         )
     # REQ-20260918-053：执行日志 — 非流水线阶段，单独追加在 rail 末尾（不计入
     # _WB_STAGES，避免 wbAutoNextMaybe 自动跳到此页）
+    # REQ-20260920-086：在「精剪视频」与「📜 执行日志」之间加明显分隔条，明确
+    # 声明「执行日志不属于流水线阶段」；logs stage 加 slirn-wb-stage-extra 类
+    # （与 router.js wbAutoNextMaybe 的 :not(.slirn-wb-stage-extra) 选择器对齐）。
     stage_items += (
-        f'<div class="slirn-wb-stage slirn-wb-stage-logs pending" '
+        f'<div class="slirn-wb-rail-divider" '
+        f'title="执行日志是历史视图，不属于流水线阶段（不参与自动跳转）">'
+        f'📜 执行日志（不属于流水线阶段）'
+        f'</div>'
+    )
+    stage_items += (
+        f'<div class="slirn-wb-stage slirn-wb-stage-logs slirn-wb-stage-extra pending" '
         f'data-action="wb-stage" data-pane="logs" '
-        f'title="查看该任务所有阶段的执行历史（含耗时、错误信息）">'
+        f'title="查看该任务所有阶段的执行历史（含耗时、错误信息，支持分页 + 过滤）">'
         f'<span class="slirn-wb-stage-mark">📜</span>'
         f'<div class="slirn-wb-stage-body"><div class="slirn-wb-stage-title">📜 执行日志</div>'
         f'<div class="slirn-wb-stage-desc">查看所有阶段执行历史（生成/修订/切分/合成/优化）</div></div></div>'
@@ -3616,9 +3625,13 @@ def _render_workbench(task_id: str, mgr: TaskManager) -> str:
         panes[key] = _pane_planned(i, desc)
 
     hidden_attr = ' style="display:none;"'
+    # REQ-20260920-086：pane 渲染迭代所有 panes key（含 logs 等非流水线视图）。
+    # 旧实现只迭代 _WB_STAGES → logs 等非流水线 pane 从未渲染到 HTML —— 是历史 BUG。
+    # 现在 panes dict 里所有 key 都参与渲染（含 logs）；focus 那一项默认显示，其他隐藏。
+    focus_key = _WB_STAGES[focus][0]
     pane_html = "".join(
-        f'<div class="slirn-wb-pane" id="slirn-wb-pane-{key}"{hidden_attr if i != focus else ""}>{panes[key]}</div>'
-        for i, (key, *_r) in enumerate(_WB_STAGES)
+        f'<div class="slirn-wb-pane" id="slirn-wb-pane-{key}"{hidden_attr if key != focus_key else ""}>{panes[key]}</div>'
+        for key in panes.keys()
     )
 
     return f'''<div id="slirn-tab-workbench-inner" class="slirn-tab-inner" data-task-id="{_esc(task_id)}">
@@ -3635,7 +3648,7 @@ def _render_workbench(task_id: str, mgr: TaskManager) -> str:
             </div>
         </div>
         {top_rows}
-        {_render_exec_history_card(task_id, mgr)}
+        <!-- REQ-20260920-086：移除顶部「📜 执行历史」折叠卡（日志查看统一走 rail tab + 分页） -->
     </div>
     <!-- 流程配置面板 + 状态条挂载点（REQ-20260918-047，v2：去掉抽屉壳，工作台内常驻纵向面板）-->
     <div id="slirn-pipe-status" class="slirn-pipe-status" data-task-id="{_esc(task_id)}" hidden></div>
@@ -3713,6 +3726,20 @@ def _render_exec_logs_pane(task_id: str) -> str:
         f'  </div>'
         f'  <div class="slirn-logs-list" id="slirn-logs-list" data-task-id="{_esc(task_id)}">'
         f'    <div class="slirn-form-hint slirn-logs-empty">尚未查询。点击「🔄 刷新」或切换过滤条件自动加载。</div>'
+        f'  </div>'
+        # REQ-20260920-086：分页导航（每页 20 条，含首页/上一页/下一页/末页 + 当前页/总页数/总条数 + 每页大小下拉）
+        f'  <div class="slirn-logs-pager" id="slirn-logs-pager" data-page="1" data-page-size="20" data-total="0">'
+        f'    <button type="button" class="slirn-pager-btn" data-pager="first" disabled title="首页">«</button>'
+        f'    <button type="button" class="slirn-pager-btn" data-pager="prev" disabled title="上一页">‹</button>'
+        f'    <span class="slirn-pager-info">第 <span data-bind="page">1</span> / <span data-bind="total-pages">1</span> 页 · 共 <span data-bind="total">0</span> 条</span>'
+        f'    <button type="button" class="slirn-pager-btn" data-pager="next" disabled title="下一页">›</button>'
+        f'    <button type="button" class="slirn-pager-btn" data-pager="last" disabled title="末页">»</button>'
+        f'    <select class="slirn-pager-size" data-pager="size" title="每页条数">'
+        f'      <option value="10">10 条/页</option>'
+        f'      <option value="20" selected>20 条/页</option>'
+        f'      <option value="50">50 条/页</option>'
+        f'      <option value="100">100 条/页</option>'
+        f'    </select>'
         f'  </div>'
         f'</div>'
     )
@@ -6595,7 +6622,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
 
     @app.app.post("/slirn/api/list_logs")
     async def list_logs(body: dict = Body(default_factory=dict)):
-        """REQ-20260920-081：执行日志查询（按 task_id + 时间段 + 阶段 + 操作 + 模式过滤）。
+        """REQ-20260920-081 + REQ-20260920-086：执行日志分页查询。
 
         输入 body：
             task_id: 必填；查询该任务的 execution_history.json
@@ -6603,9 +6630,11 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             kinds: 可选操作类型列表（如 ["rough_compose", "rough_compose_delete"]）
             statuses: 可选状态列表（如 ["success", "failed"]）
             auto: 可选 "manual" | "auto" | "any"（默认 "any"）
-            limit: 可选返回条数（默认 200）
+            keyword: 可选关键词（搜 error/kind/auto_session_id/description）
+            limit / page_size: 可选每页条数（默认 20，上限 1000）
+            offset / page: 可选分页偏移（默认 0；page 从 1 起）
         返回：
-            {ok: true, items: [...], total: N}
+            {ok: true, items: [...], total: N, page: P, page_size: S, total_pages: T}
         """
         tid = (body.get("task_id") or "").strip()
         if not tid:
@@ -6636,24 +6665,53 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         kinds_in = body.get("kinds") or []
         statuses_in = body.get("statuses") or []
         auto_mode = (body.get("auto") or "any").lower()
+        keyword = body.get("keyword") or ""
+
+        # REQ-20260920-086：分页参数（page/offset 二选一，都缺省则 offset=0）
         try:
-            limit = int(body.get("limit") or 200)
+            limit = int(body.get("limit") or body.get("page_size") or 20)
         except (TypeError, ValueError):
-            limit = 200
+            limit = 20
         limit = max(1, min(limit, 1000))
+
+        if "offset" in body and body.get("offset") not in (None, ""):
+            try:
+                offset = int(body.get("offset"))
+            except (TypeError, ValueError):
+                offset = 0
+        elif "page" in body and body.get("page") not in (None, ""):
+            try:
+                page_in = int(body.get("page"))
+                offset = (max(1, page_in) - 1) * limit
+            except (TypeError, ValueError):
+                offset = 0
+        else:
+            offset = 0
+        offset = max(0, offset)
 
         # task_id 隔离：通过 outputs_dir（每个 task 独立目录）天然隔离
         outputs_dir = mgr.tasks_dir / tid / "outputs"
-        items = execution_history.query_history(
+        items, total = execution_history.query_history_paged(
             outputs_dir,
             kinds=list(kinds_in) if kinds_in else None,
             statuses=list(statuses_in) if statuses_in else None,
+            keyword=keyword,
             limit=limit,
+            offset=offset,
             time_from_ts=time_from_ts,
             time_to_ts=time_to_ts,
             auto=auto_mode,
         )
-        return _ok("", items=items, total=len(items))
+        page = offset // max(1, limit) + 1
+        total_pages = max(1, (total + limit - 1) // limit) if total > 0 else 0
+        return _ok(
+            "",
+            items=items,
+            total=total,
+            page=page,
+            page_size=limit,
+            total_pages=total_pages,
+        )
 
     @app.app.post("/slirn/api/save_revision")
     async def save_revision(body: dict = Body(default_factory=dict)):

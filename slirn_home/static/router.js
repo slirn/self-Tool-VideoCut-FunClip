@@ -882,6 +882,7 @@
   // ===== REQ-20260918-053：执行日志面板（过滤 + 拉取 + 渲染）=====
   // 全局状态（同一时刻只看一个任务）：面板内 chip 切换 + 关键词输入 + 刷新按钮都改它
   // REQ-20260920-084：新增 timeFrom / timeTo / auto 过滤
+  // REQ-20260920-086：新增 page / pageSize 分页
   var logsState = {
     kinds: [],        // [] = 不限（默认全选）
     statuses: [],     // [] = 不限
@@ -889,6 +890,8 @@
     timeFrom: '',     // ISO 8601；空 = 不限
     timeTo: '',       // ISO 8601；空 = 不限
     auto: 'any',      // 'any' | 'manual' | 'auto'
+    page: 1,          // REQ-086：当前页（从 1 起）
+    pageSize: 20,     // REQ-086：每页条数（默认 20，可改 10/50/100）
     _loaded: false,   // 首次进入是否已加载
   };
 
@@ -945,7 +948,9 @@
       time_from: logsState.timeFrom || '',
       time_to: logsState.timeTo || '',
       auto: logsState.auto || 'any',
-      limit: 200,
+      // REQ-20260920-086：分页 offset / limit（替代旧 limit=200）
+      offset: (Math.max(1, logsState.page) - 1) * logsState.pageSize,
+      limit: logsState.pageSize,
     };
     var countEl = document.querySelector('.slirn-logs-count');
     if (countEl) countEl.textContent = '加载中…';
@@ -957,10 +962,43 @@
         return;
       }
       _renderLogsList(list, r.items || []);
-      if (countEl) countEl.textContent = (r.items || []).length + ' 条';
+      _renderLogsPager(r);
+      // REQ-086：countEl 显示「过滤后总条数」（不是当前页）
+      if (countEl) countEl.textContent = (r.total || 0) + ' 条';
     }).catch(function(err) {
       if (countEl) countEl.textContent = '加载失败';
       list.innerHTML = '<div class="slirn-form-hint slirn-logs-empty">加载失败：' + escapeHtml(String(err)) + '</div>';
+    });
+  }
+
+  // REQ-20260920-086：渲染分页导航（首页/上一页/下一页/末页 + 当前页/总页数/总条数）
+  function _renderLogsPager(r) {
+    var pager = document.getElementById('slirn-logs-pager');
+    if (!pager) return;
+    var total = r.total || 0;
+    var pageSize = r.page_size || logsState.pageSize;
+    var totalPages = r.total_pages || Math.max(1, Math.ceil(total / pageSize));
+    var page = r.page || 1;
+    pager.setAttribute('data-page', String(page));
+    pager.setAttribute('data-page-size', String(pageSize));
+    pager.setAttribute('data-total', String(total));
+    var pageEl = pager.querySelector('[data-bind="page"]');
+    var tpEl = pager.querySelector('[data-bind="total-pages"]');
+    var totalEl = pager.querySelector('[data-bind="total"]');
+    if (pageEl) pageEl.textContent = String(page);
+    if (tpEl) tpEl.textContent = String(totalPages);
+    if (totalEl) totalEl.textContent = String(total);
+    // 同步 logsState.page / pageSize（防止 back/forward 不一致）
+    logsState.page = page;
+    logsState.pageSize = pageSize;
+    // 翻页按钮 disabled 状态
+    var btns = pager.querySelectorAll('.slirn-pager-btn');
+    btns.forEach(function(b) {
+      var act = b.getAttribute('data-pager');
+      var disabled = (act === 'first' || act === 'prev')
+        ? page <= 1
+        : page >= totalPages;
+      b.disabled = disabled;
     });
   }
 
@@ -1035,11 +1073,13 @@
 
   // chip 点击：toggle .active 类 + 自动重查
   // REQ-20260920-084：data-log-auto / data-log-time chip 走单选（互斥），其他走多选
+  // REQ-20260920-086：过滤变化时重置 page = 1；翻页按钮 click handler
   document.addEventListener('click', function(e) {
     var t = e.target;
     if (!t || !t.classList) return;
     if (t.classList.contains('slirn-chip') && (t.hasAttribute('data-log-kind') || t.hasAttribute('data-log-status'))) {
       t.classList.toggle('active');
+      logsState.page = 1;  // REQ-086：过滤变化重置 page
       loadLogs();
       return;
     }
@@ -1051,6 +1091,7 @@
         if (b !== t) b.classList.remove('active');
       });
       t.classList.toggle('active');
+      logsState.page = 1;  // REQ-086
       loadLogs();
       return;
     }
@@ -1062,6 +1103,7 @@
         if (b !== t) b.classList.remove('active');
       });
       t.classList.toggle('active');
+      logsState.page = 1;  // REQ-086
       loadLogs();
       return;
     }
@@ -1075,6 +1117,7 @@
       var box = document.getElementById('slirn-wb-pane-logs');
       if (!box) return;
       box.querySelectorAll('.slirn-chip[data-log-kind].active').forEach(function(b) { b.classList.remove('active'); });
+      logsState.page = 1;  // REQ-086
       loadLogs();
       return;
     }
@@ -1083,8 +1126,34 @@
       var box = document.getElementById('slirn-wb-pane-logs');
       if (!box) return;
       box.querySelectorAll('.slirn-chip[data-log-status].active').forEach(function(b) { b.classList.remove('active'); });
+      logsState.page = 1;  // REQ-086
       loadLogs();
       return;
+    }
+    // REQ-20260920-086：分页按钮 click（首页/上一页/下一页/末页）
+    if (t.classList && t.classList.contains('slirn-pager-btn')) {
+      var act = t.getAttribute('data-pager');
+      var pager = document.getElementById('slirn-logs-pager');
+      if (!pager || !act) return;
+      if (t.disabled) return;  // disabled 按钮不响应
+      var curPage = parseInt(pager.getAttribute('data-page') || '1', 10);
+      var tp = parseInt(pager.querySelector('[data-bind="total-pages"]').textContent || '1', 10);
+      if (act === 'first') logsState.page = 1;
+      else if (act === 'prev') logsState.page = Math.max(1, curPage - 1);
+      else if (act === 'next') logsState.page = Math.min(tp, curPage + 1);
+      else if (act === 'last') logsState.page = Math.max(1, tp);
+      loadLogs();
+      return;
+    }
+  });
+
+  // REQ-20260920-086：每页大小下拉 change 事件
+  document.addEventListener('change', function(e) {
+    var t = e.target;
+    if (t && t.classList && t.classList.contains('slirn-pager-size')) {
+      logsState.pageSize = parseInt(t.value || '20', 10);
+      logsState.page = 1;  // 改 pageSize 重置 page
+      loadLogs();
     }
   });
 

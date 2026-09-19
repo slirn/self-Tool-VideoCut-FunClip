@@ -261,6 +261,59 @@ def load_history(outputs_dir: Path) -> list[dict]:
         return _read(outputs_dir)
 
 
+def query_history_paged(outputs_dir: Path, *,
+                        kinds: list[str] | None = None,
+                        statuses: list[str] | None = None,
+                        keyword: str = "",
+                        limit: int = 20,
+                        offset: int = 0,
+                        time_from_ts: float | None = None,
+                        time_to_ts: float | None = None,
+                        auto: str = "any") -> tuple[list[dict], int]:
+    """REQ-20260920-086：分页版 query_history — 返回 (items, total)。
+
+    - items: 当前页的记录（按 started_at 倒序，已切片 offset:offset+limit）
+    - total: 过滤后总记录数（用于前端算 total_pages）
+
+    与 query_history 的区别：query_history 早 break 限制返回数量（性能友好），
+    但拿不到精确 total；本函数不早 break，先收完所有 matched 再切片。
+
+    复用 query_history 的过滤逻辑：为了避免重复，把过滤逻辑提到 _apply_filters 内部函数。
+    """
+    items = load_history(outputs_dir)
+    # 倒序：最新在前
+    items = sorted(items, key=lambda x: x.get("started_at") or 0, reverse=True)
+    kw = (keyword or "").strip().lower()
+    kind_set = set(kinds) if kinds else None
+    status_set = set(statuses) if statuses else None
+    auto_mode = (auto or "any").lower()
+    matched: list[dict] = []
+    for it in items:
+        if kind_set is not None and it.get("kind") not in kind_set:
+            continue
+        if status_set is not None and it.get("status") not in status_set:
+            continue
+        started = it.get("started_at")
+        if time_from_ts is not None and started is not None and started < time_from_ts:
+            continue
+        if time_to_ts is not None and started is not None and started > time_to_ts:
+            continue
+        if auto_mode == "manual" and it.get("auto"):
+            continue
+        if auto_mode == "auto" and not it.get("auto"):
+            continue
+        if kw:
+            blob = (str(it.get("error") or "") + "\n" + str(it.get("kind") or "")
+                    + "\n" + str(it.get("auto_session_id") or "")
+                    + "\n" + str(it.get("description") or "")).lower()
+            if kw not in blob:
+                continue
+        matched.append(it)
+    total = len(matched)
+    page_items = matched[offset:offset + limit] if limit > 0 else matched[offset:]
+    return page_items, total
+
+
 def query_history(outputs_dir: Path, *,
                   kinds: list[str] | None = None,
                   statuses: list[str] | None = None,
