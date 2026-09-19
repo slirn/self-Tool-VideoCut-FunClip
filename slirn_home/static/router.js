@@ -881,10 +881,14 @@
 
   // ===== REQ-20260918-053：执行日志面板（过滤 + 拉取 + 渲染）=====
   // 全局状态（同一时刻只看一个任务）：面板内 chip 切换 + 关键词输入 + 刷新按钮都改它
+  // REQ-20260920-084：新增 timeFrom / timeTo / auto 过滤
   var logsState = {
     kinds: [],        // [] = 不限（默认全选）
     statuses: [],     // [] = 不限
     keyword: '',
+    timeFrom: '',     // ISO 8601；空 = 不限
+    timeTo: '',       // ISO 8601；空 = 不限
+    auto: 'any',      // 'any' | 'manual' | 'auto'
     _loaded: false,   // 首次进入是否已加载
   };
 
@@ -899,6 +903,29 @@
     box.querySelectorAll('.slirn-chip[data-log-status].active').forEach(function(b) {
       logsState.statuses.push(b.getAttribute('data-log-status') || '');
     });
+    // REQ-20260920-084：读 auto chip
+    var autoActive = box.querySelector('.slirn-chip[data-log-auto].active');
+    logsState.auto = autoActive ? (autoActive.getAttribute('data-log-auto') || 'any') : 'any';
+    // REQ-20260920-084：读时间段 chip
+    var timeActive = box.querySelector('.slirn-chip[data-log-time].active');
+    var timeRange = timeActive ? (timeActive.getAttribute('data-log-time') || '') : '';
+    if (timeRange === 'today') {
+      var d = new Date();
+      d.setHours(0, 0, 0, 0);
+      logsState.timeFrom = d.toISOString();
+      logsState.timeTo = '';
+    } else if (timeRange === '7d') {
+      var d7 = new Date(Date.now() - 7 * 86400000);
+      logsState.timeFrom = d7.toISOString();
+      logsState.timeTo = '';
+    } else if (timeRange === '30d') {
+      var d30 = new Date(Date.now() - 30 * 86400000);
+      logsState.timeFrom = d30.toISOString();
+      logsState.timeTo = '';
+    } else {
+      logsState.timeFrom = '';
+      logsState.timeTo = '';
+    }
     var kw = document.getElementById('slirn-logs-keyword');
     logsState.keyword = kw ? (kw.value || '') : '';
   }
@@ -914,11 +941,16 @@
       kinds: logsState.kinds,
       statuses: logsState.statuses,
       keyword: logsState.keyword,
+      // REQ-20260920-084：传 time_from / time_to / auto 给 list_logs
+      time_from: logsState.timeFrom || '',
+      time_to: logsState.timeTo || '',
+      auto: logsState.auto || 'any',
       limit: 200,
     };
     var countEl = document.querySelector('.slirn-logs-count');
     if (countEl) countEl.textContent = '加载中…';
-    postJSON(SLIRN_API + '/execution_history_query', payload).then(function(r) {
+    // REQ-20260920-084：改调 /slirn/api/list_logs（REQ-081 新端点；支持 time_from / auto）
+    postJSON(SLIRN_API + '/list_logs', payload).then(function(r) {
       if (!r || !r.ok) {
         if (countEl) countEl.textContent = '加载失败';
         list.innerHTML = '<div class="slirn-form-hint slirn-logs-empty">加载失败：' + escapeHtml((r && r.error) || '未知错误') + '</div>';
@@ -933,12 +965,19 @@
   }
 
   // REQ-20260918-053：阶段中文标签（与后端 KIND_LABELS 对齐，复制一份避免跨域/加载顺序问题）
+  // REQ-20260920-084：补齐 REQ-074 / REQ-081 加的 6 个 kind
   var LOG_KIND_LABELS = {
     subtitle_generation: '字幕生成',
     subtitle_review: '字幕修订',
     rough_cut: '切分修剪',
+    rough_cut_link_person: '关联人员ID',
     rough_compose: '粗剪合成',
+    rough_compose_delete: '删除粗剪成品',
     optimize: '优化字幕',
+    fine_ai_layout: 'AI 智能布局',
+    fine_bg_detect: '检测区域',
+    fine_preview: '生成预览',
+    fine_export: '最终导出视频',
   };
   function _formatLogsDuration(ms) {
     if (!ms || ms < 0) return '-';
@@ -995,10 +1034,33 @@
   }
 
   // chip 点击：toggle .active 类 + 自动重查
+  // REQ-20260920-084：data-log-auto / data-log-time chip 走单选（互斥），其他走多选
   document.addEventListener('click', function(e) {
     var t = e.target;
     if (!t || !t.classList) return;
     if (t.classList.contains('slirn-chip') && (t.hasAttribute('data-log-kind') || t.hasAttribute('data-log-status'))) {
+      t.classList.toggle('active');
+      loadLogs();
+      return;
+    }
+    // REQ-20260920-084：auto chip（单选）
+    if (t.classList.contains('slirn-chip') && t.hasAttribute('data-log-auto')) {
+      var boxA = document.getElementById('slirn-wb-pane-logs');
+      if (!boxA) return;
+      boxA.querySelectorAll('.slirn-chip[data-log-auto].active').forEach(function(b) {
+        if (b !== t) b.classList.remove('active');
+      });
+      t.classList.toggle('active');
+      loadLogs();
+      return;
+    }
+    // REQ-20260920-084：time chip（单选）
+    if (t.classList.contains('slirn-chip') && t.hasAttribute('data-log-time')) {
+      var boxT = document.getElementById('slirn-wb-pane-logs');
+      if (!boxT) return;
+      boxT.querySelectorAll('.slirn-chip[data-log-time].active').forEach(function(b) {
+        if (b !== t) b.classList.remove('active');
+      });
       t.classList.toggle('active');
       loadLogs();
       return;

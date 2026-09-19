@@ -634,6 +634,24 @@
       if (typeof window.fineDefaultBgmLoad === 'function') {
         try { window.fineDefaultBgmLoad(); } catch (e) { console.warn('[bgm-load]', e); }
       }
+      // REQ-20260920-084：检查是否有 in-flight export job，有则挂回进度条
+      // （页面刷新 / 服务重启后自动恢复进度显示）
+      try {
+        fetch(SLIRN_API + '/active_export_for_task?task_id=' + encodeURIComponent(taskId))
+          .then(function(r) { return r.json(); })
+          .then(function(j) {
+            if (!j || !j.ok || !j.job) return;
+            if (j.job.state !== 'queued' && j.job.state !== 'running') return;
+            var btn = document.getElementById('slirn-fine-export-btn');
+            if (btn && typeof startFineExportInline === 'function') {
+              startFineExportInline(taskId, j.job.job_id, btn);
+              if (j.job.source === 'disk' && j.job.warning) {
+                toast('⚠ ' + j.job.warning, 'warn');
+              }
+            }
+          })
+          .catch(function(e) { console.warn('[active_export_for_task]', e); });
+      } catch (e) { /* 静默：不影响主流程 */ }
     });
   }
   function saveConfig(taskId) {

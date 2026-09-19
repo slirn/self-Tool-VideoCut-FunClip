@@ -3663,7 +3663,9 @@ def _render_exec_logs_pane(task_id: str) -> str:
     """REQ-20260918-053 — 工作台「📜 执行日志」面板。
 
     不在服务端渲染记录（量大 + 需过滤），仅渲染过滤区 + 列表占位；
-    由 router.js 在面板首次显示时拉 /slirn/api/execution_history_query。
+    由 router.js 在面板首次显示时拉 /slirn/api/list_logs（REQ-20260920-084 切换）。
+
+    REQ-20260920-084：新增 模式 chip（手动/自动）+ 时间段 chip（今天/近 7 天/近 30 天/全部）。
     """
     from slirn_home import execution_history
 
@@ -3676,7 +3678,7 @@ def _render_exec_logs_pane(task_id: str) -> str:
         f'<div class="slirn-wb-pane-card slirn-logs-pane" data-task-id="{_esc(task_id)}">'
         f'  <div class="slirn-wb-pane-title">📜 执行日志 <span class="slirn-logs-count" data-bind="logs-count">--</span></div>'
         f'  <div class="slirn-form-hint slirn-logs-hint">'
-        f'    所有阶段的执行历史（含字幕生成/字幕修订/切分修剪/粗剪合成/优化字幕）。点击 chip 多选过滤；输入关键词搜错误信息。'
+        f'    所有阶段的执行历史（含字幕生成/字幕修订/切分修剪/粗剪合成/优化字幕/精剪 AI/检测/预览/导出）。阶段多选；状态/模式/时间段单选；输入关键词搜错误信息。'
         f'  </div>'
         f'  <div class="slirn-logs-filter">'
         f'    <div class="slirn-logs-filter-row">'
@@ -3689,6 +3691,19 @@ def _render_exec_logs_pane(task_id: str) -> str:
         f'      <button type="button" class="slirn-chip" data-log-status="failed" title="仅看失败的">❌ 失败</button>'
         f'      <button type="button" class="slirn-chip" data-log-status="running" title="仅看运行中的">⏳ 运行中</button>'
         f'      <button type="button" class="slirn-chip slirn-chip-clear" data-action="logs-clear-statuses" title="清除状态过滤">清除</button>'
+        f'    </div>'
+        f'    <div class="slirn-logs-filter-row">'
+        f'      <span class="slirn-logs-filter-label">模式：</span>'
+        f'      <button type="button" class="slirn-chip" data-log-auto="any" title="不限（手动 + 自动）">全部</button>'
+        f'      <button type="button" class="slirn-chip" data-log-auto="manual" title="仅看手动触发的">👆 手动</button>'
+        f'      <button type="button" class="slirn-chip" data-log-auto="auto" title="仅看流程配置自动执行的">⚙ 自动</button>'
+        f'    </div>'
+        f'    <div class="slirn-logs-filter-row">'
+        f'      <span class="slirn-logs-filter-label">时间：</span>'
+        f'      <button type="button" class="slirn-chip" data-log-time="today" title="今天 00:00 至今">📅 今天</button>'
+        f'      <button type="button" class="slirn-chip" data-log-time="7d" title="近 7 天">🗓 近 7 天</button>'
+        f'      <button type="button" class="slirn-chip" data-log-time="30d" title="近 30 天">📆 近 30 天</button>'
+        f'      <button type="button" class="slirn-chip" data-log-time="all" title="不限时间">∞ 全部</button>'
         f'    </div>'
         f'    <div class="slirn-logs-filter-row">'
         f'      <input type="text" class="slirn-input slirn-logs-keyword" id="slirn-logs-keyword" '
