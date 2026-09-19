@@ -2529,6 +2529,10 @@
           var card = document.querySelector('.slirn-fine-upload-card[data-kind="' + kind + '"]');
           if (card) card.classList.add('has-file');
           toast('✅ ' + (j.toast || '已上传'));
+          // REQ-20260920-079：超大图片上传时提示用户「合成时自动缩放」
+          if (j.warning) {
+            setTimeout(function() { toast(j.warning); }, 600);
+          }
         } else {
           toast('❌ ' + (j.error || '上传失败'));
         }
