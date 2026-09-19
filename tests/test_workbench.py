@@ -6423,3 +6423,207 @@ def test_router_log_kind_labels_includes_all_10_kinds(tmp_path):
     assert "最终导出视频" in router_js, (
         "router.js 应把 fine_export 映射为「最终导出视频」"
     )
+
+
+# =====================================================================
+# REQ-20260920-085：上传音频素材时自动启用 BGM
+# 修复「上传 mp3 后生成预览无 BGM」BUG：
+# 原 upload_fine_material_form 只写 materials.audio.path，
+# 不写 audio.enabled → _assemble_fine_filter audio gate 把 BGM 静默禁用。
+# =====================================================================
+
+def test_upload_audio_material_auto_enables_bgm(tmp_path):
+    """REQ-085：上传 mp3 → fc.audio.enabled 自动变 True；volume 保持默认 0.4。"""
+    import io
+    from fastapi.testclient import TestClient
+    from slirn_home.app import build_app, _get_fine_compose
+
+    mgr, _ = _make_mgr(tmp_path)
+    video = tmp_path / "src.mp4"
+    video.write_bytes(b"\x00" * 1024)
+    t = mgr.create(name="upload-audio-test", original_video=video)
+
+    app = build_app(repo_root=tmp_path)
+    client = TestClient(app.app)
+
+    # 上传前：fc.audio.enabled 默认 False
+    fc_before = _get_fine_compose(mgr, t.task_id)
+    assert fc_before["audio"]["enabled"] is False
+
+    # 上传 mp3
+    fake_audio = io.BytesIO(b"\xff\xfb\x90\x00" * 64)  # fake mp3 frame bytes
+    resp = client.post(
+        "/slirn/api/upload_fine_material_form",
+        data={"task_id": t.task_id, "kind": "audio"},
+        files={"file": ("bgm.mp3", fake_audio, "audio/mpeg")},
+    )
+    body = resp.json()
+    assert body["ok"] is True, body
+    assert body.get("path"), f"应返回 path，得到 {body}"
+
+    # 上传后：fc.audio.enabled 自动 True
+    fc_after = _get_fine_compose(mgr, t.task_id)
+    assert fc_after["audio"]["enabled"] is True, (
+        f"REQ-085：上传 mp3 后 fc.audio.enabled 应自动为 True，"
+        f"实际是 {fc_after['audio']['enabled']}（这是 BUG 根因）"
+    )
+    # volume 保持默认 0.4（不污染用户已有音量）
+    assert fc_after["audio"]["volume"] == 0.4
+    # materials.audio.path 必须含 tasks/<tid>/ 前缀（REQ-083 约定）
+    audio_path = fc_after["materials"]["audio"]["path"]
+    assert audio_path.endswith(".mp3"), f"音频后缀应 .mp3，得到 {audio_path}"
+    # 用 Path 部分匹配，兼容 Windows 反斜杠
+    audio_path_normalized = audio_path.replace("\\", "/")
+    assert f"tasks/{t.task_id}/" in audio_path_normalized, (
+        f"REQ-083：路径必须含 tasks/<tid>/ 前缀，得到 {audio_path}"
+    )
+    # 实际文件存在
+    audio_abs = tmp_path / audio_path
+    assert audio_abs.exists(), f"上传文件应存在: {audio_abs}"
+
+
+def test_upload_audio_does_not_override_user_disabled(tmp_path):
+    """REQ-085：用户已手动 enabled=True 时上传 mp3 → enabled 保持 True（幂等）。"""
+    import io
+    from fastapi.testclient import TestClient
+    from slirn_home.app import build_app, _get_fine_compose
+
+    mgr, _ = _make_mgr(tmp_path)
+    video = tmp_path / "src.mp4"
+    video.write_bytes(b"\x00" * 1024)
+    t = mgr.create(name="audio-keep-enabled", original_video=video)
+
+    app = build_app(repo_root=tmp_path)
+    client = TestClient(app.app)
+
+    # 用户先手动调音量 + 启用
+    r0 = client.post(
+        "/slirn/api/save_fine_audio",
+        json={"task_id": t.task_id, "audio": {"enabled": True, "volume": 0.7}},
+    )
+    assert r0.status_code == 200, r0.text
+
+    # 然后上传 mp3
+    fake_audio = io.BytesIO(b"\xff\xfb\x90\x00" * 64)
+    r = client.post(
+        "/slirn/api/upload_fine_material_form",
+        data={"task_id": t.task_id, "kind": "audio"},
+        files={"file": ("bgm.mp3", fake_audio, "audio/mpeg")},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is True
+
+    fc = _get_fine_compose(mgr, t.task_id)
+    # enabled 保持 True（不会变 False）
+    assert fc["audio"]["enabled"] is True
+    # 用户手动设的 volume=0.7 不被覆盖（默认 0.4 也不写）
+    assert fc["audio"]["volume"] == 0.7, (
+        f"用户已设 volume=0.7 不会被上传覆盖，得到 {fc['audio']['volume']}"
+    )
+
+
+def test_upload_audio_then_assemble_includes_audio_input(tmp_path, monkeypatch):
+    """REQ-085 端到端：上传 mp3 → 直接调 _assemble_fine_filter → input_args 含音频 + filter_complex 含 [bgm]。"""
+    import io
+    from fastapi.testclient import TestClient
+    from slirn_home.app import build_app, _assemble_fine_filter, _get_fine_compose, _save_fine_compose
+
+    mgr, _ = _make_mgr(tmp_path)
+    app = build_app(repo_root=tmp_path)
+    client = TestClient(app.app)
+
+    # 准备任务 + 视频素材
+    video = tmp_path / "src.mp4"
+    video.write_bytes(b"\x00" * 1024)
+    t = mgr.create(name="e2e-upload-bgm", original_video=video)
+    upload_dir = tmp_path / "tasks" / t.task_id / "upload"
+    upload_dir.mkdir(exist_ok=True)
+    shutil.copy(video, upload_dir / "video_src.mp4")
+
+    # 写 fc 视频素材（先不上传 audio）
+    fc = _get_fine_compose(mgr, t.task_id)
+    fc["materials"]["video"] = {
+        "path": f"tasks/{t.task_id}/upload/video_src.mp4",
+        "source": "upload",
+        "type": "video",
+    }
+    _save_fine_compose(mgr, t.task_id, fc)
+
+    # 上传 mp3（这就是 REQ-085 修的入口）
+    fake_audio = io.BytesIO(b"\xff\xfb\x90\x00" * 64)
+    up_resp = client.post(
+        "/slirn/api/upload_fine_material_form",
+        data={"task_id": t.task_id, "kind": "audio"},
+        files={"file": ("bgm.mp3", fake_audio, "audio/mpeg")},
+    )
+    assert up_resp.json()["ok"] is True, up_resp.json()
+
+    # 上传后 fc.audio.enabled 应自动 True（否则 assemble 会把 BGM 跳过）
+    fc_after = _get_fine_compose(mgr, t.task_id)
+    assert fc_after["audio"]["enabled"] is True, (
+        "REQ-085：上传 mp3 后 fc.audio.enabled 应自动 True，"
+        "否则 _assemble_fine_filter 会跳过 BGM"
+    )
+
+    # 调 _assemble_fine_filter → audio 应进入 input_args + filter_complex 含 [bgm]
+    asm = _assemble_fine_filter(t.task_id, mgr, duration=10.0, preview_start=0.0)
+    assert asm.get("ok") is True, asm
+    input_args = asm.get("input_args", [])
+    audio_in_args = any(
+        (input_args[i + 1] if i + 1 < len(input_args) else "").endswith(".mp3")
+        for i, tok in enumerate(input_args) if tok == "-i"
+    )
+    assert audio_in_args, (
+        f"REQ-085：上传 mp3 后 audio 应进入 input_args，但没找到；input_args={input_args}"
+    )
+    fc_str = asm.get("filter_complex", "")
+    assert "[bgm]" in fc_str and "amix=inputs=2" in fc_str, (
+        f"filter_complex 必须含 [bgm] + amix=inputs=2；实际：\n{fc_str}"
+    )
+
+
+def test_upload_non_audio_does_not_toggle_audio_enabled(tmp_path):
+    """REQ-085：上传图片 / 视频 / 字幕不应动 audio.enabled（不污染状态）。"""
+    import io
+    from fastapi.testclient import TestClient
+    from slirn_home.app import build_app, _get_fine_compose
+
+    mgr, _ = _make_mgr(tmp_path)
+    video = tmp_path / "src.mp4"
+    video.write_bytes(b"\x00" * 1024)
+    t = mgr.create(name="non-audio-test", original_video=video)
+
+    app = build_app(repo_root=tmp_path)
+    client = TestClient(app.app)
+
+    # 上传前 fc.audio.enabled 默认 False
+    fc_before = _get_fine_compose(mgr, t.task_id)
+    assert fc_before["audio"]["enabled"] is False
+
+    # 上传 cover（图片）——不应影响 audio
+    from PIL import Image as _PILImage
+    buf = io.BytesIO()
+    _PILImage.new("RGB", (200, 200), (255, 0, 0)).save(buf, format="PNG")
+    buf.seek(0)
+    r = client.post(
+        "/slirn/api/upload_fine_material_form",
+        data={"task_id": t.task_id, "kind": "cover"},
+        files={"file": ("cover.png", buf, "image/png")},
+    )
+    assert r.json()["ok"] is True
+
+    # 上传视频
+    video_bytes = io.BytesIO(b"\x00" * 1024)
+    r2 = client.post(
+        "/slirn/api/upload_fine_material_form",
+        data={"task_id": t.task_id, "kind": "video"},
+        files={"file": ("video.mp4", video_bytes, "video/mp4")},
+    )
+    assert r2.json()["ok"] is True
+
+    # fc.audio.enabled 仍是默认 False（没被污染）
+    fc_after = _get_fine_compose(mgr, t.task_id)
+    assert fc_after["audio"]["enabled"] is False, (
+        "REQ-085：上传 cover/video 不应改变 audio.enabled 状态"
+    )

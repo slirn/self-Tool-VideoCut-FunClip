@@ -6151,6 +6151,19 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             "source": "upload",
         }
         _save_fine_compose(mgr, task_id, fc)
+        # REQ-20260920-085：上传音频素材时自动启用 BGM（与 select_default_bgm 对齐）
+        # 修复「上传 mp3 后生成预览无 BGM」BUG：原代码只写 materials.audio.path，
+        # 不写 audio.enabled → _assemble_fine_filter audio gate 把 BGM 静默禁用。
+        # 仅当 enabled 仍是默认值 False 时才自动启用（不覆盖用户手动 toggle）：
+        #   - 全新任务（fc.audio 由 _get_fine_compose 默认填 enabled=False）→ 自动开 ✅
+        #   - 用户已 save_fine_audio 设过 enabled=True → 已是 True（再写幂等）✅
+        #   - 用户已 save_fine_audio 设过 enabled=False → 保留 False，不强行打开 ✅
+        # volume 已经是 _FINE_AUDIO_DEFAULTS["volume"]=0.4，无需再写。
+        if kind == "audio":
+            audio_block = fc.setdefault("audio", {})
+            if audio_block.get("enabled", _FINE_AUDIO_DEFAULTS["enabled"]) == _FINE_AUDIO_DEFAULTS["enabled"]:
+                audio_block["enabled"] = True
+            _save_fine_compose(mgr, task_id, fc)
         # REQ-20260920-079：超大图片上传提示（前端 toast；不动原图）
         warning: str | None = None
         if kind in ("bg", "cover", "reference") and save_path.suffix.lower() in _PIL_IMAGE_EXTS:
