@@ -4769,8 +4769,12 @@ def test_render_fine_cut_zone_has_export_and_import_params_buttons(tmp_path):
 
 
 def test_export_fine_params_returns_full_compose_with_detected_region(tmp_path, monkeypatch):
-    """REQ-20260919-065：export_fine_params 应返回 {filename, content, mime}，
-    content 是合法 JSON，含 _schema=3 + detected_region + layout/font/output/audio。"""
+    """REQ-20260919-065 + REQ-20260919-073：export_fine_params 应返回
+    {filename, content, mime}，content 是合法 JSON：
+    - 含 _schema=3 + detected_region + layout/font/output/audio
+    - materials == {}（REQ-20260919-073：素材路径不是设置参数，不导出；
+      与全局模板 export_fine_global_profile 同口径）
+    """
     from slirn_home import app as _app
 
     # 找 export_fine_params endpoint（用 app 对象挂的 FastAPI 实例）
@@ -4789,6 +4793,16 @@ def test_export_fine_params_returns_full_compose_with_detected_region(tmp_path, 
         "image_native_w": 1920, "image_native_h": 1080,
         "algorithm": "ai_color", "threshold": 230,
     })
+    # REQ-20260919-073：给 fc.materials 写一些数据，验证导出时被丢弃
+    from slirn_home.app import _save_fine_compose
+    fc = _get_fine_compose(m, t.task_id)
+    fc["materials"] = {
+        "video": {"path": "tasks/" + t.task_id + "/upload/video.mp4",
+                  "source": "upload", "type": "video"},
+        "bg": {"path": "tasks/" + t.task_id + "/upload/bg.png",
+               "source": "upload", "type": "image"},
+    }
+    _save_fine_compose(m, t.task_id, fc)
 
     built = build_app(repo_root)
     client = TestClient(built.app)
@@ -4809,6 +4823,11 @@ def test_export_fine_params_returns_full_compose_with_detected_region(tmp_path, 
     assert payload["detected_region"]["algorithm"] == "ai_color"
     for k in ("layout", "font", "output", "audio"):
         assert k in payload, f"导出应包含 {k} 字段"
+    # REQ-20260919-073：materials 必须是空字典（不导出素材路径）
+    assert payload["materials"] == {}, \
+        "任务级导出不应包含 materials（路径不是设置参数），与全局模板同口径"
+    assert "video" not in payload["materials"], \
+        "materials.video.path 不应泄漏到导出 JSON"
 
 
 def test_import_fine_params_overwrites_fields_keeps_materials(tmp_path):

@@ -5130,7 +5130,13 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
     # REQ-20260919-065：精剪参数 JSON 导出/导入
     @app.app.post("/slirn/api/export_fine_params")
     async def export_fine_params(body: dict = Body(default_factory=dict)):
-        """导出精剪参数为 JSON 字符串（不含素材文件本体）。
+        """导出精剪参数为 JSON 字符串（不含素材文件本体，也不上传素材路径）。
+
+        REQ-20260919-073：materials 是任务本地上传的素材（视频/字幕/封面/BGM/参考图
+        的文件路径），跨任务/跨机器复用无意义。导入端始终不动 materials（见
+        import_fine_params），故导出端本就不该把 materials 写进文件 — 与全局模板
+        `export_fine_global_profile` 同口径。
+
         返回 {ok, filename, content, mime} → 前端用 Blob 触发下载。
         """
         tid = (body.get("task_id") or "").strip()
@@ -5145,7 +5151,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             "_schema": 3,
             "_exported_at": datetime.now().isoformat(timespec="seconds"),
             "_source_task_id": tid,
-            "materials": fc.get("materials", {}),    # 仅 metadata（path/source/type），不含文件本体
+            "materials": {},    # REQ-20260919-073：素材路径不是设置参数，不导出
             "layout": fc.get("layout"),
             "font": fc.get("font"),
             "output": fc.get("output"),
