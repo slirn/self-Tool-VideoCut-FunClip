@@ -2304,11 +2304,16 @@ def _probe_video_duration_ms(mgr, tid: str) -> int:
         return 0
 
 
-def _run_fine_render_async(job: _RenderJob, tid: str, mgr, out_path: Path) -> None:
+def _run_fine_render_async(job: _RenderJob, tid: str, mgr, out_path: Path,
+                          exec_id: str = "", outputs_dir: Path | None = None) -> None:
     """REQ-20260919-074：后台 daemon 线程跑 ffmpeg（1-3 小时不再超时）。
 
     写入 job.state/progress_pct/elapsed_sec/speed_x/eta_sec/progress_time_ms/
     total_duration_ms/error/output_url 等字段；前端 GET /render_status 读取。
+
+    REQ-20260920-081：exec_id 与 outputs_dir 由 export_fine_video endpoint 传入，
+    用于在多出口（assemble 失败 / FileNotFound / cancelled / returncode 非 0 /
+    returncode 0）都补 record_finish。失败也写（status="failed"）。
     """
     job.state = "running"
     job.started_at = time.monotonic()
@@ -2320,6 +2325,15 @@ def _run_fine_render_async(job: _RenderJob, tid: str, mgr, out_path: Path) -> No
         job.error = asm.get("error", "filter 组装失败")
         job.finished_at = time.monotonic()
         job.wall_finished_at = time.time()
+        # REQ-20260920-081：assemble 失败也写历史
+        if exec_id and outputs_dir is not None:
+            try:
+                execution_history.record_finish(
+                    outputs_dir, exec_id, success=False,
+                    error=str(asm.get("error") or "filter 组装失败")[:500],
+                )
+            except Exception:
+                pass
         return
 
     sub_input_tmp = asm["sub_input_tmp"]
@@ -2370,6 +2384,15 @@ def _run_fine_render_async(job: _RenderJob, tid: str, mgr, out_path: Path) -> No
         for _p in image_tmp_paths:
             try: _p.unlink(missing_ok=True)
             except Exception: pass
+        # REQ-20260920-081：ffmpeg 不存在也写历史
+        if exec_id and outputs_dir is not None:
+            try:
+                execution_history.record_finish(
+                    outputs_dir, exec_id, success=False,
+                    error="系统未安装 ffmpeg，请先安装并加入 PATH",
+                )
+            except Exception:
+                pass
         return
 
     job.proc = proc
@@ -2458,6 +2481,15 @@ def _run_fine_render_async(job: _RenderJob, tid: str, mgr, out_path: Path) -> No
         except Exception: pass
 
     if job.state == "cancelled":
+        # REQ-20260920-081：用户取消也写历史（status 标为 failed，error 带 cancelled）
+        if exec_id and outputs_dir is not None:
+            try:
+                execution_history.record_finish(
+                    outputs_dir, exec_id, success=False,
+                    error="用户取消渲染",
+                )
+            except Exception:
+                pass
         return  # 取消路径不判断 returncode
     if proc.returncode == 0:
         job.state = "done"
@@ -2465,6 +2497,20 @@ def _run_fine_render_async(job: _RenderJob, tid: str, mgr, out_path: Path) -> No
         job.output_url = (
             f"/slirn/api/video/{tid}?src=fine_export&t={int(time.time())}"
         )
+        # REQ-20260920-081：成功落盘历史
+        if exec_id and outputs_dir is not None:
+            try:
+                execution_history.patch_extra(
+                    outputs_dir, exec_id,
+                    {"output_path": str(out_path),
+                     "duration_sec": round((job.finished_at - job.started_at), 1),
+                     "resolution": (asm.get("output_resolution") or "1080p")},
+                )
+                execution_history.record_finish(
+                    outputs_dir, exec_id, success=True, error="",
+                )
+            except Exception:
+                pass
     else:
         job.state = "failed"
         try:
@@ -2472,6 +2518,14 @@ def _run_fine_render_async(job: _RenderJob, tid: str, mgr, out_path: Path) -> No
         except Exception:
             stderr_tail = ""
         job.error = (stderr_tail or "未知错误")[-500:]
+        # REQ-20260920-081：渲染失败落盘历史
+        if exec_id and outputs_dir is not None:
+            try:
+                execution_history.record_finish(
+                    outputs_dir, exec_id, success=False, error=str(job.error)[:500],
+                )
+            except Exception:
+                pass
 
 
 def _get_fine_compose(mgr, task_id: str) -> dict:
@@ -4776,6 +4830,8 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
 
         # REQ-20260919-075：auto 透传；检测区域写日志
         _auto = request.headers.get("X-Slirn-Auto") == "1"
+        # REQ-20260920-081：session 透传
+        _auto_session_id = request.headers.get("X-Slirn-Auto-Session") or ""
         from slirn_home import execution_history
 
         # REQ-20260919-075：失败路径也写历史（用包装函数替代裸 return _err）
@@ -4818,6 +4874,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             outputs_dir, execution_history.KIND_FINE_BG_DETECT,
             extra={"algorithm": algorithm, "threshold": threshold},
             auto=_auto,
+            auto_session_id=_auto_session_id,
         )
         _bg_exec_id = exec_id
 
@@ -5162,6 +5219,8 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         """
         from slirn_home import execution_history, llm_config, revision_service
         _auto = request.headers.get("X-Slirn-Auto") == "1"
+        # REQ-20260920-081：session 透传
+        _auto_session_id = request.headers.get("X-Slirn-Auto-Session") or ""
 
         tid = (body.get("task_id") or "").strip()
         if not tid:
@@ -5177,6 +5236,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             outputs_dir, execution_history.KIND_FINE_AI_LAYOUT,
             extra={},
             auto=_auto,
+            auto_session_id=_auto_session_id,
         )
 
         # 1. 校验参考图
@@ -5604,7 +5664,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         return _ok(filename=filename, content=content, mime="application/json")
 
     @app.app.post("/slirn/api/render_fine_preview")
-    async def render_fine_preview(body: dict = Body(default_factory=dict)):
+    async def render_fine_preview(request: Request, body: dict = Body(default_factory=dict)):
         """REQ-20260919-061 Phase B：渲染精剪视频预览（ffmpeg overlay）。
 
         REQ-20260919-061 用户反馈：预览时长可调（2–30 秒，默认 10）。body 里读
@@ -5615,7 +5675,12 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         （start 不会负；不会因 ffmpeg 0-frame 报错）。
 
         输出：outputs/fine_preview.mp4（相对 slirn-standalone 根）
+
+        REQ-20260920-081：执行历史埋点（KIND_FINE_PREVIEW，同步任务，开始/结束成对记录）。
         """
+        from slirn_home import execution_history
+        _auto = request.headers.get("X-Slirn-Auto") == "1"
+        _auto_session_id = request.headers.get("X-Slirn-Auto-Session") or ""
         tid = (body.get("task_id") or "").strip()
         if not tid:
             return _err("缺少 task_id")
@@ -5623,6 +5688,15 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             mgr.get(tid)
         except Exception as e:  # noqa: BLE001
             return _err(f"任务不存在: {e}")
+        # REQ-20260920-081：执行历史 — 同步渲染开始时记 running
+        outputs_dir = mgr.tasks_dir / tid / "outputs"
+        _exec_id = execution_history.record_start(
+            outputs_dir,
+            execution_history.KIND_FINE_PREVIEW,
+            extra={"duration_sec": None, "preview_start": 0.0},  # 下方覆盖
+            auto=_auto,
+            auto_session_id=_auto_session_id,
+        )
         # 解析预览时长，钳到 [2, 30]（前端已有 min/max 限制，后端兜底防越界）
         raw_dur = body.get("duration")
         try:
@@ -5658,6 +5732,21 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         out_path = mgr.tasks_dir / tid / "outputs" / "fine_preview.mp4"
         result = _run_fine_render(tid, mgr, out_path,
                                    duration=preview_dur, preview_start=preview_start)
+        # REQ-20260920-081：执行历史 — 同步渲染完成回填 finish
+        if _exec_id:
+            try:
+                execution_history.patch_extra(
+                    outputs_dir, _exec_id,
+                    {"duration_sec": preview_dur, "preview_start": preview_start,
+                     "output_path": str(out_path)},
+                )
+                execution_history.record_finish(
+                    outputs_dir, _exec_id,
+                    success=bool(result.get("ok")),
+                    error=str(result.get("error") or "")[:500],
+                )
+            except Exception:
+                pass
         if not result.get("ok"):
             return result
         return _ok(
@@ -5666,7 +5755,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         )
 
     @app.app.post("/slirn/api/export_fine_video")
-    async def export_fine_video(body: dict = Body(default_factory=dict)):
+    async def export_fine_video(request: Request, body: dict = Body(default_factory=dict)):
         """REQ-20260919-074：导出最终精剪视频（异步后台任务）。
 
         用户反馈：实际最终视频 1-3 小时长，旧的同步 `_run_fine_render` timeout=120s
@@ -5676,7 +5765,15 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         2. 后台 daemon 线程跑 `_run_fine_render_async`，写 `_JOB_REGISTRY[job_id]`
         3. 前端 GET `/slirn/api/render_status?job_id=X` 轮询拿进度
         4. 完成后前端点关闭 → 调 `/slirn/api/cancel_render` 不会触发（job 已 done）
+
+        REQ-20260920-081：record_start 写一条 KIND_FINE_EXPORT 历史，exec_id 和
+        outputs_dir 传给后台线程用于 record_finish（4 个出口：assemble 失败 /
+        FileNotFound / 取消 / returncode 非 0 / returncode 0）。auto + session_id
+        从 X-Slirn-Auto / X-Slirn-Auto-Session 透传（REQ-20260919-075 + 081）。
         """
+        from slirn_home import execution_history
+        _auto = request.headers.get("X-Slirn-Auto") == "1"
+        _auto_session_id = request.headers.get("X-Slirn-Auto-Session") or ""
         tid = (body.get("task_id") or "").strip()
         if not tid:
             return _err("缺少 task_id")
@@ -5699,13 +5796,28 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         # 创建 job + 启线程
         job_id = f"job_{int(time.time() * 1000)}_{os.getpid()}"
         out_path = mgr.tasks_dir / tid / "outputs" / "fine_export.mp4"
+        outputs_dir = mgr.tasks_dir / tid / "outputs"
         job = _RenderJob(job_id=job_id, task_id=tid)
         with _JOB_LOCK:
             _JOB_REGISTRY[job_id] = job
 
+        # REQ-20260920-081：执行历史埋点（立即记 running；后台线程 4 个出口都补 finish）
+        fc_for_extra = _get_fine_compose(mgr, tid)
+        _ext_exec = execution_history.record_start(
+            outputs_dir,
+            execution_history.KIND_FINE_EXPORT,
+            extra={
+                "job_id": job_id,
+                "resolution": (fc_for_extra.get("output") or {}).get("resolution", "1080p"),
+                "bgm_enabled": bool((fc_for_extra.get("audio") or {}).get("enabled", False)),
+            },
+            auto=_auto,
+            auto_session_id=_auto_session_id,
+        )
+
         t = threading.Thread(
             target=_run_fine_render_async,
-            args=(job, tid, mgr, out_path),
+            args=(job, tid, mgr, out_path, _ext_exec, outputs_dir),
             daemon=True,
             name=f"fine-render-{job_id}",
         )
@@ -6079,6 +6191,8 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
     async def gen_subtitle(request: Request, body: dict = Body(default_factory=dict)):
         # REQ-20260919-075：auto 透传 — pipeline_service 调时会带 X-Slirn-Auto header
         _auto = request.headers.get("X-Slirn-Auto") == "1"
+        # REQ-20260920-081：session 透传 — 同一次自动流的多次操作共用 session_id
+        _auto_session_id = request.headers.get("X-Slirn-Auto-Session") or ""
         tid = (body.get("task_id") or "").strip()
         if not tid:
             return _err("缺少 task_id")
@@ -6118,6 +6232,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             tid, video, hotwords, outputs_dir,
             source=source, base_offset_ms=base_off_ms, sd=sd_on, on_success=_on_success,
             auto=_auto,
+            auto_session_id=_auto_session_id,
         )
         if not started:
             return _ok("", toast="⏳ 该任务已在生成中，请等待完成")
@@ -6309,6 +6424,68 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         j["elapsed_s"] = int((j.get("finished_at") or _time.time()) - j["started_at"])
         return _ok("", job=j)
 
+    @app.app.post("/slirn/api/list_logs")
+    async def list_logs(body: dict = Body(default_factory=dict)):
+        """REQ-20260920-081：执行日志查询（按 task_id + 时间段 + 阶段 + 操作 + 模式过滤）。
+
+        输入 body：
+            task_id: 必填；查询该任务的 execution_history.json
+            time_from / time_to: 可选 ISO 8601；按 started_at 区间过滤
+            kinds: 可选操作类型列表（如 ["rough_compose", "rough_compose_delete"]）
+            statuses: 可选状态列表（如 ["success", "failed"]）
+            auto: 可选 "manual" | "auto" | "any"（默认 "any"）
+            limit: 可选返回条数（默认 200）
+        返回：
+            {ok: true, items: [...], total: N}
+        """
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            mgr.get(tid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+
+        from slirn_home import execution_history
+
+        # ISO 8601 → epoch 秒（带或不带时区都容错）
+        def _parse_iso(s: str | None) -> float | None:
+            if not s:
+                return None
+            try:
+                from datetime import datetime as _dt
+                s = str(s).strip()
+                # 兼容带 Z 结尾（UTC）
+                if s.endswith("Z"):
+                    s = s[:-1] + "+00:00"
+                return _dt.fromisoformat(s).timestamp()
+            except Exception:
+                return None
+
+        time_from_ts = _parse_iso(body.get("time_from"))
+        time_to_ts = _parse_iso(body.get("time_to"))
+        kinds_in = body.get("kinds") or []
+        statuses_in = body.get("statuses") or []
+        auto_mode = (body.get("auto") or "any").lower()
+        try:
+            limit = int(body.get("limit") or 200)
+        except (TypeError, ValueError):
+            limit = 200
+        limit = max(1, min(limit, 1000))
+
+        # task_id 隔离：通过 outputs_dir（每个 task 独立目录）天然隔离
+        outputs_dir = mgr.tasks_dir / tid / "outputs"
+        items = execution_history.query_history(
+            outputs_dir,
+            kinds=list(kinds_in) if kinds_in else None,
+            statuses=list(statuses_in) if statuses_in else None,
+            limit=limit,
+            time_from_ts=time_from_ts,
+            time_to_ts=time_to_ts,
+            auto=auto_mode,
+        )
+        return _ok("", items=items, total=len(items))
+
     @app.app.post("/slirn/api/save_revision")
     async def save_revision(body: dict = Body(default_factory=dict)):
         """保存用户逐条决策；全部决策完成 → 状态推进 SUBTITLE_REVIEWED。"""
@@ -6359,6 +6536,8 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
 
         # REQ-20260919-075：auto 透传；执行切分修剪写日志
         _auto = request.headers.get("X-Slirn-Auto") == "1"
+        # REQ-20260920-081：session 透传
+        _auto_session_id = request.headers.get("X-Slirn-Auto-Session") or ""
         from slirn_home import asr_service, cutlist_service, execution_history, revision_service
 
         tid = (body.get("task_id") or "").strip()
@@ -6382,6 +6561,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         exec_id = execution_history.record_start(
             outputs_dir, execution_history.KIND_ROUGH_CUT,
             auto=_auto,
+            auto_session_id=_auto_session_id,
         )
         try:
             cutlist = cutlist_service.build_cutlist(sub_meta, rev)
@@ -6416,6 +6596,8 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         """
         # REQ-20260919-075：auto 透传；关联人员ID写日志
         _auto = request.headers.get("X-Slirn-Auto") == "1"
+        # REQ-20260920-081：session 透传
+        _auto_session_id = request.headers.get("X-Slirn-Auto-Session") or ""
         from slirn_home import asr_service, cut_speaker, cutlist_service, execution_history, revision_service
 
         tid = (body.get("task_id") or "").strip()
@@ -6446,6 +6628,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             outputs_dir, execution_history.KIND_ROUGH_CUT_LINK_PERSON,
             extra={"rows": len(cutlist.get("items") or [])},
             auto=_auto,
+            auto_session_id=_auto_session_id,
         )
         try:
             link = cut_speaker.link_speakers(sub_meta, cutlist)
@@ -6602,9 +6785,13 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         最新确认版（热词替换未撤销的行用 new_text，REQ-20260916-017）—
         「处理之后的字幕 + 原视频」交给上游合成方法（video_clip）。
         不推进任务状态。已在跑 → 返回 running 供前端接续轮询。
+
+        REQ-20260920-081：auto_session_id 透传给 compose_service.start_compose。
         """
         # REQ-20260919-075：auto 透传
         _auto = request.headers.get("X-Slirn-Auto") == "1"
+        # REQ-20260920-081：session 透传
+        _auto_session_id = request.headers.get("X-Slirn-Auto-Session") or ""
         from slirn_home import asr_service, compose_service, cutlist_service, fine_service, revision_service
 
         tid = (body.get("task_id") or "").strip()
@@ -6649,7 +6836,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         n_merged = len(compose_service.merge_intervals_ms(intervals_ms))
         started = compose_service.start_compose(
             tid, video, intervals_ms, compose_service.rough_compose_path(outputs_dir), lines,
-            auto=_auto)
+            auto=_auto, auto_session_id=_auto_session_id)
         job = compose_service.job_status(tid) or {}
         return _ok("", running=bool(started), job=job,
                    toast="🎬 合成已启动" if started else "🎬 合成已在进行中",
@@ -6673,9 +6860,14 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
 
     @app.app.post("/slirn/api/compose_rough_delete")
     async def compose_rough_delete(request: Request, body: dict = Body(default_factory=dict)):
-        """删除粗剪成片（REQ-20260916-019）：用户主动清理产物以便重合成。"""
+        """删除粗剪成片（REQ-20260916-019）：用户主动清理产物以便重合成。
+
+        REQ-20260920-081：auto_session_id 透传给 compose_service.delete_rough_compose。
+        """
         # REQ-20260919-075：auto 透传
         _auto = request.headers.get("X-Slirn-Auto") == "1"
+        # REQ-20260920-081：session 透传
+        _auto_session_id = request.headers.get("X-Slirn-Auto-Session") or ""
         from slirn_home import compose_service
 
         tid = (body.get("task_id") or "").strip()
@@ -6686,7 +6878,8 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         except Exception as e:  # noqa: BLE001
             return _err(f"任务不存在: {e}")
         outputs_dir = mgr.tasks_dir / tid / "outputs"
-        res = compose_service.delete_rough_compose(outputs_dir, auto=_auto)
+        res = compose_service.delete_rough_compose(outputs_dir, auto=_auto,
+                                                  auto_session_id=_auto_session_id)
         return _ok("", deleted=res["deleted"],
                    toast="🗑️ " + res["message"] if res["deleted"] else None,
                    removed=res["removed"], remaining=res["remaining"],
@@ -6986,6 +7179,8 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         """
         # REQ-20260919-075：auto 透传；确认保存写日志
         _auto = request.headers.get("X-Slirn-Auto") == "1"
+        # REQ-20260920-081：session 透传
+        _auto_session_id = request.headers.get("X-Slirn-Auto-Session") or ""
         from tasklib.models import TaskStatus
 
         from slirn_home import execution_history, optimize_service
@@ -7006,6 +7201,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             outputs_dir, execution_history.KIND_OPTIMIZE,
             extra={"decisions_count": len(decisions)},
             auto=_auto,
+            auto_session_id=_auto_session_id,
         )
         try:
             data, applied_n = optimize_service.save_decisions(outputs_dir, decisions)
