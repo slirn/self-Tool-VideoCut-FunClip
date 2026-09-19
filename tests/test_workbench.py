@@ -5419,6 +5419,177 @@ def test_render_fine_cut_zone_has_default_bgm_select(tmp_path):
         "REQ-078：应在 .slirn-fine-audio-block 内"
 
 
+# =====================================================================
+# REQ-20260920-079：超大图片自动缩放（防 ffmpeg OOM 卡死）
+# =====================================================================
+
+def test_maybe_prescale_image_under_threshold_returns_same_path(tmp_path):
+    """REQ-079：长边 ≤ 4096 px 应返回原路径，不写临时文件。"""
+    from pathlib import Path
+    from slirn_home.app import _maybe_prescale_image, _PIL_IMAGE_EXTS
+
+    # 构造一张 1920×1080 PNG（长边 1920 < 4096）
+    from PIL import Image as _PILImage
+    small = tmp_path / "small.png"
+    _PILImage.new("RGB", (1920, 1080), (255, 0, 0)).save(small)
+    assert small.suffix.lower() in _PIL_IMAGE_EXTS
+
+    ret = _maybe_prescale_image(Path(small), 1920, 1080, "bg")
+    assert ret == Path(small), f"小图应原样返回，得到 {ret}"
+    # 临时文件不应存在
+    tmp_glob = list(tmp_path.glob(".*req079*"))
+    assert not tmp_glob, f"不应生成临时文件，但有 {tmp_glob}"
+
+
+def test_maybe_prescale_image_over_threshold_creates_temp_scaled(tmp_path):
+    """REQ-079：长边 > 4096 px 应触发缩放，写临时文件；原图 mtime 不变。"""
+    import os
+    from pathlib import Path
+    from slirn_home.app import _maybe_prescale_image
+    from PIL import Image as _PILImage
+
+    src = tmp_path / "big.png"
+    _PILImage.new("RGB", (8000, 4500), (0, 255, 0)).save(src)
+    src_mtime = src.stat().st_mtime
+    src_size = src.stat().st_size
+
+    ret = _maybe_prescale_image(Path(src), 1920, 1080, "bg")
+    assert ret != Path(src), "超限图应返回新临时路径"
+    assert ret.exists(), f"临时文件未生成: {ret}"
+    assert ret.name.startswith(".bg_req079_"), f"命名应含 .bg_req079_ 前缀: {ret.name}"
+    assert "1920x1080" in ret.name
+
+    # 临时文件尺寸应为 1920×1080
+    with _PILImage.open(ret) as im:
+        assert im.size == (1920, 1080), f"临时图尺寸错: {im.size}"
+
+    # 原图未变
+    assert src.stat().st_mtime == src_mtime
+    assert src.stat().st_size == src_size
+
+
+def test_assemble_fine_filter_replaces_bg_path_with_prescaled_tmp(tmp_path):
+    """REQ-079：assemble_fine_filter 检测到 8000×4500 bg → 替换 input_args 中 bg 的 -i 路径。"""
+    from pathlib import Path
+    from slirn_home.app import (
+        _assemble_fine_filter, _get_fine_compose, _save_fine_compose,
+    )
+    from PIL import Image as _PILImage
+
+    mgr, video = _make_mgr(tmp_path)
+    t = mgr.create(name="prescale-bg", original_video=video)
+
+    # 写一张 8000×4500 PNG 作为 bg
+    upload = tmp_path / "tasks" / t.task_id / "upload"
+    upload.mkdir(parents=True, exist_ok=True)
+    bg_src = upload / "bg_big.png"
+    _PILImage.new("RGB", (8000, 4500), (128, 128, 128)).save(bg_src)
+    bg_rel = f"tasks/{t.task_id}/upload/bg_big.png"
+
+    fc = _get_fine_compose(mgr, t.task_id)
+    fc["materials"]["video"] = {"path": str(video.relative_to(tmp_path)),
+                                "type": "video", "source": "upload"}
+    fc["materials"]["bg"] = {"path": bg_rel, "type": "image", "source": "upload"}
+    fc["layout"]["bg"]["enabled"] = True
+    _save_fine_compose(mgr, t.task_id, fc)
+
+    asm = _assemble_fine_filter(t.task_id, mgr, duration=5.0, preview_start=0.0)
+    assert asm.get("ok") is True, asm
+
+    # 1. image_tmp_paths 应包含 bg 临时文件
+    tmp_paths = asm.get("image_tmp_paths") or []
+    assert any(".bg_req079_" in str(p) for p in tmp_paths), \
+        f"应包含 .bg_req079_ 临时路径，得到 {tmp_paths}"
+
+    # 2. input_args 中 bg 的 -i path 应被替换
+    bg_tmp = [p for p in tmp_paths if ".bg_req079_" in str(p)][0]
+    expected_path = str(bg_tmp)
+    # 找 input_args 中跟 expected_path 相等的 -i 后面的 token
+    found = False
+    for i_, tok in enumerate(asm["input_args"]):
+        if tok == "-i" and i_ + 1 < len(asm["input_args"]):
+            if asm["input_args"][i_ + 1] == expected_path:
+                found = True
+                break
+    assert found, f"input_args 应包含 bg 临时路径 {expected_path}，实际 {asm['input_args']}"
+
+    # 3. 原图未变
+    assert bg_src.exists()
+
+
+def test_upload_fine_material_form_returns_warning_for_oversized(tmp_path):
+    """REQ-079：上传 8000×4500 PNG → response.warning 含「自动缩放」字样。"""
+    from fastapi.testclient import TestClient
+    from slirn_home.app import build_app
+    from PIL import Image as _PILImage
+    import io
+
+    app = build_app(repo_root=tmp_path)
+    client = TestClient(app.app)
+
+    mgr, video = _make_mgr(tmp_path)
+    t = mgr.create(name="upload-warn", original_video=video)
+
+    # 8000×4500 PNG bytes
+    buf = io.BytesIO()
+    _PILImage.new("RGB", (8000, 4500), (0, 0, 255)).save(buf, format="PNG")
+    buf.seek(0)
+
+    resp = client.post(
+        "/slirn/api/upload_fine_material_form",
+        data={"task_id": t.task_id, "kind": "bg"},
+        files={"file": ("big.png", buf, "image/png")},
+    )
+    body = resp.json()
+    assert body["ok"] is True, body
+    assert body.get("warning"), f"应有 warning 字段，得到 {body}"
+    assert "自动缩放" in body["warning"], f"warning 文案错: {body['warning']}"
+    assert "8000" in body["warning"] and "4500" in body["warning"]
+
+
+# =====================================================================
+# REQ-20260920-080：修复 BGM filter_complex label 拼接 bug
+# 之前 "[1:a]aloop=...,volume=0.40,[bgm]" 导致 ffmpeg No such filter: '' → 预览/导出失败
+# =====================================================================
+
+def test_assemble_fine_filter_bgm_chain_has_no_comma_before_label(tmp_path):
+    """REQ-080：bgm filter chain 末尾的 [bgm] label 前不应有逗号。"""
+    from slirn_home.app import (
+        _assemble_fine_filter, _get_fine_compose, _save_fine_compose,
+    )
+
+    mgr, video = _make_mgr(tmp_path)
+    t = mgr.create(name="bgm-chain-test", original_video=video)
+
+    upload = tmp_path / "tasks" / t.task_id / "upload"
+    upload.mkdir(parents=True, exist_ok=True)
+    audio_src = upload / "bgm.mp3"
+    audio_src.write_bytes(b"ID3" + b"\x00" * 100)  # 占位 mp3 bytes
+
+    fc = _get_fine_compose(mgr, t.task_id)
+    fc["materials"]["video"] = {"path": str(video.relative_to(tmp_path)),
+                                "type": "video", "source": "upload"}
+    fc["audio"]["enabled"] = True
+    fc["audio"]["volume"] = 0.4
+    fc["audio"]["fade_in"] = 0.5
+    fc["audio"]["fade_out"] = 0.5
+    fc["materials"]["audio"] = {
+        "path": f"tasks/{t.task_id}/upload/bgm.mp3", "type": "audio", "source": "upload",
+    }
+    _save_fine_compose(mgr, t.task_id, fc)
+
+    asm = _assemble_fine_filter(t.task_id, mgr, duration=5.0, preview_start=0.0)
+    assert asm.get("ok") is True, asm
+
+    fc_text = asm["filter_complex"]
+    # 关键断言：[bgm] 前面不能有逗号
+    assert ",[bgm]" not in fc_text, \
+        f"REQ-080：[bgm] label 前不应有逗号（导致 ffmpeg 解析失败），filter_complex：\n{fc_text}"
+    # 正向：bgm chain 应是 [...aloop=...,volume=0.40,afade=t=in:...,afade=t=out:...[bgm]
+    assert "[bgm]" in fc_text
+    assert "amix=inputs=2:duration=first:normalize=0[aout]" in fc_text
+
+
 def test_import_fine_params_rejects_bad_schema(tmp_path):
     """REQ-20260919-065：_schema 不兼容（不是 2/3）应返回 error，不修改 fc。"""
     from slirn_home.app import build_app, _get_fine_compose
