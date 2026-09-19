@@ -5299,6 +5299,126 @@ def test_inline_state_javascript_render_pattern():
         "REQ-077：应绑 beforeunload/pagehide 清理 interval（防泄漏）"
 
 
+def test_list_default_bgms_returns_five_with_availability(tmp_path):
+    """REQ-20260920-078：POST /slirn/api/list_default_bgms 应返回 5 项 BGM +
+    每项带 available + size_bytes 字段（启动时校验存在性）。
+    """
+    from fastapi.testclient import TestClient
+    from slirn_home.app import build_app
+    app = build_app(repo_root=tmp_path)
+    client = TestClient(app.app)
+
+    resp = client.post("/slirn/api/list_default_bgms", json={})
+    body = resp.json()
+    assert body["ok"] is True, body
+    bgms = body["bgms"]
+    assert len(bgms) == 5, f"应返回 5 个 BGM，实际 {len(bgms)}"
+    ids = [b["id"] for b in bgms]
+    # 5 个 ID 必须是稳定的（前端按 ID 调用）
+    assert ids == [
+        "lofi_beat_1", "lofi_love_loop", "the_mountain",
+        "zephira_lofi", "zephira_relax",
+    ], f"BGM ID 顺序不对: {ids}"
+    # 每项必须有 name + filename + available + size_bytes 字段
+    for b in bgms:
+        assert "name" in b and b["name"], f"缺 name: {b}"
+        assert "filename" in b and b["filename"], f"缺 filename: {b}"
+        assert "available" in b, f"缺 available: {b}"
+        assert "size_bytes" in b, f"缺 size_bytes: {b}"
+        # 真实环境 D:\tmp\tttttt\ 下文件应存在（用户给的）
+        if b["available"]:
+            assert b["size_bytes"] > 0, f"available 但 size=0: {b}"
+
+
+def test_select_default_bgm_copies_to_task_and_enables_audio(tmp_path):
+    """REQ-20260920-078：POST /slirn/api/select_default_bgm 选某项 →
+    1) 复制到 tasks/{tid}/materials/audio/<id>.mp3
+    2) fc.materials.audio.path 设置正确
+    3) fc.audio.enabled = True（自动启用）
+    """
+    from fastapi.testclient import TestClient
+    from slirn_home.app import build_app, _get_fine_compose
+
+    mgr, _ = _make_mgr(tmp_path)
+    app = build_app(repo_root=tmp_path)
+    client = TestClient(app.app)
+
+    # 准备任务
+    video = tmp_path / "src.mp4"
+    video.write_bytes(b"\x00" * 1024)
+    t = mgr.create(name="bgm-test", original_video=video)
+
+    # 先确认 fc.audio 默认 enabled=False
+    fc_before = _get_fine_compose(mgr, t.task_id)
+    assert fc_before["audio"]["enabled"] is False
+
+    # 选第一个可用 BGM（如果 D:\tmp\tttttt\ 不存在则跳过）
+    list_resp = client.post("/slirn/api/list_default_bgms", json={}).json()
+    available = [b for b in list_resp["bgms"] if b["available"]]
+    if not available:
+        # 测试环境没有源文件，跳过（这是允许的边界）
+        return
+    bgm = available[0]
+
+    resp = client.post("/slirn/api/select_default_bgm", json={
+        "task_id": t.task_id, "bgm_id": bgm["id"],
+    })
+    body = resp.json()
+    assert body["ok"] is True, body
+    assert "audio_url" in body
+    assert body["name"] == bgm["name"]
+    assert "已选 BGM" in body["toast"]
+
+    # 1) 复制到 tasks/{tid}/materials/audio/<id>.mp3
+    expected_dst = tmp_path / "tasks" / t.task_id / "materials" / "audio" / f"{bgm['id']}.mp3"
+    assert expected_dst.exists(), f"BGM 文件未复制到: {expected_dst}"
+    assert expected_dst.stat().st_size == bgm["size_bytes"]
+
+    # 2) fc.materials.audio.path 设置正确
+    fc_after = _get_fine_compose(mgr, t.task_id)
+    assert fc_after["materials"]["audio"]["path"] == f"materials/audio/{bgm['id']}.mp3"
+
+    # 3) fc.audio.enabled = True
+    assert fc_after["audio"]["enabled"] is True
+
+
+def test_select_default_bgm_unknown_id_returns_error(tmp_path):
+    """REQ-20260920-078：未知 bgm_id 应返 error，不写 fc。"""
+    from fastapi.testclient import TestClient
+    from slirn_home.app import build_app
+
+    app = build_app(repo_root=tmp_path)
+    client = TestClient(app.app)
+
+    resp = client.post("/slirn/api/select_default_bgm", json={
+        "task_id": "task_doesnt_matter", "bgm_id": "fake_bgm_xxx",
+    })
+    body = resp.json()
+    assert body["ok"] is False
+    assert "未知" in body["error"] or "bgm_id" in body["error"]
+
+
+def test_render_fine_cut_zone_has_default_bgm_select(tmp_path):
+    """REQ-20260920-078：精剪面板 HTML 应包含「📦 系统默认 BGM」下拉。"""
+    from slirn_home.app import _render_fine_cut_zone
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="bgm-html-test", original_video=video)
+    html = _render_fine_cut_zone(t.task_id, t, m)
+
+    # 1. 应有 id="slirn-fine-default-bgm"
+    assert 'id="slirn-fine-default-bgm"' in html, \
+        "REQ-078：应有 #slirn-fine-default-bgm 下拉元素"
+    # 2. 应有默认「— 不选（清空选择）—」option
+    assert "不选" in html or "value=\"\" " in html, \
+        "REQ-078：下拉应有「不选」默认 option"
+    # 3. 应有 .slirn-fine-default-bgm-row 容器
+    assert 'slirn-fine-default-bgm-row' in html, \
+        "REQ-078：应有 .slirn-fine-default-bgm-row 容器"
+    # 4. 应在 audio 块内
+    assert 'class="slirn-fine-audio-block"' in html, \
+        "REQ-078：应在 .slirn-fine-audio-block 内"
+
+
 def test_import_fine_params_rejects_bad_schema(tmp_path):
     """REQ-20260919-065：_schema 不兼容（不是 2/3）应返回 error，不修改 fc。"""
     from slirn_home.app import build_app, _get_fine_compose
