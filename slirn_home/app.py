@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import html
 import json
+import os
 import re
 import logging
+import subprocess
+import threading
 import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -1796,19 +1800,28 @@ def _build_fine_filter(fc: dict, W: int, H: int) -> tuple[list[str], list[str], 
     return inputs, chain, cur
 
 
-def _run_fine_render(
+def _assemble_fine_filter(
     task_id: str,
     mgr,
-    output_path: Path,
     duration: float | None,
     preview_start: float = 0.0,
 ) -> dict:
-    """REQ-20260919-061 Phase B：调 ffmpeg 渲染精剪视频（预览/导出共用）。
+    """REQ-20260919-074：从 fc 组装 ffmpeg 输入参数 + filter_complex（同步/异步共用）。
 
-    REQ-20260919-064：新增 `preview_start` — 视频流从源视频 start 秒开始截取，
-    再截 duration 秒。cover 仍固定 2s 在前面（cover 不受 start 影响）。
+    返回 dict（成功）：
+        {
+          "ok": True,
+          "input_args": list[str],          # 喂给 ffmpeg 的 -ss/-t/-loop/-i 等
+          "filter_complex": str,            # -filter_complex 完整字符串
+          "final_map": str,                 # 末位输出标签（[vfinal] / [vout] / [vsub]）
+          "sub_input_tmp": Path | None,     # 字幕偏移临时文件（调用方负责 finally 清理）
+          "out_w": int, "out_h": int,        # 输出分辨率
+        }
+    返回 dict（失败）：
+        {"ok": False, "error": "..."}
     """
-    import subprocess
+    import tempfile as _tf
+    from slirn_home.compose_service import parse_srt, format_srt
 
     fc = _get_fine_compose(mgr, task_id)
     layout = fc["layout"]
@@ -1820,17 +1833,15 @@ def _run_fine_render(
     if not video_path or not video_path.exists():
         return {"ok": False, "error": "缺少视频素材，请上传或自动获取粗剪视频"}
 
-    # 2. 输出分辨率 — REQ-20260919-061 用户补充：滤镜全程在 1920×1080 设计空间运行，
-    # 末尾再 scale 到目标输出分辨率（WYSIWYG：滑块拖到哪，画面就在哪）。
+    # 2. 输出分辨率
     res = output_cfg.get("resolution", "1080p")
     if res == "720p":
         out_w, out_h = 1280, 720
-    else:  # "1080p" 或 "source"（source 简化用 1080p）
+    else:
         out_w, out_h = _FINE_DESIGN_W, _FINE_DESIGN_H
-    W, H = _FINE_DESIGN_W, _FINE_DESIGN_H  # 设计空间（滤镜内部尺寸）
+    W, H = _FINE_DESIGN_W, _FINE_DESIGN_H
 
     # 3. 收集 inputs
-    # REQ-20260919-064：-ss 用 preview_start（默认 0），让用户能跳到源视频任意时间点预览
     input_args: list[str] = []
     input_args += ["-ss", str(max(0.0, float(preview_start)))]
     if duration is not None:
@@ -1845,7 +1856,6 @@ def _run_fine_render(
             layout = {**layout, "bg": {**layout["bg"], "enabled": False}}
             fc["layout"] = layout
 
-    # REQ-20260919-061 扩展：封面图作为片头全屏海报 — 用 image2 loop 限制时长
     cover_input_enabled = (
         layout["cover"]["enabled"]
         and float(layout["cover"].get("duration", 0)) > 0
@@ -1854,7 +1864,6 @@ def _run_fine_render(
     if cover_input_enabled:
         cover_path = _resolve_mat_abs(mgr, task_id, materials, "cover")
         if cover_path and cover_path.exists():
-            # -loop 1 + -t N：让静态图生成 N 秒视频流
             cover_dur = float(layout["cover"].get("duration", 2.0))
             input_args += ["-loop", "1", "-framerate", "30", "-t", f"{cover_dur:.2f}", "-i", str(cover_path)]
         else:
@@ -1862,7 +1871,6 @@ def _run_fine_render(
             fc["layout"] = layout
             cover_input_enabled = False
 
-    # REQ-20260919-061 扩展：背景音乐 input（启用且文件存在）
     audio_cfg = fc.get("audio") or _FINE_AUDIO_DEFAULTS
     audio_input_enabled = (
         audio_cfg.get("enabled")
@@ -1879,24 +1887,17 @@ def _run_fine_render(
             audio_input_enabled = False
 
     # 4. filter_complex
-    # 注：上面 _build_fine_filter 假设 bg=1, cover=2 — 但 cover_input_idx 可能 = 1（无 bg 时）
-    # 这里重写：根据实际 input 顺序动态指定
     chain: list[str] = []
     inputs_count = sum(1 for i, _ in enumerate(input_args) if input_args[i] == "-i")
 
-    # 背景层 — REQ-20260919-063：详见 _build_bg_layer_chain
     bg_idx = -1
     if layout["bg"]["enabled"]:
-        # bg 在 video 之后：video=0, bg=1
         bg_idx = 1 if inputs_count >= 2 else -1
     chain.extend(_build_bg_layer_chain(bg_idx, W, H))
     cur = "[bg]"
 
-    # 视频层（x/y 直接用像素值，crop_* 从设计空间 1920×1080 → 源视频 iw/ih 等比换算）
     vc = layout["video"]
     if vc["enabled"]:
-        # crop_* 是设计空间像素；ffmpeg crop 表达式要的是源视频 iw/ih 的相对值
-        # → 乘 (design → source)：crop_x_src = iw * crop_x_design / 1920
         crop_expr = (
             f"crop=iw*{vc['crop_w']}/{_FINE_DESIGN_W}:ih*{vc['crop_h']}/{_FINE_DESIGN_H}:"
             f"iw*{vc['crop_x']}/{_FINE_DESIGN_W}:ih*{vc['crop_y']}/{_FINE_DESIGN_H}"
@@ -1911,26 +1912,16 @@ def _run_fine_render(
         chain.append(f"{cur}[v]overlay=x={vx}:y={vy}[v1]")
         cur = "[v1]"
 
-    # REQ-20260919-061 扩展：封面图作为片头全屏海报 — 在视频流前面拼一段 cover_intro。
-    # 关键：字幕必须先烧录到视频流上再 concat 封面，否则字幕会显示在封面上 + 时间从 0 起算
-    # （SRT 第 1 秒字幕会盖在封面第 1 秒上）。先 sub 后 concat：视频流 t=0 = 源视频 0 = 字幕 0，
-    # concat 后视频流从 output t=cover_dur 开始播，字幕时间自然延后到 cover_dur，与视频内容同步。
-    # 字幕 burn（先于 cover concat — 让字幕只覆盖视频段、不出现在封面上）
     sub_mat = materials.get("subtitle") or {}
-    # REQ-20260919-069：preview_start > 0 时，-ss 把视频流定位到源视频 N 秒，
-    # 但 subtitles 滤镜按输出 PTS（从 0 起）匹配 SRT 绝对时间 → 字幕会过早显示。
-    # 此处把 SRT 整体前移 N 秒，丢掉完全在预览窗口前的条目，使字幕与视频内容对齐。
-    # offset <= 0 → 不动；用完即删 tmp 文件。
     preview_offset_ms = int(round(max(0.0, float(preview_start)) * 1000))
     sub_input_tmp: Path | None = None
     if layout["subtitle"]["enabled"] and sub_mat.get("path"):
         sub_path = _resolve_mat_abs(mgr, task_id, materials, "subtitle")
         if sub_path and sub_path.exists():
             fs = _ass_force_style(fc["font"])
-            sub_filter_path = sub_path  # 默认用原 SRT
+            sub_filter_path = sub_path
             if preview_offset_ms > 0:
                 try:
-                    from slirn_home.compose_service import parse_srt, format_srt
                     src_text = sub_path.read_text(encoding="utf-8-sig")
                     src_entries = parse_srt(src_text)
                     shifted: list[dict] = []
@@ -1938,12 +1929,10 @@ def _run_fine_render(
                         s = max(0, int(ent["start_ms"]) - preview_offset_ms)
                         e = max(0, int(ent["end_ms"]) - preview_offset_ms)
                         if e <= s:
-                            continue  # 整条都在预览窗口前
+                            continue
                         shifted.append({"id": len(shifted) + 1, "start_ms": s,
                                         "end_ms": e, "text": ent.get("text", "")})
                     if shifted:
-                        # 落 tmp SRT — ffmpeg subtitles 滤镜按文件路径读
-                        import tempfile as _tf
                         _tfh = _tf.NamedTemporaryFile(
                             mode="w", suffix=".srt", encoding="utf-8",
                             delete=False, prefix="slirn_fine_srt_")
@@ -1952,10 +1941,8 @@ def _run_fine_render(
                         sub_filter_path = Path(_tfh.name)
                         sub_input_tmp = sub_filter_path
                 except Exception as e:  # noqa: BLE001
-                    # 解析失败 → 用原 SRT（用户至少能看到原字幕位置，不会让 ffmpeg 报错）
                     log.warning("preview_start 字幕偏移失败，回退原 SRT: %s", e)
                     sub_filter_path = sub_path
-            # REQ-20260919-061 Phase B：Windows 路径含 : 和 \ 会与 ffmpeg filter 语法冲突
             sub_safe = _ffmpeg_filter_path(sub_filter_path)
             chain.append(
                 f"{cur}subtitles='{sub_safe}':force_style='{fs}':si=0[vsub]"
@@ -1970,34 +1957,24 @@ def _run_fine_render(
 
     cover_idx = -1
     if cover_input_enabled:
-        # cover 在 video 之后；若 bg 也启用则 cover=2，否则 cover=1
         if bg_idx >= 0:
             cover_idx = 2 if inputs_count >= 3 else -1
         else:
             cover_idx = 1 if inputs_count >= 2 else -1
     if cover_idx >= 0:
-        # 把封面图按比例缩放到设计空间（1920×1080），黑边填充
         chain.append(
             f"[{cover_idx}:v]scale={W}:{H}:force_original_aspect_ratio=decrease,"
             f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,"
             f"setpts=PTS-STARTPTS,fps=30,setsar=1[intro]"
         )
-        # 用 concat 把 [intro] 拼到现有视频流 [cur] 前面；v=1 a=0 表示不拼接音频
-        # 此时 cur 是 [vsub]（带字幕的视频流），intro 没有字幕 → 字幕仅在视频段显示
         chain.append(f"[intro]{cur}concat=n=2:v=1:a=0[vout]")
         cur = "[vout]"
 
-    # 末尾统一 scale 到目标输出分辨率（设计空间 1920×1080 → 实际分辨率）
     if (out_w, out_h) != (W, H):
         chain.append(f"[vout]scale={out_w}:{out_h}:flags=lanczos,setsar=1[vfinal]")
         cur = "[vfinal]"
 
-    # REQ-20260919-061 扩展：背景音乐 amix 链 — 原声 100% + BGM 降音量混合
-    # audio input 是 inputs_count - 1（最后添加的）；若未启用音频则只用 [voice]
     audio_idx = inputs_count - 1 if audio_input_enabled else -1
-    # REQ-20260919-061 用户补充：封面（片头）播放期间不输出原视频人声，只有封面结束后才开始
-    # 用 adelay 把视频的音轨延后 cover_dur 毫秒 — 封面本身是图（无音轨），所以这段延迟里
-    # 只有 BGM 在播（如果启用），与用户的「封面静默 → 视频开始才有声」意图一致。
     if cover_input_enabled:
         cover_delay_ms = int(round(float(layout["cover"].get("duration", 0)) * 1000))
         chain.append(
@@ -2009,7 +1986,6 @@ def _run_fine_render(
         vol = float(audio_cfg.get("volume", 0.4))
         fade_in = float(audio_cfg.get("fade_in", 0.0))
         fade_out = float(audio_cfg.get("fade_out", 0.0))
-        # BGM 链：aloop 无限循环 + volume 衰减 + 可选淡入淡出
         bgm_filters = [f"[{audio_idx}:a]aloop=loop=-1:size=2e9,volume={vol:.2f}"]
         if fade_in > 0:
             bgm_filters.append(f"afade=t=in:st=0:d={fade_in:.2f}")
@@ -2017,24 +1993,51 @@ def _run_fine_render(
             bgm_filters.append(f"afade=t=out:st=0:d={fade_out:.2f}")
         bgm_filters.append("[bgm]")
         chain.append(",".join(bgm_filters))
-        # 混合原声（[voice]）和 BGM（[bgm]）；normalize=0 保留各自音量
         chain.append(
             "[voice][bgm]amix=inputs=2:duration=first:normalize=0[aout]"
         )
     else:
-        # 无背景音乐：原声直通
         chain.append("[voice]anull[aout]")
 
     filter_complex = ";\n".join(chain)
+    return {
+        "ok": True,
+        "input_args": input_args,
+        "filter_complex": filter_complex,
+        "final_map": cur,
+        "sub_input_tmp": sub_input_tmp,
+        "out_w": out_w,
+        "out_h": out_h,
+    }
 
-    # 5. ffmpeg 命令
+
+def _run_fine_render(
+    task_id: str,
+    mgr,
+    output_path: Path,
+    duration: float | None,
+    preview_start: float = 0.0,
+) -> dict:
+    """REQ-20260919-061 Phase B：调 ffmpeg 渲染精剪视频（同步版本，预览/短任务用）。
+
+    REQ-20260919-074：filter_complex 组装抽到 `_assemble_fine_filter`，本函数
+    只负责 ffmpeg subprocess.run + 错误处理。timeout=120（预览 ≤30 秒足够）。
+    1-3 小时的导出任务请走 `export_fine_video` → 后台线程 + 进度轮询。
+    """
+    import subprocess
+
+    asm = _assemble_fine_filter(task_id, mgr, duration, preview_start)
+    if not asm.get("ok"):
+        return asm
+    sub_input_tmp = asm["sub_input_tmp"]
+
     output_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         "ffmpeg", "-y",
-        *input_args,
-        "-filter_complex", filter_complex,
-        "-map", cur,
-        "-map", "[aout]",  # REQ-20260919-061 扩展：原声 + 背景音乐混合（amix）
+        *asm["input_args"],
+        "-filter_complex", asm["filter_complex"],
+        "-map", asm["final_map"],
+        "-map", "[aout]",
         "-c:v", "libx264", "-preset", "fast", "-crf", "23",
         "-c:a", "aac", "-b:a", "128k",
         "-shortest",
@@ -2042,7 +2045,6 @@ def _run_fine_render(
         str(output_path),
     ]
 
-    # 6. 执行
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=120, encoding="utf-8"
@@ -2052,7 +2054,6 @@ def _run_fine_render(
     except subprocess.TimeoutExpired:
         return {"ok": False, "error": "ffmpeg 渲染超时（>120s），请缩短视频或简化滤镜"}
     finally:
-        # REQ-20260919-069：清理预览字幕偏移临时文件（无论成功失败都删）
         if sub_input_tmp is not None:
             try:
                 sub_input_tmp.unlink(missing_ok=True)
@@ -2064,6 +2065,241 @@ def _run_fine_render(
 
     return {"ok": True, "path": str(output_path.relative_to(mgr.tasks_dir.parent))
             if output_path.is_absolute() else str(output_path)}
+
+
+# =====================================================================
+# REQ-20260919-074：精剪·导出最终视频 → 异步后台任务 + 进度展示
+# =====================================================================
+
+@dataclass
+class _RenderJob:
+    """单次精剪渲染任务的状态容器（in-process 内存表，不持久化）。
+
+    字段：
+        job_id: 全局唯一 ID（job_<ts_ms>_<pid>）
+        task_id: 来源任务 ID
+        state: queued / running / done / failed / cancelled
+        started_at / finished_at: monotonic 时间戳（用于算 elapsed）
+        wall_started_at / wall_finished_at: time.time() 时间戳（用于显示）
+        elapsed_sec: 已用秒数（每 0.5 秒刷新）
+        progress_pct: 0-100（来自 ffmpeg out_time_ms / ffprobe total）
+        progress_time_ms: 当前已编码毫秒
+        total_duration_ms: 源视频总毫秒
+        speed_x: ffmpeg speed=2.5x
+        eta_sec: 预计剩余秒数（-1 表示未知）
+        error: 失败时 stderr 末尾 500 字符
+        output_url: 成功时的下载链接
+        proc: subprocess.Popen，用于 cancel
+    """
+    job_id: str
+    task_id: str
+    state: str = "queued"
+    started_at: float = 0.0
+    finished_at: float = 0.0
+    wall_started_at: float = 0.0
+    wall_finished_at: float = 0.0
+    elapsed_sec: float = 0.0
+    progress_pct: float = 0.0
+    progress_time_ms: int = 0
+    total_duration_ms: int = 0
+    speed_x: float = 0.0
+    eta_sec: float = -1.0
+    error: str = ""
+    output_url: str = ""
+    proc: Any = None
+
+
+_JOB_REGISTRY: dict[str, _RenderJob] = {}
+_JOB_LOCK = threading.Lock()
+_JOB_TTL_SEC = 300  # 完成后保留 5 分钟，便于前端最后一次查询拿到结果
+
+
+def _cleanup_stale_jobs() -> int:
+    """清理已完成且超过 TTL 的 job。返回清理数量。线程安全。"""
+    now = time.time()
+    removed = 0
+    with _JOB_LOCK:
+        for jid in list(_JOB_REGISTRY.keys()):
+            j = _JOB_REGISTRY[jid]
+            if j.finished_at and (now - j.wall_finished_at) > _JOB_TTL_SEC:
+                del _JOB_REGISTRY[jid]
+                removed += 1
+    return removed
+
+
+def _kill_proc_with_grace(proc, grace_sec: float = 5.0) -> None:
+    """SIGTERM → 等 grace_sec → SIGKILL 兜底。"""
+    if proc is None or proc.poll() is not None:
+        return
+    try:
+        proc.terminate()
+    except Exception:
+        return
+    try:
+        proc.wait(timeout=grace_sec)
+    except subprocess.TimeoutExpired:
+        try:
+            proc.kill()
+            proc.wait(timeout=2.0)
+        except Exception:
+            pass
+
+
+def _probe_video_duration_ms(mgr, tid: str) -> int:
+    """ffprobe 拿源视频时长（毫秒）。失败返回 0。"""
+    try:
+        fc = _get_fine_compose(mgr, tid)
+        vp = _resolve_mat_abs(mgr, tid, fc["materials"], "video")
+        if not vp or not Path(vp).exists():
+            return 0
+        pr = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=nw=1:nk=1", str(vp)],
+            capture_output=True, text=True, timeout=10, encoding="utf-8",
+        )
+        sec = float((pr.stdout or "0").strip() or "0")
+        return int(sec * 1000)
+    except Exception:
+        return 0
+
+
+def _run_fine_render_async(job: _RenderJob, tid: str, mgr, out_path: Path) -> None:
+    """REQ-20260919-074：后台 daemon 线程跑 ffmpeg（1-3 小时不再超时）。
+
+    写入 job.state/progress_pct/elapsed_sec/speed_x/eta_sec/progress_time_ms/
+    total_duration_ms/error/output_url 等字段；前端 GET /render_status 读取。
+    """
+    job.state = "running"
+    job.started_at = time.monotonic()
+    job.wall_started_at = time.time()
+
+    asm = _assemble_fine_filter(tid, mgr, duration=None, preview_start=0.0)
+    if not asm.get("ok"):
+        job.state = "failed"
+        job.error = asm.get("error", "filter 组装失败")
+        job.finished_at = time.monotonic()
+        job.wall_finished_at = time.time()
+        return
+
+    sub_input_tmp = asm["sub_input_tmp"]
+
+    # 拿总时长（百分比 + ETA 计算依赖）
+    job.total_duration_ms = _probe_video_duration_ms(mgr, tid)
+
+    # ffmpeg 命令（关键差异：-progress pipe:1 -nostats）
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffmpeg", "-y",
+        *asm["input_args"],
+        "-filter_complex", asm["filter_complex"],
+        "-map", asm["final_map"],
+        "-map", "[aout]",
+        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-c:a", "aac", "-b:a", "128k",
+        "-shortest",
+        "-movflags", "+faststart",
+        "-progress", "pipe:1",
+        "-nostats",
+        str(out_path),
+    ]
+
+    # 启动 ffmpeg
+    try:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", bufsize=1,
+        )
+    except FileNotFoundError:
+        job.state = "failed"
+        job.error = "系统未安装 ffmpeg，请先安装并加入 PATH"
+        job.finished_at = time.monotonic()
+        job.wall_finished_at = time.time()
+        if sub_input_tmp:
+            try: sub_input_tmp.unlink(missing_ok=True)
+            except Exception: pass
+        return
+
+    job.proc = proc
+
+    # 主循环：读 stdout（progress key=value），算 elapsed + ETA
+    last_update = 0.0
+    try:
+        while True:
+            line = proc.stdout.readline()
+            if not line:
+                if proc.poll() is not None:
+                    break
+                # ffmpeg 已退出但 stdout 关闭
+                continue
+            line = line.strip()
+            if "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            if key == "out_time_ms":
+                try:
+                    job.progress_time_ms = int(val)
+                    if job.total_duration_ms > 0:
+                        job.progress_pct = min(
+                            100.0,
+                            job.progress_time_ms / job.total_duration_ms * 100,
+                        )
+                except ValueError:
+                    pass
+            elif key == "speed":
+                try:
+                    job.speed_x = float(val.rstrip("x"))
+                except ValueError:
+                    pass
+            elif key == "out_time_us":
+                # 兼容部分 ffmpeg 版本用 out_time_us
+                try:
+                    job.progress_time_ms = int(val) // 1000
+                    if job.total_duration_ms > 0:
+                        job.progress_pct = min(
+                            100.0,
+                            job.progress_time_ms / job.total_duration_ms * 100,
+                        )
+                except ValueError:
+                    pass
+            # 每 0.5 秒刷一次 elapsed/ETA（避免 dict 写太频繁）
+            now = time.monotonic()
+            if now - last_update > 0.5:
+                last_update = now
+                job.elapsed_sec = now - job.started_at
+                if job.speed_x > 0 and job.total_duration_ms > 0:
+                    remaining_ms = max(0, job.total_duration_ms - job.progress_time_ms)
+                    # speed_x = 源时长 / 墙钟时长 → 剩余墙钟 = 剩余源时长 / speed
+                    job.eta_sec = remaining_ms / 1000.0 / job.speed_x
+    finally:
+        # 兜底：用户中途取消时确保 proc 死掉
+        if proc.poll() is None:
+            _kill_proc_with_grace(proc)
+
+    proc.wait()
+    job.finished_at = time.monotonic()
+    job.wall_finished_at = time.time()
+    job.elapsed_sec = job.finished_at - job.started_at
+
+    # 清理临时 SRT
+    if sub_input_tmp:
+        try: sub_input_tmp.unlink(missing_ok=True)
+        except Exception: pass
+
+    if job.state == "cancelled":
+        return  # 取消路径不判断 returncode
+    if proc.returncode == 0:
+        job.state = "done"
+        job.progress_pct = 100.0
+        job.output_url = (
+            f"/slirn/api/video/{tid}?src=fine_export&t={int(time.time())}"
+        )
+    else:
+        job.state = "failed"
+        try:
+            stderr_tail = proc.stderr.read() if proc.stderr else ""
+        except Exception:
+            stderr_tail = ""
+        job.error = (stderr_tail or "未知错误")[-500:]
 
 
 def _get_fine_compose(mgr, task_id: str) -> dict:
@@ -5110,7 +5346,16 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
 
     @app.app.post("/slirn/api/export_fine_video")
     async def export_fine_video(body: dict = Body(default_factory=dict)):
-        """REQ-20260919-061 Phase B：导出完整精剪视频到 outputs/fine_export.mp4。"""
+        """REQ-20260919-074：导出最终精剪视频（异步后台任务）。
+
+        用户反馈：实际最终视频 1-3 小时长，旧的同步 `_run_fine_render` timeout=120s
+        完全不够；fetch 同步等 1-3 小时浏览器也会卡死。这次改为：
+
+        1. 本端点立即返回 `{job_id, toast}`（不阻塞，<0.5 秒）
+        2. 后台 daemon 线程跑 `_run_fine_render_async`，写 `_JOB_REGISTRY[job_id]`
+        3. 前端 GET `/slirn/api/render_status?job_id=X` 轮询拿进度
+        4. 完成后前端点关闭 → 调 `/slirn/api/cancel_render` 不会触发（job 已 done）
+        """
         tid = (body.get("task_id") or "").strip()
         if not tid:
             return _err("缺少 task_id")
@@ -5118,14 +5363,86 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             mgr.get(tid)
         except Exception as e:  # noqa: BLE001
             return _err(f"任务不存在: {e}")
+
+        # 清理过期 job
+        _cleanup_stale_jobs()
+
+        # 同一任务已有运行中/排队的 job → 拒绝重启（避免并发写同一文件）
+        with _JOB_LOCK:
+            for existing in _JOB_REGISTRY.values():
+                if existing.task_id == tid and existing.state in ("queued", "running"):
+                    return _err(
+                        f"该任务已有运行中的渲染（job_id={existing.job_id}），请等待完成或取消"
+                    )
+
+        # 创建 job + 启线程
+        job_id = f"job_{int(time.time() * 1000)}_{os.getpid()}"
         out_path = mgr.tasks_dir / tid / "outputs" / "fine_export.mp4"
-        result = _run_fine_render(tid, mgr, out_path, duration=None)
-        if not result.get("ok"):
-            return result
-        return _ok(
-            url=f"/slirn/api/video/{tid}?src=fine_export&t={int(time.time())}",
-            toast="💾 导出完成 → outputs/fine_export.mp4",
+        job = _RenderJob(job_id=job_id, task_id=tid)
+        with _JOB_LOCK:
+            _JOB_REGISTRY[job_id] = job
+
+        t = threading.Thread(
+            target=_run_fine_render_async,
+            args=(job, tid, mgr, out_path),
+            daemon=True,
+            name=f"fine-render-{job_id}",
         )
+        t.start()
+
+        return _ok(
+            job_id=job_id,
+            toast=f"🎬 导出已启动（{tid[:8]}），可在本面板下方看进度",
+        )
+
+    @app.app.get("/slirn/api/render_status")
+    async def render_status(job_id: str):
+        """REQ-20260919-074：返回指定 job 的实时进度。
+
+        前端每 1.5 秒轮询一次。完成后保留 5 分钟供最后一次查询拿到 output_url。
+        """
+        if not job_id:
+            return _err("缺少 job_id")
+        with _JOB_LOCK:
+            job = _JOB_REGISTRY.get(job_id)
+        if not job:
+            return _err(f"job 不存在或已过期（>{_JOB_TTL_SEC // 60} 分钟）: {job_id}")
+        return _ok(
+            job_id=job.job_id,
+            task_id=job.task_id,
+            state=job.state,
+            elapsed_sec=round(job.elapsed_sec, 1),
+            progress_pct=round(job.progress_pct, 1),
+            progress_time_ms=job.progress_time_ms,
+            total_duration_ms=job.total_duration_ms,
+            speed_x=round(job.speed_x, 2),
+            eta_sec=round(job.eta_sec, 1) if job.eta_sec >= 0 else None,
+            error=job.error,
+            output_url=job.output_url,
+        )
+
+    @app.app.post("/slirn/api/cancel_render")
+    async def cancel_render(body: dict = Body(default_factory=dict)):
+        """REQ-20260919-074：取消正在渲染的 job（SIGTERM → 5 秒后 SIGKILL 兜底）。"""
+        job_id = (body.get("job_id") or "").strip()
+        if not job_id:
+            return _err("缺少 job_id")
+        with _JOB_LOCK:
+            job = _JOB_REGISTRY.get(job_id)
+        if not job:
+            return _err(f"job 不存在: {job_id}")
+        if job.state not in ("queued", "running"):
+            return _err(f"job 已处于终态（{job.state}），无法取消")
+        # 先标记 cancelled，再发信号（让后台线程主循环的 stdout 读返回后能立即退出）
+        job.state = "cancelled"
+        job.finished_at = time.monotonic()
+        job.wall_finished_at = time.time()
+        if job.proc:
+            try:
+                job.proc.terminate()
+            except Exception as e:
+                return _err(f"取消信号发送失败: {e}")
+        return _ok(toast="⏹ 已发送取消信号")
 
     # REQ-20260919-065：精剪参数 JSON 导出/导入
     @app.app.post("/slirn/api/export_fine_params")

@@ -44,6 +44,46 @@
   }
   window.slirnToast = toast;
 
+  // 工作台加载等待弹窗（REQ-20260918-051）：任务列表点「剪辑」时弹出。
+  // 内容多的任务接口耗时长，用户需要明确反馈（全屏半透明遮罩 + spinner +
+  // 任务名）。Fetch 完成（成功 / 失败 / 超时）自动关闭；多次点击同一个
+  // tid 不会叠出多个弹窗。
+  var _wbLoaderTimer = null;
+  var _wbLoaderTid = null;
+  function showWbLoader(tid, label) {
+    hideWbLoader();  // 去重：先关旧弹窗（避免叠层 + 状态错乱）
+    _wbLoaderTid = tid || '';
+    var ov = document.createElement('div');
+    ov.className = 'slirn-wb-loader-overlay';
+    ov.setAttribute('data-wb-loader-for', _wbLoaderTid);
+    ov.innerHTML =
+      '<div class="slirn-wb-loader-card">'
+      + '<div class="slirn-wb-loader-spinner"></div>'
+      + '<p class="slirn-wb-loader-title">加载工作台…</p>'
+      + '<p class="slirn-wb-loader-task">' + escapeHtml(label || tid || '') + '</p>'
+      + '<p class="slirn-wb-loader-hint">内容较多时可能需要几秒，请稍候</p>'
+      + '</div>';
+    // 阻止遮罩自身点击穿透到下层（用户可能误点关不掉）
+    ov.addEventListener('click', function(ev) { ev.stopPropagation(); });
+    document.body.appendChild(ov);
+    // 60s 超时兜底（防接口挂死导致弹窗永远关不掉）
+    _wbLoaderTimer = setTimeout(function() {
+      var cur = document.querySelector('.slirn-wb-loader-overlay');
+      if (cur) {
+        cur.querySelector('.slirn-wb-loader-title').textContent = '加载超时';
+        cur.querySelector('.slirn-wb-loader-hint').textContent = '已等待 60 秒仍未返回，请检查网络或刷新页面';
+      }
+    }, 60000);
+  }
+  function hideWbLoader() {
+    if (_wbLoaderTimer) { clearTimeout(_wbLoaderTimer); _wbLoaderTimer = null; }
+    _wbLoaderTid = null;
+    var ov = document.querySelector('.slirn-wb-loader-overlay');
+    if (ov) ov.remove();
+  }
+  window.slirnShowWbLoader = showWbLoader;
+  window.slirnHideWbLoader = hideWbLoader;
+
   // 更新分类标题里"删除选中"按钮上的计数
   function updateDeleteCount(section) {
     if (!section) return;
@@ -323,6 +363,9 @@
       .forEach(function(i) { var el = document.getElementById(i); if (el) el.value = ''; });
     var proto = document.getElementById('slirn-llm-in-proto');
     if (proto) proto.value = 'openai';
+    // REQ-20260919-061 用户补充：重置时取消勾选「支持图片」
+    var visChk = document.getElementById('slirn-llm-in-vision');
+    if (visChk) visChk.checked = false;
     var t = document.getElementById('slirn-llm-form-title');
     if (t) t.textContent = '添加模型';
     var btn = document.getElementById('slirn-llm-add-btn');
@@ -356,6 +399,9 @@
             '<input id="slirn-llm-in-url" class="slirn-llm-input" placeholder="https://api.deepseek.com/v1" /></div>' +
           '<div class="slirn-llm-row"><span class="slirn-llm-label">Key 环境变量</span>' +
             '<input id="slirn-llm-in-env" class="slirn-llm-input" placeholder="如 DEEPSEEK_API_KEY" /></div>' +
+          '<div class="slirn-llm-row"><span class="slirn-llm-label">支持图片</span>' +
+            '<label class="slirn-llm-chk"><input type="checkbox" id="slirn-llm-in-vision" /> ' +
+            '可接收图片输入（多模态 — 精剪视频 AI 智能布局需此项）</label></div>' +
         '</div>' +
         '<div class="slirn-llm-tip">按所选协议调用（OpenAI 兼容 <code>{Base URL}/chat/completions</code> / Anthropic <code>{Base URL}/v1/messages</code>）；API Key 从上面填写的系统环境变量读取，界面不存储 Key。</div>' +
         '<div id="slirn-llm-test-result" class="slirn-llm-test-result"></div>' +
@@ -389,11 +435,14 @@
     list.innerHTML = models.map(function(m) {
       var isCur = m.id === current;
       var proto = m.protocol === 'anthropic' ? 'Anthropic' : 'OpenAI 兼容';
+      // REQ-20260919-061 用户补充：UI 显式显示「多模态」徽章，一眼看清哪些能用图片
+      var visionBadge = m.vision ? '<span class="slirn-llm-item-vision" title="支持图片输入（多模态）">🖼 多模态</span>' : '';
       return '<div class="slirn-llm-item' + (isCur ? ' current' : '') + '">' +
         '<div class="slirn-llm-item-head">' +
           '<span class="slirn-llm-item-name">' + (isCur ? '⭐ ' : '') + escapeHtml(m.id) +
             '<span class="slirn-llm-item-prov">' + escapeHtml(m.provider || '') + '</span>' +
-            '<span class="slirn-llm-item-proto">' + proto + '</span></span>' +
+            '<span class="slirn-llm-item-proto">' + proto + '</span>' +
+            visionBadge + '</span>' +
           '<span class="slirn-llm-item-key ' + (m.key_present ? 'ok' : 'miss') + '">' +
             (m.key_present ? '✅ Key 已配置' : '❌ 未配置 ' + escapeHtml(m.api_key_env)) + '</span>' +
         '</div>' +
@@ -522,7 +571,12 @@
   }
 
   function openWorkbench(tid) {
+    // REQ-20260918-053：进 wb 时把 task_id 写到 URL hash，F5/Cmd+R 刷新仍在同一任务页
+    if (tid && history && history.replaceState) {
+      try { history.replaceState(null, '', '#wb=' + encodeURIComponent(tid)); } catch (e) {}
+    }
     postJSON(SLIRN_API + '/workbench', {task_id: tid}).then(function(r) {
+      hideWbLoader();  // REQ-20260918-051：无论成功失败都关掉等待弹窗
       if (r && r.ok && r.html) {
         var w = document.getElementById('slirn-tab-workbench');
         if (!w) return;
@@ -605,6 +659,14 @@
         var optPv = revVis('slirn-opt-player');
         if (optPv) bindSpeedControl(optPv);  // 优化字幕行播放倍速（REQ-20260917-030）
         bindOptRows(tid);
+        setupOptWordsPagination();  // REQ-20260918-050：词频列表分页（每次 wb 重渲后调）
+        optInputOverflowInit();  // REQ-20260918-058：替换输入框溢出检测 + 自动换行
+        bindFineControls();  // REQ-20260919-061：精剪视频·素材合成器控件绑定（位置/缩放/字体/输出自动保存）
+        bindFineSteppers();  // REQ-20260919-061：精剪视频·数值控件（number input + ▲▼）与滑块双向同步
+        bindCropAspectLink();  // REQ-20260919-061a：crop_w / crop_h 按 16:9 联动（防变形）
+        bindBgWhiteDetector();  // REQ-20260919-062：背景图白色区域检测（算法 + 阈值 + 4 角点 + 填充）
+        bindFineMaterialPreviews();  // REQ-20260919-063：每个素材的 👁️ 预览按钮（图片/视频/音频/SRT）
+        // 模板列表已搬到「📥 引用参数」modal 里 — wb 渲染时不主动拉，按需由 fineImportShow() 取
         var optSt = revVis('slirn-opt-status');  // 优化 job 还在跑 → 恢复轮询
         if (optSt && optSt.dataset.taskId && optSt.dataset.state === 'running')
           startOptPolling(optSt.dataset.taskId);
@@ -621,6 +683,30 @@
           // pipe-panel 紧跟 wb 顶部信息卡之后（在 slirn-wb-main 之前；位置与模板一致）
           if (_pipeStatus && _pipeStatus.parentNode !== _inner) _inner.appendChild(_pipeStatus);
           if (_pipePanel && _pipePanel.parentNode !== _inner) _inner.appendChild(_pipePanel);
+          // ===== BUGFIX：拔掉 r.html 模板里的「空壳」重复元素 =====
+          // 现象：用户切换任务（或工作台刷新时）出现两个「流程配置」面板 ——
+          // 一个是当前任务的（新挂载，由 slirnPipelineMount 渲染），一个是上一个
+          // 任务的（OLD 重新 attach，task-id 与内容都还是旧的）。根因：r.html
+          // 模板自带空 <section id="slirn-pipe-panel">，又 appendChild 了 OLD
+          // pipe-panel，DOM 里就同时有两个同 id 的元素。
+          // 修复：保留 OLD（其内容已加载，跨刷新保住表单状态），删掉模板里的
+          // 空壳。slirnPipelineMount 会按 OLD 当前的 data-task-id 与新 tid 比对，
+          // 不同则 loadPanel(tid) 重新加载（任务切换场景），相同则保留表单（同
+          // 任务刷新场景）。
+          // 注意：querySelectorAll 必须用 'not-self' 类名筛除 OLD，否则会把自己
+          // 也删掉。我们用「不在 _pipePanel/_pipeStatus 集合内」条件筛选。
+          // BUGFIX：只有 OLD 存在时才清理空壳。首次进 wb（重启后）_pipePanel=null，
+          // 此时「el !== null」恒为真 → 模板里的空 pipe-panel 会被误删，导致
+          // 用户看到「流程配置没了」。必须用 _pipePanel || _pipeStatus 守住。
+          if (_pipePanel || _pipeStatus) {
+            var _toRemove = [];
+            _inner.querySelectorAll('section#slirn-pipe-panel, div#slirn-pipe-status').forEach(function(el) {
+              if (el !== _pipePanel && el !== _pipeStatus) _toRemove.push(el);
+            });
+            _toRemove.forEach(function(el) {
+              try { el.parentNode.removeChild(el); } catch (err) {}
+            });
+          }
         }
         // 6) 恢复 pipe-panel / pipe-status 内表单状态（节点引用保住但保险起见也回填）
         _restoreInputs(_panelSnap);
@@ -668,8 +754,9 @@
   });
   function wbAutoNextMaybe(prevDone, hadWb, prevActive) {
     if (!hadWb || !wbAutoNextOn() || !prevActive) return;
+    // REQ-20260918-053：仅迭代真正的流水线阶段（排除「执行日志」等视图阶段）
     var stages = [];
-    document.querySelectorAll('#slirn-tab-workbench .slirn-wb-stage').forEach(function(s) {
+    document.querySelectorAll('#slirn-tab-workbench .slirn-wb-stage:not(.slirn-wb-stage-extra)').forEach(function(s) {
       stages.push(s.getAttribute('data-pane') || '');
     });
     var justDone = '';
@@ -785,7 +872,170 @@
     // 面板显隐切换后过滤计数才可见：重算 chips/可见性（工作台初始打开时
     // 修订面板可能隐藏，revRows 取不到行 → 计数 0；REQ-20260916-010）
     revFilterSync();
+    // REQ-20260918-053：首次进入执行日志面板时自动加载一次（无需手动点刷新）
+    if (paneKey === 'logs' && !logsState._loaded) {
+      loadLogs();
+      logsState._loaded = true;
+    }
   }
+
+  // ===== REQ-20260918-053：执行日志面板（过滤 + 拉取 + 渲染）=====
+  // 全局状态（同一时刻只看一个任务）：面板内 chip 切换 + 关键词输入 + 刷新按钮都改它
+  var logsState = {
+    kinds: [],        // [] = 不限（默认全选）
+    statuses: [],     // [] = 不限
+    keyword: '',
+    _loaded: false,   // 首次进入是否已加载
+  };
+
+  function _logsReadFilters() {
+    var box = document.getElementById('slirn-wb-pane-logs');
+    if (!box) return;
+    logsState.kinds = [];
+    box.querySelectorAll('.slirn-chip[data-log-kind].active').forEach(function(b) {
+      logsState.kinds.push(b.getAttribute('data-log-kind') || '');
+    });
+    logsState.statuses = [];
+    box.querySelectorAll('.slirn-chip[data-log-status].active').forEach(function(b) {
+      logsState.statuses.push(b.getAttribute('data-log-status') || '');
+    });
+    var kw = document.getElementById('slirn-logs-keyword');
+    logsState.keyword = kw ? (kw.value || '') : '';
+  }
+
+  function loadLogs() {
+    var list = document.getElementById('slirn-logs-list');
+    if (!list) return;
+    var tid = list.getAttribute('data-task-id') || '';
+    if (!tid) return;
+    _logsReadFilters();
+    var payload = {
+      task_id: tid,
+      kinds: logsState.kinds,
+      statuses: logsState.statuses,
+      keyword: logsState.keyword,
+      limit: 200,
+    };
+    var countEl = document.querySelector('.slirn-logs-count');
+    if (countEl) countEl.textContent = '加载中…';
+    postJSON(SLIRN_API + '/execution_history_query', payload).then(function(r) {
+      if (!r || !r.ok) {
+        if (countEl) countEl.textContent = '加载失败';
+        list.innerHTML = '<div class="slirn-form-hint slirn-logs-empty">加载失败：' + escapeHtml((r && r.error) || '未知错误') + '</div>';
+        return;
+      }
+      _renderLogsList(list, r.items || []);
+      if (countEl) countEl.textContent = (r.items || []).length + ' 条';
+    }).catch(function(err) {
+      if (countEl) countEl.textContent = '加载失败';
+      list.innerHTML = '<div class="slirn-form-hint slirn-logs-empty">加载失败：' + escapeHtml(String(err)) + '</div>';
+    });
+  }
+
+  // REQ-20260918-053：阶段中文标签（与后端 KIND_LABELS 对齐，复制一份避免跨域/加载顺序问题）
+  var LOG_KIND_LABELS = {
+    subtitle_generation: '字幕生成',
+    subtitle_review: '字幕修订',
+    rough_cut: '切分修剪',
+    rough_compose: '粗剪合成',
+    optimize: '优化字幕',
+  };
+  function _formatLogsDuration(ms) {
+    if (!ms || ms < 0) return '-';
+    var s = Math.floor(ms / 1000);
+    if (s < 60) return s + '秒';
+    var m = Math.floor(s / 60);
+    var rs = s % 60;
+    if (m < 60) return m + '分' + rs + '秒';
+    var h = Math.floor(m / 60);
+    var rm = m % 60;
+    return h + '时' + rm + '分';
+  }
+  function _renderLogsList(list, items) {
+    if (!items.length) {
+      list.innerHTML = '<div class="slirn-form-hint slirn-logs-empty">无符合条件的记录。点击「清除」放宽过滤试试。</div>';
+      return;
+    }
+    var html = '';
+    items.forEach(function(it) {
+      var status = it.status || 'running';
+      var badgeCls = status === 'success' ? 'slirn-exec-ok'
+                   : status === 'failed' ? 'slirn-exec-fail'
+                   : 'slirn-exec-running';
+      var badgeText = status === 'success' ? '✅ 成功'
+                    : status === 'failed' ? '❌ 失败'
+                    : '⏳ 运行中';
+      var kindLabel = LOG_KIND_LABELS[it.kind] || it.kind || '操作';
+      var startIso = (it.started_at_iso || '').replace('T', ' ').slice(0, 19);
+      var endIso = (it.finished_at_iso || '').replace('T', ' ').slice(0, 19) || '—';
+      var duration = _formatLogsDuration(it.duration_ms);
+      var extra = it.extra || {};
+      var extraBits = [];
+      if (extra.lines) extraBits.push(extra.lines + ' 行');
+      if (extra.occurrences) extraBits.push(extra.occurrences + ' 处');
+      if (extra.segments) extraBits.push(extra.segments + ' 段');
+      if (extra.intervals) extraBits.push(extra.intervals + ' 区间');
+      if (extra.del_speakers_count) extraBits.push('删除 ' + extra.del_speakers_count + ' 说话人');
+      if (extra.speakers) extraBits.push(extra.speakers + ' 位说话人');
+      if (extra.output_mb) extraBits.push(extra.output_mb + ' MB');
+      var extraStr = extraBits.length ? ' · ' + extraBits.join(' / ') : '';
+      var errHtml = it.error
+        ? '<div class="slirn-exec-err">' + escapeHtml(String(it.error).slice(0, 300)) + '</div>'
+        : '';
+      html += '<div class="slirn-exec-row" data-status="' + escapeHtml(status) + '">'
+        + '<span class="slirn-exec-idx">#' + escapeHtml(String(it.id || '').slice(-8)) + '</span>'
+        + '<span class="slirn-exec-kind"><strong>' + escapeHtml(kindLabel) + '</strong>'
+        + ' · ' + escapeHtml(startIso) + ' → ' + escapeHtml(endIso) + '</span>'
+        + '<span class="slirn-exec-dur">' + escapeHtml(duration) + '</span> '
+        + '<span class="' + badgeCls + '">' + badgeText + extraStr + '</span>'
+        + errHtml
+        + '</div>';
+    });
+    list.innerHTML = html;
+  }
+
+  // chip 点击：toggle .active 类 + 自动重查
+  document.addEventListener('click', function(e) {
+    var t = e.target;
+    if (!t || !t.classList) return;
+    if (t.classList.contains('slirn-chip') && (t.hasAttribute('data-log-kind') || t.hasAttribute('data-log-status'))) {
+      t.classList.toggle('active');
+      loadLogs();
+      return;
+    }
+    if (t.getAttribute && t.getAttribute('data-action') === 'logs-refresh') {
+      e.preventDefault();
+      loadLogs();
+      return;
+    }
+    if (t.getAttribute && t.getAttribute('data-action') === 'logs-clear-kinds') {
+      e.preventDefault();
+      var box = document.getElementById('slirn-wb-pane-logs');
+      if (!box) return;
+      box.querySelectorAll('.slirn-chip[data-log-kind].active').forEach(function(b) { b.classList.remove('active'); });
+      loadLogs();
+      return;
+    }
+    if (t.getAttribute && t.getAttribute('data-action') === 'logs-clear-statuses') {
+      e.preventDefault();
+      var box = document.getElementById('slirn-wb-pane-logs');
+      if (!box) return;
+      box.querySelectorAll('.slirn-chip[data-log-status].active').forEach(function(b) { b.classList.remove('active'); });
+      loadLogs();
+      return;
+    }
+  });
+
+  // 关键词输入：300ms 防抖自动重查
+  var _logsKwTimer = null;
+  document.addEventListener('input', function(e) {
+    var t = e.target;
+    if (!t || t.id !== 'slirn-logs-keyword') return;
+    if (_logsKwTimer) clearTimeout(_logsKwTimer);
+    _logsKwTimer = setTimeout(function() {
+      loadLogs();
+    }, 300);
+  });
 
   var subPollTimer = null;
   function startSubPolling(tid) {
@@ -858,17 +1108,24 @@
   }
   function colEnhance(root) {
     var scope = root || document;
-    // 说明文案：连续的 form-hint 并成一组（一条折叠头收起整段说明）
+    // REQ-20260918-059：同一 pane 内所有 .slirn-form-hint 合并成单个折叠（不管相邻不相邻）
+    // 旧实现只合并相邻 hint；被 opt-words / opt-list 等元素隔开时会各自成组，撑高页面。
+    var paneMap = Object.create(null);
     Array.prototype.forEach.call(scope.querySelectorAll('.slirn-wb-pane .slirn-form-hint'), function(h) {
       if (h.dataset.slirnCol !== undefined) return;
-      colWrap(h, colPaneKey(h, 'hint'), 'ℹ️ 说明');
-      var wrapH = h.parentNode;  // colWrap 已把 h 挪进壳
-      var nxt = wrapH.nextElementSibling;
-      while (nxt && nxt.classList && nxt.classList.contains('slirn-form-hint')
-             && nxt.dataset.slirnCol === undefined) {
-        nxt.dataset.slirnCol = '1';
-        wrapH.appendChild(nxt);
-        nxt = wrapH.nextElementSibling;
+      var pane = (h.closest && h.closest('.slirn-wb-pane')) || null;
+      var pid = pane && pane.id ? pane.id : 'x';
+      (paneMap[pid] = paneMap[pid] || []).push(h);
+    });
+    Object.keys(paneMap).forEach(function(pid) {
+      var group = paneMap[pid];
+      if (!group.length) return;
+      var first = group[0];
+      colWrap(first, colPaneKey(first, 'hint'), 'ℹ️ 说明');
+      var wrap = first.parentNode;  // colWrap 已把 first 挪进 .slirn-col
+      for (var i = 1; i < group.length; i++) {
+        group[i].dataset.slirnCol = '1';
+        wrap.appendChild(group[i]);
       }
     });
     Array.prototype.forEach.call(scope.querySelectorAll('.slirn-wb-pane .slirn-sub-meta'), function(m) {
@@ -942,6 +1199,31 @@
       document.addEventListener('pointerup', up);
       ev.preventDefault();
     });
+    // REQ-20260919-061a v7 用户反馈：浮动视频窗口可调整大小 — 用 ResizeObserver
+    // 监听用户拖右下角 resize handle 改变尺寸，存到 localStorage 下次恢复。
+    if (typeof ResizeObserver !== 'undefined') {
+      var ro = new ResizeObserver(function(entries) {
+        for (var i = 0; i < entries.length; i++) {
+          var cr = entries[i].contentRect;
+          try {
+            var saved = JSON.parse(localStorage.getItem('slirnVfSize') || 'null') || {};
+            saved.w = Math.round(cr.width);
+            saved.h = Math.round(cr.height);
+            localStorage.setItem('slirnVfSize', JSON.stringify(saved));
+          } catch (err) {}
+        }
+      });
+      ro.observe(layer);
+    }
+  }
+  function vfRestoreSize(layer) {
+    try {
+      var s = JSON.parse(localStorage.getItem('slirnVfSize') || 'null');
+      if (s && s.w > 0 && s.h > 0) {
+        layer.style.width = s.w + 'px';
+        layer.style.height = s.h + 'px';
+      }
+    } catch (err) {}
   }
   function vfEnsureLayer() {
     if (vfLayer && vfLayer.isConnected) return vfLayer;
@@ -969,6 +1251,7 @@
     }
     wrap.style.display = '';
     layer.hidden = false;
+    vfRestoreSize(layer);  // 恢复上次保存的尺寸（用户拖右下角 resize 调整过的）
     vfPlaceSaved(layer);  // 记忆位置；隐藏期间视口可能变化 → 重新夹取进屏
   }
   // 兜底：不走 playXxx 助手的视频（如粗剪成片预览）一播放也进浮层
@@ -1701,6 +1984,141 @@
     toast('❌ 👤' + spk + ' 已改判删除：整段 ' + nWhole + ' + 子段 ' + nSub
       + '（未保存 — 可翻回；其记录已不计入统计，点「🧮 重新统计」可确认清零）');
   }
+
+  // ===== REQ-20260919-068：字幕修订阶段关联人员 ID =====
+  // 模式与 cutSpk* 一致：行集合换为 rev rows；删除口径简化为 decision=delete。
+  function revRowKept(row) {
+    return (row.getAttribute('data-decision') || '') !== 'delete';
+  }
+  function revSpkRows() {  // 已关联的修订行（data-spk 不为空）
+    return revRows().filter(function(r) { return !!r.getAttribute('data-spk'); });
+  }
+  function revSpkStats() {  // 按 DOM 现算 → [{spk, count}]（spk 升序；count=未删除行数）
+    var m = {};
+    revSpkRows().forEach(function(r) {
+      var s = r.getAttribute('data-spk');
+      if (!s) return;
+      if (!(s in m)) m[s] = 0;
+      if (revRowKept(r)) m[s] += 1;  // 删除决策不计入统计
+    });
+    return Object.keys(m).sort(function(a, b) { return parseInt(a, 10) - parseInt(b, 10); })
+      .map(function(s) { return { spk: parseInt(s, 10), count: m[s] }; });
+  }
+  function revSpkBarRender() {  // 统计条（chips + 查找/导航/删除/重算），保留输入值
+    var bar = document.getElementById('slirn-rev-spk-bar');
+    if (!bar) return;
+    var keepQ = '';
+    var prevQ = bar.querySelector('#slirn-rev-spk-q');
+    if (prevQ) keepQ = prevQ.value;
+    var keepSkip = true;
+    var prevSkip = bar.querySelector('#slirn-rev-spk-skipdel');
+    if (prevSkip) keepSkip = prevSkip.checked;
+    var chips = revSpkStats().map(function(c) {
+      return '<span class="slirn-rev-spk-chip" data-action="rev-spk-chip" data-spk="' + c.spk + '"'
+        + ' title="点击填入查找框（统计仅计未删除决策行）">👤' + c.spk + ' · <b>' + c.count + '</b> 条</span>';
+    }).join('');
+    bar.innerHTML =
+      '<div class="slirn-rev-spk-title">👥 人员统计（仅计未删除决策行 · 关联已保存，重进任务自动显示）</div>'
+      + '<div class="slirn-rev-spk-chips">' + chips + '</div>'
+      + '<div class="slirn-rev-spk-find">按人员ID查找：'
+      + '<input id="slirn-rev-spk-q" type="number" min="1" step="1" placeholder="如 2">'
+      + '<label class="slirn-rev-spk-skiplbl" title="勾选后「上一条/下一条」只在未删除决策行间跳转">'
+      + '<input id="slirn-rev-spk-skipdel" type="checkbox" checked>跳过已删除</label>'
+      + '<button class="slirn-btn slirn-btn-xs" data-action="rev-spk-prev">⬆️ 上一条</button>'
+      + '<button class="slirn-btn slirn-btn-xs" data-action="rev-spk-next">⬇️ 下一条</button>'
+      + '<button class="slirn-btn slirn-btn-xs" data-action="rev-spk-delete">❌ 删除该人员全部记录</button>'
+      + '<button class="slirn-btn slirn-btn-xs" data-action="rev-spk-recount">🧮 重新统计</button>'
+      + '<span class="slirn-rev-spk-hint">统计只计未删除决策行 — 删除非主讲人员后重算即可确认清零；删除改判需「💾 保存修订决策」落盘</span></div>';
+    bar.style.display = '';
+    bar.dataset.linked = '1';
+    var q = bar.querySelector('#slirn-rev-spk-q');
+    if (q) q.value = keepQ;
+    var skipEl = bar.querySelector('#slirn-rev-spk-skipdel');
+    if (skipEl) skipEl.checked = keepSkip;
+  }
+  function revSpkLink(btn) {  // 👤 关联人员ID → POST rev_speaker_link → 注入徽章 + 统计条
+    var tid = btn.getAttribute('data-task-id') || '';
+    btn.disabled = true;
+    btn.textContent = '⏳ 关联中…';
+    postJSON(SLIRN_API + '/rev_speaker_link', {task_id: tid}).then(function(r) {
+      btn.disabled = false;
+      btn.textContent = '👤 关联人员ID';
+      if (!(r && r.ok && r.link && r.link.available)) {
+        toast('❌ ' + ((r && r.error) || '关联失败'), 'error');
+        return;
+      }
+      var rowsMap = r.link.rows || {}, n = 0;
+      revRows().forEach(function(row) {
+        var spk = rowsMap[row.getAttribute('data-i') || ''];
+        if (spk) {
+          row.setAttribute('data-spk', String(spk));
+          var badge = row.querySelector('.slirn-rev-spk');
+          if (badge) badge.textContent = '👤' + spk;
+          n += 1;
+        } else {
+          row.removeAttribute('data-spk');
+          var ob = row.querySelector('.slirn-rev-spk');
+          if (ob) ob.textContent = '';
+        }
+      });
+      revSpkBarRender();
+      btn.textContent = '🔄 重新关联人员ID';
+      var barEl = document.getElementById('slirn-rev-spk-bar');
+      if (barEl) barEl.dataset.linked = '1';
+      toast('👥 已标注 ' + n + ' 行（' + (r.link.stats || []).length + ' 位人员）· 关联已保存，重进任务自动显示'
+        + ' — 删除后记得「💾 保存修订决策」');
+    }, function() {
+      btn.disabled = false;
+      btn.textContent = '👤 关联人员ID';
+      toast('❌ 网络错误，请重试', 'error');
+    });
+  }
+  function revSpkQuery() {  // 查找框值
+    var q = document.getElementById('slirn-rev-spk-q');
+    if (!q) { toast('先点「👤 关联人员ID」建立人员关联', 'error'); return null; }
+    var v = (q.value || '').trim();
+    if (!v) { toast('先输入人员ID（如 2，可点统计条快速填入）', 'error'); q.focus(); return null; }
+    return v;
+  }
+  function revSpkNav(dir) {  // 上一条/下一条：修订行间循环跳转，kbsel 高亮 + 滚动定位
+    var spk = revSpkQuery();
+    if (spk === null) return;
+    var skipEl = document.getElementById('slirn-rev-spk-skipdel');
+    var skipDel = !!(skipEl && skipEl.checked);
+    var rows = revSpkRows().filter(function(r) {
+      return r.getAttribute('data-spk') === spk && (!skipDel || revRowKept(r));
+    });
+    if (!rows.length) {
+      var any = revSpkRows().some(function(r) { return r.getAttribute('data-spk') === spk; });
+      toast(any ? '👤' + spk + ' 的记录已全部删除 — 取消勾选「跳过已删除」可继续翻看'
+                : '👤' + spk + ' 无匹配字幕记录', 'error');
+      return;
+    }
+    var curRow = revRows().filter(function(r) { return r.classList.contains('kbsel'); })[0];
+    var idx = rows.indexOf(curRow);
+    var next = idx < 0 ? (dir > 0 ? 0 : rows.length - 1)
+                       : (idx + dir + rows.length) % rows.length;
+    revMarkSel(rows[next]);
+    toast('👤' + spk + ' 第 ' + (next + 1) + '/' + rows.length + ' 条（序号 '
+      + (rows[next].getAttribute('data-i') || '?') + '）' + (skipDel ? ' · 已跳过删除' : ''));
+  }
+  function revSpkDelete() {  // 删除该人员全部记录：行 decision=delete
+    var spk = revSpkQuery();
+    if (spk === null) return;
+    var rows = revSpkRows().filter(function(r) { return r.getAttribute('data-spk') === spk; });
+    if (!rows.length) { toast('👤' + spk + ' 无匹配字幕记录', 'error'); return; }
+    if (!window.confirm('把人员 👤' + spk + ' 的 ' + rows.length + ' 条字幕记录全部决策改为「删除」？\n'
+      + '（未保存 — 可逐条翻回；点「💾 保存修订决策」后落盘并影响成片）')) return;
+    var n = 0;
+    rows.forEach(function(r) {
+      var sel = r.querySelector('.slirn-rev-select');
+      if (sel) { sel.value = 'delete'; n += 1; }
+      // 触发 select 的 change 事件让 JS 同步 UI 状态（badge 等）
+      if (sel) sel.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    revSpkBarRender();
+    toast('❌ 👤' + spk + ' 已改判删除 ' + n + ' 条（未保存 — 可翻回；其记录已不计入统计，点「🧮 重新统计」可确认清零）');
+  }
   // 粗剪合成（REQ-20260916-016，可选步骤）：启动后台拼接 → 轮询进度 → 完成注入预览
   function rcFmtDur(sec) {
     var s = Math.floor(sec || 0), m = Math.floor(s / 60), h = Math.floor(m / 60);
@@ -1885,6 +2303,41 @@
       }
     });
   }
+  // REQ-20260918-055：替换值输入框按 Enter → 自动标记为「已修正/已完成」
+  // （采纳 + reviewed 标记 + 词行进度 +1 + 瞬时视觉反馈）
+  function optOccEnterConfirm(inp, ev) {
+    var occ = inp.closest('.slirn-opt-occ');
+    if (!occ) return;
+    var v = (inp.value || '').trim();
+    if (!v) {
+      // 替换值为空 → 阻止默认（避免吞掉换行/提交）+ toast 警告
+      if (ev && ev.preventDefault) ev.preventDefault();
+      toast('⚠️ 替换值为空，无法标记完成', 'warning');
+      return;
+    }
+    // 阻止默认 Enter（避免在文本框里插入换行/触发表单提交）
+    if (ev && ev.preventDefault) ev.preventDefault();
+    // 1) 自动采纳（如果原本是 0）— 同点 ✓ 按钮效果
+    if (occ.getAttribute('data-applied') !== '1') {
+      occ.setAttribute('data-applied', '1');
+      var tog = occ.querySelector('button.slirn-opt-toggle');
+      if (tog) {
+        tog.textContent = '✓';
+        tog.title = '已采纳（保存时替换）';
+      }
+    }
+    // 2) 标记 reviewed（幂等：optOccMarkReviewed 内部判 reviewed=1 直接 return）
+    optOccMarkReviewed(occ);
+    // 3) 瞬时视觉反馈（600ms 后移除）
+    occ.classList.add('slirn-opt-occ-just-done');
+    setTimeout(function() {
+      if (occ && occ.classList) occ.classList.remove('slirn-opt-occ-just-done');
+    }, 600);
+    // 4) REQ-20260918-056：自动持久化（不刷面板，保留焦点）
+    var inner = document.getElementById('slirn-tab-workbench-inner');
+    var tid = inner ? (inner.getAttribute('data-task-id') || '') : '';
+    if (tid) optAutoSave(tid);
+  }
   function optOccToggle(btn) {  // 出现项采纳/不采纳（纯前端，保存时统一提交）
     var w = btn.closest('.slirn-opt-occ');
     if (!w) return;
@@ -1893,6 +2346,10 @@
     btn.textContent = now === 1 ? '✓' : '✕';
     btn.title = now === 1 ? '已采纳（保存时替换）' : '已不采纳（保留原文）';
     optOccMarkReviewed(w);  // REQ-038：明确处理过（无论采纳与否）→ 计入词进度
+    // REQ-20260918-057A：与回车一致 — 切换后自动保存（含并发锁）
+    var inner = document.getElementById('slirn-tab-workbench-inner');
+    var tid = inner ? (inner.getAttribute('data-task-id') || '') : '';
+    if (tid) optAutoSave(tid);
   }
   function optOccMarkReviewed(occEl) {  // REQ-038：occ 标记已处理 + 所属词行进度刷新
     if (!occEl || occEl.getAttribute('data-reviewed') === '1') return;
@@ -1917,41 +2374,1492 @@
                        : '还有 ' + (total - done) + ' 处未处理 — 逐处切换 ✓/✕ 或编辑替换值即计为已处理';
     }
   }
-  function optWordFilter(chip) {  // 点词 → 筛选出现行并滚动到首行；再点取消
+  function optWordFilter(chip) {  // 点词 → 列出含该词的所有出现行 + 各上下 5 行；再点取消
     var word = chip.getAttribute('data-word') || '';
     var list = revVis('slirn-opt-list');
     if (!list || !word) return;
+    var CONTEXT_RADIUS = 5;  // 上下文半径：目标行前后各 5 行 = 共 11 行上下文
     document.querySelectorAll('#slirn-opt-words .slirn-opt-chip').forEach(function(c) {
       c.classList.remove('active');
     });
+    // 复用：同一词再点 → 清空上下文
     if (list.getAttribute('data-filter-word') === word) {
       list.removeAttribute('data-filter-word');
-      list.querySelectorAll('.slirn-opt-row').forEach(function(row) { row.style.display = ''; });
+      list.removeAttribute('data-filter-mode');
+      list.querySelectorAll('.slirn-opt-row').forEach(function(row) {
+        row.style.display = '';
+        row.classList.remove('slirn-opt-row-target');
+      });
+      // 同步移除上下文模式 hint
+      var hintOld = document.getElementById('slirn-opt-filter-hint');
+      if (hintOld) hintOld.remove();
       return;
     }
     list.setAttribute('data-filter-word', word);
+    list.setAttribute('data-filter-mode', 'context');
     chip.classList.add('active');
+
+    // 一次遍历同时做两件事：
+    // 1) 找出所有含目标词的行（target）及其 segment id
+    // 2) 算出 target id ± CONTEXT_RADIUS 内的所有 id（去重 set）
+    var targetIds = [];
+    var contextIdSet = {};
     var firstHit = null;
     list.querySelectorAll('.slirn-opt-row').forEach(function(row) {
       var ws = (row.getAttribute('data-words') || '').split('\n');
       var hit = ws.indexOf(word) >= 0;
-      row.style.display = hit ? '' : 'none';
-      if (hit && !firstHit) firstHit = row;
+      if (hit) {
+        var rid = parseInt(row.getAttribute('data-id') || '0', 10) || 0;
+        targetIds.push(rid);
+        for (var d = -CONTEXT_RADIUS; d <= CONTEXT_RADIUS; d++) {
+          contextIdSet[rid + d] = 1;
+        }
+        if (!firstHit) firstHit = row;
+      }
     });
+
+    // 应用显示/隐藏 + 标记 target 行（高亮 + 视觉上看得见）
+    list.querySelectorAll('.slirn-opt-row').forEach(function(row) {
+      var rid = parseInt(row.getAttribute('data-id') || '0', 10) || 0;
+      var isTarget = targetIds.indexOf(rid) >= 0;
+      row.classList.toggle('slirn-opt-row-target', isTarget);
+      row.style.display = contextIdSet[rid] ? '' : 'none';
+    });
+
+    // 顶部插一条 hint 让用户知道这是「上下文模式」+ 隐藏了多少行
+    var hintId = 'slirn-opt-filter-hint';
+    var oldHint = document.getElementById(hintId);
+    if (oldHint) oldHint.remove();
+    if (targetIds.length > 0) {
+      var hint = document.createElement('div');
+      hint.id = hintId;
+      hint.className = 'slirn-form-hint slirn-opt-filter-hint';
+      hint.innerHTML = '🔍 <b>' + escapeHtml(word) + '</b> 出现 <b>' + targetIds.length
+        + '</b> 处，每处显示上下文 ±' + CONTEXT_RADIUS + ' 行（再点同一词可清除）';
+      list.parentNode.insertBefore(hint, list);
+    }
+
+    // 滚到第一个出现处（保留原行为）
     if (firstHit) try { firstHit.scrollIntoView({block: 'center', behavior: 'smooth'}); } catch (err) {}
   }
   function optWordFilterBtn(btn) {  // REQ-038：词列表按处理状态过滤（全部/未完成/已完成）
     var mode = btn.getAttribute('data-mode') || 'all';
-    var box = document.getElementById('slirn-opt-words');
-    if (!box) return;
-    box.querySelectorAll('button[data-action="opt-word-filter"]').forEach(function(b) {
+    // REQ-20260918-060：colEnhance 把 .slirn-opt-word-filters 和 #slirn-opt-words
+    // 包成各自独立的 .slirn-col wrap（两个 wrap 是兄弟），导致旧实现
+    // box = document.getElementById('slirn-opt-words') 找不到 filter 按钮、
+    // 而 filter 按钮所在的 wrap 又找不到 .slirn-opt-word 行。
+    // 修复：用最近的 opt-zone 容器（同时包含 filter 按钮 + 词行）。
+    var scope = btn.closest && btn.closest('.slirn-card');
+    if (!scope) scope = document.body;
+    scope.querySelectorAll('button[data-action="opt-word-filter"]').forEach(function(b) {
       b.classList.toggle('active', b === btn);
     });
-    box.querySelectorAll('.slirn-opt-word').forEach(function(r) {
+    scope.querySelectorAll('.slirn-opt-word').forEach(function(r) {
       var done = r.getAttribute('data-done') === '1';
       r.style.display = (mode === 'all' || (mode === 'done') === done) ? '' : 'none';
     });
+    // REQ-20260918-050：过滤后重置到第 1 页 + 按可见项重新分页
+    optWordsCurrentPage = 1;
+    paginateOptWords();
+    // REQ-20260918-057B：状态切换后联动文字过滤（AND 组合）
+    optWordTextFilter();
   }
+  // REQ-20260918-057B：词频文字过滤（与状态过滤 AND 组合 + 250ms 防抖）
+  function optWordTextFilter() {
+    // REQ-20260918-060：同 optWordFilterBtn — colEnhance 把 filters 和 words
+    // 包成兄弟 wrap；用 .slirn-card 作为共同 scope 才能同时找到 input/clear/buttons/words。
+    var inp = document.getElementById('slirn-opt-word-text');
+    var clr = document.querySelector('.slirn-opt-word-text-clear');
+    if (!inp) return;
+    var scope = inp.closest && inp.closest('.slirn-card');
+    if (!scope) scope = document.body;
+    var q = (inp.value || '').trim().toLowerCase();
+    if (clr) clr.style.display = q ? '' : 'none';
+    // 当前激活的状态过滤 mode（同时尊重状态过滤）
+    var modeBtn = scope.querySelector('button[data-action="opt-word-filter"].active');
+    var mode = modeBtn ? (modeBtn.getAttribute('data-mode') || 'all') : 'all';
+    scope.querySelectorAll('.slirn-opt-word').forEach(function(r) {
+      var w = (r.getAttribute('data-word') || '').toLowerCase();
+      var matchText = !q || w.indexOf(q) >= 0;
+      var done = r.getAttribute('data-done') === '1';
+      var matchMode = (mode === 'all' || (mode === 'done') === done);
+      r.style.display = (matchText && matchMode) ? '' : 'none';
+    });
+    // REQ-20260918-050：过滤变化后重置页码 + 重新分页
+    optWordsCurrentPage = 1;
+    paginateOptWords();
+  }
+  function bindOptWordTextFilter() {  // 幂等 — wb 重渲后重绑 input 事件
+    var inp = document.getElementById('slirn-opt-word-text');
+    if (!inp || inp.dataset.bound) return;
+    inp.dataset.bound = '1';
+    var t = null;
+    inp.addEventListener('input', function() {
+      if (t) clearTimeout(t);
+      t = setTimeout(optWordTextFilter, 250);
+    });
+  }
+  // ========== REQ-20260919-061：精剪视频·四素材合成器 前端函数 ==========
+  function fineUpload(btn, kind) {
+    var fileInput = document.getElementById('slirn-fine-file-' + kind);
+    if (!fileInput || !fileInput.files || !fileInput.files[0]) {
+      toast('❌ 请先选择文件');
+      return;
+    }
+    var file = fileInput.files[0];
+    var inner = document.getElementById('slirn-tab-workbench-inner');
+    var tid = inner ? (inner.getAttribute('data-task-id') || '') : '';
+    if (!tid) { toast('❌ 缺少 task_id'); return; }
+    var fd = new FormData();
+    fd.append('task_id', tid);
+    fd.append('kind', kind);
+    fd.append('file', file);
+    btn.disabled = true;
+    var oldText = btn.textContent;
+    btn.textContent = '📤 上传中...';
+    fetch('/slirn/api/upload_fine_material_form', { method: 'POST', body: fd })
+      .then(function(r) { return r.json(); })
+      .then(function(j) {
+        btn.disabled = false;
+        btn.textContent = oldText;
+        if (j.ok) {
+          // 更新 status + has-file 类
+          var status = document.querySelector('[data-status-kind="' + kind + '"]');
+          if (status) status.innerHTML = '✅ ' + (j.path || file.name).split(/[\\/]/).pop();
+          var card = document.querySelector('.slirn-fine-upload-card[data-kind="' + kind + '"]');
+          if (card) card.classList.add('has-file');
+          toast('✅ ' + (j.toast || '已上传'));
+        } else {
+          toast('❌ ' + (j.error || '上传失败'));
+        }
+      }).catch(function(e) {
+        btn.disabled = false; btn.textContent = oldText;
+        toast('❌ 网络错误: ' + e.message);
+      });
+  }
+  function fineSetSaveStatus(text, state) {
+    // REQ-20260919-061 用户反馈：保存成功后更新状态指示器。
+    var el = document.getElementById('slirn-fine-save-status');
+    if (!el) return;
+    el.textContent = text;
+    el.setAttribute('data-state', state || 'idle');
+    if (state === 'saving') {
+      el.classList.remove('err');
+    } else if (state === 'saved') {
+      el.classList.remove('err');
+    } else if (state === 'error') {
+      el.classList.add('err');
+    }
+  }
+  function _fineFormatNow() {
+    var d = new Date();
+    var pad = function(n) { return n < 10 ? '0' + n : '' + n; };
+    return pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+  }
+  function fineSaveAll(showToast, asTemplate) {
+    // showToast=true 仅在用户主动点 💾 按钮时显示；自动保存静默更新状态指示器。
+    // asTemplate=true 时（用户主动点保存按钮）：如果「模板名」为空 → window.prompt 弹窗要求填，
+    //   拿到名后调 save_fine_global_profile 另存为全局模板。
+    // asTemplate=false（自动保存）→ 不写模板，避免一堆「未命名」垃圾数据。
+    // 收集所有滑块 + 复选框 + 字体 + 输出，一次保存（避免多次请求）
+    var inner = document.getElementById('slirn-tab-workbench-inner');
+    var tid = inner ? (inner.getAttribute('data-task-id') || '') : '';
+    if (!tid) return;
+    // 若要求存模板：先解析模板名（用户主动点保存时；asTemplate 包含默认 false）
+    if (asTemplate) {
+      var _nameEl = document.getElementById('slirn-fine-profile-name');
+      var _name = _nameEl ? _nameEl.value.trim() : '';
+      if (!_name) {
+        // 弹窗要求填名（maxlength=30 与后端规则对齐）
+        _name = window.prompt(
+          '请填写模板名（≤30 字，会作为全局参数模板保存）',
+          ''
+        );
+        if (_name === null) {
+          // 用户取消 → 不存模板，但 fine_compose 还是要存
+          toast('已跳过保存模板，只保存当前参数');
+        } else {
+          _name = String(_name).trim();
+          if (!_name) { toast('❌ 模板名不能为空'); return; }
+          if (_name.length > 30) { _name = _name.slice(0, 30); }
+          if (_nameEl) _nameEl.value = _name;
+        }
+      }
+      var _profileName = _name || '';
+    }
+    fineSetSaveStatus('保存中…', 'saving');
+    var layout = {};
+    document.querySelectorAll('.slirn-fine-slider').forEach(function(s) {
+      var key = s.getAttribute('data-key') || '';
+      var parts = key.split('.');
+      if (parts.length !== 2) return;
+      var k1 = parts[0], k2 = parts[1];
+      layout[k1] = layout[k1] || {};
+      layout[k1][k2] = parseFloat(s.value);
+    });
+    document.querySelectorAll('.slirn-fine-enabled, [data-key][type="checkbox"]').forEach(function(c) {
+      var k = c.getAttribute('data-key') || '';
+      if (!k || k.indexOf('.') < 0) return;
+      var parts = k.split('.');
+      var k1 = parts[0], k2 = parts[1];
+      layout[k1] = layout[k1] || {};
+      // REQ-20260919-062 v18：crop_aspect_lock 字段名不是 "enabled"，直接存原字段。
+      // 其它 .slirn-fine-enabled 仍然写 .enabled。
+      if (c.classList.contains('slirn-fine-enabled')) {
+        layout[k1].enabled = c.checked;
+      } else {
+        layout[k1][k2] = c.checked;
+      }
+    });
+    // 收集所有 3 个端点 — Promise.all 一起完成再更新状态
+    var promises = [];
+    promises.push(
+      fetch('/slirn/api/save_fine_layout?task_id=' + encodeURIComponent(tid), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ task_id: tid, layout: layout })
+      })
+        .then(function(r) { return r.json(); })
+        .then(function(j) {
+          // REQ-20260919-062 v5：后端在 viewport 限定下夹紧了 video 的 x/y/scale，
+          // 把夹紧后的值同步回滑块显示（用户拖到边界外时滑块自动回退）
+          if (j && j.layout && j.layout.video) {
+            var v = j.layout.video;
+            if (typeof v.x === 'number') _fineSyncSlider('slirn-fine-video-x', v.x);
+            if (typeof v.y === 'number') _fineSyncSlider('slirn-fine-video-y', v.y);
+            if (typeof v.scale === 'number') _fineSyncSlider('slirn-fine-video-scale', v.scale);
+          }
+          return j;
+        })
+    );
+    // 字体
+    var font = {};
+    document.querySelectorAll('[data-font-key]').forEach(function(el) {
+      var k = el.getAttribute('data-font-key');
+      if (el.type === 'checkbox') font[k] = el.checked;
+      else if (el.type === 'number') font[k] = parseInt(el.value, 10);
+      else font[k] = el.value;
+    });
+    if (Object.keys(font).length > 0) {
+      promises.push(
+        fetch('/slirn/api/save_fine_font?task_id=' + encodeURIComponent(tid), {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ task_id: tid, font: font })
+        }).then(function(r) { return r.json(); })
+      );
+    }
+    // 输出
+    var output = {};
+    document.querySelectorAll('[data-output-key]').forEach(function(el) {
+      output[el.getAttribute('data-output-key')] = el.value;
+    });
+    if (Object.keys(output).length > 0) {
+      promises.push(
+        fetch('/slirn/api/save_fine_output?task_id=' + encodeURIComponent(tid), {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ task_id: tid, output: output })
+        }).then(function(r) { return r.json(); })
+      );
+    }
+    // REQ-20260919-061 扩展：背景音乐（独立于 layout/font/output）
+    var audio = {};
+    document.querySelectorAll('[data-audio-key]').forEach(function(el) {
+      var k = el.getAttribute('data-audio-key');
+      audio[k] = parseFloat(el.value);
+    });
+    if (Object.keys(audio).length > 0) {
+      promises.push(
+        fetch('/slirn/api/save_fine_audio?task_id=' + encodeURIComponent(tid), {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ task_id: tid, audio: audio })
+        }).then(function(r) { return r.json(); })
+      );
+    }
+    Promise.all(promises).then(function(results) {
+      // REQ-20260919-061 用户反馈：「保存全部」一直报错的根因 — 后端用 `{"ok":true}` 而不是
+      // `{"code":0}`，原版写 `r.code !== 0` 会让每个成功响应都被判失败。改成按 `ok` 字段判定，
+      // 错误信息也从 `error` 字段取（与 `_err` 返回结构对齐）。
+      var failed = results.find(function(r) { return !r || r.ok !== true; });
+      if (failed) {
+        var msg = failed.error || '未知错误';
+        fineSetSaveStatus('保存失败：' + msg, 'error');
+        if (showToast) toast('❌ 保存失败: ' + msg, 'error');
+        return;
+      }
+      // 模板保存：用户主动保存且模板名非空时
+      if (asTemplate && _profileName) {
+        fetch('/slirn/api/save_fine_global_profile', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ task_id: tid, name: _profileName })
+        })
+          .then(function(r) { return r.json(); })
+          .then(function(j) {
+            if (j && j.ok) {
+              fineSetSaveStatus('上次保存：' + _fineFormatNow() + '（模板「' + _profileName + '」）', 'saved');
+              if (showToast) toast('✅ 已保存参数 + 模板「' + _profileName + '」');
+            } else {
+              // fine_compose 已存好；模板保存失败 → 不算整个失败，提示用户
+              fineSetSaveStatus('上次保存：' + _fineFormatNow() + '（模板保存失败）', 'saved');
+              if (showToast) toast('⚠️ 参数已保存，但模板保存失败: ' + ((j && j.error) || '未知错误'));
+            }
+          })
+          .catch(function(e) {
+            if (showToast) toast('⚠️ 参数已保存，但模板保存网络错误: ' + e.message);
+          });
+      } else {
+        fineSetSaveStatus('上次保存：' + _fineFormatNow(), 'saved');
+        if (showToast) toast('✅ 已保存全部参数');
+      }
+    }).catch(function(e) {
+      fineSetSaveStatus('保存失败：网络错误', 'error');
+      if (showToast) toast('❌ 保存失败: 网络错误', 'error');
+    });
+  }
+  function bindFineControls() {  // wb 重渲后调用 — 绑所有 fine_cut 控件
+    var t = null;
+    function debounceSave() {
+      if (t) clearTimeout(t);
+      t = setTimeout(fineSaveAll, 300);
+    }
+    function updateCropAspect() {
+      var wx = document.getElementById('slirn-fine-video-crop_w');
+      var hx = document.getElementById('slirn-fine-video-crop_h');
+      var aspectEl = document.getElementById('slirn-fine-crop-aspect-val');
+      if (!aspectEl || !wx || !hx) return;
+      var w = parseFloat(wx.value) || 0;
+      var h = parseFloat(hx.value) || 0;
+      aspectEl.textContent = w > 0 ? (h / w).toFixed(3) : '0.000';
+    }
+    // REQ-20260919-062 v7：实时计算视频显示尺寸（crop_w × scale, crop_h × scale）
+    function updateVideoDisp() {
+      var cw = document.getElementById('slirn-fine-video-crop_w');
+      var ch = document.getElementById('slirn-fine-video-crop_h');
+      var sc = document.getElementById('slirn-fine-video-scale');
+      var dispW = document.getElementById('slirn-fine-video-disp-w');
+      var dispH = document.getElementById('slirn-fine-video-disp-h');
+      var scalePct = document.getElementById('slirn-fine-video-scale-pct');
+      var aspect = document.getElementById('slirn-fine-video-aspect');
+      var cropWPct = document.getElementById('slirn-fine-video-crop-w-pct');
+      var cropHPct = document.getElementById('slirn-fine-video-crop-h-pct');
+      if (!cw || !ch || !sc) return;
+      var w = parseFloat(cw.value) || 0;
+      var h = parseFloat(ch.value) || 0;
+      var s = parseFloat(sc.value) || 0;
+      var dw = Math.round(w * s);
+      var dh = Math.round(h * s);
+      if (dispW) dispW.textContent = String(dw);
+      if (dispH) dispH.textContent = String(dh);
+      if (scalePct) scalePct.textContent = (s * 100).toFixed(4);
+      if (aspect) aspect.textContent = dw > 0 ? (dh / dw).toFixed(3) : '0.000';
+      // REQ-20260919-062 v10：占背景图宽高百分比 = crop_w / 1920 × 100%,
+      // crop_h / 1080 × 100%（背景图整个区域 = 设计空间 1920×1080）。
+      if (cropWPct) cropWPct.textContent = (w / 1920 * 100).toFixed(2);
+      if (cropHPct) cropHPct.textContent = (h / 1080 * 100).toFixed(2);
+    }
+    // REQ-20260919-062 v10：去掉了页面内的预览框（设计空间画布）— 不再需要
+    // _fineApplyVideoLayout / _fineApplyVideoLayout ResizeObserver。预览只通过
+    // 弹窗 .slirn-mat-preview-float（每个素材独立预览）进行。
+    // REQ-20260919-062 v15：crop_w 变化时自动重算 scale = crop_w / 1920（保留 4 位小数）。
+    // 共用公式：scale = crop_w / 1920；clamp 到 [0.1, 2.0]；toFixed(4) 取 4 位小数。
+    // 不在这里 toast（避免每次拖滑块都弹提示）；保存走 bindFineControls 的 debounceSave。
+    function _recomputeScaleFromCropW() {
+      var cropWEl = document.getElementById('slirn-fine-video-crop_w');
+      var scaleEl = document.getElementById('slirn-fine-video-scale');
+      if (!cropWEl || !scaleEl) return;
+      var cropW = parseInt(cropWEl.value, 10);
+      if (!cropW || cropW <= 0) return;
+      // scale = crop_w / 1920，保留 4 位小数
+      var scale = Math.round((cropW / 1920) * 10000) / 10000;
+      // clamp 到滑块范围
+      var minS = parseFloat(scaleEl.min || '0.1');
+      var maxS = parseFloat(scaleEl.max || '2.0');
+      scale = Math.max(minS, Math.min(maxS, scale));
+      // 同步 slider + number input（保留 4 位小数显示）
+      var s = scale.toFixed(4);
+      if (scaleEl.value !== s) {
+        scaleEl.value = s;
+        // 主动派发 input 事件，让 updateVideoDisp 立即刷新视频信息行
+        scaleEl.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      var scaleNum = document.getElementById('slirn-fine-video-scale_num');
+      if (scaleNum && scaleNum.value !== s) scaleNum.value = s;
+    }
+    document.querySelectorAll('.slirn-fine-slider, .slirn-fine-enabled, [data-font-key], [data-output-key]').forEach(function(el) {
+      if (el.dataset.fineBound) return;
+      el.dataset.fineBound = '1';
+      var ev = (el.type === 'checkbox') ? 'change' : 'input';
+      el.addEventListener(ev, function() {
+        // REQ-20260919-061a：val 显示区已移除，输入框本身承担数值显示。
+        if (el.classList.contains('slirn-fine-slider') || el.classList.contains('slirn-fine-font-slider')) {
+          // REQ-20260919-061a v3 用户反馈：拖动滑块时对应 num 框数值要同步更新（之前
+          // 只有 ▲▼ 路径同步了两边，slider input 路径漏写）。直接同步 value，不重派发
+          // input 事件，避免无限递归；debounceSave 仍由本次事件触发。
+          var num = document.getElementById(el.id + '_num');
+          if (num && num.value !== el.value) num.value = el.value;
+          // crop 矩形 w/h 变化时实时更新比例（仅 layout slider 才有 data-key）
+          var k = el.getAttribute('data-key') || '';
+          if (k === 'video.crop_w' || k === 'video.crop_h') updateCropAspect();
+          // REQ-20260919-062 v7：video.crop_w/crop_h/scale 变化时刷新显示尺寸
+          if (k === 'video.crop_w' || k === 'video.crop_h' || k === 'video.scale') {
+            updateVideoDisp();
+          }
+          // REQ-20260919-062 v15：crop_w 变化时自动重算 scale（保留 4 位小数）。
+          // scale 的 input 事件会被同 handler 处理 → 触发 updateVideoDisp + debounceSave，
+          // 因此无需在这里单独调 fineSaveAll。
+          if (k === 'video.crop_w') {
+            _recomputeScaleFromCropW();
+          }
+        }
+        debounceSave();
+      });
+    });
+  }
+
+  // ---------- REQ-20260919-061 扩展：全局参数模板 ----------
+  function _fineTid() {
+    var inner = document.getElementById('slirn-tab-workbench-inner');
+    return inner ? (inner.getAttribute('data-task-id') || '') : '';
+  }
+  function bindFineSteppers() {
+    // REQ-20260919-061a v7 用户反馈：num input 旁边的自定义 ▲▼ 按钮已移除（与浏览器
+    // 原生 stepper 重复），所以这一步只剩 num 自身的双向同步逻辑：
+    //   - number input（用浏览器原生 stepper 微调）→ 按 Enter 或失焦时 clamp + 写回
+    //     slider，触发 bindFineControls 的 input 事件走 300ms 防抖自动保存
+    function _readMinMaxStep(target) {
+      var min = parseFloat(target.min);
+      var max = parseFloat(target.max);
+      var step = parseFloat(target.step) || 1;
+      if (isNaN(min) || isNaN(max)) {
+        // 兜底：若 min/max 没写（不应该发生），用 num 的 value 推断
+        var cur = parseFloat(target.value) || 0;
+        return { min: cur, max: cur, step: 1 };
+      }
+      return { min: min, max: max, step: step };
+    }
+    document.querySelectorAll('.slirn-fine-num[data-for]').forEach(function(num) {
+      if (num.dataset.numBound) return;
+      num.dataset.numBound = '1';
+      // REQ-20260919-061a 用户反馈：直接修改输入框，按回车时才调整滑动条位置。
+      // 键入过程中不修改 slider，避免 "1." 这种中间态被打断。
+      function _commitNum() {
+        var slider = document.getElementById(num.dataset.for);
+        var src = slider || num;
+        var b = _readMinMaxStep(src);
+        var v = parseFloat(num.value);
+        if (isNaN(v)) { num.value = src.value; return; }
+        var clamped = Math.max(b.min, Math.min(b.max, v));
+        num.value = String(clamped);
+        if (slider && slider.value !== String(clamped)) {
+          slider.value = String(clamped);
+          // 触发 input 事件 → bindFineControls 走 300ms 防抖自动保存
+          slider.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+      }
+      num.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          _commitNum();
+          num.blur();  // 收起光标，让用户看到 slider 已就位
+        }
+      });
+      num.addEventListener('blur', _commitNum);
+    });
+  }
+  function bindCropAspectLink() {
+    // REQ-20260919-061a 用户反馈：crop_w 和 crop_h 按 16:9 联动（防变形）。
+    // 默认开启；用户可关闭（关后 1:1 等预设才能任意设 w=h）。
+    var toggle = document.getElementById('slirn-fine-crop-aspect-link');
+    var wEl = document.getElementById('slirn-fine-video-crop_w');
+    var hEl = document.getElementById('slirn-fine-video-crop_h');
+    var wNum = document.getElementById('slirn-fine-video-crop_w_num');
+    var hNum = document.getElementById('slirn-fine-video-crop_h_num');
+    if (!toggle || !wEl || !hEl) return;
+    if (toggle.dataset.linkBound) return;
+    toggle.dataset.linkBound = '1';
+    var _syncing = false;
+    function _setLinked(otherEl, otherNum, val) {
+      // val 由调用方算好；同步写 slider + num（让两边都更新）
+      var s = String(val);
+      if (otherEl.value !== s) otherEl.value = s;
+      if (otherNum && otherNum.value !== s) otherNum.value = s;
+    }
+    function _syncHfromW() {
+      var w = parseFloat(wEl.value) || 0;
+      var newH = Math.round(w * 9 / 16);
+      _setLinked(hEl, hNum, newH);
+    }
+    function _syncWfromH() {
+      var h = parseFloat(hEl.value) || 0;
+      var newW = Math.round(h * 16 / 9);
+      _setLinked(wEl, wNum, newW);
+    }
+    function _propagate(srcEl) {
+      // 让被联动的一方也触发 input 事件 → bindFineControls 走防抖自动保存
+      // + updateCropAspect 刷新比例显示
+      srcEl.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    function _wrap(handler) {
+      return function() {
+        if (_syncing || !toggle.checked) return;
+        _syncing = true;
+        try { handler(); } finally { _syncing = false; }
+      };
+    }
+    // slider input：拖动 w → 同步 h；拖动 h → 同步 w
+    wEl.addEventListener('input', _wrap(function() {
+      _syncHfromW(); _propagate(hEl);
+    }));
+    hEl.addEventListener('input', _wrap(function() {
+      _syncWfromH(); _propagate(wEl);
+    }));
+    // toggle 切换：开 → 立刻按当前 w 重算 h；关 → 不动
+    toggle.addEventListener('change', function() {
+      if (toggle.checked) {
+        _syncing = true;
+        try { _syncHfromW(); _propagate(hEl); }
+        finally { _syncing = false; }
+      }
+      // REQ-20260919-062 v18：把勾选状态持久化到 layout.video.crop_aspect_lock
+      // （fineSaveAll 会从 [data-key][type=checkbox] 自动收集所有复选框）
+      // 用 setTimeout 0 跳出当前 input 事件栈，避免与其他 input 事件循环
+      setTimeout(function() { if (typeof fineSaveAll === 'function') fineSaveAll(); }, 0);
+    });
+  }
+
+  // REQ-20260919-062：背景图白色区域检测
+  // - 算法下拉（pixel / ai）+ 阈值下拉 + 阈值手动输入（双向同步）
+  // - 检测按钮 → 调 /slirn/api/detect_bg_white_area → 填充 4 角点 + 宽高 + 中心 + 像素数
+  // - 「填充到视频位置和裁剪」按钮 → 把结果写回 video.X/Y + video.crop_x/y/w/h
+  var _bgDetectLastResult = null;  // 上次检测结果，供 apply 复用
+  function bindBgWhiteDetector() {
+    var detectBtn = document.querySelector('[data-action="fine-bg-detect"]');
+    var applyBtn = document.querySelector('[data-action="fine-bg-detect-apply"]');
+    var algoSel = document.getElementById('slirn-fine-bg-detect-algo');
+    var thSel = document.getElementById('slirn-fine-bg-detect-threshold-sel');
+    var thNum = document.getElementById('slirn-fine-bg-detect-threshold-num');
+    var thRow = document.getElementById('slirn-fine-bg-detect-threshold-row');
+    if (!detectBtn) return;
+
+    // 算法切换 → 阈值控件仅 pixel 显示；ai/ai_color 隐藏
+    function _syncAlgoUi() {
+      var algo = (algoSel && algoSel.value) || 'pixel';
+      if (thRow) thRow.style.display = (algo === 'pixel') ? '' : 'none';
+    }
+    if (algoSel) {
+      algoSel.addEventListener('change', _syncAlgoUi);
+      _syncAlgoUi();
+    }
+
+    // 阈值下拉 ↔ 手动输入 双向同步
+    if (thSel && thNum) {
+      thSel.addEventListener('change', function() {
+        thNum.value = thSel.value;
+      });
+      thNum.addEventListener('input', function() {
+        var v = parseInt(thNum.value, 10);
+        if (!isNaN(v) && v >= 200 && v <= 255) {
+          // 找匹配选项，没有就不动下拉
+          var opt = thSel.querySelector('option[value="' + v + '"]');
+          if (opt) thSel.value = String(v);
+        }
+      });
+    }
+
+    detectBtn.addEventListener('click', function() {
+      var tid = detectBtn.dataset.taskId || _fineTid();
+      var algorithm = (algoSel && algoSel.value) || 'ai_color';
+      var threshold = (thNum && parseInt(thNum.value, 10)) || 250;
+      detectBtn.disabled = true;
+      var origText = detectBtn.textContent;
+      detectBtn.textContent = '⏳ 检测中…';
+      fetch(SLIRN_API + '/detect_bg_white_area', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ task_id: tid, algorithm: algorithm, threshold: threshold }),
+      })
+      .then(function(r) { return r.json(); })
+      .then(function(j) {
+        detectBtn.disabled = false;
+        detectBtn.textContent = origText;
+        if (!j || !j.ok) {
+          toast('❌ 检测失败: ' + ((j && j.err) || '未知错误'), 'error');
+          return;
+        }
+        _bgDetectLastResult = j;
+        // 填充只读区
+        var c = j.corners || {};
+        var set = function(id, val) {
+          var el = document.getElementById(id);
+          if (el) el.textContent = val;
+        };
+        set('slirn-fine-bg-detect-tl',     '(' + (c.topleft     || [j.x, j.y]).join(', ') + ')');
+        set('slirn-fine-bg-detect-tr',     '(' + (c.topright    || [j.x + j.width - 1, j.y]).join(', ') + ')');
+        set('slirn-fine-bg-detect-bl',     '(' + (c.bottomleft  || [j.x, j.y + j.height - 1]).join(', ') + ')');
+        set('slirn-fine-bg-detect-br',     '(' + (c.bottomright || [j.x + j.width - 1, j.y + j.height - 1]).join(', ') + ')');
+        set('slirn-fine-bg-detect-wh',     j.width + ' × ' + j.height);
+        set('slirn-fine-bg-detect-center', '(' + j.center_x + ', ' + j.center_y + ')');
+        set('slirn-fine-bg-detect-pixels', (j.pixel_count || 0).toLocaleString());
+        set('slirn-fine-bg-detect-native', j.image_native_w + ' × ' + j.image_native_h);
+        // AI 颜色模式额外显示主色（带色块）
+        var colorTextEl = document.getElementById('slirn-fine-bg-detect-color-text');
+        var colorSwatchEl = document.getElementById('slirn-fine-bg-detect-color-swatch');
+        if (j.detected_color && Array.isArray(j.detected_color) && j.detected_color.length === 3) {
+          var rgb = j.detected_color;
+          var hex = '#' + rgb.map(function(v) {
+            var h = parseInt(v, 10).toString(16);
+            return h.length === 1 ? '0' + h : h;
+          }).join('');
+          if (colorTextEl) colorTextEl.textContent = 'RGB(' + rgb.join(', ') + ') · ' + hex + ' (±' + (j.color_tolerance || 10) + ')';
+          if (colorSwatchEl) {
+            colorSwatchEl.style.backgroundColor = hex;
+            colorSwatchEl.style.display = 'inline-block';
+          }
+        } else {
+          if (colorTextEl) colorTextEl.textContent = '—（仅 pixel / ai_color 算法适用）';
+          if (colorSwatchEl) colorSwatchEl.style.backgroundColor = 'transparent';
+        }
+        var resultEl = document.getElementById('slirn-fine-bg-detect-result');
+        if (resultEl) resultEl.hidden = false;
+        if (applyBtn) applyBtn.disabled = false;
+        var algoLabel = algorithm === 'ai_color' ? '（AI 主色识别）' :
+                        algorithm === 'ai'       ? '（AI bbox 识别）' : '（像素扫描）';
+        toast('✅ 区域已检测 ' + algoLabel + ' — 左上 (' + j.x + ', ' + j.y + ')，宽 ' + j.width + '，高 ' + j.height, 'success');
+      })
+      .catch(function(err) {
+        detectBtn.disabled = false;
+        detectBtn.textContent = origText;
+        toast('❌ 网络错误: ' + err, 'error');
+      });
+    });
+
+    if (applyBtn) {
+      applyBtn.addEventListener('click', function() {
+        var r = _bgDetectLastResult;
+        if (!r) {
+          toast('⚠️ 请先点「🔍 检测区域」', 'warning');
+          return;
+        }
+        // 逻辑：检测到的区域是用来展示视频的画布矩形。
+        //   - 视频左上角 = 区域左上角 → video.X = r.x, video.Y = r.y
+        //   - 区域宽高 = 从原视频截取的宽高 → video.crop_w = r.width, crop_h = r.height
+        //   - 从原视频 (0,0) 起取这块矩形 → video.crop_x = 0, crop_y = 0
+        //   - 缩放归 1.0，让裁剪后的视频刚好填满区域
+        function _setSlider(sliderId, val) {
+          var s = document.getElementById(sliderId);
+          var n = document.getElementById(sliderId + '_num');
+          if (s) {
+            s.value = String(val);
+            s.dispatchEvent(new Event('input', { bubbles: true }));
+          }
+          if (n) n.value = String(val);
+        }
+        _setSlider('slirn-fine-video-x', r.x);
+        _setSlider('slirn-fine-video-y', r.y);
+        _setSlider('slirn-fine-video-crop_x', 0);
+        _setSlider('slirn-fine-video-crop_y', 0);
+        _setSlider('slirn-fine-video-crop_w', r.width);
+        _setSlider('slirn-fine-video-crop_h', r.height);
+        _setSlider('slirn-fine-video-scale', 1.0);
+
+        // REQ-20260919-062 v5：把 viewport 限定也保存到后端，
+        // 这样用户后续拖滑块时 video 不会跑出检测区域。
+        var applyTid = applyBtn.getAttribute('data-task-id') || '';
+        if (applyTid) {
+          fetch('/slirn/api/save_fine_layout?task_id=' + encodeURIComponent(applyTid), {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              task_id: applyTid,
+              layout: { video: { viewport: { x: r.x, y: r.y, width: r.width, height: r.height } } },
+            }),
+          })
+            .then(function(resp) { return resp.json(); })
+            .then(function(j) {
+              // 后端夹紧 x/y/scale 到 viewport（这里通常无变化；保险起见同步一次）
+              if (j && j.layout && j.layout.video) {
+                var v = j.layout.video;
+                _fineSyncSlider('slirn-fine-video-x', v.x);
+                _fineSyncSlider('slirn-fine-video-y', v.y);
+                _fineSyncSlider('slirn-fine-video-scale', v.scale);
+              }
+            })
+            .catch(function(err) { toast('⚠️ viewport 保存失败：' + err, 'warning'); });
+        }
+        toast('✅ 已填充：video 位置=(' + r.x + ', ' + r.y + ')，从原视频 (0,0) 截取 ' + r.width + '×' + r.height + '，缩放 1.00 填满区域，并已限定视频在该区域内', 'success');
+      });
+    }
+  }
+  function _fineEscapeHtml(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  // REQ-20260919-062 v5：把值同步到滑块上（不触发 input 事件，避免再触发自动保存死循环）
+  function _fineSyncSlider(sliderId, val) {
+    var s = document.getElementById(sliderId);
+    var n = document.getElementById(sliderId + '_num');
+    var cur = s ? parseFloat(s.value) : NaN;
+    var target = parseFloat(val);
+    if (s && !isNaN(target) && (isNaN(cur) || Math.abs(cur - target) >= 0.001)) {
+      s.value = String(target);
+    }
+    if (n && !isNaN(target)) n.value = String(target);
+  }
+
+  // REQ-20260919-063 用户反馈：每个素材都要提供预览功能，并且可以缩放展示素材窗口的尺寸。
+  // 实现：
+  //   - 委托：[data-action="fine-mat-preview"] → fineMaterialPreview(tid, kind)
+  //   - 弹出 .slirn-mat-preview-float 浮层（CSS resize: both；ResizeObserver 持久化尺寸）
+  //   - 按 kind 渲染合适的内容：image → <img>；video → <video controls>；
+  //     audio → <audio controls>；subtitle (.srt) → fetch 文本按行展示
+  function bindFineMaterialPreviews() {
+    // 绑定已委托给全局 action handler（见 router.js 主事件循环），
+    // 此函数保留为 wb-setup 阶段的占位调用，便于将来扩展按需刷新。
+  }
+
+  var _matFloatDragOffset = null;  // 标题栏拖动用
+  function fineMaterialPreview(tid, kind) {
+    if (!tid || !kind) {
+      toast('⚠️ 缺少任务 ID 或素材类型', 'warning');
+      return;
+    }
+    // 已存在的浮层先关掉（同一 kind 再点 = 切内容；不同 kind = 关掉再开新的）
+    var existing = document.getElementById('slirn-mat-preview-float');
+    if (existing) existing.remove();
+
+    var labels = {
+      video: '🎬 粗剪视频',
+      subtitle: '📝 字幕文件',
+      cover: '🖼 封面图片',
+      bg: '🎨 背景图片',
+      reference: '🤖 参考位置关系图',
+      audio: '🎵 背景音乐',
+    };
+    var label = labels[kind] || kind;
+    var fileUrl = SLIRN_API + '/fine_material_file?task_id=' + encodeURIComponent(tid)
+      + '&kind=' + encodeURIComponent(kind);
+
+    // 容器（带 data-* 属性便于将来扩展）
+    var flt = document.createElement('div');
+    flt.id = 'slirn-mat-preview-float';
+    flt.className = 'slirn-mat-preview-float';
+    flt.setAttribute('data-kind', kind);
+    flt.setAttribute('data-task-id', tid);
+    // 默认位置：屏幕右侧偏下（不挡顶部状态栏）
+    flt.style.top = '120px';
+    flt.style.right = '40px';
+    flt.style.left = 'auto';
+    // 恢复之前保存的尺寸
+    try {
+      var saved = JSON.parse(localStorage.getItem('slirnMatPreviewSize') || 'null');
+      if (saved && typeof saved.w === 'number' && typeof saved.h === 'number') {
+        flt.style.width = saved.w + 'px';
+        flt.style.height = saved.h + 'px';
+      }
+    } catch (err) { /* 静默忽略 */ }
+
+    // 标题栏（可拖动 + 关闭）
+    var header = document.createElement('div');
+    header.className = 'slirn-mat-preview-header';
+    var title = document.createElement('span');
+    title.className = 'slirn-mat-preview-title';
+    title.textContent = '预览 · ' + label;
+    var closeBtn = document.createElement('button');
+    closeBtn.className = 'slirn-mat-preview-close';
+    closeBtn.setAttribute('aria-label', '关闭预览');
+    closeBtn.textContent = '×';
+    closeBtn.addEventListener('click', function() {
+      var f = document.getElementById('slirn-mat-preview-float');
+      if (f) f.remove();
+    });
+    header.appendChild(title);
+    header.appendChild(closeBtn);
+
+    // 内容区
+    var body = document.createElement('div');
+    body.className = 'slirn-mat-preview-body';
+
+    // 按 kind 渲染
+    if (kind === 'subtitle') {
+      // SRT 文本：fetch 拿原文，按行展示
+      body.innerHTML = '<div class="slirn-mat-preview-error">加载中…</div>';
+      fetch(fileUrl)
+        .then(function(r) {
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          return r.text();
+        })
+        .then(function(text) {
+          body.innerHTML = '';
+          var pre = document.createElement('pre');
+          // 保留原始换行；前 500 行足够预览
+          var lines = text.split(/\r?\n/);
+          if (lines.length > 500) {
+            lines = lines.slice(0, 500).concat(['...（共 ' + text.split(/\r?\n/).length + ' 行，已截断）']);
+          }
+          pre.textContent = lines.join('\n');
+          body.appendChild(pre);
+        })
+        .catch(function(err) {
+          body.innerHTML = '<div class="slirn-mat-preview-error">❌ 字幕加载失败: ' + _fineEscapeHtml(String(err)) + '</div>';
+        });
+    } else if (kind === 'video') {
+      var v = document.createElement('video');
+      v.src = fileUrl;
+      v.controls = true;
+      v.preload = 'metadata';
+      body.appendChild(v);
+    } else if (kind === 'audio') {
+      var a = document.createElement('audio');
+      a.src = fileUrl;
+      a.controls = true;
+      a.preload = 'metadata';
+      body.appendChild(a);
+    } else {
+      // image 类型（cover/bg/reference）— 用 <img>，自带错误回退
+      var img = document.createElement('img');
+      img.src = fileUrl;
+      img.alt = label;
+      img.addEventListener('error', function() {
+        body.innerHTML = '<div class="slirn-mat-preview-error">❌ 图片加载失败（文件可能已损坏或被占用）</div>';
+      });
+      body.appendChild(img);
+    }
+
+    flt.appendChild(header);
+    flt.appendChild(body);
+    document.body.appendChild(flt);
+
+    // 拖动（标题栏 mousedown → mousemove 改 left/top）
+    header.addEventListener('mousedown', function(ev) {
+      // 仅主键；点击关闭按钮时不要触发拖动
+      if (ev.button !== 0) return;
+      if (ev.target === closeBtn) return;
+      var rect = flt.getBoundingClientRect();
+      _matFloatDragOffset = {
+        dx: ev.clientX - rect.left,
+        dy: ev.clientY - rect.top,
+        // 解除 right: auto，改用 left/top 定位
+        left: rect.left,
+        top: rect.top,
+      };
+      flt.style.left = rect.left + 'px';
+      flt.style.top = rect.top + 'px';
+      flt.style.right = 'auto';
+      ev.preventDefault();
+    });
+    document.addEventListener('mousemove', function(ev) {
+      if (!_matFloatDragOffset) return;
+      var nx = Math.max(0, ev.clientX - _matFloatDragOffset.dx);
+      var ny = Math.max(0, ev.clientY - _matFloatDragOffset.dy);
+      flt.style.left = nx + 'px';
+      flt.style.top = ny + 'px';
+    });
+    document.addEventListener('mouseup', function() {
+      _matFloatDragOffset = null;
+    });
+
+    // ResizeObserver：用户拖右下角调尺寸 → 持久化到 localStorage
+    if (typeof ResizeObserver !== 'undefined') {
+      var ro = new ResizeObserver(function(entries) {
+        for (var i = 0; i < entries.length; i++) {
+          var cr = entries[i].contentRect;
+          try {
+            localStorage.setItem('slirnMatPreviewSize', JSON.stringify({
+              w: Math.round(cr.width),
+              h: Math.round(cr.height),
+            }));
+          } catch (err) { /* 静默 */ }
+        }
+      });
+      ro.observe(flt);
+    }
+  }
+
+  // REQ-20260919-062 v11：生成预览/导出完成后，自动弹出合成预览窗口。
+  // 复用 .slirn-mat-preview-float 样式（位置 + resize 行为一致），但 body
+  // 直接放 <video src={url}>（不需要再 fetch /slirn/api/fine_material_file）。
+  // v19 用户反馈：合成预览窗口无法拖动 + 拖动后位置不持久化。
+  //   根因：openFinePreviewFloat 只绑了 mousedown，没绑 mousemove/mouseup，导致
+  //   鼠标移动时浮窗纹丝不动。同时复用单例 _matFloatDragOffset 还会被
+  //   fineMaterialPreview 的 mousemove handler 错位更新（闭包里的 flt 已 remove）。
+  //   修复：把 _dragOffset 提到本函数闭包里（每个浮窗独立），完整 mousedown/move/up
+  //   三件套，并在 mouseup 时把 left/top 持久化到 localStorage 的 slirnMatPreviewPos。
+  function openFinePreviewFloat(url, title) {
+    if (!url) return;
+    var labels_title = title || '🎬 合成预览';
+    // 已存在的浮层先关掉（避免叠加）
+    var existing = document.getElementById('slirn-fine-preview-float');
+    if (existing) existing.remove();
+    var flt = document.createElement('div');
+    flt.id = 'slirn-fine-preview-float';
+    flt.className = 'slirn-mat-preview-float slirn-fine-preview-float';
+    // 默认位置 + 尺寸（与单素材预览一致）
+    flt.style.top = '120px';
+    flt.style.right = '40px';
+    flt.style.left = 'auto';
+    try {
+      var savedSize = JSON.parse(localStorage.getItem('slirnMatPreviewSize') || 'null');
+      if (savedSize && savedSize.w && savedSize.h) {
+        flt.style.width = savedSize.w + 'px';
+        flt.style.height = savedSize.h + 'px';
+      }
+      // v19：恢复上次拖到的位置（left/top）
+      var savedPos = JSON.parse(localStorage.getItem('slirnMatPreviewPos') || 'null');
+      if (savedPos && typeof savedPos.left === 'number' && typeof savedPos.top === 'number') {
+        flt.style.left = savedPos.left + 'px';
+        flt.style.top = savedPos.top + 'px';
+        flt.style.right = 'auto';
+      }
+    } catch (err) { /* 静默 */ }
+    // 标题栏
+    var header = document.createElement('div');
+    header.className = 'slirn-mat-preview-header';
+    var titleEl = document.createElement('span');
+    titleEl.className = 'slirn-mat-preview-title';
+    titleEl.textContent = labels_title;
+    var closeBtn = document.createElement('button');
+    closeBtn.className = 'slirn-mat-preview-close';
+    closeBtn.setAttribute('aria-label', '关闭预览');
+    closeBtn.textContent = '×';
+    closeBtn.addEventListener('click', function() {
+      var f = document.getElementById('slirn-fine-preview-float');
+      if (f) f.remove();
+    });
+    header.appendChild(titleEl);
+    header.appendChild(closeBtn);
+    // body：放一个 <video controls autoplay src={url}>；video src 需要绝对 URL
+    var body = document.createElement('div');
+    body.className = 'slirn-mat-preview-body';
+    var v = document.createElement('video');
+    v.src = url;
+    v.controls = true;
+    v.autoplay = true;
+    v.preload = 'metadata';
+    v.style.width = '100%';
+    v.style.height = '100%';
+    body.appendChild(v);
+    flt.appendChild(header);
+    flt.appendChild(body);
+    document.body.appendChild(flt);
+    // v19：完整拖动三件套（mousedown / mousemove / mouseup）。
+    // _dragOffset 放在闭包里，避免复用模块级 _matFloatDragOffset 被其它浮窗覆盖。
+    var _dragOffset = null;
+    header.addEventListener('mousedown', function(ev) {
+      if (ev.button !== 0) return;
+      if (ev.target === closeBtn) return;
+      var rect = flt.getBoundingClientRect();
+      _dragOffset = {
+        dx: ev.clientX - rect.left,
+        dy: ev.clientY - rect.top,
+      };
+      flt.style.left = rect.left + 'px';
+      flt.style.top = rect.top + 'px';
+      flt.style.right = 'auto';
+      ev.preventDefault();
+    });
+    document.addEventListener('mousemove', function(ev) {
+      if (!_dragOffset) return;
+      var nx = Math.max(0, ev.clientX - _dragOffset.dx);
+      var ny = Math.max(0, ev.clientY - _dragOffset.dy);
+      flt.style.left = nx + 'px';
+      flt.style.top = ny + 'px';
+    });
+    document.addEventListener('mouseup', function() {
+      if (!_dragOffset) return;
+      _dragOffset = null;
+      // 持久化位置（mouseup 时记录当前 flt 的 left/top）
+      try {
+        var rect = flt.getBoundingClientRect();
+        localStorage.setItem('slirnMatPreviewPos', JSON.stringify({
+          left: Math.round(rect.left),
+          top: Math.round(rect.top),
+        }));
+      } catch (err) { /* 静默 */ }
+    });
+    // 尺寸持久化（复用 slirnMatPreviewSize key）
+    if (typeof ResizeObserver !== 'undefined') {
+      var ro = new ResizeObserver(function(entries) {
+        for (var i = 0; i < entries.length; i++) {
+          var cr = entries[i].contentRect;
+          try {
+            localStorage.setItem('slirnMatPreviewSize', JSON.stringify({
+              w: Math.round(cr.width),
+              h: Math.round(cr.height),
+            }));
+          } catch (err) { /* 静默 */ }
+        }
+      });
+      ro.observe(flt);
+    }
+  }
+
+  // REQ-20260919-074：导出精剪视频 · 异步进度模态框
+  // 由 export_fine_video 端点启动后台线程后，前端调本函数开模态框 + 1.5s 轮询 render_status。
+  function openFineExportProgress(tid, jobId) {
+    // 已存在则复用（不叠加）
+    var modal = document.getElementById('slirn-fine-export-progress');
+    if (!modal) {
+      modal = document.createElement('div');
+      modal.id = 'slirn-fine-export-progress';
+      modal.className = 'slirn-modal-overlay';
+      modal.innerHTML = ''
+        + '<div class="slirn-modal-card slirn-fine-progress-card">'
+        +   '<div class="slirn-modal-title">🎬 导出精剪视频</div>'
+        +   '<div class="slirn-fine-progress-body">'
+        +     '<div class="slirn-fine-progress-row">'
+        +       '<span class="slirn-fine-progress-label">状态</span>'
+        +       '<span class="slirn-fine-progress-val" id="slirn-fine-progress-state">排队中...</span>'
+        +     '</div>'
+        +     '<div class="slirn-fine-progress-bar">'
+        +       '<div class="slirn-fine-progress-fill" id="slirn-fine-progress-fill"></div>'
+        +     '</div>'
+        +     '<div class="slirn-fine-progress-row">'
+        +       '<span class="slirn-fine-progress-label">已渲染</span>'
+        +       '<span class="slirn-fine-progress-val" id="slirn-fine-progress-time">— / —</span>'
+        +     '</div>'
+        +     '<div class="slirn-fine-progress-row">'
+        +       '<span class="slirn-fine-progress-label">已用时</span>'
+        +       '<span class="slirn-fine-progress-val" id="slirn-fine-progress-elapsed">00:00:00</span>'
+        +     '</div>'
+        +     '<div class="slirn-fine-progress-row">'
+        +       '<span class="slirn-fine-progress-label">编码速度</span>'
+        +       '<span class="slirn-fine-progress-val" id="slirn-fine-progress-speed">—</span>'
+        +     '</div>'
+        +     '<div class="slirn-fine-progress-row">'
+        +       '<span class="slirn-fine-progress-label">预计剩余</span>'
+        +       '<span class="slirn-fine-progress-val" id="slirn-fine-progress-eta">—</span>'
+        +     '</div>'
+        +   '</div>'
+        +   '<div class="slirn-fine-progress-actions">'
+        +     '<button class="slirn-btn" id="slirn-fine-export-cancel-btn">⏹ 取消渲染</button>'
+        +     '<button class="slirn-btn slirn-btn-primary" id="slirn-fine-export-close-btn" hidden>关闭</button>'
+        +   '</div>'
+        + '</div>';
+      document.body.appendChild(modal);
+      // 点遮罩关闭
+      modal.addEventListener('click', function(e) {
+        if (e.target === modal && document.getElementById('slirn-fine-export-cancel-btn').hidden) {
+          modal.hidden = true;
+        }
+      });
+    } else {
+      // 重置 UI 字段
+      document.getElementById('slirn-fine-progress-state').textContent = '排队中...';
+      document.getElementById('slirn-fine-progress-fill').style.width = '0%';
+      document.getElementById('slirn-fine-progress-time').textContent = '— / —';
+      document.getElementById('slirn-fine-progress-elapsed').textContent = '00:00:00';
+      document.getElementById('slirn-fine-progress-speed').textContent = '—';
+      document.getElementById('slirn-fine-progress-eta').textContent = '—';
+    }
+    modal.hidden = false;
+
+    var _stateLabel = { queued: '排队中', running: '渲染中', done: '已完成', failed: '失败', cancelled: '已取消' };
+    var _cancelBtn = document.getElementById('slirn-fine-export-cancel-btn');
+    var _closeBtn = document.getElementById('slirn-fine-export-close-btn');
+    _cancelBtn.hidden = false;
+    _closeBtn.hidden = true;
+    _closeBtn.textContent = '关闭';
+
+    var _poll = function() {
+      fetch('/slirn/api/render_status?job_id=' + encodeURIComponent(jobId))
+        .then(function(r) { return r.json(); })
+        .then(function(s) {
+          if (!s.ok) {
+            toast('❌ ' + (s.error || '查询失败'));
+            return;
+          }
+          var st = s.state;
+          document.getElementById('slirn-fine-progress-state').textContent =
+            _stateLabel[st] || st;
+          document.getElementById('slirn-fine-progress-fill').style.width = s.progress_pct + '%';
+          document.getElementById('slirn-fine-progress-time').textContent =
+            _fmtMs(s.progress_time_ms) + ' / ' + _fmtMs(s.total_duration_ms) +
+            ' (' + s.progress_pct.toFixed(1) + '%)';
+          document.getElementById('slirn-fine-progress-elapsed').textContent =
+            _fmtSec(s.elapsed_sec);
+          document.getElementById('slirn-fine-progress-speed').textContent =
+            s.speed_x > 0 ? s.speed_x.toFixed(2) + '×' : '—';
+          document.getElementById('slirn-fine-progress-eta').textContent =
+            s.eta_sec != null && s.eta_sec >= 0 ? '约 ' + _fmtSec(s.eta_sec) : '—';
+
+          if (st === 'done') {
+            clearInterval(_timer);
+            _cancelBtn.hidden = true;
+            _closeBtn.hidden = false;
+            _closeBtn.textContent = '⬇️ 下载 + 关闭';
+            _closeBtn.onclick = function() {
+              if (s.output_url) window.open(s.output_url, '_blank');
+              modal.hidden = true;
+            };
+            toast('✅ 导出完成');
+          } else if (st === 'failed') {
+            clearInterval(_timer);
+            _cancelBtn.hidden = true;
+            _closeBtn.hidden = false;
+            _closeBtn.onclick = function() { modal.hidden = true; };
+            toast('❌ 渲染失败: ' + (s.error || '未知'));
+          } else if (st === 'cancelled') {
+            clearInterval(_timer);
+            _cancelBtn.hidden = true;
+            _closeBtn.hidden = false;
+            _closeBtn.onclick = function() { modal.hidden = true; };
+          }
+        })
+        .catch(function(e) {
+          // 网络错误不立即关 modal（可能是临时抖动），下一轮再试
+          console.warn('[render_status]', e);
+        });
+    };
+    _poll();
+    var _timer = setInterval(_poll, 1500);
+
+    _cancelBtn.onclick = function() {
+      if (!confirm('确认取消当前渲染？已生成的片段会被丢弃。')) return;
+      fetch('/slirn/api/cancel_render', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ job_id: jobId })
+      })
+        .then(function(r) { return r.json(); })
+        .then(function(j) {
+          if (!j.ok) toast('❌ ' + (j.error || '取消失败'));
+          else toast('⏹ 已发送取消信号');
+        })
+        .catch(function(e) { toast('❌ 网络错误: ' + e.message); });
+    };
+  }
+  function _fmtMs(ms) {
+    if (!ms || ms <= 0) return '00:00:00';
+    var s = Math.floor(ms / 1000);
+    return _fmtSec(s);
+  }
+  function _fmtSec(sec) {
+    if (sec == null || isNaN(sec) || sec < 0) return '00:00:00';
+    var s = Math.floor(sec);
+    var h = Math.floor(s / 3600);
+    var m = Math.floor((s % 3600) / 60);
+    var ss = s % 60;
+    function pad(n) { return n < 10 ? '0' + n : '' + n; }
+    return pad(h) + ':' + pad(m) + ':' + pad(ss);
+  }
+
+  function fineImportShow() {
+    // REQ-20260919-061 用户反馈：点「📥 引用参数」→ 弹出 modal 列出已保存模板。
+    // 每次打开都重新拉一次（模板可能已被其他任务/用户改动过）。
+    var overlay = document.getElementById('slirn-fine-import-overlay');
+    var list = document.getElementById('slirn-fine-import-list');
+    if (!overlay || !list) return;
+    overlay.hidden = false;
+    list.innerHTML = '<div class="slirn-fine-profile-empty">加载中…</div>';
+    fetch('/slirn/api/list_fine_global_profiles', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    })
+      .then(function(r) { return r.json(); })
+      .then(function(j) {
+        var profiles = (j && j.ok && j.profiles) ? j.profiles : [];
+        if (!profiles.length) {
+          list.innerHTML =
+            '<div class="slirn-fine-profile-empty">暂无模板 — 在顶部「模板名」输入框填名字，点「💾 保存设置参数」即可创建</div>';
+          return;
+        }
+        list.innerHTML = profiles.map(function(p) {
+          var ts = (p.saved_at || '').replace('T', ' ').slice(0, 16);
+          return (
+            '<div class="slirn-fine-import-row" data-profile-id="' + _fineEscapeHtml(p.id) + '">' +
+              '<div class="slirn-fine-import-info">' +
+                '<span class="slirn-fine-import-name">' + _fineEscapeHtml(p.name) + '</span>' +
+                '<span class="slirn-fine-import-time">' + _fineEscapeHtml(ts) + '</span>' +
+              '</div>' +
+              '<div class="slirn-fine-import-ops">' +
+                '<button class="slirn-btn slirn-btn-xs slirn-btn-primary" ' +
+                  'data-action="fine-import-apply" data-profile-id="' + _fineEscapeHtml(p.id) + '">' +
+                  '📥 应用</button>' +
+                '<button class="slirn-btn slirn-btn-xs" ' +
+                  'data-action="fine-import-export" data-profile-id="' + _fineEscapeHtml(p.id) + '" ' +
+                  'title="下载该模板的参数为 JSON 文件（与精剪阶段「📤 导出参数」同口径）">' +
+                  '📤 导出</button>' +
+                '<button class="slirn-btn slirn-btn-xs" ' +
+                  'data-action="fine-import-rename" data-profile-id="' + _fineEscapeHtml(p.id) + '">' +
+                  '✏️ 改名</button>' +
+                '<button class="slirn-btn slirn-btn-xs slirn-btn-danger" ' +
+                  'data-action="fine-import-delete" data-profile-id="' + _fineEscapeHtml(p.id) + '">' +
+                  '🗑 删除</button>' +
+              '</div>' +
+            '</div>'
+          );
+        }).join('');
+      })
+      .catch(function(e) {
+        list.innerHTML =
+          '<div class="slirn-fine-profile-empty">❌ 加载失败: ' + _fineEscapeHtml(e.message) + '</div>';
+      });
+  }
+  function fineImportClose() {
+    var overlay = document.getElementById('slirn-fine-import-overlay');
+    if (overlay) overlay.hidden = true;
+  }
+  function fineProfileList() {
+    // 拉全局模板列表 → 渲染到 #slirn-fine-profile-list
+    fetch('/slirn/api/list_fine_global_profiles', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    })
+      .then(function(r) { return r.json(); })
+      .then(function(j) {
+        var box = document.getElementById('slirn-fine-profile-list');
+        if (!box) return;
+        var profiles = (j && j.ok && j.profiles) ? j.profiles : [];
+        if (!profiles.length) {
+          box.innerHTML = '<div class="slirn-fine-profile-empty">暂无模板 — 调好参数后在上面输入名保存</div>';
+          return;
+        }
+        box.innerHTML = profiles.map(function(p) {
+          var ts = (p.saved_at || '').replace('T', ' ').slice(0, 16);
+          return (
+            '<div class="slirn-fine-profile-row" data-profile-id="' + _fineEscapeHtml(p.id) + '">' +
+              '<div class="slirn-fine-profile-info">' +
+                '<span class="slirn-fine-profile-name">' + _fineEscapeHtml(p.name) + '</span>' +
+                '<span class="slirn-fine-profile-time">' + _fineEscapeHtml(ts) + '</span>' +
+              '</div>' +
+              '<div class="slirn-fine-profile-ops">' +
+                '<button class="slirn-btn slirn-btn-xs slirn-btn-primary" ' +
+                  'data-action="fine-profile-apply" data-profile-id="' + _fineEscapeHtml(p.id) + '">' +
+                  '📥 应用</button>' +
+                '<button class="slirn-btn slirn-btn-xs" ' +
+                  'data-action="fine-profile-rename" data-profile-id="' + _fineEscapeHtml(p.id) + '">' +
+                  '✏️ 改名</button>' +
+                '<button class="slirn-btn slirn-btn-xs" ' +
+                  'data-action="fine-profile-delete" data-profile-id="' + _fineEscapeHtml(p.id) + '">' +
+                  '🗑 删除</button>' +
+              '</div>' +
+            '</div>'
+          );
+        }).join('');
+      })
+      .catch(function(e) {
+        toast('❌ 加载模板列表失败: ' + e.message, 'error');
+      });
+  }
+  function fineProfileSave() {
+    var tid = _fineTid();
+    if (!tid) { toast('❌ 缺少 task_id', 'error'); return; }
+    var inp = document.getElementById('slirn-fine-profile-name');
+    var name = inp ? inp.value.trim() : '';
+    if (!name) { toast('❌ 请先填写模板名', 'error'); return; }
+    fetch('/slirn/api/save_fine_global_profile', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task_id: tid, name: name })
+    })
+      .then(function(r) { return r.json(); })
+      .then(function(j) {
+        if (j && j.ok) {
+          toast(j.toast || '✅ 已保存');
+          if (inp) inp.value = '';
+          fineProfileList();
+        } else {
+          toast('❌ ' + ((j && j.error) || '保存失败'), 'error');
+        }
+      })
+      .catch(function(e) {
+        toast('❌ 网络错误: ' + e.message, 'error');
+      });
+  }
+  function fineProfileApply(profileId, profileName) {
+    var tid = _fineTid();
+    if (!tid) { toast('❌ 缺少 task_id', 'error'); return; }
+    // 弹窗确认覆盖
+    slirnConfirm(
+      '📥 应用模板「' + profileName + '」',
+      '将覆盖当前任务的「位置/裁剪/字体/输出/音频」参数。\n素材文件（视频/封面/字幕/BGM）不受影响。\n\n确定继续？',
+      function() {
+        fetch('/slirn/api/apply_fine_global_profile', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ task_id: tid, profile_id: profileId })
+        })
+          .then(function(r) { return r.json(); })
+          .then(function(j) {
+            if (j && j.ok) {
+              toast(j.toast || '✅ 已应用模板');
+              // 替换 wb HTML → 所有控件（滑块/勾选/值显示）刷新
+              var inner = document.getElementById('slirn-tab-workbench-inner');
+              if (inner && j.html) {
+                // 用临时容器解析新 HTML
+                var tmp = document.createElement('div');
+                tmp.innerHTML = j.html;
+                var fresh = tmp.querySelector('#slirn-tab-workbench-inner');
+                if (fresh) inner.innerHTML = fresh.innerHTML;
+                // 重新绑 fine_cut 控件
+                if (typeof bindFineControls === 'function') bindFineControls();
+                if (typeof bindFineSteppers === 'function') bindFineSteppers();
+                // 引用参数 modal 应用后自动关闭（避免残留旧状态）
+                if (typeof fineImportClose === 'function') fineImportClose();
+              }
+            } else {
+              toast('❌ ' + ((j && j.error) || '应用失败'), 'error');
+            }
+          })
+          .catch(function(e) {
+            toast('❌ 网络错误: ' + e.message, 'error');
+          });
+      }
+    );
+  }
+  function fineProfileDelete(profileId) {
+    if (!window.confirm('确定删除该模板？\n（不影响已应用此模板的任务）')) return;
+    fetch('/slirn/api/delete_fine_global_profile', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile_id: profileId })
+    })
+      .then(function(r) { return r.json(); })
+      .then(function(j) {
+        if (j && j.ok) {
+          toast(j.toast || '🗑 已删除');
+          fineProfileList();
+        } else {
+          toast('❌ ' + ((j && j.error) || '删除失败'), 'error');
+        }
+      })
+      .catch(function(e) {
+        toast('❌ 网络错误: ' + e.message, 'error');
+      });
+  }
+  function fineProfileRename(profileId, currentName) {
+    var newName = window.prompt('新模板名（当前：「' + currentName + '」）', currentName);
+    if (!newName || !newName.trim()) return;
+    newName = newName.trim();
+    if (newName === currentName) return;
+    fetch('/slirn/api/rename_fine_global_profile', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile_id: profileId, name: newName })
+    })
+      .then(function(r) { return r.json(); })
+      .then(function(j) {
+        if (j && j.ok) {
+          toast(j.toast || '✏️ 已重命名');
+          fineProfileList();
+        } else {
+          toast('❌ ' + ((j && j.error) || '改名失败'), 'error');
+        }
+      })
+      .catch(function(e) {
+        toast('❌ 网络错误: ' + e.message, 'error');
+      });
+  }
+  // 最小化确认弹窗：复用 .slirn-modal-overlay 样式
+  function slirnConfirm(title, message, onOk) {
+    var existing = document.getElementById('slirn-confirm-overlay');
+    if (existing) existing.remove();
+    var overlay = document.createElement('div');
+    overlay.className = 'slirn-modal-overlay';
+    overlay.id = 'slirn-confirm-overlay';
+    overlay.innerHTML =
+      '<div class="slirn-modal-card">' +
+        '<div class="slirn-modal-title">' + _fineEscapeHtml(title) + '</div>' +
+        '<div class="slirn-modal-filename">' + _fineEscapeHtml(message).replace(/\n/g, '<br>') + '</div>' +
+        '<div style="display:flex; gap:10px; justify-content:center;">' +
+          '<button class="slirn-btn" id="slirn-confirm-cancel">❌ 取消</button>' +
+          '<button class="slirn-btn slirn-btn-primary" id="slirn-confirm-ok">✅ 确认覆盖</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+    function close() { overlay.remove(); }
+    document.getElementById('slirn-confirm-cancel').onclick = close;
+    document.getElementById('slirn-confirm-ok').onclick = function() {
+      close();
+      if (typeof onOk === 'function') onOk();
+    };
+    overlay.addEventListener('click', function(e) {
+      if (e.target === overlay) close();  // 点遮罩关闭
+    });
+  }
+
+  function fineSourceAuto(btn, kind) {
+    // REQ-20260919-061：把素材来源切到「自动获取上游产物」。
+    // 设计：两个按钮常驻（手动上传 / 自动获取），点哪个就用哪个，无需切换按钮组。
+    var inner = document.getElementById('slirn-tab-workbench-inner');
+    var tid = inner ? (inner.getAttribute('data-task-id') || '') : '';
+    if (!tid) { toast('❌ 缺少 task_id'); return; }
+    btn.disabled = true;
+    var oldText = btn.textContent;
+    btn.textContent = '📥 获取中...';
+    fetch('/slirn/api/auto_pick_upstream_material', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task_id: tid, kind: kind })
+    })
+      .then(function(r) { return r.json(); })
+      .then(function(j) {
+        btn.disabled = false; btn.textContent = oldText;
+        if (j.ok) {
+          if (typeof refreshWb === 'function') refreshWb();
+          else location.reload();
+          toast('✅ ' + (j.toast || '已自动从上游获取'));
+        } else {
+          toast('❌ ' + (j.error || '自动获取失败'));
+        }
+      }).catch(function(e) {
+        btn.disabled = false; btn.textContent = oldText;
+        toast('❌ 网络错误: ' + e.message);
+      });
+  }
+  // （移除 fineSourceManual：上传按钮始终可用，无需切换）
+  function fineCropPreset(btn, preset) {
+    // REQ-20260919-061 用户补充：crop_* 用设计空间 1920×1080 像素。
+    // 16:9 居中：在 1920×1080 设计空间裁出 1920×1080 矩形 = 全幅；这里改为裁
+    // 一个 1920×1080 矩形居中（即全幅），但保留 UI 让用户直观看到比例。
+    // 1:1 居中：从源视频居中裁一个 1080×1080 正方形（按设计空间最短边）。
+    var defaults = {
+      // 全幅：crop 矩形 = 整个 1920×1080（实际源视频全幅）
+      'full': { crop_x: 0,    crop_y: 0,    crop_w: 1920, crop_h: 1080 },
+      // 16:9 居中：矩形 = 整个 1920×1080（全幅本身就是 16:9，无需裁）
+      '16x9': { crop_x: 0,    crop_y: 0,    crop_w: 1920, crop_h: 1080 },
+      // 1:1 居中：边长 = 设计空间短边 1080，居中 → (540, 0, 1080, 1080)
+      '1x1':  { crop_x: 420,  crop_y: 0,    crop_w: 1080, crop_h: 1080 },
+    }[preset] || null;
+    if (!defaults) return;
+    ['crop_x', 'crop_y', 'crop_w', 'crop_h'].forEach(function(k) {
+      var slider = document.getElementById('slirn-fine-video-' + k);
+      if (slider) {
+        slider.value = defaults[k];
+      }
+    });
+    // 更新比例显示
+    var aspectEl = document.getElementById('slirn-fine-crop-aspect-val');
+    if (aspectEl && defaults.crop_w > 0) {
+      aspectEl.textContent = (defaults.crop_h / defaults.crop_w).toFixed(3);
+    }
+    // 触发保存
+    fineSaveAll();
+    toast('✅ 已应用「' + (preset === 'full' ? '全幅' : preset === '16x9' ? '16:9 居中' : '1:1 居中') + '」');
+  }
+
+  // REQ-20260919-062 v14 用户反馈：视频缩放 = 视频原裁剪宽度 / 背景图片宽度。
+  // 公式 scale = crop_w / 1920。点「🎯 按裁剪宽度」按钮应用此公式。
+  // 设计空间 bg_w = 1920；视频裁剪宽度 = crop_w（来自滑块）。
+  // 限制：scale ∈ [0.1, 2.0]（与滑块 max/min 对齐）。
+  function fineScaleAutoFromCrop() {
+    var cropWEl = document.getElementById('slirn-fine-video-crop_w');
+    var scaleEl = document.getElementById('slirn-fine-video-scale');
+    if (!cropWEl || !scaleEl) {
+      toast('❌ 找不到裁剪宽度 / 缩放滑块', 'error');
+      return;
+    }
+    var cropW = parseInt(cropWEl.value, 10);
+    if (!cropW || cropW <= 0) {
+      toast('❌ 视频裁剪宽度无效', 'error');
+      return;
+    }
+    // REQ-20260919-062 v15：保留 4 位小数（与自动重算路径一致）
+    var scale = Math.round((cropW / 1920) * 10000) / 10000;
+    // 限制到滑块范围 [0.1, 2.0]
+    var minS = parseFloat(scaleEl.min || '0.1');
+    var maxS = parseFloat(scaleEl.max || '2.0');
+    scale = Math.max(minS, Math.min(maxS, scale));
+    // 同步 slider + number input（用 _fineSyncSlider 一致化处理，保留 4 位）
+    _fineSyncSlider('slirn-fine-video-scale', scale);
+    // 触发保存 + 刷新视频信息行（updateVideoDisp 由滑块 change 事件触发）
+    fineSaveAll();
+    toast('✅ 已应用「按裁剪宽度」：scale = ' + scale.toFixed(4));
+  }
+  // ========== END REQ-20260919-061 前端函数 ==========
   function optFilterBtn(btn) {  // 只看有不明确字词的行 / 全部行
     var list = revVis('slirn-opt-list');
     if (!list) return;
@@ -1960,10 +3868,9 @@
     btn.textContent = only ? '📋 显示全部识别行'
       : (btn.getAttribute('data-all-text') || '🔍 只看有不明确字词的行');
   }
-  function optSave(btn) {
-    var tid = btn.getAttribute('data-task-id') || '';
+  function optCollectDecisions() {  // REQ-20260918-056：共用 decisions 收集（前端 DOM = 磁盘状态镜像）
     var list = revVis('slirn-opt-list');
-    if (!list) { toast('❌ 无优化结果列表', 'error'); return; }
+    if (!list) return [];
     var decisions = [];
     list.querySelectorAll('.slirn-opt-occ').forEach(function(w) {
       var inp = w.querySelector('input.slirn-opt-after');
@@ -1974,6 +3881,44 @@
         reviewed: w.getAttribute('data-reviewed') === '1'  // REQ-038：处理进度随保存落盘
       });
     });
+    return decisions;
+  }
+  // REQ-20260918-056：回车后自动保存 — 含并发锁（连续 Enter 合并到 pending）
+  var _optSaveInFlight = null;
+  var _optSavePending = null;
+  function optAutoSave(tid) {
+    if (!tid) return;
+    if (_optSaveInFlight) {
+      // 已有请求在跑 → 把当前快照记为"完成后立即再发一次"
+      _optSavePending = {tid: tid, decisions: optCollectDecisions()};
+      return;
+    }
+    var decisions = optCollectDecisions();
+    _optSaveInFlight = postJSON(SLIRN_API + '/save_optimize_subtitle',
+      {task_id: tid, decisions: decisions})
+      .then(function(r) {
+        if (r && r.ok) {
+          toast('✅ 已自动保存', 'success');
+        } else if (r && r.error) {
+          toast('❌ 自动保存失败：' + r.error, 'error');
+        }
+      })
+      .catch(function() {
+        toast('❌ 自动保存失败（网络错误）', 'error');
+      })
+      .then(function() {
+        _optSaveInFlight = null;
+        // 若期间有 pending → 立即再发一次（捕获最后一次的状态）
+        if (_optSavePending) {
+          var p = _optSavePending; _optSavePending = null;
+          optAutoSave(p.tid);
+        }
+      });
+  }
+  function optSave(btn) {
+    var tid = btn.getAttribute('data-task-id') || '';
+    var decisions = optCollectDecisions();
+    if (decisions.length === 0) { toast('❌ 无优化结果列表', 'error'); return; }
     postJSON(SLIRN_API + '/save_optimize_subtitle', {task_id: tid, decisions: decisions})
       .then(function(r) {
         if (r && r.ok) {
@@ -2009,13 +3954,53 @@
       v.src = SLIRN_API + '/video/' + encodeURIComponent(tid) + '?src=rough_compose';
       v.load();
     }
+    // REQ-20260918-054：首次绑定 timeupdate + seeked 跟高亮（幂等）
+    bindOptPlayerHighlight();
     var goO = function() {
       try { v.currentTime = (startMs || 0) / 1000; } catch (err) {}
+      // REQ-20260918-054：跳转后立即按 currentTime 重算（不等首个 timeupdate）
+      optPlayerHighlight(v);
       var p = v.play();
       if (p && p.catch) p.catch(function() {});
     };
     if (v.readyState >= 1) goO();
     else v.addEventListener('loadedmetadata', goO, {once: true});
+  }
+  // REQ-20260918-054：按 currentTime 重算当前播放行 + 应用 .active + 自动滚到视口
+  // 单行点击语义，没有 cut/rev 那样的连续跳播链；只做"高亮跟随"。
+  function optPlayerHighlight(v) {
+    var list = revVis('slirn-opt-list');
+    if (!v || !list) return;
+    var rows = Array.prototype.slice.call(
+      list.querySelectorAll('.slirn-opt-row[data-start-ms]'));
+    if (rows.length === 0) return;
+    var tms = (v.currentTime || 0) * 1000, hit = -1;
+    for (var i = 0; i < rows.length; i++) {
+      var s0 = parseInt(rows[i].getAttribute('data-start-ms'), 10) || 0;
+      var e0 = parseInt(rows[i].getAttribute('data-end-ms'), 10) || 0;
+      // 兜底：end_ms 缺失/≤start 时用下一行 start_ms 作为上界；
+      // 最后一行（无下一行）兜底为 Infinity — 让此行包到结尾，避免
+      // currentTime 越过末行 start_ms 时高亮丢失
+      var eEff = (e0 > s0) ? e0 :
+        (i + 1 < rows.length) ?
+          (parseInt(rows[i + 1].getAttribute('data-start-ms'), 10) || (s0 + 1)) :
+          Infinity;
+      if (tms >= s0 && tms < eEff) { hit = i; break; }
+      if (s0 > tms) break;
+    }
+    for (var j = 0; j < rows.length; j++) {
+      rows[j].classList.toggle('active', j === hit);
+    }
+    if (hit >= 0 && rows[hit] && rows[hit].scrollIntoView) {
+      try { rows[hit].scrollIntoView({block: 'nearest'}); } catch (err) {}
+    }
+  }
+  function bindOptPlayerHighlight() {  // 幂等：video 替换后由 v.dataset 标记防重复
+    var v = revVis('slirn-opt-player');
+    if (!v || v.dataset.optHLBound) return;
+    v.dataset.optHLBound = '1';
+    v.addEventListener('timeupdate', function() { optPlayerHighlight(v); });
+    v.addEventListener('seeked',    function() { optPlayerHighlight(v); });
   }
   function bindOptRows(tid) {  // 行点击定位播放（输入框/按钮自身不触发）
     var list = revVis('slirn-opt-list');
@@ -2026,6 +4011,103 @@
         playOptAt(tid, parseInt(row.getAttribute('data-start-ms'), 10) || 0);
       });
     });
+  }
+  // REQ-20260918-050：词频列表分页（每页 20 条 = 每行 2 条 × 10 行）
+  var OPT_WORDS_PAGE_SIZE = 20;
+  var optWordsCurrentPage = 1;
+  function setupOptWordsPagination() {  // 初始化分页（每次 wb 重渲染后调）
+    var box = document.getElementById('slirn-opt-words');
+    if (!box) return;
+    // 用 class 找 pager（不依赖位置：colEnhance 会把 box 包进 .slirn-col，
+    // 那时 box.nextElementSibling 就不是 pager；用 querySelector 永远拿得到）
+    var pager = document.querySelector('.slirn-opt-words-pager');
+    if (!pager) {
+      pager = document.createElement('div');
+      pager.className = 'slirn-opt-words-pager';
+      // 紧贴 box 后面插入（"行内 …删除线…" 提示之前）。即使 colEnhance 后续
+      // 把 box 包进 .slirn-col，pager 仍在 slirn-card 层级、紧跟在 col 之后，
+      // 视觉上仍是「词频列表正下方」，不会跑到字幕列表下方。
+      box.parentNode.insertBefore(pager, box.nextSibling);
+    }
+    optWordsCurrentPage = 1;  // 重置页码（wb 重渲后用户期望从头看）
+    paginateOptWords();
+    // REQ-20260918-057B：wb 重渲后 input 是新元素，重绑 input 事件
+    bindOptWordTextFilter();
+  }
+  // REQ-20260918-058：替换输入框溢出检测 — scrollWidth>clientWidth 时加 .wrapped
+  function optInputOverflowCheck(input) {
+    if (!input) return;
+    var occ = input.closest('.slirn-opt-occ');
+    if (!occ) return;
+    // 短文字 → 移除 wrapped（确保 wrap 后再变短能恢复横排）
+    // 长文字 → 添加 wrapped
+    // 容差 +2px（防浏览器子像素 rounding）
+    var overflow = (input.scrollWidth || 0) > (input.clientWidth || 0) + 2;
+    occ.classList.toggle('wrapped', overflow);
+  }
+  function optInputOverflowInit() {  // wb 重渲后调一次：检测 + 绑 input 事件
+    var list = document.getElementById('slirn-opt-list');
+    if (!list) return;
+    var inputs = list.querySelectorAll('.slirn-opt-occ input.slirn-opt-after');
+    inputs.forEach(function(inp) {
+      // 多重试：font 加载 + 容器布局完成前 scrollWidth/clientWidth 可能不准
+      requestAnimationFrame(function() { optInputOverflowCheck(inp); });
+      setTimeout(function() { optInputOverflowCheck(inp); }, 200);
+      setTimeout(function() { optInputOverflowCheck(inp); }, 800);
+      if (!inp.dataset.wrapBound) {
+        inp.dataset.wrapBound = '1';
+        var t = null;
+        inp.addEventListener('input', function() {
+          if (t) clearTimeout(t);
+          t = setTimeout(function() { optInputOverflowCheck(inp); }, 100);
+        });
+        // ResizeObserver：父容器/window resize 后重测（fallback）
+        if (window.ResizeObserver && !inp.dataset.roBound) {
+          inp.dataset.roBound = '1';
+          try {
+            var ro = new ResizeObserver(function() {
+              setTimeout(function() { optInputOverflowCheck(inp); }, 50);
+            });
+            ro.observe(inp);
+          } catch (e) { /* ignore */ }
+        }
+      }
+    });
+  }
+  function paginateOptWords() {
+    var box = document.getElementById('slirn-opt-words');
+    if (!box) return;
+    var pager = document.querySelector('.slirn-opt-words-pager');
+    var all = Array.prototype.slice.call(box.querySelectorAll('.slirn-opt-word'));
+    // 过滤当前「应该被分页的」词：optWordFilterBtn 用 display:none 隐藏未选中词。
+    // 注意不能用 slirn-opt-word-hidden 来过滤——分页自己也用它，否则翻页后会
+    // 把「分页隐藏的词」从计数里去掉，total 会越翻越少，最终 total <= 20 触
+    // 发「隐藏分页控件」分支、把分页器清空，再也翻不回去。
+    var visible = all.filter(function(el) {
+      return el.style.display !== 'none';
+    });
+    var total = visible.length;
+    var pages = Math.max(1, Math.ceil(total / OPT_WORDS_PAGE_SIZE));
+    if (optWordsCurrentPage > pages) optWordsCurrentPage = pages;
+
+    // 隐藏非当前页
+    visible.forEach(function(el, i) {
+      var pageIdx = Math.floor(i / OPT_WORDS_PAGE_SIZE);
+      el.classList.toggle('slirn-opt-word-hidden', pageIdx !== optWordsCurrentPage - 1);
+    });
+
+    // 更新分页控件（pager 用 class 找，colEnhance wrap 不影响）
+    if (!pager) return;
+    if (total <= OPT_WORDS_PAGE_SIZE) {
+      pager.style.display = 'none';
+      pager.innerHTML = '';
+      return;
+    }
+    pager.style.display = '';
+    pager.innerHTML =
+      '<button type="button" data-action="opt-page-prev"' + (optWordsCurrentPage <= 1 ? ' disabled' : '') + '>‹ 上一页</button>'
+      + '<span class="slirn-opt-page-info">第 ' + optWordsCurrentPage + ' / ' + pages + ' 页 · 共 ' + total + ' 个词</span>'
+      + '<button type="button" data-action="opt-page-next"' + (optWordsCurrentPage >= pages ? ' disabled' : '') + '>下一页 ›</button>';
   }
   // 保存切分决策：全量收集子段 mark + 组级 action（改判 split 附切分后内容）→ 落盘
   function cutSave(btn) {
@@ -2790,6 +4872,17 @@
     else if (act === 'split') { cutApplyDecision('split'); }
   });
 
+  // REQ-20260918-055：优化字幕·替换值输入框回车 → 标记完成（采纳 + reviewed）
+  // document 级委托 — wb 重渲染后元素替换不影响；严格过滤避免误吞其他 Enter
+  document.addEventListener('keydown', function(e) {
+    if (revKeysModalOpen()) return;  // 录制弹窗打开时让位
+    if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+    if (e.key !== 'Enter') return;
+    var ae = e.target;
+    if (!ae || !ae.classList || !ae.classList.contains('slirn-opt-after')) return;
+    optOccEnterConfirm(ae, e);
+  });
+
   function handleResp(resp, refreshCellId) {
     if (!resp) { toast('❌ 无响应', 'error'); return; }
     if (!resp.ok) { toast('❌ ' + (resp.error || '操作失败'), 'error'); return; }
@@ -2972,6 +5065,13 @@
     if (action === 'refresh-tasks') {
       postJSON(SLIRN_API + '/refresh_tasks', {}).then(function(r) { handleResp(r, 'slirn-tab-tasks'); });
     }
+    else if (action === 'refresh-wb') {
+      // REQ-20260918-053 延伸：wb 内「🔄 刷新」按钮 — 不刷整页，仅重渲 wb 面板
+      // 用户原话：「一刷新当前页面就回到首页，还得点列表，然后还得重新进来」
+      // 配套：URL #wb= 已写入，F5 / Cmd+R 也能留在同一任务页
+      var _tidR = target.getAttribute('data-task-id') || '';
+      if (_tidR) openWorkbench(_tidR);
+    }
     else if (action === 'view-task') {
       var tid = target.getAttribute('data-task-id') || '';
       postJSON(SLIRN_API + '/view_task', {task_id: tid}).then(function(r) {
@@ -3058,6 +5158,34 @@
         toast('🧮 已按当前去留状态重新统计');
       }
     }
+    else if (action === 'rev-spk-link') {
+      // 字幕修订阶段关联人员ID（REQ-20260919-068）：时间重叠 → 行徽章 + 统计条
+      revSpkLink(target);
+    }
+    else if (action === 'rev-spk-prev') {
+      revSpkNav(-1);
+    }
+    else if (action === 'rev-spk-next') {
+      revSpkNav(1);
+    }
+    else if (action === 'rev-spk-delete') {
+      revSpkDelete();
+    }
+    else if (action === 'rev-spk-chip') {
+      // 统计条 chip 点击 → 填入查找框
+      var revQEl = document.getElementById('slirn-rev-spk-q');
+      if (revQEl) { revQEl.value = target.getAttribute('data-spk') || ''; revQEl.focus(); }
+    }
+    else if (action === 'rev-spk-recount') {
+      // 重新统计：按当前 DOM 决策现算（未保存改判也计入）；未关联过 → 引导
+      var revSpkBarEl = document.getElementById('slirn-rev-spk-bar');
+      if (!revSpkBarEl || revSpkBarEl.dataset.linked !== '1') {
+        toast('先点「👤 关联人员ID」建立人员关联', 'error');
+      } else {
+        revSpkBarRender();
+        toast('🧮 已按当前决策状态重新统计');
+      }
+    }
     else if (action === 'rev-batch-apply') {
       revBatchApply();  // REQ-20260918-039：字幕修改批量改判
     }
@@ -3092,6 +5220,354 @@
     }
     else if (action === 'opt-word-filter') {
       optWordFilterBtn(target);  // REQ-038：词列表按 处理完成 状态过滤
+    }
+    else if (action === 'opt-word-text-clear') {
+      // REQ-20260918-057B：清空文字过滤
+      var _inp = document.getElementById('slirn-opt-word-text');
+      if (_inp) {
+        _inp.value = '';
+        optWordTextFilter();
+        _inp.focus();
+      }
+    }
+    else if (action === 'fine-upload') {
+      // REQ-20260919-061：上传精剪视频素材
+      fineUpload(target, target.getAttribute('data-kind') || '');
+    }
+    else if (action === 'fine-source-auto') {
+      // REQ-20260919-061：从上游自动获取（与手动上传按钮并行可用）
+      fineSourceAuto(target, target.getAttribute('data-kind') || '');
+    }
+    else if (action === 'fine-mat-preview') {
+      // REQ-20260919-063：每个素材的预览按钮（图片/视频/音频/SRT）
+      var _kind = target.getAttribute('data-kind') || '';
+      var _tid = target.getAttribute('data-task-id') || _fineTid();
+      if (typeof fineMaterialPreview === 'function') fineMaterialPreview(_tid, _kind);
+    }
+    else if (action === 'fine-crop-preset') {
+      // REQ-20260919-061：视频源裁剪预设（全幅/16:9/1:1）
+      fineCropPreset(target, target.getAttribute('data-preset') || '');
+    }
+    else if (action === 'fine-scale-auto') {
+      // REQ-20260919-062 v14：缩放 = crop_w / 1920（视频原裁剪宽度 / 背景图片宽度）
+      fineScaleAutoFromCrop();
+    }
+    else if (action === 'fine-save-all') {
+      // REQ-20260919-061 用户反馈：手动保存参数 + 模板（顶部操作栏）
+      // showToast=true（用户主动点） + asTemplate=true（若没填名会弹窗要求填）
+      if (typeof fineSaveAll === 'function') fineSaveAll(true, true);
+    }
+    else if (action === 'fine-import-show') {
+      // REQ-20260919-061 用户反馈：弹出引用参数 modal（从全局模板列表里选）
+      if (typeof fineImportShow === 'function') fineImportShow();
+    }
+    else if (action === 'fine-import-close') {
+      if (typeof fineImportClose === 'function') fineImportClose();
+    }
+    else if (action === 'fine-import-apply') {
+      var _impPid = target.getAttribute('data-profile-id') || '';
+      var _impRow = target.closest('.slirn-fine-import-row');
+      var _impName = _impRow ? (_impRow.querySelector('.slirn-fine-import-name') || {}).textContent || '' : '';
+      if (typeof fineProfileApply === 'function') fineProfileApply(_impPid, _impName);
+    }
+    else if (action === 'fine-import-delete') {
+      var _impDelPid = target.getAttribute('data-profile-id') || '';
+      if (typeof fineProfileDelete === 'function') fineProfileDelete(_impDelPid);
+      // 删除后刷新 modal 列表
+      if (typeof fineImportShow === 'function') fineImportShow();
+    }
+    else if (action === 'fine-import-rename') {
+      var _impRenPid = target.getAttribute('data-profile-id') || '';
+      var _impRenRow = target.closest('.slirn-fine-import-row');
+      var _impRenName = _impRenRow ? (_impRenRow.querySelector('.slirn-fine-import-name') || {}).textContent || '' : '';
+      if (typeof fineProfileRename === 'function') fineProfileRename(_impRenPid, _impRenName);
+      if (typeof fineImportShow === 'function') fineImportShow();
+    }
+    else if (action === 'fine-import-export') {
+      // REQ-20260919-070：导出单个全局模板参数为 JSON 文件。
+      // 与「📤 导出参数」（任务级）同口径：后端返 {filename, content, mime} →
+      // 前端 Blob + <a download> 触发下载。
+      var _expBtn = target;
+      var _expPid = _expBtn.getAttribute('data-profile-id') || '';
+      var _expOldText = _expBtn.textContent;
+      _expBtn.disabled = true;
+      _expBtn.textContent = '⏳ 导出中...';
+      fetch('/slirn/api/export_fine_global_profile', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({profile_id: _expPid})
+      })
+        .then(function(r) { return r.json(); })
+        .then(function(j) {
+          _expBtn.disabled = false;
+          _expBtn.textContent = _expOldText;
+          if (!j.ok) { toast('❌ ' + (j.error || '导出失败')); return; }
+          try {
+            var blob = new Blob([j.content], {type: j.mime || 'application/json'});
+            var url = URL.createObjectURL(blob);
+            var a = document.createElement('a');
+            a.href = url;
+            a.download = j.filename || ('fine_params_profile_' + _expPid + '.json');
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            toast('✅ 已导出模板参数 → ' + a.download);
+          } catch (e) {
+            toast('❌ 触发下载失败: ' + e.message);
+          }
+        })
+        .catch(function(e) {
+          _expBtn.disabled = false;
+          _expBtn.textContent = _expOldText;
+          toast('❌ 网络错误: ' + e.message);
+        });
+    }
+    else if (action === 'fine-export-params') {
+      // REQ-20260919-065：导出当前任务的精剪参数为 JSON 文件（不含素材二进制）
+      var _b = target;
+      var _tid = _b.getAttribute('data-task-id') || '';
+      var _oldText = _b.textContent;
+      _b.disabled = true;
+      _b.textContent = '⏳ 导出中...';
+      fetch('/slirn/api/export_fine_params', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({task_id: _tid})
+      })
+        .then(function(r) { return r.json(); })
+        .then(function(j) {
+          _b.disabled = false;
+          _b.textContent = _oldText;
+          if (!j.ok) {
+            toast('❌ ' + (j.error || '导出失败'));
+            return;
+          }
+          // 触发浏览器下载（Blob + <a download>）
+          try {
+            var blob = new Blob([j.content], {type: j.mime || 'application/json'});
+            var url = URL.createObjectURL(blob);
+            var a = document.createElement('a');
+            a.href = url;
+            a.download = j.filename || ('fine_params_' + _tid + '.json');
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            toast('✅ 参数已导出到 ' + a.download);
+          } catch (e) {
+            toast('❌ 触发下载失败: ' + e.message);
+          }
+        })
+        .catch(function(e) {
+          _b.disabled = false;
+          _b.textContent = _oldText;
+          toast('❌ 网络错误: ' + e.message);
+        });
+    }
+    else if (action === 'fine-import-params') {
+      // REQ-20260919-065：从 JSON 文件导入参数（覆盖当前参数；不动素材）
+      var _b = target;
+      var _tid = _b.getAttribute('data-task-id') || '';
+      var _oldText = _b.textContent;
+      _b.disabled = true;
+      _b.textContent = '⏳ 选择文件中...';
+      // 动态创建 input[type=file] 触发选择器
+      var input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.json,application/json';
+      input.style.display = 'none';
+      input.addEventListener('change', function(e) {
+        var file = e.target.files && e.target.files[0];
+        if (!file) {
+          _b.disabled = false;
+          _b.textContent = _oldText;
+          return;
+        }
+        // 64KB 上限（实际参数远低于此）
+        if (file.size > 64 * 1024) {
+          toast('❌ 文件过大（>' + (file.size / 1024).toFixed(1) + 'KB），拒绝导入');
+          _b.disabled = false;
+          _b.textContent = _oldText;
+          return;
+        }
+        var reader = new FileReader();
+        reader.onload = function(ev) {
+          _b.textContent = '⏳ 导入中...';
+          fetch('/slirn/api/import_fine_params', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({task_id: _tid, content: ev.target.result})
+          })
+            .then(function(r) { return r.json(); })
+            .then(function(j) {
+              _b.disabled = false;
+              _b.textContent = _oldText;
+              if (!j.ok) {
+                toast('❌ ' + (j.error || '导入失败'));
+                return;
+              }
+              var cnt = (j.applied_fields || []).length;
+              toast('✅ 已从导入文件应用参数（' + cnt + ' 个字段）');
+              // 刷新整个精剪面板，让滑块/输入框反映新参数
+              if (typeof renderWorkbench === 'function') {
+                renderWorkbench();
+              } else if (typeof wbRefresh === 'function') {
+                wbRefresh();
+              }
+            })
+            .catch(function(err) {
+              _b.disabled = false;
+              _b.textContent = _oldText;
+              toast('❌ 网络错误: ' + err.message);
+            });
+        };
+        reader.onerror = function() {
+          _b.disabled = false;
+          _b.textContent = _oldText;
+          toast('❌ 读取文件失败');
+        };
+        reader.readAsText(file, 'utf-8');
+      });
+      document.body.appendChild(input);
+      input.click();
+      document.body.removeChild(input);
+    }
+    else if (action === 'fine-ai-parse') {
+      // REQ-20260919-061：调多模态模型解析参考位置关系图（Phase C）
+      var _ai = target;
+      _ai.disabled = true;
+      var _aiText = _ai.textContent;
+      _ai.textContent = '🤖 解析中...';
+      var _tid = _ai.getAttribute('data-task-id') || '';
+      fetch('/slirn/api/parse_reference_layout', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({task_id: _tid})
+      })
+        .then(function(r) { return r.json(); })
+        .then(function(j) {
+          _ai.disabled = false;
+          _ai.textContent = _aiText;
+          if (j.ok && j.layout) {
+            // 同步填到滑块 + 复选框（x/y 是整数像素 → 不带小数；scale 浮点 → 2 位小数）
+            ['video', 'subtitle', 'cover', 'bg'].forEach(function(k) {
+              var v = j.layout[k];
+              if (!v) return;
+              ['x', 'y', 'scale'].forEach(function(axis) {
+                var slider = document.getElementById('slirn-fine-' + k + '-' + axis);
+                if (slider) {
+                  slider.value = String(v[axis]);
+                }
+              });
+              var ena = document.querySelector('.slirn-fine-enabled[data-key="' + k + '"]');
+              if (ena) ena.checked = !!v.enabled;
+            });
+            toast('✅ AI 已生成布局');
+          } else {
+            toast('❌ ' + (j.error || '解析失败'));
+          }
+        }).catch(function(e) {
+          _ai.disabled = false; _ai.textContent = _aiText;
+          toast('❌ 网络错误: ' + e.message);
+        });
+    }
+    else if (action === 'fine-preview' || action === 'fine-export') {
+      // REQ-20260919-061 Phase B：调 ffmpeg 渲染
+      var _b = target;
+      if (_b.disabled) return;
+      var _isPreview = (action === 'fine-preview');
+      var _tid = _b.getAttribute('data-task-id') || '';
+
+      // REQ-20260919-074：导出最终视频走异步后台任务（1-3 小时不再超时）
+      if (!_isPreview) {
+        var _oldText2 = _b.textContent;
+        _b.disabled = true;
+        _b.textContent = '💾 启动导出...';
+        fetch('/slirn/api/export_fine_video', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ task_id: _tid })
+        })
+          .then(function(r) { return r.json(); })
+          .then(function(j) {
+            _b.disabled = false; _b.textContent = _oldText2;
+            if (!j.ok) { toast('❌ ' + (j.error || '启动失败')); return; }
+            if (j.job_id && typeof openFineExportProgress === 'function') {
+              openFineExportProgress(_tid, j.job_id);
+            } else {
+              toast('✅ ' + (j.toast || '已启动'));
+            }
+          })
+          .catch(function(e) {
+            _b.disabled = false; _b.textContent = _oldText2;
+            toast('❌ 网络错误: ' + e.message);
+          });
+        return;
+      }
+
+      // 预览：同步路径（≤30 秒，原逻辑不变）
+      var _api = '/slirn/api/render_fine_preview';
+      var _oldText = _b.textContent;
+      _b.disabled = true;
+      var _payload = { task_id: _tid };
+      var _durEl = document.getElementById('slirn-fine-preview-duration');
+      var _dur = parseFloat(_durEl && _durEl.value);
+      if (!isNaN(_dur)) _payload.duration = _dur;
+      // REQ-20260919-066：预览开始时间改为 时:分:秒 三段输入（默认 00:00:00）。
+      var _hEl = document.getElementById('slirn-fine-preview-start-h');
+      var _mEl = document.getElementById('slirn-fine-preview-start-m');
+      var _sEl = document.getElementById('slirn-fine-preview-start-s');
+      var _h = parseInt(_hEl && _hEl.value, 10);
+      var _m = parseInt(_mEl && _mEl.value, 10);
+      var _s = parseInt(_sEl && _sEl.value, 10);
+      if (isNaN(_h) || _h < 0) _h = 0;
+      if (isNaN(_m) || _m < 0) _m = 0;
+      if (isNaN(_s) || _s < 0) _s = 0;
+      if (_m > 59) _m = 59;
+      if (_s > 59) _s = 59;
+      var _totalSec = _h * 3600 + _m * 60 + _s;
+      _payload.preview_start = _totalSec;
+      var _timeStr = (_h < 10 ? '0' + _h : _h) + ':' +
+                     (_m < 10 ? '0' + _m : _m) + ':' +
+                     (_s < 10 ? '0' + _s : _s);
+      var _durStr = isNaN(_dur) ? '10' : _dur;
+      _b.textContent = '🎬 渲染中（' + _timeStr + ' 起 ' + _durStr + ' 秒）...';
+      fetch(_api, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(_payload)
+      })
+        .then(function(r) { return r.json(); })
+        .then(function(j) {
+          _b.disabled = false; _b.textContent = _oldText;
+          if (j.ok) {
+            if (j.url && typeof openFinePreviewFloat === 'function') {
+              openFinePreviewFloat(j.url, '🎬 合成预览（前 ' + (j.preview_dur || '?') + ' 秒）');
+            }
+            var _empty = document.getElementById('slirn-fine-preview-empty');
+            if (_empty) _empty.style.display = 'none';
+            toast('✅ ' + (j.toast || '完成'));
+          } else {
+            toast('❌ ' + (j.error || '渲染失败'));
+          }
+        }).catch(function(e) {
+          _b.disabled = false; _b.textContent = _oldText;
+          toast('❌ 网络错误: ' + e.message);
+        });
+    }
+    else if (action === 'opt-page-prev' || action === 'opt-page-next') {
+      // REQ-20260918-050：词频列表翻页
+      if (action === 'opt-page-prev' && optWordsCurrentPage > 1) optWordsCurrentPage--;
+      else if (action === 'opt-page-next') {
+        var _box = document.getElementById('slirn-opt-words');
+        if (_box) {
+          // 计数不能用 hidden class（见 paginateOptWords 注释）— 仅算 filter 后的
+          var _vis = Array.prototype.slice.call(_box.querySelectorAll('.slirn-opt-word'))
+            .filter(function(el){ return el.style.display !== 'none'; });
+          var _pages = Math.max(1, Math.ceil(_vis.length / OPT_WORDS_PAGE_SIZE));
+          if (optWordsCurrentPage < _pages) optWordsCurrentPage++;
+        }
+      }
+      paginateOptWords();
     }
     else if (action === 'opt-filter') {
       optFilterBtn(target);
@@ -3202,16 +5678,18 @@
     else if (action === 'llm-add') {
       var gv = function(elId) { return ((document.getElementById(elId) || {}).value || '').trim(); };
       var protoSel = document.getElementById('slirn-llm-in-proto');
+      var visionChk = document.getElementById('slirn-llm-in-vision');
       var editing = LLM_EDIT_ID;  // 非空 = 当前是编辑模式 → 提交修改
       var payload = {
         id: gv('slirn-llm-in-id'), provider: gv('slirn-llm-in-provider'),
         base_url: gv('slirn-llm-in-url'), api_key_env: gv('slirn-llm-in-env'),
         protocol: protoSel ? protoSel.value : 'openai',
+        vision: !!(visionChk && visionChk.checked),
       };
       postJSON(SLIRN_API + '/llm_config/' + (editing ? 'update' : 'add'), editing
         ? {id: editing, new_id: payload.id, provider: payload.provider,
            base_url: payload.base_url, api_key_env: payload.api_key_env,
-           protocol: payload.protocol}
+           protocol: payload.protocol, vision: payload.vision}
         : payload).then(function(r) {
         if (r && r.ok) {
           toast(r.toast || (editing ? '已更新' : '已添加'));
@@ -3233,6 +5711,8 @@
       document.getElementById('slirn-llm-in-env').value = m.api_key_env || '';
       var protoSel2 = document.getElementById('slirn-llm-in-proto');
       if (protoSel2) protoSel2.value = (m.protocol === 'anthropic') ? 'anthropic' : 'openai';
+      var visionEditChk = document.getElementById('slirn-llm-in-vision');
+      if (visionEditChk) visionEditChk.checked = !!m.vision;
       var ft = document.getElementById('slirn-llm-form-title');
       if (ft) ft.textContent = '修改模型（' + editId + '）';
       var ab = document.getElementById('slirn-llm-add-btn');
@@ -3339,7 +5819,11 @@
       });
     }
     else if (action === 'open-workbench') {
-      openWorkbench(target.getAttribute('data-task-id') || '');
+      var tidW = target.getAttribute('data-task-id') || '';
+      // REQ-20260918-051：内容多的任务接口耗时长，先弹等待动画再去拉接口
+      var labelW = target.getAttribute('data-task-label') || tidW;
+      showWbLoader(tidW, labelW);
+      openWorkbench(tidW);
     }
     else if (action === 'wb-stage') {
       switchWbPane(target.getAttribute('data-pane') || '');
@@ -3554,4 +6038,25 @@
   });
 
   console.log('[slirn] router initialized (custom /slirn/api mode)');
+
+  // ===== REQ-20260918-053：URL #wb=<tid> 持久化 — F5 / Cmd+R 自动回到 wb =====
+  // 写入端：openWorkbench(tid) → history.replaceState('#wb=<tid>')
+  // 读取端：DOMContentLoaded → 解析 hash → 切到任务页 + openWorkbench(tid)
+  function _restoreWbFromHash() {
+    var hash = (location && location.hash) ? location.hash : '';
+    var m = hash.match(/^#wb=(.+)$/);
+    if (!m) return;
+    var tid = decodeURIComponent(m[1] || '').trim();
+    if (!tid) return;
+    // 切到 wb tab，再异步加载 wb 内容（顺序：tab 切换 → openWorkbench）
+    try { showTab('slirn-tab-workbench'); } catch (e) {}
+    // 等待 wb tab 显示后再渲染（避免 race）
+    setTimeout(function() { try { openWorkbench(tid); } catch (e) {} }, 0);
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', _restoreWbFromHash);
+  } else {
+    // DOM 已就绪，立即执行（router.js 通常在 </body> 之前同步加载）
+    try { _restoreWbFromHash(); } catch (e) {}
+  }
 })();

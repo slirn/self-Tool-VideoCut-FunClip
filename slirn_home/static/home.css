@@ -949,6 +949,16 @@ input[type="checkbox"]:focus-visible {
   max-width: 480px;
   text-align: center;
 }
+
+/* REQ-20260919-074：精剪导出异步进度模态框 */
+.slirn-fine-progress-card { min-width: 460px; text-align: left; }
+.slirn-fine-progress-body { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
+.slirn-fine-progress-row { display: flex; justify-content: space-between; align-items: center; font-size: 13px; padding: 4px 0; }
+.slirn-fine-progress-label { color: var(--text-muted, #64748b); }
+.slirn-fine-progress-val { color: var(--text-primary, #1e293b); font-weight: 600; font-variant-numeric: tabular-nums; }
+.slirn-fine-progress-bar { height: 8px; background: rgba(128,128,128,0.15); border-radius: 4px; overflow: hidden; margin: 4px 0 6px 0; }
+.slirn-fine-progress-fill { height: 100%; background: var(--accent-solid, #4f7cff); width: 0; transition: width 0.4s ease; }
+.slirn-fine-progress-actions { display: flex; gap: 10px; justify-content: center; margin-top: 18px; }
 .slirn-modal-title {
   font-size: 17px;
   font-weight: 600;

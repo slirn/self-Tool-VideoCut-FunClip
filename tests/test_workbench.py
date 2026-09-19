@@ -4883,6 +4883,138 @@ def test_import_fine_params_overwrites_fields_keeps_materials(tmp_path):
         f"materials.video.path 应保持不变，实际：{fc2['materials']}"
 
 
+# ---------- REQ-20260919-074：精剪·导出异步化 ----------
+def test_export_fine_video_returns_job_id_immediately(tmp_path):
+    """REQ-20260919-074：导出端点应立即返回 job_id，不阻塞（<2 秒）。
+
+    实际 1-3 小时视频如果走同步会被 ffmpeg timeout 截断；异步化后端点 <2 秒
+    返回 {job_id}，前端拿 job_id 后开始轮询。
+    """
+    import time as _t
+    from slirn_home.app import build_app
+    from fastapi.testclient import TestClient
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="async-export", original_video=video)
+    built = build_app(tmp_path)
+    client = TestClient(built.app)
+
+    t0 = _t.time()
+    resp = client.post("/slirn/api/export_fine_video", json={"task_id": t.task_id})
+    elapsed = _t.time() - t0
+    assert resp.status_code == 200, f"HTTP {resp.status_code}: {resp.text[:200]}"
+    body = resp.json()
+    assert body["ok"] is True, f"启动应成功：{body}"
+    assert "job_id" in body, f"应返回 job_id，实际：{body}"
+    assert elapsed < 2.0, f"导出端点应 <2 秒返回，实际 {elapsed:.2f}s"
+
+
+def test_render_status_reports_progress(tmp_path):
+    """REQ-20260919-074：GET /slirn/api/render_status 应返回实时进度。
+
+    启动 job → 立即轮询 → state 至少是 queued/running 之一；最终状态由后台线程
+    实际跑完决定（用 monkeypatch 拦截 ffmpeg 让它瞬间 done）。
+    """
+    from slirn_home.app import (
+        build_app, _JOB_REGISTRY, _JOB_LOCK, _RenderJob,
+    )
+    from fastapi.testclient import TestClient
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="render-status", original_video=video)
+    built = build_app(tmp_path)
+    client = TestClient(built.app)
+
+    # 直接注册一个 mock 的 done 状态 job，避免依赖 ffmpeg（部分 CI 环境无 ffmpeg）
+    job_id = "job_test_done_001"
+    job = _RenderJob(
+        job_id=job_id, task_id=t.task_id, state="done",
+        elapsed_sec=120.5, progress_pct=100.0,
+        progress_time_ms=3_600_000, total_duration_ms=3_600_000,
+        speed_x=1.2, eta_sec=0.0,
+        output_url=f"/slirn/api/video/{t.task_id}?src=fine_export&t=999",
+    )
+    with _JOB_LOCK:
+        _JOB_REGISTRY[job_id] = job
+
+    resp = client.get(f"/slirn/api/render_status?job_id={job_id}")
+    assert resp.status_code == 200, f"HTTP {resp.status_code}"
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["state"] == "done"
+    assert body["progress_pct"] == 100.0
+    assert body["progress_time_ms"] == 3_600_000
+    assert body["total_duration_ms"] == 3_600_000
+    assert body["elapsed_sec"] == 120.5
+    assert body["speed_x"] == 1.2
+    assert body["output_url"] == f"/slirn/api/video/{t.task_id}?src=fine_export&t=999"
+    # 清理
+    with _JOB_LOCK:
+        _JOB_REGISTRY.pop(job_id, None)
+
+
+def test_render_status_returns_err_for_unknown_job(tmp_path):
+    """REQ-20260919-074：未知 job_id 应返 _err（404 性质），不崩。"""
+    from slirn_home.app import build_app
+    from fastapi.testclient import TestClient
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="render-unknown", original_video=video)
+    built = build_app(tmp_path)
+    client = TestClient(built.app)
+
+    resp = client.get("/slirn/api/render_status?job_id=job_does_not_exist")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is False
+    assert "不存在" in body.get("error", "") or "过期" in body.get("error", "")
+
+
+def test_cancel_render_returns_err_for_unknown_job(tmp_path):
+    """REQ-20260919-074：未知 job_id 应返 _err。"""
+    from slirn_home.app import build_app
+    from fastapi.testclient import TestClient
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="cancel-unknown", original_video=video)
+    built = build_app(tmp_path)
+    client = TestClient(built.app)
+
+    resp = client.post("/slirn/api/cancel_render", json={"job_id": "job_ghost"})
+    body = resp.json()
+    assert body["ok"] is False
+    assert "不存在" in body.get("error", "")
+
+
+def test_router_fine_export_calls_async_endpoint_with_progress_modal():
+    """REQ-20260919-074：router.js 中 fine-export 应走异步路径 +
+    openFineExportProgress 弹出模态框。
+    """
+    from pathlib import Path as _P
+    src = (_P(__file__).resolve().parent.parent
+           / "slirn_home" / "static" / "router.js").read_text(encoding="utf-8")
+    # 1. action handler 应调 /slirn/api/export_fine_video 并取 job_id
+    assert "'/slirn/api/export_fine_video'" in src, \
+        "router.js 应调用 /slirn/api/export_fine_video"
+    # 2. 应有 openFineExportProgress 函数定义 + 调用
+    assert "function openFineExportProgress" in src, \
+        "router.js 应定义 openFineExportProgress 函数"
+    assert "openFineExportProgress(" in src, \
+        "router.js fine-export handler 应调 openFineExportProgress"
+    # 3. 进度模态框应包含关键元素
+    assert 'slirn-fine-progress-state' in src
+    assert 'slirn-fine-progress-fill' in src
+    assert 'slirn-fine-progress-time' in src
+    assert 'slirn-fine-progress-elapsed' in src
+    assert 'slirn-fine-progress-speed' in src
+    assert 'slirn-fine-progress-eta' in src
+    # 4. 应轮询 /render_status + 调 /cancel_render
+    assert "/slirn/api/render_status" in src
+    assert "/slirn/api/cancel_render" in src
+    # 5. 应有 setInterval 1.5s 轮询
+    assert "setInterval(_poll, 1500)" in src or "setInterval(_poll,1500)" in src
+
+
 def test_import_fine_params_rejects_bad_schema(tmp_path):
     """REQ-20260919-065：_schema 不兼容（不是 2/3）应返回 error，不修改 fc。"""
     from slirn_home.app import build_app, _get_fine_compose
