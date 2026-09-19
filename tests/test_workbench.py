@@ -5047,6 +5047,43 @@ def test_export_fine_video_returns_job_id_immediately(tmp_path):
     assert elapsed < 2.0, f"导出端点应 <2 秒返回，实际 {elapsed:.2f}s"
 
 
+def test_home_css_has_inline_export_styles():
+    """REQ-20260920-077：home.css 应有 .slirn-fine-export-status / -track / -bar 等
+    inline 进度样式；旧 REQ-074 的 .slirn-fine-progress-* modal 样式应被删除。
+    """
+    from pathlib import Path as _P
+    css_path = (_P(__file__).resolve().parent.parent
+                / "slirn_home" / "static" / "home.css")
+    css = css_path.read_text(encoding="utf-8")
+
+    # 1. 必须有新的 inline 状态元素容器样式
+    assert ".slirn-fine-export-status" in css, (
+        "REQ-077：home.css 应定义 .slirn-fine-export-status"
+    )
+    # 2. 必须有五态 data-state 配色（idle 不需显式，running/done/failed/cancelling）
+    for state in ("running", "done", "failed", "cancelling"):
+        assert f'.slirn-fine-export-status[data-state="{state}"]' in css, (
+            f"REQ-077：home.css 应有 data-state='{state}' 配色"
+        )
+    # 3. 必须有 cell 容器 + 迷你进度条
+    assert ".slirn-fine-export-cell" in css, (
+        "REQ-077：home.css 应有 .slirn-fine-export-cell 容器"
+    )
+    assert ".slirn-fine-export-track" in css, (
+        "REQ-077：home.css 应有 .slirn-fine-export-track 迷你进度条轨道"
+    )
+    assert ".slirn-fine-export-bar" in css, (
+        "REQ-077：home.css 应有 .slirn-fine-export-bar 进度填充"
+    )
+    # 4. 旧 REQ-074 的 modal 进度样式应被清理
+    assert ".slirn-fine-progress-card" not in css, (
+        "REQ-077：旧 modal 样式 .slirn-fine-progress-card 应被删除"
+    )
+    assert ".slirn-fine-progress-fill" not in css, (
+        "REQ-077：旧 modal 样式 .slirn-fine-progress-fill 应被删除"
+    )
+
+
 def test_render_fine_cut_zone_includes_inline_export_status(tmp_path):
     """REQ-20260920-077：_render_fine_cut_zone 应在导出按钮旁新增 inline 状态元素。
 

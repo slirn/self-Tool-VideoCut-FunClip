@@ -950,15 +950,7 @@ input[type="checkbox"]:focus-visible {
   text-align: center;
 }
 
-/* REQ-20260919-074：精剪导出异步进度模态框 */
-.slirn-fine-progress-card { min-width: 460px; text-align: left; }
-.slirn-fine-progress-body { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
-.slirn-fine-progress-row { display: flex; justify-content: space-between; align-items: center; font-size: 13px; padding: 4px 0; }
-.slirn-fine-progress-label { color: var(--text-muted, #64748b); }
-.slirn-fine-progress-val { color: var(--text-primary, #1e293b); font-weight: 600; font-variant-numeric: tabular-nums; }
-.slirn-fine-progress-bar { height: 8px; background: rgba(128,128,128,0.15); border-radius: 4px; overflow: hidden; margin: 4px 0 6px 0; }
-.slirn-fine-progress-fill { height: 100%; background: var(--accent-solid, #4f7cff); width: 0; transition: width 0.4s ease; }
-.slirn-fine-progress-actions { display: flex; gap: 10px; justify-content: center; margin-top: 18px; }
+/* REQ-20260919-074：精剪导出异步进度模态框 — REQ-20260920-077 已删除（被 inline 进度元素替代） */
 .slirn-modal-title {
   font-size: 17px;
   font-weight: 600;
@@ -3600,3 +3592,74 @@ input[type="checkbox"]:focus-visible {
 /* REQ-20260919-062 v10 用户反馈：去掉页面内的预览框（设计空间画布），不再渲染
    <video> / .slirn-fine-preview-stage；预览通过 .slirn-mat-preview-float 弹窗。
    保留 .slirn-fine-preview-empty 用于无文件时的占位提示（hidden）。*/
+
+/* REQ-20260920-077：导出最终视频 · inline 进度（替代 REQ-074 的 modal）
+   在「💾 导出最终视频」按钮右侧 inline 显示状态文字 + 迷你进度条，
+   不弹模态框；点击 status 元素本身触发取消/下载/查看错误。 */
+.slirn-fine-export-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.slirn-fine-export-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: var(--input-bg, #fff);
+  color: var(--text-muted, #94a3b8);
+  border: 1px solid var(--border, rgba(128,128,128,0.2));
+  font-variant-numeric: tabular-nums;
+  cursor: default;
+  user-select: none;
+  white-space: nowrap;
+  transition: color 0.2s, background 0.2s, border-color 0.2s;
+}
+.slirn-fine-export-status[hidden] { display: none; }
+.slirn-fine-export-status[data-state="running"] {
+  color: var(--accent, #3178c6);
+  border-color: var(--accent, #3178c6);
+  background: rgba(49, 120, 198, 0.08);
+  cursor: pointer;  /* 提示：点我可取消 */
+}
+.slirn-fine-export-status[data-state="done"] {
+  color: #2ea043;
+  border-color: #2ea043;
+  background: rgba(46, 160, 67, 0.08);
+  cursor: pointer;  /* 提示：点我可下载 */
+}
+.slirn-fine-export-status[data-state="failed"] {
+  color: #d1242f;
+  border-color: #d1242f;
+  background: rgba(209, 36, 47, 0.08);
+  cursor: pointer;  /* 提示：点我可看错误 */
+}
+.slirn-fine-export-status[data-state="cancelling"] {
+  color: var(--text-muted, #94a3b8);
+  border-color: var(--border, rgba(128,128,128,0.2));
+  cursor: wait;
+}
+.slirn-fine-export-status[data-state="running"]:hover,
+.slirn-fine-export-status[data-state="done"]:hover,
+.slirn-fine-export-status[data-state="failed"]:hover {
+  filter: brightness(1.05);
+}
+.slirn-fine-export-track {
+  width: 80px;
+  height: 6px;
+  background: rgba(99, 102, 241, 0.18);
+  border-radius: 999px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+.slirn-fine-export-bar {
+  height: 100%;
+  background: linear-gradient(90deg, #6366f1, #8b5cf6);
+  width: 0%;
+  transition: width 0.15s linear;
+}
+.slirn-fine-export-status[data-state="done"] .slirn-fine-export-bar { background: #2ea043; }
+.slirn-fine-export-status[data-state="failed"] .slirn-fine-export-bar { background: #d1242f; }
