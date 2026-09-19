@@ -3392,140 +3392,164 @@
     }
   }
 
-  // REQ-20260919-074：导出精剪视频 · 异步进度模态框
-  // 由 export_fine_video 端点启动后台线程后，前端调本函数开模态框 + 1.5s 轮询 render_status。
-  function openFineExportProgress(tid, jobId) {
-    // 已存在则复用（不叠加）
-    var modal = document.getElementById('slirn-fine-export-progress');
-    if (!modal) {
-      modal = document.createElement('div');
-      modal.id = 'slirn-fine-export-progress';
-      modal.className = 'slirn-modal-overlay';
-      modal.innerHTML = ''
-        + '<div class="slirn-modal-card slirn-fine-progress-card">'
-        +   '<div class="slirn-modal-title">🎬 导出精剪视频</div>'
-        +   '<div class="slirn-fine-progress-body">'
-        +     '<div class="slirn-fine-progress-row">'
-        +       '<span class="slirn-fine-progress-label">状态</span>'
-        +       '<span class="slirn-fine-progress-val" id="slirn-fine-progress-state">排队中...</span>'
-        +     '</div>'
-        +     '<div class="slirn-fine-progress-bar">'
-        +       '<div class="slirn-fine-progress-fill" id="slirn-fine-progress-fill"></div>'
-        +     '</div>'
-        +     '<div class="slirn-fine-progress-row">'
-        +       '<span class="slirn-fine-progress-label">已渲染</span>'
-        +       '<span class="slirn-fine-progress-val" id="slirn-fine-progress-time">— / —</span>'
-        +     '</div>'
-        +     '<div class="slirn-fine-progress-row">'
-        +       '<span class="slirn-fine-progress-label">已用时</span>'
-        +       '<span class="slirn-fine-progress-val" id="slirn-fine-progress-elapsed">00:00:00</span>'
-        +     '</div>'
-        +     '<div class="slirn-fine-progress-row">'
-        +       '<span class="slirn-fine-progress-label">编码速度</span>'
-        +       '<span class="slirn-fine-progress-val" id="slirn-fine-progress-speed">—</span>'
-        +     '</div>'
-        +     '<div class="slirn-fine-progress-row">'
-        +       '<span class="slirn-fine-progress-label">预计剩余</span>'
-        +       '<span class="slirn-fine-progress-val" id="slirn-fine-progress-eta">—</span>'
-        +     '</div>'
-        +   '</div>'
-        +   '<div class="slirn-fine-progress-actions">'
-        +     '<button class="slirn-btn" id="slirn-fine-export-cancel-btn">⏹ 取消渲染</button>'
-        +     '<button class="slirn-btn slirn-btn-primary" id="slirn-fine-export-close-btn" hidden>关闭</button>'
-        +   '</div>'
-        + '</div>';
-      document.body.appendChild(modal);
-      // 点遮罩关闭
-      modal.addEventListener('click', function(e) {
-        if (e.target === modal && document.getElementById('slirn-fine-export-cancel-btn').hidden) {
-          modal.hidden = true;
-        }
-      });
-    } else {
-      // 重置 UI 字段
-      document.getElementById('slirn-fine-progress-state').textContent = '排队中...';
-      document.getElementById('slirn-fine-progress-fill').style.width = '0%';
-      document.getElementById('slirn-fine-progress-time').textContent = '— / —';
-      document.getElementById('slirn-fine-progress-elapsed').textContent = '00:00:00';
-      document.getElementById('slirn-fine-progress-speed').textContent = '—';
-      document.getElementById('slirn-fine-progress-eta').textContent = '—';
-    }
-    modal.hidden = false;
+  // REQ-20260920-077：导出精剪视频 · inline 进度状态机（替代 REQ-074 的模态框）
+  // 由 export_fine_video 端点启动后台线程后，前端调 startFineExportInline：
+  //   1. 把按钮变为「⏳ 导出中…」disabled
+  //   2. 按钮右侧 #slirn-fine-export-status 显示状态文字 + 迷你进度条
+  //   3. 1.5s 轮询 /slirn/api/render_status 更新进度
+  //   4. 点击 status 元素本身 → 取消/下载/查看错误（三态对称交互）
+  // 不弹任何模态框，不影响用户操作其他工作。
+  function startFineExportInline(tid, jobId, btnEl) {
+    var statusEl = document.getElementById('slirn-fine-export-status');
+    if (!statusEl) return;
+    if (!btnEl) btnEl = document.getElementById('slirn-fine-export-btn');
+
+    setExportBtnState(btnEl, 'running');
+    setExportInlineState(statusEl, 'running', 0, 0, 0, 0);
 
     var _stateLabel = { queued: '排队中', running: '渲染中', done: '已完成', failed: '失败', cancelled: '已取消' };
-    var _cancelBtn = document.getElementById('slirn-fine-export-cancel-btn');
-    var _closeBtn = document.getElementById('slirn-fine-export-close-btn');
-    _cancelBtn.hidden = false;
-    _closeBtn.hidden = true;
-    _closeBtn.textContent = '关闭';
+    var _timer = null;
 
     var _poll = function() {
       fetch('/slirn/api/render_status?job_id=' + encodeURIComponent(jobId))
         .then(function(r) { return r.json(); })
         .then(function(s) {
           if (!s.ok) {
+            setExportInlineState(statusEl, 'failed', 0, 0, 0, 0);
+            clearInterval(_timer); _timer = null;
+            setExportBtnState(btnEl, 'failed');
             toast('❌ ' + (s.error || '查询失败'));
             return;
           }
           var st = s.state;
-          document.getElementById('slirn-fine-progress-state').textContent =
-            _stateLabel[st] || st;
-          document.getElementById('slirn-fine-progress-fill').style.width = s.progress_pct + '%';
-          document.getElementById('slirn-fine-progress-time').textContent =
-            _fmtMs(s.progress_time_ms) + ' / ' + _fmtMs(s.total_duration_ms) +
-            ' (' + s.progress_pct.toFixed(1) + '%)';
-          document.getElementById('slirn-fine-progress-elapsed').textContent =
-            _fmtSec(s.elapsed_sec);
-          document.getElementById('slirn-fine-progress-speed').textContent =
-            s.speed_x > 0 ? s.speed_x.toFixed(2) + '×' : '—';
-          document.getElementById('slirn-fine-progress-eta').textContent =
-            s.eta_sec != null && s.eta_sec >= 0 ? '约 ' + _fmtSec(s.eta_sec) : '—';
+          // 映射后端 state 到 inline 状态元素
+          var _map = { running: 'running', done: 'done', failed: 'failed', cancelled: 'idle', queued: 'running' };
+          setExportInlineState(
+            statusEl,
+            _map[st] || 'running',
+            s.progress_pct, s.elapsed_sec, s.eta_sec, s.speed_x,
+            _stateLabel[st] || st
+          );
 
           if (st === 'done') {
-            clearInterval(_timer);
-            _cancelBtn.hidden = true;
-            _closeBtn.hidden = false;
-            _closeBtn.textContent = '⬇️ 下载 + 关闭';
-            _closeBtn.onclick = function() {
-              if (s.output_url) window.open(s.output_url, '_blank');
-              modal.hidden = true;
-            };
+            clearInterval(_timer); _timer = null;
+            setExportBtnState(btnEl, 'done', s.output_url);
+            statusEl.setAttribute('data-output-url', s.output_url || '');
             toast('✅ 导出完成');
           } else if (st === 'failed') {
-            clearInterval(_timer);
-            _cancelBtn.hidden = true;
-            _closeBtn.hidden = false;
-            _closeBtn.onclick = function() { modal.hidden = true; };
-            toast('❌ 渲染失败: ' + (s.error || '未知'));
+            clearInterval(_timer); _timer = null;
+            setExportBtnState(btnEl, 'failed', null, s.error);
+            statusEl.setAttribute('data-error', s.error || '未知错误');
           } else if (st === 'cancelled') {
-            clearInterval(_timer);
-            _cancelBtn.hidden = true;
-            _closeBtn.hidden = false;
-            _closeBtn.onclick = function() { modal.hidden = true; };
+            clearInterval(_timer); _timer = null;
+            setExportBtnState(btnEl, 'idle');
           }
         })
         .catch(function(e) {
-          // 网络错误不立即关 modal（可能是临时抖动），下一轮再试
+          // 网络抖动不立即报错，下一轮再试
           console.warn('[render_status]', e);
         });
     };
     _poll();
-    var _timer = setInterval(_poll, 1500);
+    _timer = setInterval(_poll, 1500);
 
-    _cancelBtn.onclick = function() {
-      if (!confirm('确认取消当前渲染？已生成的片段会被丢弃。')) return;
-      fetch('/slirn/api/cancel_render', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ job_id: jobId })
-      })
-        .then(function(r) { return r.json(); })
-        .then(function(j) {
-          if (!j.ok) toast('❌ ' + (j.error || '取消失败'));
-          else toast('⏹ 已发送取消信号');
+    // 点击 status 元素本身 → 取消（running）或下载（done）或查看错误（failed）
+    statusEl.onclick = function() {
+      var st = statusEl.getAttribute('data-state');
+      if (st === 'running' || st === 'cancelling') {
+        if (!confirm('确认取消当前渲染？已生成的片段会被丢弃。')) return;
+        setExportInlineState(statusEl, 'cancelling', null);
+        fetch('/slirn/api/cancel_render', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ job_id: jobId })
         })
-        .catch(function(e) { toast('❌ 网络错误: ' + e.message); });
+          .then(function(r) { return r.json(); })
+          .then(function(j) {
+            if (!j.ok) toast('❌ ' + (j.error || '取消失败'));
+            else toast('⏹ 已发送取消信号');
+          })
+          .catch(function(e) { toast('❌ 网络错误: ' + e.message); });
+      } else if (st === 'done') {
+        var url = statusEl.getAttribute('data-output-url');
+        if (url) window.open(url, '_blank');
+      } else if (st === 'failed') {
+        toast('❌ 渲染失败: ' + (statusEl.getAttribute('data-error') || '未知错误'));
+      }
     };
+
+    // 页面卸载时清理 interval（避免泄漏；job 后台继续跑，5min TTL 过期自动清理）
+    var _unload = function() { if (_timer) { clearInterval(_timer); _timer = null; } };
+    window.addEventListener('beforeunload', _unload);
+    window.addEventListener('pagehide', _unload);
   }
+
+  // REQ-20260920-077：更新 inline 状态元素的内容 + 进度条宽度。
+  // state: 'idle' | 'running' | 'done' | 'failed' | 'cancelling'
+  function setExportInlineState(el, state, pct, elapsed, eta, speed, label) {
+    el.setAttribute('data-state', state);
+    if (state === 'idle') {
+      el.hidden = true;
+      el.innerHTML = '';
+      return;
+    }
+    el.hidden = false;
+    var pctStr = (pct != null && !isNaN(pct)) ? pct.toFixed(1) + '%' : '';
+    var elapsedStr = (elapsed != null && !isNaN(elapsed)) ? _fmtSec(elapsed) : '';
+    var etaStr = (eta != null && eta >= 0) ? '剩 ≈ ' + _fmtSec(eta) : '';
+    var speedStr = (speed != null && speed > 0) ? '×' + speed.toFixed(2) : '';
+    if (state === 'done') {
+      el.innerHTML = '✅ 已完成 · 下载'
+        + (elapsedStr ? ' <span style="opacity:.65">· ' + elapsedStr + '</span>' : '');
+    } else if (state === 'failed') {
+      el.innerHTML = '❌ 失败 · 查看';
+    } else if (state === 'cancelling') {
+      el.innerHTML = '⏹ 取消中…';
+    } else {
+      // running
+      el.innerHTML = '⏳ ' + (label || '渲染中')
+        + ' <span class="slirn-fine-export-track">'
+        +   '<span class="slirn-fine-export-bar" style="width:' + pctStr + '"></span>'
+        + '</span> '
+        + pctStr
+        + (elapsedStr ? ' · 已用 ' + elapsedStr : '')
+        + (etaStr ? ' · ' + etaStr : '')
+        + (speedStr ? ' · ' + speedStr : '');
+    }
+  }
+
+  // REQ-20260920-077：更新按钮的文本 + disabled + 点击行为。
+  // state: 'idle' | 'running' | 'done' | 'failed' | 'cancelling'
+  function setExportBtnState(btn, state, outputUrl, error) {
+    if (!btn) return;
+    btn.removeAttribute('data-state');
+    if (state === 'idle') {
+      btn.disabled = false;
+      btn.textContent = '💾 导出最终视频';
+      btn.onclick = null;  // 复用原 action handler 委托
+      btn.removeAttribute('data-output-url');
+      btn.removeAttribute('data-error');
+    } else if (state === 'running' || state === 'cancelling') {
+      btn.disabled = true;
+      btn.textContent = state === 'cancelling' ? '⏹ 取消中…' : '⏳ 导出中…';
+      btn.onclick = null;
+    } else if (state === 'done') {
+      btn.disabled = false;
+      btn.textContent = '✅ 已导出 · 下载';
+      btn.setAttribute('data-output-url', outputUrl || '');
+      btn.onclick = function(e) {
+        e.stopPropagation();
+        e.preventDefault();
+        if (outputUrl) window.open(outputUrl, '_blank');
+        return false;
+      };
+    } else if (state === 'failed') {
+      btn.disabled = false;
+      btn.textContent = '❌ 失败 · 重试';
+      btn.setAttribute('data-error', error || '未知');
+      btn.onclick = null;  // 复用原 action handler 自动重试
+    }
+  }
+
   function _fmtMs(ms) {
     if (!ms || ms <= 0) return '00:00:00';
     var s = Math.floor(ms / 1000);
@@ -5492,8 +5516,9 @@
           .then(function(j) {
             _b.disabled = false; _b.textContent = _oldText2;
             if (!j.ok) { toast('❌ ' + (j.error || '启动失败')); return; }
-            if (j.job_id && typeof openFineExportProgress === 'function') {
-              openFineExportProgress(_tid, j.job_id);
+            // REQ-20260920-077：改用 inline 状态元素（按钮旁），不弹模态框
+            if (j.job_id && typeof startFineExportInline === 'function') {
+              startFineExportInline(_tid, j.job_id, _b);
             } else {
               toast('✅ ' + (j.toast || '已启动'));
             }

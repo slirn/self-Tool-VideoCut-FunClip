@@ -5236,9 +5236,9 @@ def test_render_async_uses_line_buffered_stdout():
     )
 
 
-def test_router_fine_export_calls_async_endpoint_with_progress_modal():
-    """REQ-20260919-074：router.js 中 fine-export 应走异步路径 +
-    openFineExportProgress 弹出模态框。
+def test_router_fine_export_calls_async_endpoint_with_inline_progress():
+    """REQ-20260920-077：router.js 中 fine-export 应走异步路径 +
+    startFineExportInline 在按钮右侧 inline 显示状态（替代 REQ-074 的 modal）。
     """
     from pathlib import Path as _P
     src = (_P(__file__).resolve().parent.parent
@@ -5246,23 +5246,57 @@ def test_router_fine_export_calls_async_endpoint_with_progress_modal():
     # 1. action handler 应调 /slirn/api/export_fine_video 并取 job_id
     assert "'/slirn/api/export_fine_video'" in src, \
         "router.js 应调用 /slirn/api/export_fine_video"
-    # 2. 应有 openFineExportProgress 函数定义 + 调用
-    assert "function openFineExportProgress" in src, \
-        "router.js 应定义 openFineExportProgress 函数"
-    assert "openFineExportProgress(" in src, \
-        "router.js fine-export handler 应调 openFineExportProgress"
-    # 3. 进度模态框应包含关键元素
-    assert 'slirn-fine-progress-state' in src
-    assert 'slirn-fine-progress-fill' in src
-    assert 'slirn-fine-progress-time' in src
-    assert 'slirn-fine-progress-elapsed' in src
-    assert 'slirn-fine-progress-speed' in src
-    assert 'slirn-fine-progress-eta' in src
-    # 4. 应轮询 /render_status + 调 /cancel_render
+    # 2. 应有 startFineExportInline 函数定义 + 调用（替代 modal）
+    assert "function startFineExportInline" in src, \
+        "REQ-077：router.js 应定义 startFineExportInline 函数"
+    assert "startFineExportInline(" in src, \
+        "REQ-077：router.js fine-export handler 应调 startFineExportInline"
+    # 3. 旧 modal 函数应被删除
+    assert "function openFineExportProgress" not in src, \
+        "REQ-077：旧 modal 函数 openFineExportProgress 应被删除"
+    assert "slirn-fine-progress-state" not in src, \
+        "REQ-077：旧 modal 元素 ID slirn-fine-progress-state 应被删除"
+    assert "slirn-fine-progress-fill" not in src, \
+        "REQ-077：旧 modal 元素 ID slirn-fine-progress-fill 应被删除"
+    # 4. inline 状态元素应存在
+    assert "slirn-fine-export-status" in src, \
+        "REQ-077：inline 状态元素 #slirn-fine-export-status 应被引用"
+    assert "slirn-fine-export-track" in src, \
+        "REQ-077：迷你进度条轨道 .slirn-fine-export-track 应被引用"
+    assert "slirn-fine-export-bar" in src, \
+        "REQ-077：进度填充 .slirn-fine-export-bar 应被引用"
+    # 5. 应轮询 /render_status + 调 /cancel_render
     assert "/slirn/api/render_status" in src
     assert "/slirn/api/cancel_render" in src
-    # 5. 应有 setInterval 1.5s 轮询
+    # 6. 应有 setInterval 1.5s 轮询
     assert "setInterval(_poll, 1500)" in src or "setInterval(_poll,1500)" in src
+
+
+def test_inline_state_javascript_render_pattern():
+    """REQ-20260920-077：router.js 应有 setExportInlineState / setExportBtnState
+    两个状态机函数 + 完成态 window.open 下载 + 取消 confirm() 二次确认。
+    """
+    from pathlib import Path as _P
+    src = (_P(__file__).resolve().parent.parent
+           / "slirn_home" / "static" / "router.js").read_text(encoding="utf-8")
+    # 1. 两个状态机函数必须存在
+    assert "function setExportInlineState" in src, \
+        "REQ-077：应定义 setExportInlineState 函数"
+    assert "function setExportBtnState" in src, \
+        "REQ-077：应定义 setExportBtnState 函数"
+    # 2. 完成态必须能下载（window.open）
+    assert "window.open" in src, \
+        "REQ-077：完成态应能通过 window.open 触发下载"
+    # 3. 取消必须有 confirm() 二次确认
+    assert "confirm(" in src, \
+        "REQ-077：取消操作应有 confirm() 二次确认"
+    # 4. 五态文案都应在代码中出现
+    for state_text in ("导出中", "已导出", "失败 · 重试", "取消中", "已完成"):
+        assert state_text in src, \
+            f"REQ-077：按钮文案 '{state_text}' 应在 router.js 中出现"
+    # 5. 页面卸载清理 interval
+    assert "beforeunload" in src or "pagehide" in src, \
+        "REQ-077：应绑 beforeunload/pagehide 清理 interval（防泄漏）"
 
 
 def test_import_fine_params_rejects_bad_schema(tmp_path):
