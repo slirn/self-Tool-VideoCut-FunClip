@@ -5237,6 +5237,9 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             "font": fc.get("font") or {},
             "output": fc.get("output") or {},
             "audio": fc.get("audio") or {},
+            # REQ-20260920-076：把背景图检测结果也存进模板（与任务级 export 同口径），
+            # 旧模板（无 detected_region 字段）→ get() 返回 None，应用时不动目标任务的。
+            "detected_region": fc.get("detected_region"),
         }
         profile = _fine_profiles.save_profile(repo_root, name, params, task_id_origin=tid)
         return _ok(
@@ -5336,7 +5339,9 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             "font": params.get("font"),
             "output": params.get("output"),
             "audio": params.get("audio"),
-            "detected_region": None,  # 全局模板不存 detected_region
+            # REQ-20260920-076：与任务级 export_fine_params 口径一致；旧模板
+            # （无 detected_region 字段）→ params.get("detected_region") = None
+            "detected_region": params.get("detected_region"),
         }
         # 文件名：清理模板名里的非法字符 + 时间戳
         safe_name = re.sub(r'[\\/:*?"<>|\s]+', "_", prof.get("name") or "profile")[:30]

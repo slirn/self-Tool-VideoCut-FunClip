@@ -40,6 +40,14 @@ GLOBAL_PROFILES_REL = "tasks/_global_fine_profiles.json"
 # 模板载荷包含的 4 个子字段（其余 — 如 materials — 不进模板）
 PROFILE_PARAM_KEYS = ("layout", "font", "output", "audio")
 
+# REQ-20260920-076：保存到模板时额外携带的字段。
+# 与 PROFILE_PARAM_KEYS 的区别：
+# - PROFILE_PARAM_KEYS 是「应用模板时覆盖哪些字段」白名单（apply 时不动 detected_region
+#   因为它是任务背景图强相关的 4 角点坐标，跨任务复用没意义）。
+# - SAVE_PARAM_KEYS 是「保存到模板时保留哪些字段」白名单（detected_region 也存下来，
+#   这样导出 JSON 与任务级 export 同口径；旧版模板可能没有这个字段，导出时 .get() 返回 None）。
+SAVE_PARAM_KEYS = PROFILE_PARAM_KEYS + ("detected_region",)
+
 
 def _path(repo_root: Path | str) -> Path:
     return Path(repo_root) / GLOBAL_PROFILES_REL
@@ -96,8 +104,12 @@ def _unique_name(existing: Iterable[dict], base: str) -> str:
 
 
 def _sanitize_params(params: dict) -> dict:
-    """只保留 PROFILE_PARAM_KEYS 中的子字段，避免塞入 materials 等意外数据。"""
-    return {k: params.get(k) for k in PROFILE_PARAM_KEYS if k in params}
+    """只保留 SAVE_PARAM_KEYS 中的子字段，避免塞入 materials 等意外数据。
+
+    REQ-20260920-076：相比 PROFILE_PARAM_KEYS 多保留 detected_region（save 时存；
+    apply 时由 apply_fine_global_profile 的 PROFILE_PARAM_KEYS 白名单另作限制）。
+    """
+    return {k: params.get(k) for k in SAVE_PARAM_KEYS if k in params}
 
 
 def list_profiles(repo_root: Path | str) -> list[dict]:

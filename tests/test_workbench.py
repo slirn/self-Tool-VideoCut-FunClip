@@ -1166,6 +1166,139 @@ def test_export_fine_global_profile_sanitizes_filename(tmp_path: Path):
     assert not bad, f"文件名不应含 Windows 非法字符：{bad}（filename={body['filename']}）"
 
 
+def test_export_fine_global_profile_includes_detected_region(tmp_path: Path):
+    """REQ-20260920-076：模板级导出 JSON 应包含 detected_region（与任务级 export 同口径）。
+
+    验证：
+    - save_fine_global_profile 保存模板时带 detected_region
+    - export_fine_global_profile 导出时 detected_region 字段存在 + 等于保存的值
+    """
+    from slirn_home import fine_profiles as fp
+    from slirn_home.app import build_app
+    from fastapi.testclient import TestClient
+
+    fake_region = {
+        "x_min": 200, "y_min": 100, "x_max": 1500, "y_max": 900,
+        "algorithm": "pixel", "threshold": 240,
+        "white_pixels": 1234567,
+    }
+    prof = fp.save_profile(
+        tmp_path, "含背景模板",
+        {
+            "layout": {"video": {"x": 100}},
+            "font": {"size": 36},
+            "output": {"resolution": "1080p"},
+            "audio": {"enabled": False},
+            "detected_region": fake_region,
+        },
+        task_id_origin="task_origin_yyy",
+    )
+    built = build_app(tmp_path)
+    client = TestClient(built.app)
+    resp = client.post("/slirn/api/export_fine_global_profile",
+                       json={"profile_id": prof["id"]})
+    body = resp.json()
+    assert body["ok"] is True, f"导出应成功：{body}"
+    payload = json.loads(body["content"])
+    assert "detected_region" in payload, \
+        f"导出 JSON 必须含 detected_region 顶层字段；实际顶层字段：{list(payload.keys())}"
+    assert payload["detected_region"] == fake_region, \
+        f"detected_region 应等于保存值；实际：{payload['detected_region']}"
+    # 与任务级 export_fine_params 顶层字段集合一致（除 _source_* / _exported_at 元数据外）
+    task_top = {
+        "_schema", "_exported_at", "_source_task_id",
+        "materials", "layout", "font", "output", "audio", "detected_region",
+    }
+    prof_top = {
+        "_schema", "_exported_at", "_source_profile_id", "_source_profile_name", "_source_task_id",
+        "materials", "layout", "font", "output", "audio", "detected_region",
+    }
+    assert (set(payload.keys()) - prof_top) == set(), \
+        f"模板导出有未声明字段：{set(payload.keys()) - prof_top}"
+    # 两个 schema 共享的核心字段（不计元数据）应一致
+    shared_core = {"materials", "layout", "font", "output", "audio", "detected_region"}
+    assert shared_core.issubset(set(payload.keys())), \
+        f"模板导出缺少核心字段：{shared_core - set(payload.keys())}"
+
+
+def test_export_fine_global_profile_old_template_no_detected_region(tmp_path: Path):
+    """REQ-20260920-076 AC4：旧模板（无 detected_region 字段）→ 导出时为 None，不报错。
+
+    模拟 REQ-076 修复前保存的模板（params 里没有 detected_region 键）→ 重新导出
+    时 .get() 返回 None，导出 JSON 顶层仍有 detected_region 字段（值为 None）。
+    """
+    from slirn_home import fine_profiles as fp
+    from slirn_home.app import build_app
+    from fastapi.testclient import TestClient
+
+    # 直接调底层 save_profile（与 REQ-076 前代码一致 — params 里不含 detected_region）
+    prof = fp.save_profile(
+        tmp_path, "旧模板无背景",
+        {
+            "layout": {"video": {"x": 50}},
+            "font": {"size": 24},
+            "output": {"resolution": "720p"},
+            "audio": {"enabled": False},
+            # ← 没有 detected_region（模拟 REQ-076 修复前的旧模板）
+        },
+    )
+    # 二次确认：params 里确实没有 detected_region
+    assert "detected_region" not in prof["params"], \
+        "测试前置条件：旧模板的 params 不应含 detected_region"
+
+    built = build_app(tmp_path)
+    client = TestClient(built.app)
+    resp = client.post("/slirn/api/export_fine_global_profile",
+                       json={"profile_id": prof["id"]})
+    body = resp.json()
+    assert body["ok"] is True, f"旧模板导出不应报错：{body}"
+    payload = json.loads(body["content"])
+    assert "detected_region" in payload, \
+        f"导出 JSON 应包含 detected_region 顶层字段（值为 None）"
+    assert payload["detected_region"] is None, \
+        f"旧模板 detected_region 应为 None；实际：{payload['detected_region']}"
+
+
+def test_save_fine_global_profile_saves_detected_region(tmp_path: Path):
+    """REQ-20260920-076 AC1：save_fine_global_profile 应把 detected_region 写进模板。
+
+    验证：触发 save_fine_global_profile 后，模板的 params["detected_region"] 等于
+    fc.detected_region。修复前会被忽略；修复后应保留。
+    """
+    from tasklib import TaskManager
+    from slirn_home import fine_profiles as fp
+    from slirn_home.app import build_app
+    from fastapi.testclient import TestClient
+
+    fake_region = {
+        "x_min": 0, "y_min": 0, "x_max": 1920, "y_max": 1080,
+        "algorithm": "ai", "threshold": None,
+        "detected_color": [255, 255, 255],
+    }
+    # 建任务 + 写 fc.detected_region
+    video = tmp_path / "test.mp4"
+    video.write_bytes(b"fake-video")
+    mgr = TaskManager(tmp_path)
+    t = mgr.create(name="test-task", original_video=video)
+    from slirn_home.app import _get_fine_compose, _save_fine_compose
+    fc_doc = _get_fine_compose(mgr, t.task_id)
+    fc_doc["detected_region"] = fake_region
+    _save_fine_compose(mgr, t.task_id, fc_doc)
+
+    built = build_app(tmp_path)
+    client = TestClient(built.app)
+    resp = client.post("/slirn/api/save_fine_global_profile",
+                       json={"task_id": t.task_id, "name": "背景同步模板"})
+    body = resp.json()
+    assert body["ok"] is True, f"保存模板应成功：{body}"
+    # 验证：底层文件里 params 含 detected_region
+    prof_loaded = fp.get_profile(tmp_path, body["profile"]["id"])
+    assert prof_loaded is not None, "模板应能取回"
+    assert "detected_region" in prof_loaded["params"], \
+        f"模板 params 应含 detected_region；实际 keys：{list(prof_loaded['params'].keys())}"
+    assert prof_loaded["params"]["detected_region"] == fake_region
+
+
 def test_render_workbench_button_renamed_to_local(tmp_path: Path):
     """REQ-20260919-070：「引用参数」按钮文案改为「引用参数（本地）」。"""
     from slirn_home.app import _render_workbench
