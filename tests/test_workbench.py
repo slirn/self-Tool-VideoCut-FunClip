@@ -6198,3 +6198,228 @@ def test_fine_default_bgm_load_wired_to_panel_load(tmp_path):
     assert "REQ-20260920-082" in pipeline_js, (
         "pipeline.js 应有 REQ-20260920-082 注释说明本次修复"
     )
+
+
+# =====================================================================
+# REQ-20260920-084：精剪·导出进度时间显示 0 + 页面回显 + 执行日志显示
+# =====================================================================
+
+def test_render_status_returns_live_elapsed_when_running(tmp_path):
+    """REQ-20260920-084：render_status GET 时实时算 elapsed_sec。
+
+    BUG：旧版只在 ffmpeg out_time_ms= 行 + 0.5s 节流后才更新 job.elapsed_sec，
+    ffmpeg init 阶段（5-15 秒）一直显示 00:00:00。修复：GET 时基于
+    time.monotonic() - started_at 实时算，不依赖 ffmpeg 输出。
+    """
+    from slirn_home.app import (
+        build_app, _JOB_REGISTRY, _JOB_LOCK, _RenderJob,
+    )
+    from fastapi.testclient import TestClient
+    import time
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="live-elapsed", original_video=video)
+    built = build_app(tmp_path)
+    client = TestClient(built.app)
+
+    # 直接注册一个 running 状态 job，started_at 设为 100 秒前
+    job_id = "job_test_live_elapsed"
+    job = _RenderJob(
+        job_id=job_id, task_id=t.task_id, state="running",
+        started_at=time.monotonic() - 100.0,
+        wall_started_at=time.time() - 100.0,
+        elapsed_sec=0.0,  # BUG：旧版会返回 0
+    )
+    with _JOB_LOCK:
+        _JOB_REGISTRY[job_id] = job
+
+    resp = client.get(f"/slirn/api/render_status?job_id={job_id}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["state"] == "running"
+    # 关键断言：elapsed_sec 应约等于 100（不是 0）
+    elapsed = body["elapsed_sec"]
+    assert 95.0 <= elapsed <= 110.0, (
+        f"实时 elapsed_sec 应 ~100（实测 {elapsed}）；"
+        "若 ~0 则 GET 还在用旧逻辑（依赖 ffmpeg 输出）"
+    )
+
+
+def test_write_and_read_active_export_job_roundtrip(tmp_path):
+    """REQ-20260920-084：.export_job.json 落盘文件读 / 写 roundtrip。"""
+    from slirn_home.app import (
+        _write_active_export_job, _read_active_export_job, _delete_active_export_job,
+    )
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="export-job-disk", original_video=video)
+
+    # 写
+    _write_active_export_job(m, t.task_id, "job_test_disk_001", "running")
+
+    # 读
+    data = _read_active_export_job(m, t.task_id)
+    assert data is not None
+    assert data["job_id"] == "job_test_disk_001"
+    assert data["state"] == "running"
+    assert isinstance(data["started_at"], (int, float))
+
+    # 删
+    _delete_active_export_job(m, t.task_id)
+    assert _read_active_export_job(m, t.task_id) is None
+
+
+def test_active_export_for_task_returns_job_from_registry(tmp_path):
+    """REQ-20260920-084：active_export_for_task 端点命中内存注册表 → source=registry。"""
+    from slirn_home.app import (
+        build_app, _JOB_REGISTRY, _JOB_LOCK, _RenderJob,
+    )
+    from fastapi.testclient import TestClient
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="active-registry", original_video=video)
+    built = build_app(tmp_path)
+    client = TestClient(built.app)
+
+    # 清空 _JOB_REGISTRY 中其他 task 的 job，避免被命中（按 task_id 过滤）
+    tid = t.task_id
+    job_id = "job_test_active_unique_" + tid
+    with _JOB_LOCK:
+        # 清掉无关 job 后只插自己（确保按 task_id 过滤后能命中）
+        _JOB_REGISTRY.clear()
+    job = _RenderJob(
+        job_id=job_id, task_id=tid, state="running",
+        started_at=1.0, wall_started_at=2.0,
+    )
+    with _JOB_LOCK:
+        _JOB_REGISTRY[job_id] = job
+
+    resp = client.get(f"/slirn/api/active_export_for_task?task_id={tid}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["job"] is not None
+    assert body["job"]["job_id"] == job_id
+    assert body["job"]["state"] == "running"
+    assert body["job"]["source"] == "registry"
+    # 内存命中时不应有 warning
+    assert "warning" not in body["job"]
+
+
+def test_active_export_for_task_falls_back_to_disk(tmp_path):
+    """REQ-20260920-084：内存无 job + 落盘文件有 → 端点返回 source=disk + warning。"""
+    from slirn_home.app import (
+        build_app, _write_active_export_job, _JOB_REGISTRY, _JOB_LOCK,
+    )
+    from fastapi.testclient import TestClient
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="active-disk", original_video=video)
+    built = build_app(tmp_path)
+    client = TestClient(built.app)
+
+    # 清空整个内存注册表 + 清本 task 的磁盘文件（确保只命中磁盘）
+    with _JOB_LOCK:
+        _JOB_REGISTRY.clear()
+    from slirn_home.app import _delete_active_export_job
+    _delete_active_export_job(m, t.task_id)
+
+    # 写一个 disk 状态（模拟服务重启后但 ffmpeg 仍在）
+    _write_active_export_job(m, t.task_id, "job_old_unique_" + t.task_id, "running")
+
+    resp = client.get(f"/slirn/api/active_export_for_task?task_id={t.task_id}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["job"] is not None
+    assert body["job"]["source"] == "disk"
+    # 兜底必须带 warning（提示服务重启）
+    assert "warning" in body["job"]
+    assert "服务" in body["job"]["warning"] or "重启" in body["job"]["warning"]
+
+
+def test_active_export_for_task_returns_null_when_no_job(tmp_path):
+    """REQ-20260920-084：无 in-flight → 返回 job: null。"""
+    from slirn_home.app import (
+        build_app, _JOB_REGISTRY, _JOB_LOCK, _delete_active_export_job,
+    )
+    from fastapi.testclient import TestClient
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="active-none", original_video=video)
+    built = build_app(tmp_path)
+    client = TestClient(built.app)
+
+    # 清内存 + 清磁盘
+    with _JOB_LOCK:
+        _JOB_REGISTRY.clear()
+    _delete_active_export_job(m, t.task_id)
+
+    resp = client.get(f"/slirn/api/active_export_for_task?task_id={t.task_id}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["job"] is None
+
+
+def test_load_panel_calls_active_export_for_task(tmp_path):
+    """REQ-20260920-084：pipeline.js loadPanel 末尾必须挂 active_export_for_task 端点。
+
+    静态扫描验证，避免漏改前端导致页面刷新后进度条不恢复。
+    """
+    FUNCLIP_ROOT = Path(__file__).resolve().parent.parent
+    pipeline_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(
+        encoding="utf-8"
+    )
+    assert "active_export_for_task" in pipeline_js, (
+        "pipeline.js loadPanel 应调 /slirn/api/active_export_for_task（REQ-20260920-084）"
+    )
+    # 必须有 REQ 注释说明本次修复
+    assert "REQ-20260920-084" in pipeline_js, (
+        "pipeline.js 应有 REQ-20260920-084 注释"
+    )
+
+
+def test_router_load_logs_calls_list_logs_endpoint(tmp_path):
+    """REQ-20260920-084：router.js loadLogs() 必须改调 /slirn/api/list_logs（不是旧 execution_history_query）。"""
+    FUNCLIP_ROOT = Path(__file__).resolve().parent.parent
+    router_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "router.js").read_text(
+        encoding="utf-8"
+    )
+    # 必须有 list_logs 调用
+    assert "postJSON(SLIRN_API + '/list_logs'" in router_js or \
+           "'/list_logs'" in router_js, (
+        "router.js loadLogs 必须调 /slirn/api/list_logs（REQ-20260920-084 切换）"
+    )
+    # 不应再调旧的 execution_history_query（在 loadLogs 路径里）
+    # 找到 loadLogs 函数体
+    m_start = router_js.find("function loadLogs()")
+    m_end = router_js.find("function ", m_start + 10)
+    load_logs_body = router_js[m_start:m_end] if m_end > 0 else ""
+    assert "execution_history_query" not in load_logs_body, (
+        "router.js loadLogs 不应再调旧的 execution_history_query"
+    )
+
+
+def test_router_log_kind_labels_includes_all_10_kinds(tmp_path):
+    """REQ-20260920-084：LOG_KIND_LABELS 必须含全部 kind（含 fine_export 等 REQ-081 加的）。"""
+    FUNCLIP_ROOT = Path(__file__).resolve().parent.parent
+    router_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "router.js").read_text(
+        encoding="utf-8"
+    )
+    required_kinds = [
+        "subtitle_generation", "subtitle_review",
+        "rough_cut", "rough_cut_link_person",
+        "rough_compose", "rough_compose_delete",
+        "optimize",
+        "fine_ai_layout", "fine_bg_detect", "fine_preview", "fine_export",
+    ]
+    for k in required_kinds:
+        assert f"'{k}'" in router_js or f'"{k}"' in router_js or f"{k}:" in router_js, (
+            f"router.js LOG_KIND_LABELS 必须含 kind={k!r}（REQ-20260920-084）"
+        )
+    # 关键中文标签
+    assert "最终导出视频" in router_js, (
+        "router.js 应把 fine_export 映射为「最终导出视频」"
+    )
