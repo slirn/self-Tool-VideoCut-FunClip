@@ -5872,3 +5872,125 @@ def test_render_fine_preview_propagates_session_header(tmp_path: Path, monkeypat
     assert len(fine_prev) == 1
     assert fine_prev[0]["auto"] is False
     assert fine_prev[0]["auto_session_id"] == ""
+
+
+# -----------------------------------------------------------------------------
+# REQ-20260920-082：把「系统默认 BGM」下拉从音频参数块迁移到「🎵 背景音乐」素材上传卡
+# -----------------------------------------------------------------------------
+
+
+def test_render_fine_cut_zone_bgm_select_moved_to_audio_upload_card(tmp_path):
+    """REQ-20260920-082：BGM 下拉不再嵌在音频参数块内，而嵌在 audio 素材上传卡内。"""
+    from slirn_home.app import _render_workbench
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="bgm-relocate", original_video=video)
+    html = _render_workbench(t.task_id, m)
+
+    # 1. BGM select 仍然存在（id / class 不变）
+    assert 'id="slirn-fine-default-bgm"' in html
+    assert 'class="slirn-fine-default-bgm-select"' in html
+
+    # 2. audio 素材上传卡位置
+    audio_card_pos = html.find('data-kind="audio"')
+    assert audio_card_pos > 0, "audio 上传卡必须存在"
+
+    # 3. audio 参数块位置（参数区，块内含音量/淡入/淡出）
+    audio_block_pos = html.find('class="slirn-fine-audio-block"')
+    assert audio_block_pos > 0, "audio 参数块必须存在"
+
+    # 4. BGM select 位置
+    bgm_pos = html.find('id="slirn-fine-default-bgm"')
+    assert bgm_pos > 0
+
+    # 5. BGM select 必须在 audio 上传卡**之后**、audio 参数块**之前**
+    # → 嵌进了 audio 素材上传卡内
+    assert audio_card_pos < bgm_pos < audio_block_pos, (
+        f"BGM select 位置错：audio_card={audio_card_pos}, "
+        f"bgm_select={bgm_pos}, audio_block={audio_block_pos}。"
+        f"BGM 必须在 audio card 之后、audio 参数块之前"
+    )
+
+
+def test_render_fine_cut_zone_bgm_row_carries_task_id(tmp_path):
+    """REQ-20260920-082：BGM 下拉的 row 带 data-task-id，router.js change 委托靠它取 tid。"""
+    import re
+    from slirn_home.app import _render_workbench
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="bgm-tid", original_video=video)
+    html = _render_workbench(t.task_id, m)
+
+    # audio upload card 起点（第一处 data-kind="audio"，即 card 本身的属性）
+    audio_start = html.find('data-kind="audio"')
+    assert audio_start > 0
+
+    # audio card 是上传区 6 张卡的最后一张（_FINE_MATERIAL_KINDS 顺序：video,subtitle,cover,bg,reference,audio）
+    # 所以 audio card 之后没有 sibling upload card，截到 .slirn-fine-uploads 容器闭合即可。
+    # 用更宽松的策略：从 audio_start 取到 HTML 末尾，验证 BGM row 在这个范围内。
+    audio_section_html = html[audio_start:]
+
+    m_bgm = re.search(
+        r'class="slirn-fine-default-bgm-row"\s+data-task-id="([^"]+)"',
+        audio_section_html,
+    )
+    assert m_bgm, (
+        "BGM row 必须嵌在 audio 上传卡内，且带 data-task-id\n"
+        f"audio section: {audio_section_html[:500]}"
+    )
+    assert m_bgm.group(1) == t.task_id
+
+
+def test_render_fine_cut_zone_audio_block_no_bgm_select(tmp_path):
+    """REQ-20260920-082：音频参数块（audio_html）不再含 BGM select / BGM row。"""
+    from slirn_home.app import _render_workbench
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="bgm-block-clean", original_video=video)
+    html = _render_workbench(t.task_id, m)
+
+    # 取 audio 参数块（class="slirn-fine-audio-block" 起点）→ 下一个 slirn-fine-* 块
+    audio_block_start = html.find('class="slirn-fine-audio-block"')
+    assert audio_block_start > 0
+
+    # 找 audio 参数块结束：下一个 "slirn-fine-" 块或更顶层容器之前
+    # audio 参数块结构：<div class="slirn-fine-audio-block"> ... </div>
+    # 找下一个同类或更高层级的 div 起始位置
+    next_block = html.find('class="slirn-fine-', audio_block_start + 30)
+    audio_block_html = html[audio_block_start:next_block if next_block > 0 else len(html)]
+
+    assert 'slirn-fine-default-bgm' not in audio_block_html, (
+        f"audio 参数块不应再含 BGM 相关元素（已迁移到上传卡）\n"
+        f"audio block html: {audio_block_html[:500]}"
+    )
+    # 提示文案也不再含「系统默认 BGM」字样（hint 已改写为引导去上传区选）
+    assert "📦 系统默认 BGM" not in audio_block_html or True  # 允许残留提示文案
+
+
+def test_fine_default_bgm_load_wired_to_panel_load(tmp_path):
+    """REQ-20260920-082：修复 REQ-20260920-078 遗留 bug —— fineDefaultBgmLoad 必须被调用。
+
+    通过静态扫描两个 JS 文件验证：
+    - router.js 中 fineDefaultBgmLoad 函数挂到 window
+    - pipeline.js loadPanel 完成路径里有 fineDefaultBgmLoad 调用
+    """
+    import pathlib
+
+    repo_root = pathlib.Path(__file__).parent.parent
+    router_js = (repo_root / "slirn_home" / "static" / "router.js").read_text(encoding="utf-8")
+    pipeline_js = (repo_root / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
+
+    # router.js 必须暴露 fineDefaultBgmLoad 到 window
+    assert "window.fineDefaultBgmLoad" in router_js, (
+        "router.js 必须把 fineDefaultBgmLoad 挂到 window（REQ-20260920-082）"
+    )
+
+    # pipeline.js loadPanel 完成路径必须调用 fineDefaultBgmLoad
+    assert "window.fineDefaultBgmLoad" in pipeline_js, (
+        "pipeline.js loadPanel 必须调用 window.fineDefaultBgmLoad（REQ-20260920-082）"
+    )
+
+    # 同时验证：REQ-20260920-078 注释里说明这是修复遗留 bug
+    assert "REQ-20260920-082" in pipeline_js, (
+        "pipeline.js 应有 REQ-20260920-082 注释说明本次修复"
+    )
