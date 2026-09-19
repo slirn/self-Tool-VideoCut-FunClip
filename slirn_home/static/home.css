@@ -1662,7 +1662,7 @@ input[type="checkbox"]:focus-visible {
   display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
   color: var(--text-secondary);
 }
-.slirn-cut-spk-find input {
+.slirn-cut-spk-find input:not([type="checkbox"]) {
   width: 72px; padding: 2px 8px; border-radius: 6px;
   border: 1px solid var(--border); font-size: 12px;
 }
@@ -1704,7 +1704,7 @@ input[type="checkbox"]:focus-visible {
   display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
   color: var(--text-secondary);
 }
-.slirn-rev-spk-find input {
+.slirn-rev-spk-find input:not([type="checkbox"]) {
   width: 72px; padding: 2px 8px; border-radius: 6px;
   border: 1px solid var(--border); font-size: 12px;
 }
@@ -2375,6 +2375,42 @@ input[type="checkbox"]:focus-visible {
 }
 .slirn-col.off > :not(.slirn-col-head) { display: none; }
 .slirn-col.off .slirn-col-chev { transform: rotate(-90deg); }
+
+/* REQ-20260919-072：精剪视频面板的「上传素材」+「背景图区域检测」可折叠块（默认折叠） */
+.slirn-fine-section { margin: 10px 0; }
+.slirn-fine-section > summary.slirn-fine-section-summary {
+  display: flex; align-items: center; gap: 8px;
+  padding: 10px 14px; cursor: pointer; list-style: none;
+  font-weight: 600; user-select: none;
+  border-radius: 6px;
+  background: rgba(128,128,128,0.04);
+  border: 1px solid var(--border, rgba(128,128,128,0.18));
+  font-size: 13.5px;
+  color: var(--text-primary);
+  transition: background-color 0.12s;
+}
+.slirn-fine-section > summary.slirn-fine-section-summary:hover {
+  background: rgba(128,128,128,0.09);
+}
+.slirn-fine-section > summary.slirn-fine-section-summary::-webkit-details-marker { display: none; }
+.slirn-fine-section > summary.slirn-fine-section-summary::before {
+  content: '▸'; font-size: 11px; color: var(--text-muted);
+  transition: transform 0.15s; display: inline-block; width: 12px;
+}
+.slirn-fine-section[open] > summary.slirn-fine-section-summary::before { transform: rotate(90deg); }
+.slirn-fine-section-status {
+  font-size: 11.5px; font-weight: 400;
+  color: var(--text-muted); margin-left: auto;
+}
+/* 上传区 summary 左边色条 */
+#slirn-fine-uploads-details > summary.slirn-fine-section-summary {
+  border-left: 3px solid #3178c6;
+}
+#slirn-fine-bg-detect-details > summary.slirn-fine-section-summary {
+  border-left: 3px solid #f59e0b;
+}
+/* 展开时给 body 加个浅背景区分 */
+.slirn-fine-section[open] > summary.slirn-fine-section-summary { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
 
 /* REQ-20260919-062：背景图白色区域检测面板 — 独立块，只读结果 + 一键填充 */
 .slirn-fine-bg-detect-block {

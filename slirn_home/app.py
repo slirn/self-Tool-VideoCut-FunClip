@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import html
+import json
+import re
 import logging
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import gradio as gr
+from fastapi import Body, File, Form as _Form, UploadFile  # REQ-061：精剪视频上传用
 
 log = logging.getLogger(__name__)
 
@@ -187,7 +192,7 @@ def _render_task_list(mgr: TaskManager) -> str:
             <div class="slirn-task-actions">
                 <button class="slirn-btn slirn-btn-sm" data-action="view-task" data-task-id="{_esc(s.task_id)}">📄 详情</button>
                 <button class="slirn-btn slirn-btn-sm" data-action="edit-task" data-task-id="{_esc(s.task_id)}">✏️ 编辑</button>
-                <button class="slirn-btn slirn-btn-sm slirn-btn-primary" data-action="open-workbench" data-task-id="{_esc(s.task_id)}">✂️ 剪辑</button>
+                <button class="slirn-btn slirn-btn-sm slirn-btn-primary" data-action="open-workbench" data-task-id="{_esc(s.task_id)}" data-task-label="{_esc(s.name)}">✂️ 剪辑</button>
                 <button class="slirn-btn slirn-btn-sm slirn-btn-danger" data-action="delete-task" data-task-id="{_esc(s.task_id)}" data-task-name="{_esc(s.name)}">🗑️ 删除</button>
             </div>
         </div>'''
@@ -432,6 +437,24 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
         elapsed = int((job.get("finished_at") or _t.time()) - job.get("started_at", _t.time()))
         running_html = f"⏳ {_esc(job.get('stage') or '处理中')} · 已耗时 {elapsed}s"
 
+    # REQ-20260919-068：字幕修订阶段关联人员 ID（与切分修剪同口径）。
+    # 关联状态落盘后，重进面板时现算（按当前 revision entries + subtitle spk），
+    # 保证统计口径永远最新；快照仅供人工检查。
+    rev_spk_link = None
+    rev_spk_rows: dict[str, int] = {}
+    if entries and sub_meta:
+        from slirn_home import rev_speaker
+        saved_link = rev_speaker.load_link(outputs_dir)
+        if saved_link is not None:
+            # 现算（不读快照的 rows/stats，但若字幕无 spk → 用 saved_link 提示）
+            fresh = rev_speaker.link_speakers(sub_meta, rev)
+            if fresh.get("available"):
+                rev_spk_link = fresh
+                rev_spk_rows = fresh.get("rows") or {}
+            else:
+                rev_spk_link = None  # 当前 subtitle 无 spk，不渲染统计条
+        # saved_link is None → 不渲染 spk_bar（按钮显示「👤 关联人员ID」）
+
     # ---- 状态 2：有字幕、无建议 → 说明 + 分析按钮 ----
     if not entries:
         from slirn_home import llm_config
@@ -499,13 +522,20 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
             final_kind = cat
         else:
             final_kind = ""
+        # REQ-20260919-068：行级人员编号（仅在已关联时显示）
+        _i_str = str(int(e["i"]))
+        _spk = rev_spk_rows.get(_i_str)
+        _spk_attr = f' data-spk="{int(_spk)}"' if _spk else ""
+        _spk_badge_html = f'👤{int(_spk)}' if _spk else ""
         rows += (
             f'<div class="slirn-rev-row{" open" if open_detail else ""}" data-task-id="{_esc(task_id)}"'
             f' data-start-ms="{int(e.get("start_ms", 0))}" data-end-ms="{int(e.get("end_ms", 0))}"'
             f' data-sugg="{_esc(cat)}" data-decision="{_esc(decision)}" data-final="{_esc(final_kind)}"'
+            f' data-i="{int(e["i"])}"{_spk_attr}'
             f' data-text="{_esc(e.get("text", ""))}">'
             f'<div class="slirn-rev-line">'
             f'<span class="slirn-sub-idx">{int(e["i"])}</span>'
+            f'<span class="slirn-rev-spk">{_spk_badge_html}</span>'
             f'<span class="slirn-sub-time">{_esc(e.get("start", ""))} → {_esc(e.get("end", ""))}</span>'
             f'<span class="slirn-sub-text"><span class="slirn-rev-badge {cat}">{cat_label}</span>'
             f'{_esc(e.get("text", ""))}</span>'
@@ -547,6 +577,34 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
         for k, v in revision_service.USER_DECISIONS.items()
     )
 
+    # REQ-20260919-068：字幕修订阶段关联人员 ID 后的统计条 + 按钮文案。
+    # 模式与切分修剪 cut_spk_bar 完全对齐（含 chips、查找、上/下一条、删除、重算）。
+    if rev_spk_link and rev_spk_link.get("available"):
+        chips = "".join(
+            f'<span class="slirn-rev-spk-chip" data-action="rev-spk-chip" data-spk="{s["spk"]}"'
+            f' title="点击填入查找框（统计仅计未删除决策行）">👤{s["spk"]} · <b>{s["count"]}</b> 条</span>'
+            for s in rev_spk_link["stats"]
+        )
+        rev_spk_bar = (
+            '<div id="slirn-rev-spk-bar" class="slirn-rev-spk-bar" data-linked="1">'
+            '<div class="slirn-rev-spk-title">👥 人员统计（仅计未删除决策行 · 关联已保存，重进任务自动显示）</div>'
+            f'<div class="slirn-rev-spk-chips">{chips}</div>'
+            '<div class="slirn-rev-spk-find">按人员ID查找：'
+            '<input id="slirn-rev-spk-q" type="number" min="1" step="1" placeholder="如 2">'
+            '<label class="slirn-rev-spk-skiplbl" title="勾选后「上一条/下一条」只在未删除决策行间跳转">'
+            '<input id="slirn-rev-spk-skipdel" type="checkbox" checked>跳过已删除</label>'
+            '<button class="slirn-btn slirn-btn-xs" data-action="rev-spk-prev">⬆️ 上一条</button>'
+            '<button class="slirn-btn slirn-btn-xs" data-action="rev-spk-next">⬇️ 下一条</button>'
+            '<button class="slirn-btn slirn-btn-xs" data-action="rev-spk-delete">❌ 删除该人员全部记录</button>'
+            '<button class="slirn-btn slirn-btn-xs" data-action="rev-spk-recount">🧮 重新统计</button>'
+            '<span class="slirn-rev-spk-hint">统计只计未删除决策行 — 删除非主讲人员后重算即可确认清零；'
+            '删除改判需「💾 保存修订决策」落盘</span></div></div>'
+        )
+        rev_spk_btn_label = "🔄 重新关联人员ID"
+    else:
+        rev_spk_bar = '<div id="slirn-rev-spk-bar" class="slirn-rev-spk-bar" style="display:none;"></div>'
+        rev_spk_btn_label = "👤 关联人员ID"
+
     return f'''<div class="slirn-card" style="margin-top:16px;">
         <div class="slirn-panel-header"><div class="slirn-panel-title">🎬 处理剪辑 · 第 2 步：字幕修订</div></div>
         <div class="slirn-sub-meta">{stats}</div>
@@ -587,6 +645,7 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
           <button type="button" class="slirn-btn slirn-btn-xs" data-action="rev-search-next">下一条 ⬇</button>
           <span class="slirn-batch-hint">按内容定位字幕（不区分大小写）；筛选生效时只在可见行中搜</span>
         </div>
+        {rev_spk_bar}
         <div id="slirn-rev-player-wrap" class="slirn-video-wrap slirn-sub-player-wrap" style="display:none;">
             <video id="slirn-rev-player" controls preload="metadata"></video>
         </div>
@@ -601,6 +660,7 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
             <button class="slirn-btn slirn-btn-primary" data-action="save-revision" data-task-id="{_esc(task_id)}">💾 保存修订决策</button>
             <button class="slirn-btn" data-action="play-rev-video" data-task-id="{_esc(task_id)}">▶️ 播放视频</button>
             <button class="slirn-btn" data-action="revise-subtitle" data-task-id="{_esc(task_id)}" data-has-revision="1">🔄 重新分析</button>
+            <button class="slirn-btn" data-action="rev-spk-link" data-task-id="{_esc(task_id)}" title="按时间段重叠把 subtitle 段级 spk 对齐到修订每行">{rev_spk_btn_label}</button>
         </div></div>'''
 
 
@@ -1164,6 +1224,12 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
         '<button class="slirn-btn slirn-btn-xs active" data-action="opt-word-filter" data-mode="all">全部</button>'
         '<button class="slirn-btn slirn-btn-xs" data-action="opt-word-filter" data-mode="todo">⬜ 未完成</button>'
         '<button class="slirn-btn slirn-btn-xs" data-action="opt-word-filter" data-mode="done">✅ 已完成</button>'
+        # REQ-20260918-057B：文字输入过滤（与状态过滤 AND 组合）
+        '<span class="slirn-opt-word-text-filter">'
+        '<input type="text" id="slirn-opt-word-text" placeholder="🔍 输入词文本过滤" autocomplete="off">'
+        '<button type="button" class="slirn-opt-word-text-clear" data-action="opt-word-text-clear" '
+        'title="清空过滤" style="display:none;">✕</button>'
+        '</span>'
         '</div>'
     ) if word_agg else ""
 
@@ -1195,7 +1261,10 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
         row_words = sorted({str(o["after"]) for o in occs if o.get("applied", True)})
         has_occ = " has-occ" if occs else ""
         occ_col = f'<div class="slirn-opt-col">{"".join(occ_chips)}</div>' if occ_chips else ''
-        return (f'<div class="slirn-opt-row{has_occ}" data-id="{_esc(rid)}" data-start-ms="{int(seg.get("start_ms", 0))}"'
+        # REQ-20260918-054：补 data-end-ms，前端 timeupdate 按 [start,end) 命中行
+        return (f'<div class="slirn-opt-row{has_occ}" data-id="{_esc(rid)}" '
+                f'data-start-ms="{int(seg.get("start_ms", 0))}" '
+                f'data-end-ms="{int(seg.get("end_ms", 0))}"'
                 f' data-words="{_esc(chr(10).join(row_words))}">'
                 f'<span class="slirn-sub-idx">{_esc(rid)}</span>'
                 f'<span class="slirn-fw-time">{_esc(str(seg.get("start") or ""))}</span>'
@@ -1436,6 +1505,1473 @@ def _wb_stage_states(t) -> list[str]:
     return states
 
 
+# REQ-20260919-061：精剪视频·四素材合成器 — 数据结构辅助函数
+_FINE_MATERIAL_KINDS = ("video", "subtitle", "cover", "bg", "reference", "audio")
+_FINE_MATERIAL_LABELS = {
+    "video":     ("🎬", "粗剪视频", "mp4/mov"),
+    "subtitle":  ("📝", "字幕文件", "srt"),
+    "cover":     ("🖼", "封面图片", "png/jpg"),
+    "bg":        ("🎨", "背景图片", "png/jpg"),
+    "reference": ("🤖", "参考位置关系图", "png/jpg（AI 解析用）"),
+    "audio":     ("🎵", "背景音乐", "mp3/wav/m4a"),
+}
+# 用户补充 · x/y 改为像素坐标（基于 1920×1080 设计空间）：
+# - 0.35 * 1920 ≈ 672；0.9 * 1080 = 972；0.7 * 1920 ≈ 1344；0.85 * 1080 = 918
+# - 设计空间保证：720p 输出时 ffmpeg 在末尾 scale，WYSIWYG 不变
+_FINE_DESIGN_W = 1920
+_FINE_DESIGN_H = 1080
+_FINE_LAYOUT_SCHEMA = 2  # _schema=2：x/y 是像素；旧 0-1 数据自动迁移
+# REQ-20260919-062 v19：颜色 picker 只接受完整 #RRGGBB（拒绝 #fff 简写和非 hex 字符串）
+_HEX_COLOR_OK = re.compile(r"^#[0-9A-Fa-f]{6}$")
+# REQ-20260919-061 扩展：cover 不再是「角标小图」，改为「片头全屏海报」；
+# 旧字段 x/y/scale 在迁移时被保留（数据不丢），新增 duration 字段控制展示秒数。
+_FINE_LAYOUT_DEFAULTS = {
+    # REQ-20260919-061 用户补充：视频不铺满画布，只占左侧 70%（右侧让背景图人员区透过）
+    # crop_* 是从源视频里再截一个矩形（归一化 0-1），与画布 x/y/scale 正交。
+    # 默认全幅（不裁剪）；点击「16:9 居中」预设切换到 16:9 居中矩形。
+    "video":    {"x": 0,    "y": 0,    "scale": 0.7,
+                 # crop_* 是从源视频里截一个矩形（设计空间 1920×1080 像素），
+                 # 渲染时按源视频实际尺寸等比换算到 iw/ih
+                 "crop_x": 0, "crop_y": 0, "crop_w": 1920, "crop_h": 1080,
+                 "enabled": True,
+                 # REQ-20260919-062 v5 用户反馈：把视频展示的区域限定在所检测区域之内。
+                 # viewport 是背景图白色区域检测的结果（设计空间像素），
+                 # 设置后 x/y/scale 在 save_fine_layout 时被自动夹紧到 viewport 内。
+                 # None / 缺失 = 不限定（视频可超出画布任意位置）。
+                 "viewport": None,
+                 # REQ-20260919-062 v18 用户反馈：「视频源裁剪里的锁定 16:9 比例」也要保存。
+                 # True = crop_w/crop_h 拖动时按 16:9 联动（防变形）；
+                 # False = 任意调整（1:1 等预设才能任意设 w=h）。
+                 # 默认 True，与前端默认勾选保持一致。
+                 "crop_aspect_lock": True},
+    "subtitle": {"x": 672,  "y": 972,  "scale": 1.0, "enabled": True},
+    "cover":    {"enabled": False, "duration": 2.0},
+    "bg":       {"x": 0,    "y": 0,    "scale": 1.0, "enabled": False},
+}
+_FINE_FONT_DEFAULTS = {
+    "size":         36,
+    "color":        "#FFFFFF",  # REQ-20260919-062：字幕文字本身颜色（libass PrimaryColour）
+    "stroke_width": 2,
+    "stroke_color": "#000000",
+    "bg_enabled":   False,
+    "bg_color":     "#000000",
+    "bg_opacity":   0.6,
+    "bg_radius":    4,
+    "bold":         True,
+    "align":        "center",
+    "family":       "STHeitiMedium",
+}
+# REQ-20260919-061 扩展：背景音乐 4 项（启用 + 音量 + 淡入/淡出）
+# volume 默认 0.4 — 不压过说话人语音
+_FINE_AUDIO_DEFAULTS = {
+    "enabled":  False,
+    "volume":   0.4,
+    "fade_in":  0.0,
+    "fade_out": 0.0,
+}
+_FINE_OUTPUT_DEFAULTS = {
+    "resolution":  "1080p",  # 720p / 1080p / source
+    "codec":       "h264",
+    "audio_codec": "aac",
+}
+# REQ-20260919-061 用户补充：video/subtitle 既可手动上传，也可默认从上游产物获取
+_FINE_AUTO_KINDS = frozenset({"video", "subtitle"})
+
+
+def _fine_upstream_path(task_id: str, kind: str, mgr) -> Path | None:
+    """返回上游产物绝对路径（None = 无上游或不支持 auto）。
+
+    - video → tasks/{tid}/outputs/rough_compose.mp4（粗剪合成阶段产物）
+    - subtitle → optimize_subtitle.json → 落盘到 tmp/optimized_subs.srt
+    """
+    if kind == "video":
+        from slirn_home.compose_service import rough_compose_path
+        p = rough_compose_path(mgr.tasks_dir / task_id / "outputs")
+        return p if p.exists() else None
+    if kind == "subtitle":
+        from slirn_home import optimize_service
+        outputs_dir = mgr.tasks_dir / task_id / "outputs"
+        data = optimize_service.load_optimize(outputs_dir)
+        if not data or not data.get("saved_at"):
+            return None
+        segments = data.get("segments") or []
+        srt_text = optimize_service.build_srt(segments)
+        tmp_dir = mgr.tasks_dir / task_id / "tmp"
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        out = tmp_dir / "optimized_subs.srt"
+        out.write_text(srt_text, encoding="utf-8")
+        return out
+    return None
+
+
+def _fine_upstream_label(task_id: str, kind: str, mgr) -> str:
+    """上游产物的可读文件名（用于 UI 显示）。"""
+    p = _fine_upstream_path(task_id, kind, mgr)
+    return p.name if p else ""
+
+
+def _resolve_mat_abs(mgr, task_id: str, materials: dict, kind: str) -> Path | None:
+    """把 materials[kind].path（相对路径）解析为绝对路径（用于 ffmpeg input）。
+
+    路径约定有两种历史来源：
+    - 自动获取（compose_service.rough_compose_path / optimize_service.build_srt）：
+      写的是 `mgr.tasks_dir.relative_to(mgr.repo_root)` → 不含 `tasks/` 前缀
+      例：`20260918-022\\outputs\\rough_compose.mp4`
+    - 上传（upload_fine_material_form）：
+      写的是 `save_path.relative_to(repo_root)` → 含 `tasks/` 前缀
+      例：`tasks\\20260918-022\\upload\\cover.png`
+
+    这里两种都试一下：先 tasks_dir + pp，回退 repo_root + pp。
+    """
+    mat = materials.get(kind) or {}
+    p = mat.get("path")
+    if not p:
+        return None
+    pp = Path(p)
+    if pp.is_absolute():
+        return pp
+    # 候选 1：tasks_dir + pp（自动获取约定）
+    cand1 = (mgr.tasks_dir / pp).resolve()
+    if cand1.exists():
+        return cand1
+    # 候选 2：repo_root + pp（上传约定，路径含 `tasks/` 前缀）
+    cand2 = (mgr.repo_root / pp).resolve()
+    if cand2.exists():
+        return cand2
+    # 都找不到：返回最近似的（让上层报错信息有真实路径）
+    return cand1
+
+
+def _ffmpeg_filter_path(p: Path) -> str:
+    """REQ-20260919-061 Phase B：把 Path 转成 ffmpeg filter 安全的字符串。
+
+    Windows 路径含 `:`（盘符）+ `\`（转义符），与 ffmpeg filter 选项语法冲突。
+    解决：全部转 `/`，并把 `:` 转义为 `\:`。
+    """
+    s = str(p).replace("\\", "/")
+    s = s.replace(":", r"\:")
+    return s
+
+
+def _ass_force_style(font: dict) -> str:
+    """REQ-20260919-061 Phase B：把 font 设置转成 ASS force_style（libass 字幕滤镜用）。"""
+    family_map = {
+        "STHeitiMedium": "STHeiti Medium",
+        "Noto Sans CJK SC": "Noto Sans CJK SC",
+    }
+    family = family_map.get(font["family"], font["family"])
+    parts = [f"FontName={family}", f"FontSize={int(font['size'])}"]
+    # REQ-20260919-062：字幕文字本身颜色 = libass PrimaryColour
+    # #RRGGBB → &H00BBGGRR（ASS 用 BGR，alpha 在前 &H00 = 不透明）
+    # None/非字符串（如 0/False）走默认 #FFFFFF；非 #RRGGBB 格式（如 #fff/#GGGGGG）静默忽略。
+    tc_raw = font.get("color", "#FFFFFF")
+    if isinstance(tc_raw, str):
+        tc = tc_raw.lstrip("#")
+        if len(tc) == 6 and all(c in "0123456789abcdefABCDEF" for c in tc):
+            tc_bgr = tc[4:6] + tc[2:4] + tc[0:2]
+            parts.append(f"PrimaryColour=&H00{tc_bgr.upper()}")
+    if font.get("bold"):
+        parts.append("Bold=1")
+    align_map = {"left": 1, "center": 2, "right": 3}
+    parts.append(f"Alignment={align_map.get(font['align'], 2)}")
+    sw = int(font.get("stroke_width") or 0)
+    if sw > 0:
+        # ASS stroke_color #RRGGBB → &H00BBGGRR
+        sc = font.get("stroke_color", "#000000").lstrip("#")
+        if len(sc) == 6:
+            sc = sc[4:6] + sc[2:4] + sc[0:2]
+            parts.append(f"Outline={sw}")
+            parts.append(f"OutlineColour=&H00{sc.upper()}")
+    if font.get("bg_enabled"):
+        bc = font.get("bg_color", "#000000").lstrip("#")
+        if len(bc) == 6:
+            bc = bc[4:6] + bc[2:4] + bc[0:2]
+        op = float(font.get("bg_opacity", 0.6))
+        alpha_hex = format(int((1.0 - op) * 255), "02X")
+        parts.append("BorderStyle=4")  # 背景框
+        parts.append(f"BackColour=&H{alpha_hex}{bc.upper()}")
+    return ",".join(parts)
+
+
+def _build_bg_layer_chain(bg_idx: int, W: int, H: int) -> list[str]:
+    """REQ-20260919-063：bg 图透明区黑底 alpha 合成链。
+
+    - bg_idx >= 0：bg 图是 RGBA 且透明像素 RGB=白色 → 必须用「黑底 + bg 图 overlay」
+      才能让透明像素显示黑色（否则 ffmpeg 直接把透明像素当白色渲染 → 用户看到「白框」）。
+      注：ffmpeg 的 format filter 不支持 'auto' 值；PNG 解码默认保留 alpha，
+      overlay 会自动按 alpha 合成。
+    - bg_idx < 0：纯黑底。
+    返回：filter_complex chain 片段。
+    """
+    if bg_idx >= 0:
+        return [
+            f"color=size={W}x{H}:color=black:rate=30[bg_b]",
+            f"[{bg_idx}:v]scale={W}:{H},setsar=1[bg_img]",
+            "[bg_b][bg_img]overlay=eof_action=pass[bg]",
+        ]
+    return [f"color=size={W}x{H}:color=black:rate=30[bg]"]
+
+
+def _build_fine_filter(fc: dict, W: int, H: int) -> tuple[list[str], list[str], str]:
+    """构建 ffmpeg inputs + filter_complex（REQ-20260919-061 Phase B）。
+
+    返回：(input_args, chain, final_label)
+    - input_args: ["-i", path, ...]
+    - chain: filter_complex 的分号串行
+    - final_label: 最终视频流的标签（用于 -map）
+    """
+    layout = fc["layout"]
+    materials = fc["materials"]
+    font = fc["font"]
+
+    inputs: list[str] = []
+    chain: list[str] = []
+
+    # Input 0: 视频（必填；render_fine_preview 先校验存在）
+    # Input 1 (opt): 背景
+    # Input 2 (opt): 封面
+    bg_input_idx = -1
+    cover_input_idx = -1
+
+    if layout["bg"]["enabled"] and (materials.get("bg") or {}).get("path"):
+        bg_input_idx = 1  # 假设视频=0, bg=1
+    if layout["cover"]["enabled"] and (materials.get("cover") or {}).get("path"):
+        cover_input_idx = 2 if bg_input_idx >= 0 else 1
+
+    # 1. 背景层 — REQ-20260919-063：详见 _build_bg_layer_chain
+    chain.extend(_build_bg_layer_chain(bg_input_idx, W, H))
+    cur = "[bg]"
+
+    # 2. 视频层：crop + scale + overlay
+    vc = layout["video"]
+    if vc["enabled"]:
+        # ASS 表达式中 crop_w/h 是 0-1，归一化 iw/ih
+        crop_expr = (
+            f"crop=iw*{vc['crop_w']}:ih*{vc['crop_h']}:"
+            f"iw*{vc['crop_x']}:ih*{vc['crop_y']}"
+        )
+        # 缩放后尺寸（向上取整防止 0）
+        sw = max(1, int(round(W * vc["scale"])))
+        sh = max(1, int(round(H * vc["scale"])))
+        chain.append(
+            f"[0:v]{crop_expr},scale={sw}:{sh}:flags=lanczos,setsar=1[v]"
+        )
+        vx = int(round(vc["x"] * W))
+        vy = int(round(vc["y"] * H))
+        chain.append(f"{cur}[v]overlay=x={vx}:y={vy}[v1]")
+        cur = "[v1]"
+
+    # 3. 封面层
+    if cover_input_idx >= 0:
+        cc = layout["cover"]
+        # 封面基础尺寸：画布宽度的 30% × scale
+        cw = max(1, int(round(W * 0.3 * cc["scale"])))
+        ch = max(1, int(round(H * 0.3 * cc["scale"])))
+        chain.append(f"[{cover_input_idx}:v]scale={cw}:{ch}[cv]")
+        cx = int(round(cc["x"] * W))
+        cy = int(round(cc["y"] * H))
+        chain.append(f"{cur}[cv]overlay=x={cx}:y={cy}[v2]")
+        cur = "[v2]"
+
+    # 4. 字幕 burn-in（force_style 用 font 设置）
+    sub_mat = materials.get("subtitle") or {}
+    if layout["subtitle"]["enabled"] and sub_mat.get("path"):
+        fs = _ass_force_style(font)
+        # force_style 含逗号，filter graph 用逗号分隔参数，所以 force_style 内不能用逗号
+        # 我们已经把逗号作为参数分隔，所以单字符串内不能含逗号；上面已用 , 作分隔
+        # 但 force_style 子串里有逗号时会被解析错 — 用 \\, 转义不靠谱，改用半角 ;?
+        # 实际 ASS 风格里我们没用逗号，用空格/; 都不行。规范做法：用 ',' 作分隔符
+        # 时 force_style 内容不能含 ','
+        # 简化：把 ',' 在 font family 里换掉（这里 family 已知不含逗号）；stroke_color/...
+        # 转 16 进制无逗号
+        # 所以最终 force_style 不含逗号，安全
+        chain.append(
+            f"{cur}subtitles='{sub_mat['path']}':force_style='{fs}':si=0[vout]"
+        )
+        cur = "[vout]"
+    else:
+        chain.append(f"{cur}copy[vout]")
+        cur = "[vout]"
+
+    return inputs, chain, cur
+
+
+def _run_fine_render(
+    task_id: str,
+    mgr,
+    output_path: Path,
+    duration: float | None,
+    preview_start: float = 0.0,
+) -> dict:
+    """REQ-20260919-061 Phase B：调 ffmpeg 渲染精剪视频（预览/导出共用）。
+
+    REQ-20260919-064：新增 `preview_start` — 视频流从源视频 start 秒开始截取，
+    再截 duration 秒。cover 仍固定 2s 在前面（cover 不受 start 影响）。
+    """
+    import subprocess
+
+    fc = _get_fine_compose(mgr, task_id)
+    layout = fc["layout"]
+    materials = fc["materials"]
+    output_cfg = fc["output"]
+
+    # 1. 校验视频素材存在
+    video_path = _resolve_mat_abs(mgr, task_id, materials, "video")
+    if not video_path or not video_path.exists():
+        return {"ok": False, "error": "缺少视频素材，请上传或自动获取粗剪视频"}
+
+    # 2. 输出分辨率 — REQ-20260919-061 用户补充：滤镜全程在 1920×1080 设计空间运行，
+    # 末尾再 scale 到目标输出分辨率（WYSIWYG：滑块拖到哪，画面就在哪）。
+    res = output_cfg.get("resolution", "1080p")
+    if res == "720p":
+        out_w, out_h = 1280, 720
+    else:  # "1080p" 或 "source"（source 简化用 1080p）
+        out_w, out_h = _FINE_DESIGN_W, _FINE_DESIGN_H
+    W, H = _FINE_DESIGN_W, _FINE_DESIGN_H  # 设计空间（滤镜内部尺寸）
+
+    # 3. 收集 inputs
+    # REQ-20260919-064：-ss 用 preview_start（默认 0），让用户能跳到源视频任意时间点预览
+    input_args: list[str] = []
+    input_args += ["-ss", str(max(0.0, float(preview_start)))]
+    if duration is not None:
+        input_args += ["-t", str(duration)]
+    input_args += ["-i", str(video_path)]
+
+    if layout["bg"]["enabled"] and (materials.get("bg") or {}).get("path"):
+        bg_path = _resolve_mat_abs(mgr, task_id, materials, "bg")
+        if bg_path and bg_path.exists():
+            input_args += ["-loop", "1", "-i", str(bg_path)]
+        else:
+            layout = {**layout, "bg": {**layout["bg"], "enabled": False}}
+            fc["layout"] = layout
+
+    # REQ-20260919-061 扩展：封面图作为片头全屏海报 — 用 image2 loop 限制时长
+    cover_input_enabled = (
+        layout["cover"]["enabled"]
+        and float(layout["cover"].get("duration", 0)) > 0
+        and (materials.get("cover") or {}).get("path")
+    )
+    if cover_input_enabled:
+        cover_path = _resolve_mat_abs(mgr, task_id, materials, "cover")
+        if cover_path and cover_path.exists():
+            # -loop 1 + -t N：让静态图生成 N 秒视频流
+            cover_dur = float(layout["cover"].get("duration", 2.0))
+            input_args += ["-loop", "1", "-framerate", "30", "-t", f"{cover_dur:.2f}", "-i", str(cover_path)]
+        else:
+            layout = {**layout, "cover": {**layout["cover"], "enabled": False}}
+            fc["layout"] = layout
+            cover_input_enabled = False
+
+    # REQ-20260919-061 扩展：背景音乐 input（启用且文件存在）
+    audio_cfg = fc.get("audio") or _FINE_AUDIO_DEFAULTS
+    audio_input_enabled = (
+        audio_cfg.get("enabled")
+        and (materials.get("audio") or {}).get("path")
+    )
+    if audio_input_enabled:
+        audio_path = _resolve_mat_abs(mgr, task_id, materials, "audio")
+        if audio_path and audio_path.exists():
+            input_args += ["-i", str(audio_path)]
+        else:
+            audio_cfg = dict(audio_cfg)
+            audio_cfg["enabled"] = False
+            fc["audio"] = audio_cfg
+            audio_input_enabled = False
+
+    # 4. filter_complex
+    # 注：上面 _build_fine_filter 假设 bg=1, cover=2 — 但 cover_input_idx 可能 = 1（无 bg 时）
+    # 这里重写：根据实际 input 顺序动态指定
+    chain: list[str] = []
+    inputs_count = sum(1 for i, _ in enumerate(input_args) if input_args[i] == "-i")
+
+    # 背景层 — REQ-20260919-063：详见 _build_bg_layer_chain
+    bg_idx = -1
+    if layout["bg"]["enabled"]:
+        # bg 在 video 之后：video=0, bg=1
+        bg_idx = 1 if inputs_count >= 2 else -1
+    chain.extend(_build_bg_layer_chain(bg_idx, W, H))
+    cur = "[bg]"
+
+    # 视频层（x/y 直接用像素值，crop_* 从设计空间 1920×1080 → 源视频 iw/ih 等比换算）
+    vc = layout["video"]
+    if vc["enabled"]:
+        # crop_* 是设计空间像素；ffmpeg crop 表达式要的是源视频 iw/ih 的相对值
+        # → 乘 (design → source)：crop_x_src = iw * crop_x_design / 1920
+        crop_expr = (
+            f"crop=iw*{vc['crop_w']}/{_FINE_DESIGN_W}:ih*{vc['crop_h']}/{_FINE_DESIGN_H}:"
+            f"iw*{vc['crop_x']}/{_FINE_DESIGN_W}:ih*{vc['crop_y']}/{_FINE_DESIGN_H}"
+        )
+        sw = max(1, int(round(W * vc["scale"])))
+        sh = max(1, int(round(H * vc["scale"])))
+        chain.append(
+            f"[0:v]{crop_expr},scale={sw}:{sh}:flags=lanczos,setsar=1[v]"
+        )
+        vx = max(0, min(W, int(vc["x"])))
+        vy = max(0, min(H, int(vc["y"])))
+        chain.append(f"{cur}[v]overlay=x={vx}:y={vy}[v1]")
+        cur = "[v1]"
+
+    # REQ-20260919-061 扩展：封面图作为片头全屏海报 — 在视频流前面拼一段 cover_intro。
+    # 关键：字幕必须先烧录到视频流上再 concat 封面，否则字幕会显示在封面上 + 时间从 0 起算
+    # （SRT 第 1 秒字幕会盖在封面第 1 秒上）。先 sub 后 concat：视频流 t=0 = 源视频 0 = 字幕 0，
+    # concat 后视频流从 output t=cover_dur 开始播，字幕时间自然延后到 cover_dur，与视频内容同步。
+    # 字幕 burn（先于 cover concat — 让字幕只覆盖视频段、不出现在封面上）
+    sub_mat = materials.get("subtitle") or {}
+    # REQ-20260919-069：preview_start > 0 时，-ss 把视频流定位到源视频 N 秒，
+    # 但 subtitles 滤镜按输出 PTS（从 0 起）匹配 SRT 绝对时间 → 字幕会过早显示。
+    # 此处把 SRT 整体前移 N 秒，丢掉完全在预览窗口前的条目，使字幕与视频内容对齐。
+    # offset <= 0 → 不动；用完即删 tmp 文件。
+    preview_offset_ms = int(round(max(0.0, float(preview_start)) * 1000))
+    sub_input_tmp: Path | None = None
+    if layout["subtitle"]["enabled"] and sub_mat.get("path"):
+        sub_path = _resolve_mat_abs(mgr, task_id, materials, "subtitle")
+        if sub_path and sub_path.exists():
+            fs = _ass_force_style(fc["font"])
+            sub_filter_path = sub_path  # 默认用原 SRT
+            if preview_offset_ms > 0:
+                try:
+                    from slirn_home.compose_service import parse_srt, format_srt
+                    src_text = sub_path.read_text(encoding="utf-8-sig")
+                    src_entries = parse_srt(src_text)
+                    shifted: list[dict] = []
+                    for ent in src_entries:
+                        s = max(0, int(ent["start_ms"]) - preview_offset_ms)
+                        e = max(0, int(ent["end_ms"]) - preview_offset_ms)
+                        if e <= s:
+                            continue  # 整条都在预览窗口前
+                        shifted.append({"id": len(shifted) + 1, "start_ms": s,
+                                        "end_ms": e, "text": ent.get("text", "")})
+                    if shifted:
+                        # 落 tmp SRT — ffmpeg subtitles 滤镜按文件路径读
+                        import tempfile as _tf
+                        _tfh = _tf.NamedTemporaryFile(
+                            mode="w", suffix=".srt", encoding="utf-8",
+                            delete=False, prefix="slirn_fine_srt_")
+                        _tfh.write(format_srt(shifted))
+                        _tfh.close()
+                        sub_filter_path = Path(_tfh.name)
+                        sub_input_tmp = sub_filter_path
+                except Exception as e:  # noqa: BLE001
+                    # 解析失败 → 用原 SRT（用户至少能看到原字幕位置，不会让 ffmpeg 报错）
+                    log.warning("preview_start 字幕偏移失败，回退原 SRT: %s", e)
+                    sub_filter_path = sub_path
+            # REQ-20260919-061 Phase B：Windows 路径含 : 和 \ 会与 ffmpeg filter 语法冲突
+            sub_safe = _ffmpeg_filter_path(sub_filter_path)
+            chain.append(
+                f"{cur}subtitles='{sub_safe}':force_style='{fs}':si=0[vsub]"
+            )
+            cur = "[vsub]"
+        else:
+            chain.append(f"{cur}copy[vsub]")
+            cur = "[vsub]"
+    else:
+        chain.append(f"{cur}copy[vsub]")
+        cur = "[vsub]"
+
+    cover_idx = -1
+    if cover_input_enabled:
+        # cover 在 video 之后；若 bg 也启用则 cover=2，否则 cover=1
+        if bg_idx >= 0:
+            cover_idx = 2 if inputs_count >= 3 else -1
+        else:
+            cover_idx = 1 if inputs_count >= 2 else -1
+    if cover_idx >= 0:
+        # 把封面图按比例缩放到设计空间（1920×1080），黑边填充
+        chain.append(
+            f"[{cover_idx}:v]scale={W}:{H}:force_original_aspect_ratio=decrease,"
+            f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2:color=black,"
+            f"setpts=PTS-STARTPTS,fps=30,setsar=1[intro]"
+        )
+        # 用 concat 把 [intro] 拼到现有视频流 [cur] 前面；v=1 a=0 表示不拼接音频
+        # 此时 cur 是 [vsub]（带字幕的视频流），intro 没有字幕 → 字幕仅在视频段显示
+        chain.append(f"[intro]{cur}concat=n=2:v=1:a=0[vout]")
+        cur = "[vout]"
+
+    # 末尾统一 scale 到目标输出分辨率（设计空间 1920×1080 → 实际分辨率）
+    if (out_w, out_h) != (W, H):
+        chain.append(f"[vout]scale={out_w}:{out_h}:flags=lanczos,setsar=1[vfinal]")
+        cur = "[vfinal]"
+
+    # REQ-20260919-061 扩展：背景音乐 amix 链 — 原声 100% + BGM 降音量混合
+    # audio input 是 inputs_count - 1（最后添加的）；若未启用音频则只用 [voice]
+    audio_idx = inputs_count - 1 if audio_input_enabled else -1
+    # REQ-20260919-061 用户补充：封面（片头）播放期间不输出原视频人声，只有封面结束后才开始
+    # 用 adelay 把视频的音轨延后 cover_dur 毫秒 — 封面本身是图（无音轨），所以这段延迟里
+    # 只有 BGM 在播（如果启用），与用户的「封面静默 → 视频开始才有声」意图一致。
+    if cover_input_enabled:
+        cover_delay_ms = int(round(float(layout["cover"].get("duration", 0)) * 1000))
+        chain.append(
+            f"[0:a]adelay={cover_delay_ms}|{cover_delay_ms}:all=1,volume=1.0[voice]"
+        )
+    else:
+        chain.append("[0:a]volume=1.0[voice]")
+    if audio_input_enabled and audio_idx >= 0:
+        vol = float(audio_cfg.get("volume", 0.4))
+        fade_in = float(audio_cfg.get("fade_in", 0.0))
+        fade_out = float(audio_cfg.get("fade_out", 0.0))
+        # BGM 链：aloop 无限循环 + volume 衰减 + 可选淡入淡出
+        bgm_filters = [f"[{audio_idx}:a]aloop=loop=-1:size=2e9,volume={vol:.2f}"]
+        if fade_in > 0:
+            bgm_filters.append(f"afade=t=in:st=0:d={fade_in:.2f}")
+        if fade_out > 0:
+            bgm_filters.append(f"afade=t=out:st=0:d={fade_out:.2f}")
+        bgm_filters.append("[bgm]")
+        chain.append(",".join(bgm_filters))
+        # 混合原声（[voice]）和 BGM（[bgm]）；normalize=0 保留各自音量
+        chain.append(
+            "[voice][bgm]amix=inputs=2:duration=first:normalize=0[aout]"
+        )
+    else:
+        # 无背景音乐：原声直通
+        chain.append("[voice]anull[aout]")
+
+    filter_complex = ";\n".join(chain)
+
+    # 5. ffmpeg 命令
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffmpeg", "-y",
+        *input_args,
+        "-filter_complex", filter_complex,
+        "-map", cur,
+        "-map", "[aout]",  # REQ-20260919-061 扩展：原声 + 背景音乐混合（amix）
+        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-c:a", "aac", "-b:a", "128k",
+        "-shortest",
+        "-movflags", "+faststart",
+        str(output_path),
+    ]
+
+    # 6. 执行
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=120, encoding="utf-8"
+        )
+    except FileNotFoundError:
+        return {"ok": False, "error": "系统未安装 ffmpeg，请先安装并加入 PATH"}
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "ffmpeg 渲染超时（>120s），请缩短视频或简化滤镜"}
+    finally:
+        # REQ-20260919-069：清理预览字幕偏移临时文件（无论成功失败都删）
+        if sub_input_tmp is not None:
+            try:
+                sub_input_tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+    if result.returncode != 0:
+        log.error("ffmpeg failed: %s", result.stderr[-2000:])
+        return {"ok": False, "error": f"ffmpeg 渲染失败: {(result.stderr or '')[-300:]}"}
+
+    return {"ok": True, "path": str(output_path.relative_to(mgr.tasks_dir.parent))
+            if output_path.is_absolute() else str(output_path)}
+
+
+def _get_fine_compose(mgr, task_id: str) -> dict:
+    """返回 task 的 fine_compose 数据（独立 JSON 文件，不污染 Task dataclass）。
+
+    存储位置：tasks/{tid}/fine_compose.json
+    返回：含默认值的 dict（materials/layout/font/output）。
+
+    自动迁移：磁盘数据若未带 `_schema: 2`（旧 0-1 归一化 x/y），读时把每个 layout
+    的 x/y 乘以 (设计空间宽, 设计空间高) 转成像素值。_schema 字段在内存里维护，
+    落盘时由 _save_fine_compose 写入。
+    """
+    fc_path = mgr.tasks_dir / task_id / "fine_compose.json"
+    fc = {}
+    if fc_path.exists():
+        try:
+            fc = json.loads(fc_path.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001
+            fc = {}
+    fc.setdefault("materials", {})
+    fc.setdefault("layout", {})
+    fc.setdefault("output", dict(_FINE_OUTPUT_DEFAULTS))
+    fc.setdefault("font", dict(_FINE_FONT_DEFAULTS))
+    # REQ-20260919-061 扩展：背景音乐默认设置（独立于 layout）
+    fc.setdefault("audio", dict(_FINE_AUDIO_DEFAULTS))
+    # REQ-20260919-065：检测区域正式参数（旧任务缺该字段也兼容）
+    fc.setdefault("detected_region", None)
+    # layout 默认值与已存值合并（保留用户已设置的）
+    for k, defaults in _FINE_LAYOUT_DEFAULTS.items():
+        fc["layout"].setdefault(k, dict(defaults))
+
+    # REQ-20260919-061 扩展：cover 旧字段（x/y/scale）迁移 —
+    # 旧版封面是「右侧角标小图」，新版是「片头全屏海报」（仅需 duration 字段）。
+    # 旧字段保留（数据不丢），但补一个 duration 默认值。
+    cover_layout = fc["layout"].get("cover") or {}
+    if "duration" not in cover_layout:
+        cover_layout["duration"] = 2.0
+        fc["layout"]["cover"] = cover_layout
+
+    # REQ-20260919-062 v18：旧任务没有 crop_aspect_lock 字段 → 补默认值 True
+    # （与前端默认勾选一致；不引入隐性行为变更，老数据按原渲染）
+    video_layout = fc["layout"].get("video") or {}
+    if "crop_aspect_lock" not in video_layout:
+        video_layout["crop_aspect_lock"] = True
+    fc["layout"]["video"] = video_layout
+
+    # REQ-20260919-062 v19：旧任务 fc.font 缺 color 字段 → 补 #FFFFFF
+    # （与 libass 默认 PrimaryColour 一致；不改写用户已设的值）
+    _f_color = fc.get("font") or {}
+    if "color" not in _f_color:
+        _f_color["color"] = "#FFFFFF"
+        fc["font"] = _f_color
+
+    # 数字字段类型规整：JSON 不区分 int/float/str，f-string 用 .2f 时必须是数字
+    # 否则报 "Unknown format code 'f' for object of type 'str'"。
+    # 先做类型规整（字符串 → 数字），再做迁移（旧 0-1 → 像素）。
+    _f = fc["font"]
+    for k in ("size", "stroke_width", "bg_opacity", "bg_radius"):
+        v = _f.get(k)
+        if isinstance(v, str):
+            try:
+                _f[k] = float(v)
+            except (TypeError, ValueError):
+                _f[k] = dict(_FINE_FONT_DEFAULTS)[k]
+    # layout 数字字段规整：x/y/crop_* 字符串 → 数字（最终转 int 像素），scale/duration 保留 float
+    for layout in fc["layout"].values():
+        for axis in ("x", "y", "crop_x", "crop_y", "crop_w", "crop_h"):
+            v = layout.get(axis)
+            if isinstance(v, str):
+                try:
+                    layout[axis] = float(v)
+                except (TypeError, ValueError):
+                    layout[axis] = 0  # 字符串解析失败 → 安全默认
+        for axis in ("scale", "duration"):
+            v = layout.get(axis)
+            if isinstance(v, str):
+                try:
+                    layout[axis] = float(v)
+                except (TypeError, ValueError):
+                    pass
+    # REQ-20260919-061 扩展：audio 字段（volume/fade_in/fade_out）字符串 → 数字
+    _a = fc.get("audio") or {}
+    for ak in ("volume", "fade_in", "fade_out"):
+        v = _a.get(ak)
+        if isinstance(v, str):
+            try:
+                _a[ak] = float(v)
+            except (TypeError, ValueError):
+                _a[ak] = 0.0
+
+    # 数据迁移：旧 _schema (None/1) → 2（x/y 与 crop_* 都由 0-1 转像素）
+    # 此时所有相关字段已是数字（float 或 int），可直接判定。
+    schema = int(fc.get("_schema") or 0)
+    if schema < _FINE_LAYOUT_SCHEMA:
+        for layout in fc["layout"].values():
+            for axis, design_size in (
+                ("x", _FINE_DESIGN_W), ("y", _FINE_DESIGN_H),
+                ("crop_x", _FINE_DESIGN_W), ("crop_y", _FINE_DESIGN_H),
+                ("crop_w", _FINE_DESIGN_W), ("crop_h", _FINE_DESIGN_H),
+            ):
+                v = layout.get(axis)
+                if isinstance(v, (int, float)) and 0.0 <= v <= 1.0:
+                    # 旧归一化坐标 → 像素（整数）
+                    layout[axis] = int(round(v * design_size))
+        fc["_schema"] = _FINE_LAYOUT_SCHEMA
+        # 落盘（atomic write，迁移一次即可）
+        try:
+            _save_fine_compose(mgr, task_id, fc)
+        except Exception:  # noqa: BLE001 — 迁移失败不应阻断功能
+            log.warning("fine_compose 迁移落盘失败: %s", task_id)
+
+    # 迁移后类型再规整：x/y/crop_* 强制 int（像素，纯 float 也转 int）
+    for layout in fc["layout"].values():
+        for axis in ("x", "y", "crop_x", "crop_y", "crop_w", "crop_h"):
+            v = layout.get(axis)
+            if isinstance(v, float):
+                v = int(round(v))
+            elif not isinstance(v, int):
+                v = 0  # 兜底
+            layout[axis] = v
+    return fc
+
+
+def _clamp_video_to_viewport(vc: dict) -> None:
+    """REQ-20260919-062 v5 用户反馈：把视频展示区域限定在所检测区域之内。
+
+    若 vc 含 viewport（设计空间像素 {x,y,width,height}），则把 x/y/scale
+    夹紧到 viewport 内，使得 video 的显示矩形（x, y, x+crop_w*scale, y+crop_h*scale）
+    完全落在 viewport 内。直接修改入参 dict。
+
+    - viewport 缺失/None/非法 → 不做任何修改
+    - crop_w/h 或 viewport.width/height ≤ 0 → 不做任何修改（避免除零/反向夹紧）
+    - scale 上限 = min(viewport.w / crop_w, viewport.h / crop_h)，再和 _fine_scale_max
+      取小，保证不会因为 viewport 很小就把视频压成 0
+    """
+    vp = vc.get("viewport") if isinstance(vc, dict) else None
+    if not isinstance(vp, dict):
+        return
+    if not all(k in vp for k in ("x", "y", "width", "height")):
+        return
+    try:
+        rx, ry = int(vp["x"]), int(vp["y"])
+        rw, rh = int(vp["width"]), int(vp["height"])
+        crop_w = int(vc.get("crop_w", _FINE_DESIGN_W))
+        crop_h = int(vc.get("crop_h", _FINE_DESIGN_H))
+        if crop_w <= 0 or crop_h <= 0 or rw <= 0 or rh <= 0:
+            return
+        scale = float(vc.get("scale", 1.0))
+    except (TypeError, ValueError):
+        return
+
+    # scale 上限：display 完全放进 viewport；同时不超过滑块本身的 max=2.0
+    max_scale = min(rw / crop_w, rh / crop_h, 2.0)
+    if scale > max_scale:
+        scale = max_scale
+    vc["scale"] = scale
+
+    # 夹紧 x/y：display 矩形 (x, y) → (x + crop_w*scale, y + crop_h*scale) 必须 ⊂ viewport
+    disp_w = crop_w * scale
+    disp_h = crop_h * scale
+    max_x = rx + max(0, rw - disp_w)
+    max_y = ry + max(0, rh - disp_h)
+    try:
+        cur_x = int(vc.get("x", rx))
+        cur_y = int(vc.get("y", ry))
+    except (TypeError, ValueError):
+        cur_x, cur_y = rx, ry
+    vc["x"] = max(rx, min(max_x, cur_x))
+    vc["y"] = max(ry, min(max_y, cur_y))
+
+
+def _fine_param(
+    label: str,
+    slider_id: str,
+    data_key: str,
+    value: float,
+    min_v: float,
+    max_v: float,
+    step: float,
+    value_format: str = "{:.2f}",
+    data_attr: str = "data-key",
+    raw_format: str | None = None,
+) -> str:
+    """REQ-20260919-061a v7 用户反馈：单个参数设置块 = label + slider + num。
+
+    结构：
+    ```
+    ┌─ slirn-fine-param ────────────────────────────────┐
+    │  [label]  [────── slider ──────]  [┌ num ┐▴▾]     │
+    └──────────────────────────────────────────────────┘
+    ```
+
+    - range slider：拖动快速调（同步写 num 框）
+    - number input：精调（直接输入数字，浏览器自带原生 stepper 满足 +1/-1）
+    - `data-for=slider_id` 让 bindFineSteppers() 双向同步 slider ↔ num
+    - v7：移除之前在输入框外面额外加的自定义 ▲▼ 按钮 — 浏览器原生 stepper 已提供
+      同样功能，自定义按钮是重复的。
+
+    `data_attr`：默认 `data-key`，给 audio 滑块传 `data-audio-key` 以保持它们走独立的
+    `save_fine_audio` 端点而不是 `save_fine_layout`。
+    `raw_format`：slider/number input 的 `value=` 字面值格式，默认跟随 `value_format`
+    —— 这样 `0.4` 会渲染成 `"0.40"` 兼容旧测试断言。
+    """
+    if raw_format is None:
+        raw_format = value_format
+    raw = raw_format.format(value)
+    return (
+        f'<div class="slirn-fine-param">'
+        f'<span class="slirn-fine-param-label">{label}</span>'
+        f'<input type="range" class="slirn-fine-slider" id="{slider_id}" '
+        f'{data_attr}="{data_key}" min="{min_v}" max="{max_v}" step="{step}" value="{raw}">'
+        f'<input type="number" class="slirn-fine-num" id="{slider_id}_num" '
+        f'aria-label="数值输入" min="{min_v}" max="{max_v}" step="{step}" value="{raw}" '
+        f'data-for="{slider_id}">'
+        f'</div>'
+    )
+
+
+
+
+
+def _save_bg_detect_cache(mgr, task_id: str, result: dict) -> None:
+    """REQ-20260919-062 v8 用户反馈：检测后把结果存到 fine_compose.bg_detect_cache，
+    下次打开精剪面板直接渲染缓存值，无需重新扫描。
+
+    REQ-20260919-065 升级：双写到 bg_detect_cache（向后兼容） + detected_region（正式参数）。
+
+    缓存字段（与 _result_payload 输出对齐 + 算法/时间戳）：
+      - x, y, width, height, center_x, center_y, corners
+      - pixel_count, image_native_w/h
+      - algorithm, threshold, detected_color, color_tolerance
+      - detected_at (ISO 时间戳)
+    """
+    try:
+        fc = _get_fine_compose(mgr, task_id)
+        cache = {
+            "x": result.get("x"),
+            "y": result.get("y"),
+            "width": result.get("width"),
+            "height": result.get("height"),
+            "center_x": result.get("center_x"),
+            "center_y": result.get("center_y"),
+            "corners": result.get("corners"),
+            "pixel_count": result.get("pixel_count"),
+            "image_native_w": result.get("image_native_w"),
+            "image_native_h": result.get("image_native_h"),
+            "algorithm": result.get("algorithm"),
+            "threshold": result.get("threshold"),
+            "detected_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        # 颜色字段：仅在算法返回时存（pixel 算法没颜色）
+        if "detected_color" in result:
+            cache["detected_color"] = list(result["detected_color"])
+        if "color_tolerance" in result:
+            cache["color_tolerance"] = result["color_tolerance"]
+        fc["bg_detect_cache"] = cache
+        # REQ-20260919-065：同一份内容也写到 detected_region（正式参数位置）
+        fc["detected_region"] = cache
+        _save_fine_compose(mgr, task_id, fc)
+    except Exception:
+        # 缓存失败不影响主流程（接口已返回成功结果）
+        pass
+
+
+def _save_fine_compose(mgr, task_id: str, fc: dict) -> None:
+    """写回 fine_compose.json。"""
+    fc_path = mgr.tasks_dir / task_id / "fine_compose.json"
+    fc_path.parent.mkdir(parents=True, exist_ok=True)
+    fc_path.write_text(
+        json.dumps(fc, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
+    """REQ-20260919-061：精剪视频 pane — 5 素材上传 + 位置/缩放 + 字体 5 项 + 输出。"""
+    fc = _get_fine_compose(mgr, task_id)
+    materials = fc.get("materials") or {}
+    layout = fc["layout"]
+    font = fc["font"]
+    output = fc["output"]
+
+    # 1. 5 个素材上传卡
+    upload_cards = []
+    for kind in _FINE_MATERIAL_KINDS:
+        icon, label, accept = _FINE_MATERIAL_LABELS[kind]
+        mat = materials.get(kind) or {}
+        path = mat.get("path") or ""
+        filename = Path(path).name if path else ""
+        source = mat.get("source") or ("upload" if path else "")
+        # REQ-20260919-061 用户补充：video/subtitle 可从上游 auto 获取
+        upstream_name = _fine_upstream_label(task_id, kind, mgr) if kind in _FINE_AUTO_KINDS else ""
+        # source=auto 但上游产物已不存在 → 降级回空态（清掉 path）
+        if source == "auto" and not upstream_name:
+            source = ""
+            path = ""
+            filename = ""
+        has = " has-file" if path else ""
+        # REQ-20260919-061 用户反馈：状态显示当前来源 + 文件名；上传/自动获取两个按钮都常驻可用，
+        # 点哪个就用哪个（最后一次操作决定 source 字段），不再禁用对方按钮。
+        if source == "auto":
+            source_badge = '<span class="slirn-fine-source-badge auto">📥 自动获取</span>'
+            status_text = f"✅ 已从上游获取：{_esc(upstream_name)}"
+        elif source == "upload" and filename:
+            source_badge = '<span class="slirn-fine-source-badge upload">📤 手动上传</span>'
+            status_text = f"✅ {_esc(filename)}"
+        else:
+            source_badge = ""
+            status_text = "未上传"
+        # 自动获取按钮：仅当上游存在时显示，且只在未自动获取时高亮（避免反复点）
+        auto_btn_html = ""
+        if kind in _FINE_AUTO_KINDS and upstream_name:
+            auto_btn_html = (
+                f'<button class="slirn-btn slirn-btn-xs" data-action="fine-source-auto" '
+                f'data-kind="{kind}" title="从上游阶段产物自动获取：{_esc(upstream_name)}">'
+                f'📥 自动获取（{_esc(upstream_name)}）</button>'
+            )
+        upload_cards.append(
+            f'<div class="slirn-fine-upload-card{has}" data-kind="{kind}" data-source="{source or "none"}">'
+            f'<div class="slirn-fine-upload-label">{icon} {label}{source_badge}</div>'
+            f'<div class="slirn-fine-upload-hint">{accept}</div>'
+            f'<input type="file" class="slirn-fine-file" id="slirn-fine-file-{kind}" '
+            f'accept=".{",".join(accept.split("/"))}" data-kind="{kind}">'
+            f'<button class="slirn-btn slirn-btn-xs" data-action="fine-upload" data-kind="{kind}">📤 上传文件</button>'
+            # REQ-20260919-063 用户反馈：每个素材都要提供预览功能；预览窗口可缩放。
+            # 已有素材（has=has-file）才显示 👁️ 按钮，缺文件时禁用。
+            f'<button class="slirn-btn slirn-btn-xs" data-action="fine-mat-preview" data-kind="{kind}" '
+            f'data-task-id="{_esc(task_id)}" '
+            f'{"disabled" if not has else ""} '
+            f'title="{_esc("请先上传或自动获取素材") if not has else _esc("打开预览窗口（可缩放）")}">'
+            f'👁️ 预览</button>'
+            f'{auto_btn_html}'
+            f'<div class="slirn-fine-upload-status" data-status-kind="{kind}">{status_text}</div>'
+            f'</div>'
+        )
+    upload_html = '<div class="slirn-fine-uploads">' + "".join(upload_cards) + '</div>'
+
+    # 2. 3 个素材的位置/缩放控件（video/subtitle/bg）
+    # REQ-20260919-061 扩展：cover 不再是角标小图 → 改为独立的「片头全屏」控制块，
+    # 不在 layout 循环里（详见下面 cover_html）。
+    # REQ-20260919-061a 用户反馈 v3：每个 block 单独渲染（不再合并成 .slirn-fine-layouts），
+    # block 内部参数 = 单列堆叠；外层由 _render_fine_cut_zone 末尾组装为左右两列。
+    position_blocks = {}
+    for mat_key in ("video", "subtitle", "bg"):
+        lc = layout[mat_key]
+        label_icon = {"video": "🎬 视频", "subtitle": "📝 字幕", "cover": "🖼 封面", "bg": "🎨 背景"}[mat_key]
+        # REQ-20260919-062 v13 用户反馈：画布 X/Y 允许负数（视频可半截出画布，做"露半边"效果）。
+        # 允许范围 = [-画布宽, +画布宽] / [-画布高, +画布高]（-1920–1920 / -1080–1080）。
+        # 渲染层（_render_fine_cut_zone）按绝对坐标直接定位素材；负值 = 素材左侧/上侧出画布。
+        # v14 用户反馈：缩放 = crop_w / bg_w（视频原剪辑宽度 / 背景图片宽度）。
+        # 默认 crop_w=1920 → scale=1.0；自定义 crop 后点按钮「🎯 按裁剪宽度」自动应用公式。
+        scale_auto_btn = (
+            f'<button class="slirn-btn slirn-btn-xs slirn-fine-scale-auto-btn" '
+            f'data-action="fine-scale-auto" '
+            f'title="把视频缩放自动设为 crop_w / 1920（即视频原裁剪宽度占背景图片宽度的百分比）">'
+            f'🎯 按裁剪宽度</button>'
+        ) if mat_key == "video" else ''
+        params_html = (
+            f'<div class="slirn-fine-params">'
+            + _fine_param(
+                f"X（-{_FINE_DESIGN_W}–{_FINE_DESIGN_W}）", f"slirn-fine-{mat_key}-x",
+                f"{mat_key}.x", int(lc["x"]), -_FINE_DESIGN_W, _FINE_DESIGN_W, 1, "{:d}",
+            )
+            + _fine_param(
+                f"Y（-{_FINE_DESIGN_H}–{_FINE_DESIGN_H}）", f"slirn-fine-{mat_key}-y",
+                f"{mat_key}.y", int(lc["y"]), -_FINE_DESIGN_H, _FINE_DESIGN_H, 1, "{:d}",
+            )
+            + _fine_param(
+                # REQ-20260919-062 v6 用户反馈：视频缩放精度 5% → 1%。
+                # v16 用户反馈：视频缩放值要显示 4 位小数（与 v15 自动重算保留 4 位一致）。
+                # v17 用户反馈：bug — 自动重算到 4 位后立刻被浏览器截到 2 位。
+                #   根因：<input type="range" step="0.01"> 会把 value 吸附到 0.01 网格，
+                #   导致 s.value = "0.6667" 变成 "0.67"。step 改成 0.0001 后浏览器保留 4 位精度。
+                # 其它素材（subtitle/cover/bg）仍保持 5% step + 2 位小数显示。
+                "缩放", f"slirn-fine-{mat_key}-scale",
+                f"{mat_key}.scale", float(lc["scale"]), 0.1, 2.0,
+                0.0001 if mat_key == "video" else 0.05,
+                "{:.4f}" if mat_key == "video" else "{:.2f}",
+            )
+            + scale_auto_btn
+            + '</div>'
+        )
+        # REQ-20260919-062 v7 用户反馈：给视频添加宽高信息。
+        # 仅 video 块附一个只读"显示尺寸"行，由前端 JS 根据 crop_w/h + scale 实时计算。
+        # v10 用户反馈：「视频播放时的宽度百分比为视频原裁剪的宽度除以背景图片整个区域的宽度」。
+        # 背景图整个区域 = 设计空间 1920×1080；视频裁剪宽度 = crop_w；所以
+        # 宽度百分比 = crop_w / 1920 × 100%。同时显示高同理（crop_h / 1080）。
+        info_html = ""
+        if mat_key == "video":
+            try:
+                _disp_w = int(round(int(lc["crop_w"]) * float(lc["scale"])))
+                _disp_h = int(round(int(lc["crop_h"]) * float(lc["scale"])))
+                _crop_w = int(lc["crop_w"])
+                _crop_h = int(lc["crop_h"])
+            except (TypeError, ValueError):
+                _disp_w, _disp_h, _crop_w, _crop_h = 0, 0, 0, 0
+            _scale_pct = round(float(lc["scale"]) * 100, 4)
+            # 背景图整个区域 = 设计空间 1920×1080；百分比按此计算
+            _bg_w, _bg_h = 1920, 1080
+            _crop_w_pct = round(_crop_w / _bg_w * 100, 2) if _bg_w else 0
+            _crop_h_pct = round(_crop_h / _bg_h * 100, 2) if _bg_h else 0
+            info_html = (
+                f'<div class="slirn-fine-video-info" id="slirn-fine-video-info">'
+                f'📐 显示尺寸: '
+                f'<strong id="slirn-fine-video-disp-w">{_disp_w}</strong> × '
+                f'<strong id="slirn-fine-video-disp-h">{_disp_h}</strong> px'
+                # REQ-20260919-062 v16：缩放百分比也显示 4 位小数（与滑块/auto-recompute 一致）。
+                f'　|　🎞 缩放 <span id="slirn-fine-video-scale-pct">{_scale_pct:.4f}</span>%'
+                f'　|　📊 宽高比 '
+                f'<span id="slirn-fine-video-aspect">'
+                f'{(_disp_h / _disp_w) if _disp_w > 0 else 0:.3f}'
+                f'</span>'
+                f'　|　📏 占背景图 '
+                f'<span id="slirn-fine-video-crop-w-pct">{_crop_w_pct:.2f}</span>'
+                f'×<span id="slirn-fine-video-crop-h-pct">{_crop_h_pct:.2f}</span>%'
+                f'（裁剪 {_crop_w}×{_crop_h} / 背景 1920×1080）'
+                f'</div>'
+            )
+        position_blocks[mat_key] = (
+            f'<div class="slirn-fine-layout-block">'
+            f'<div class="slirn-fine-layout-title">'
+            f'<label><input type="checkbox" class="slirn-fine-enabled" data-key="{mat_key}" '
+            f'{"checked" if lc["enabled"] else ""}> {label_icon}</label>'
+            f'</div>'
+            f'{params_html}'
+            f'{info_html}'
+            f'</div>'
+        )
+
+    # 2.5 视频源裁剪（REQ-20260919-061 用户补充：crop_* 也用像素，基于 1920×1080 设计空间，
+    # 渲染时按源视频实际尺寸等比换算）
+    vc = layout["video"]
+    crop_params = []
+    for ck, ck_max in (
+        ("crop_x", _FINE_DESIGN_W), ("crop_y", _FINE_DESIGN_H),
+        ("crop_w", _FINE_DESIGN_W), ("crop_h", _FINE_DESIGN_H),
+    ):
+        ck_label = {
+            "crop_x": f"X 起点（0–{_FINE_DESIGN_W}）",
+            "crop_y": f"Y 起点（0–{_FINE_DESIGN_H}）",
+            "crop_w": f"宽度（0–{_FINE_DESIGN_W}）",
+            "crop_h": f"高度（0–{_FINE_DESIGN_H}）",
+        }[ck]
+        crop_params.append(
+            _fine_param(
+                ck_label, f"slirn-fine-video-{ck}",
+                f"video.{ck}", int(vc[ck]), 0, ck_max, 1, "{:d}",
+            )
+        )
+    # 实时算 crop 矩形比例（设计空间下）
+    if vc["crop_w"] > 0:
+        aspect = vc["crop_h"] / vc["crop_w"]
+    else:
+        aspect = 0
+    crop_html = (
+        f'<div class="slirn-fine-crop-block">'
+        f'<div class="slirn-fine-layout-title">🎥 视频源裁剪（从源画面里截一个矩形范围）</div>'
+        f'<div class="slirn-fine-crop-presets">'
+        f'<button class="slirn-btn slirn-btn-xs" data-action="fine-crop-preset" data-preset="full">📐 全幅（不裁剪）</button>'
+        f'<button class="slirn-btn slirn-btn-xs" data-action="fine-crop-preset" data-preset="16x9">🎯 16:9 居中</button>'
+        f'<button class="slirn-btn slirn-btn-xs" data-action="fine-crop-preset" data-preset="1x1">⬛ 1:1 居中</button>'
+        f'</div>'
+        f'<label class="slirn-fine-crop-link-toggle">'
+        # REQ-20260919-062 v18：把勾选状态读自 layout.video.crop_aspect_lock，
+        # 默认 True（与旧版 HTML 默认勾选一致）。
+        f'<input type="checkbox" id="slirn-fine-crop-aspect-link" '
+        f'data-key="video.crop_aspect_lock" '
+        f'{"checked" if bool(vc.get("crop_aspect_lock", True)) else ""}> '
+        f'🔗 锁定 16:9 比例（防变形；关闭后可任意调整）</label>'
+        f'<div class="slirn-fine-crop-aspect">当前矩形比例 ≈ <span id="slirn-fine-crop-aspect-val">{aspect:.3f}</span>'
+        f'（目标 16:9 = {16/9:.3f}，1:1 = 1.000）</div>'
+        f'<div class="slirn-fine-params">'
+        + "".join(crop_params) +
+        f'</div>'
+        f'</div>'
+    )
+
+    # 2.6 片头封面（REQ-20260919-061 扩展）：不再画角标小图，封面作为片头全屏海报展示 N 秒
+    cover_layout = layout["cover"]
+    cover_duration = float(cover_layout.get("duration", 2.0))
+    cover_html = (
+        f'<div class="slirn-fine-cover-block">'
+        f'<div class="slirn-fine-layout-title">🎞 片头封面（全屏展示 N 秒后切视频）</div>'
+        f'<label><input type="checkbox" class="slirn-fine-enabled" data-key="cover" '
+        f'{"checked" if cover_layout["enabled"] else ""}> 启用片头封面</label>'
+        f'<div class="slirn-fine-params">'
+        f'{_fine_param("展示时长（0–10 秒）", "slirn-fine-cover-duration", "cover.duration", cover_duration, 0, 10, 0.5, "{:.1f}")}'
+        f'</div>'
+        f'<div class="slirn-form-hint">设为 0 秒 = 不显示片头；建议 1–3 秒。'
+        f'封面图会自动按比例铺满 1920×1080 画布（黑边填充）。'
+        f'<b>封面播放期间视频静音（不输出原声），封面结束后才开始播放</b>。</div>'
+        f'</div>'
+    )
+
+    # 2.7 背景音乐控制（REQ-20260919-061 扩展）：与原声混合（amix），保留说话人语音
+    audio_cfg = fc.get("audio") or _FINE_AUDIO_DEFAULTS
+    audio_html = (
+        f'<div class="slirn-fine-audio-block">'
+        f'<div class="slirn-fine-layout-title">🎵 背景音乐（与原声混合播放，保留说话人语音）</div>'
+        f'<label><input type="checkbox" class="slirn-fine-enabled" data-key="audio" '
+        f'{"checked" if audio_cfg["enabled"] else ""}> 启用背景音乐</label>'
+        f'<div class="slirn-fine-params">'
+        f'{_fine_param("音量（0–1，0.4 = 不压人声）", "slirn-fine-audio-volume", "volume", float(audio_cfg["volume"]), 0, 1, 0.05, "{:.2f}", data_attr="data-audio-key")}'
+        f'{_fine_param("淡入（0–5 秒）", "slirn-fine-audio-fade_in", "fade_in", float(audio_cfg["fade_in"]), 0, 5, 0.5, "{:.1f}", data_attr="data-audio-key")}'
+        f'{_fine_param("淡出（0–5 秒）", "slirn-fine-audio-fade_out", "fade_out", float(audio_cfg["fade_out"]), 0, 5, 0.5, "{:.1f}", data_attr="data-audio-key")}'
+        f'</div>'
+        f'<div class="slirn-form-hint">上传 mp3/wav/m4a 文件 → 原说话人语音 + BGM 同时播放；'
+        f'短 BGM 自动循环填充。</div>'
+        f'</div>'
+    )
+
+    # 3. AI 解析按钮
+    has_reference = bool(materials.get("reference", {}).get("path"))
+    # tooltip 显示「将调用的当前模型」，让用户清楚按钮背后是哪个模型
+    from slirn_home import llm_config as _llm_cfg
+    _cur_model_id = _llm_cfg.get_current(mgr.tasks_dir.parent) or "未选"
+    ai_btn = (
+        f'<button class="slirn-btn slirn-btn-primary" data-action="fine-ai-parse" '
+        f'data-task-id="{_esc(task_id)}" '
+        f'{"disabled" if not has_reference else ""} '
+        f'title="{_esc("需先上传参考位置关系图") if not has_reference else _esc(f"调当前模型「{_cur_model_id}」自动解析参考图")}">'
+        f'🤖 AI 智能布局{"" if has_reference else "（需参考图）"}</button>'
+    )
+
+    # 4. 字体 5 项
+    font_family_options = (
+        f'<option value="STHeitiMedium" {"selected" if font["family"] == "STHeitiMedium" else ""}>STHeitiMedium（系统）</option>'
+        f'<option value="Noto Sans CJK SC" {"selected" if font["family"] == "Noto Sans CJK SC" else ""}>思源黑体 Noto Sans CJK SC</option>'
+    )
+    font_html = (
+        f'<div class="slirn-fine-font-block">'
+        f'<div class="slirn-fine-font-title">🔤 字幕字体设置</div>'
+        f'<div class="slirn-fine-font-row">'
+        f'<span class="slirn-fine-font-label">字体本身</span>'
+        f'<select class="slirn-fine-font-sel" data-font-key="family">{font_family_options}</select>'
+        f'</div>'
+        f'<div class="slirn-fine-font-row">'
+        f'<span class="slirn-fine-font-label">字体大小（px）</span>'
+        f'<input type="number" class="slirn-fine-font-num" data-font-key="size" '
+        f'min="12" max="96" value="{font["size"]}">'
+        f'</div>'
+        f'<div class="slirn-fine-font-row">'
+        f'<span class="slirn-fine-font-label">粗体</span>'
+        f'<label><input type="checkbox" class="slirn-fine-font-chk" data-font-key="bold" '
+        f'{"checked" if font["bold"] else ""}> 启用</label>'
+        f'</div>'
+        f'<div class="slirn-fine-font-row">'
+        f'<span class="slirn-fine-font-label">屏幕对齐</span>'
+        f'<select class="slirn-fine-font-sel" data-font-key="align">'
+        f'<option value="left" {"selected" if font["align"] == "left" else ""}>左对齐</option>'
+        f'<option value="center" {"selected" if font["align"] == "center" else ""}>居中</option>'
+        f'<option value="right" {"selected" if font["align"] == "right" else ""}>右对齐</option>'
+        f'</select>'
+        f'</div>'
+        f'<div class="slirn-fine-font-row">'
+        f'<span class="slirn-fine-font-label">描边宽度（px）</span>'
+        f'<input type="number" class="slirn-fine-font-num" data-font-key="stroke_width" '
+        f'min="0" max="10" value="{font["stroke_width"]}">'
+        f'</div>'
+        # REQ-20260919-062 v19：字幕文字本身颜色 picker（之前只有描边/背景，
+        # 在白色 PPT 背景上默认白字=看不见 → 用户以为是「白框」）
+        f'<div class="slirn-fine-font-row">'
+        f'<span class="slirn-fine-font-label">文字颜色</span>'
+        f'<input type="color" class="slirn-fine-font-color" data-font-key="color" '
+        f'value="{font["color"]}">'
+        f'</div>'
+        f'<div class="slirn-fine-font-row">'
+        f'<span class="slirn-fine-font-label">描边颜色</span>'
+        f'<input type="color" class="slirn-fine-font-color" data-font-key="stroke_color" '
+        f'value="{font["stroke_color"]}">'
+        f'</div>'
+        f'<div class="slirn-fine-font-row">'
+        f'<span class="slirn-fine-font-label">背景框</span>'
+        f'<label><input type="checkbox" class="slirn-fine-font-chk" data-font-key="bg_enabled" '
+        f'{"checked" if font["bg_enabled"] else ""}> 启用</label>'
+        f'</div>'
+        f'<div class="slirn-fine-font-row">'
+        f'<span class="slirn-fine-font-label">背景颜色</span>'
+        f'<input type="color" class="slirn-fine-font-color" data-font-key="bg_color" '
+        f'value="{font["bg_color"]}">'
+        f'</div>'
+        # REQ-20260919-061a v7：背景透明度 = label + slider + num（用浏览器原生 stepper，
+        # 移除自定义 ▲▼ 按钮 — 与外层其他 num 框一致）。
+        f'<div class="slirn-fine-params">'
+        f'<div class="slirn-fine-param">'
+        f'<span class="slirn-fine-param-label">背景透明度</span>'
+        f'<input type="range" class="slirn-fine-font-slider" id="slirn-fine-font-bg_opacity" '
+        f'data-font-key="bg_opacity" min="0" max="1" step="0.05" value="{font["bg_opacity"]}">'
+        f'<input type="number" class="slirn-fine-num" id="slirn-fine-font-bg_opacity_num" '
+        f'aria-label="数值输入" min="0" max="1" step="0.05" value="{font["bg_opacity"]}" '
+        f'data-for="slirn-fine-font-bg_opacity">'
+        f'</div>'
+        f'</div>'
+        f'</div>'
+    )
+
+    # 5. 输出 3 项
+    output_html = (
+        f'<div class="slirn-fine-output-block">'
+        f'<div class="slirn-fine-font-title">📺 输出设置</div>'
+        f'<div class="slirn-fine-font-row">'
+        f'<span class="slirn-fine-font-label">分辨率</span>'
+        f'<select class="slirn-fine-output-sel" data-output-key="resolution">'
+        f'<option value="1080p" {"selected" if output["resolution"] == "1080p" else ""}>1080p（1920×1080）</option>'
+        f'<option value="720p" {"selected" if output["resolution"] == "720p" else ""}>720p（1280×720）</option>'
+        f'<option value="source" {"selected" if output["resolution"] == "source" else ""}>原始视频分辨率</option>'
+        f'</select>'
+        f'</div>'
+        f'</div>'
+    )
+
+    # 6. 预览/导出按钮（Phase B：ffmpeg 渲染已就绪）
+    #   启用条件：至少视频素材已就绪（auto-pick 上游产物或 手动上传）
+    has_video = bool(materials.get("video", {}).get("path"))
+    preview_btn_disabled = "" if has_video else "disabled"
+    preview_btn_title = "渲染预览（ffmpeg overlay，时长 2–30 秒可调）" if has_video else "请先上传或自动获取视频素材"
+    export_btn_disabled = "" if has_video else "disabled"
+    export_btn_title = "导出完整视频到 outputs/fine_export.mp4" if has_video else "请先上传或自动获取视频素材"
+    preview_btn = (
+        f'<button class="slirn-btn" data-action="fine-preview" data-task-id="{_esc(task_id)}" '
+        f'{preview_btn_disabled} title="{_esc(preview_btn_title)}">🎬 生成预览</button>'
+    )
+    # REQ-20260919-061a v6 用户反馈：删除预览时长旁的 ▲▼ 按钮 — 直接修改 number input 即可。
+    # 仍保留 number input + min/max 限制 + Enter 提交语义。
+    # REQ-20260919-064：新增「预览开始时间」input 在「预览时长」前 — 让用户能跳到视频
+    # 不同时间点预览。start + duration 由后端钳到不超出源视频时长。
+    # REQ-20260919-066 用户反馈：开始时间改为 时:分:秒 三段输入（比纯秒更直观）；
+    # 前端在发送前转成总秒数发给后端。默认 00:00:00。
+    preview_start = (
+        f'<span class="slirn-fine-preview-start">'
+        f'<span class="slirn-fine-actions-label">预览开始时间</span>'
+        f'<input type="number" id="slirn-fine-preview-start-h" class="slirn-fine-num slirn-fine-preview-time" '
+        f'aria-label="预览开始时间（小时）" min="0" step="1" value="0" maxlength="2">'
+        f'<span class="slirn-fine-time-sep">:</span>'
+        f'<input type="number" id="slirn-fine-preview-start-m" class="slirn-fine-num slirn-fine-preview-time" '
+        f'aria-label="预览开始时间（分钟）" min="0" max="59" step="1" value="0" maxlength="2">'
+        f'<span class="slirn-fine-time-sep">:</span>'
+        f'<input type="number" id="slirn-fine-preview-start-s" class="slirn-fine-num slirn-fine-preview-time" '
+        f'aria-label="预览开始时间（秒）" min="0" max="59" step="1" value="0" maxlength="2">'
+        f'<span class="slirn-fine-actions-label">（时:分:秒）</span>'
+        f'</span>'
+    )
+    preview_duration = (
+        f'<span class="slirn-fine-preview-duration">'
+        f'<span class="slirn-fine-actions-label">预览时长</span>'
+        f'<input type="number" id="slirn-fine-preview-duration" class="slirn-fine-num" '
+        f'aria-label="预览时长（秒，2-30）" min="2" max="30" step="1" value="10">'
+        f'<span class="slirn-fine-actions-label">秒（2–30）</span>'
+        f'</span>'
+    )
+    export_btn = (
+        f'<button class="slirn-btn slirn-btn-primary" data-action="fine-export" data-task-id="{_esc(task_id)}" '
+        f'{export_btn_disabled} title="{_esc(export_btn_title)}">💾 导出最终视频</button>'
+    )
+    preview_box = (
+        # REQ-20260919-062 v10 用户反馈：去掉页面内的预览框（设计空间画布），
+        # 弹出窗口预览（.slirn-mat-preview-float）就够了；预览框占页面大块空间，
+        # 不再需要。生成预览按钮仍保留，让用户能渲染后再用弹窗预览查看。
+        '<div class="slirn-fine-preview-empty" id="slirn-fine-preview-empty" hidden>'
+        '本页已去掉内嵌预览；点「🎬 生成预览」后用「👁️ 预览」弹窗查看效果。</div>'
+    )
+
+    # REQ-20260919-061 用户反馈：把「保存设置参数」+ 模板管理搬到顶部操作栏。
+    # 设计：
+    #   - 模板名输入框（空着也行，但保存时会弹窗要求填名）
+    #   - 💾 保存设置参数：保存当前参数到 fine_compose；如有模板名 → 同步另存为全局模板
+    #   - 📥 引用参数：弹出模态框列出所有已保存模板，点「应用」覆盖当前任务参数
+    #   - 状态指示器：显示「未保存 / 保存中 / 上次保存 HH:MM:SS / 保存失败」
+    #   - 自动保存（滑块拖动 300ms 防抖）仍然只写 fine_compose，不写模板（避免一堆「未命名」）
+    save_status = '<span class="slirn-fine-save-status" id="slirn-fine-save-status" data-state="idle">未保存</span>'
+
+    # 引用参数（本地）modal（默认 hidden）。列表内容由前端 fineImportShow() 动态填充。
+    import_modal = (
+        f'<div class="slirn-modal-overlay" id="slirn-fine-import-overlay" hidden>'
+        f'<div class="slirn-modal-card slirn-fine-import-card">'
+        f'<div class="slirn-modal-title">📥 引用参数模板（应用到当前任务）</div>'
+        f'<div class="slirn-fine-import-list" id="slirn-fine-import-list">'
+        f'<div class="slirn-fine-profile-empty">加载中…</div>'
+        f'</div>'
+        f'<div style="display:flex; gap:10px; justify-content:center; margin-top:12px;">'
+        f'<button class="slirn-btn" data-action="fine-import-close">关闭</button>'
+        f'</div>'
+        f'<div class="slirn-form-hint" style="margin-top:10px;">'
+        f'「应用」会覆盖当前任务的对应参数（位置/字体/输出/音频），弹窗确认后生效。'
+        f'「导出」会把该模板的参数下载为 JSON 文件（不依赖任务，可在外部备份/分享）。'
+        f'</div>'
+        f'</div>'
+        f'</div>'
+    )
+
+    # REQ-20260919-061a 用户反馈 v4：左右两列的前 2 个块固定为视频/视频源裁剪（左）、
+    # 字幕/字幕字体设置（右）。剩余 4 块按主题续列：
+    #   左列（视频主层相关）：视频位置 → 视频源裁剪 → 背景位置 → 背景音乐
+    #   右列（叠加 + 收尾）：  字幕位置 → 字幕字体设置 → 片头封面 → 输出设置
+    # 每个 block 内部参数仍是单列堆叠（_fine_param 3 列 mini-grid = label/slider/num）。
+    left_col_blocks = (
+        position_blocks["video"]
+        + crop_html
+        + position_blocks["bg"]
+        + audio_html
+    )
+    right_col_blocks = (
+        position_blocks["subtitle"]
+        + font_html
+        + cover_html
+        + output_html
+    )
+    fine_cols_html = (
+        f'<div class="slirn-fine-cols">'
+        f'<div class="slirn-fine-col">{left_col_blocks}</div>'
+        f'<div class="slirn-fine-col">{right_col_blocks}</div>'
+        f'</div>'
+    )
+
+    # REQ-20260919-064：把预览/导出行 + 模板/保存行 拆成两行（每个一行 .slirn-fine-actions-bar）。
+    # 模板名 input 用 flex:1 自动填充剩余宽度；不再需要 sep 分隔符。
+    combined_actions_bar = (
+        # 行 1：渲染操作（AI 解析 / 生成预览 / 预览开始 / 预览时长 / 导出最终）
+        f'<div class="slirn-fine-actions-bar">'
+        f'{ai_btn} {preview_btn} {preview_start} {preview_duration} {export_btn}'
+        f'</div>'
+        # 行 2：模板管理 + 参数文件导入导出（REQ-065 在引用参数后追加 📤 导出 / 📥 导入按钮）
+        f'<div class="slirn-fine-actions-bar">'
+        f'<span class="slirn-fine-actions-label">模板名</span>'
+        f'<input type="text" class="slirn-fine-profile-name" id="slirn-fine-profile-name" '
+        f'placeholder="（可选）填了名另存为模板" maxlength="30" autocomplete="off">'
+        f'<button class="slirn-btn slirn-btn-primary" data-action="fine-save-all" '
+        f'data-task-id="{_esc(task_id)}" title="保存当前参数；未填名会弹窗要求填">'
+        f'💾 保存设置参数</button>'
+        f'<button class="slirn-btn" data-action="fine-import-show" '
+        f'data-task-id="{_esc(task_id)}" title="从本机已保存的全局参数模板中选择应用（不会发到外部）">'
+        f'📥 引用参数（本地）</button>'
+        f'<button class="slirn-btn" data-action="fine-export-params" '
+        f'data-task-id="{_esc(task_id)}" '
+        f'title="下载所有参数（布局/字体/输出/音频/检测区域）为 JSON 文件">'
+        f'📤 导出参数</button>'
+        f'<button class="slirn-btn" data-action="fine-import-params" '
+        f'data-task-id="{_esc(task_id)}" '
+        f'title="从 JSON 文件导入参数（覆盖当前参数；不动素材文件）">'
+        f'📥 导入参数</button>'
+        f'{save_status}'
+        f'</div>'
+    )
+
+    # REQ-20260919-062：背景图区域检测面板（独立块）。
+    # v8 用户反馈：
+    #   - 「把背景图区域颜色剪下」→ 检测主色用大色块 + RGB + HEX 醒目标签
+    #   - 「信息区挪到 AI 智能布局区域的上方」→ 整个检测块上移到 combined_actions_bar 之前
+    #   - 「检测后存储检测信息」→ 命中检测后写 fc.bg_detect_cache；渲染时优先读缓存
+    # 算法：
+    #   - center_expand 从中心向 4 方向扩展，遇到颜色变化即停（默认；最稳）
+    #   - pixel         像素扫描（白色 RGB≥threshold，已知是白色时用）
+    #   - ai_color      LLM 识别左下角主色 → 像素扫描（颜色未知但需要彩色 bbox 时）
+    #   - ai            LLM 直接给出 bbox（已废弃）
+    has_bg = bool(materials.get("bg", {}).get("path"))
+    # REQ-20260919-065：优先读 detected_region（新正式位置），fallback 到 bg_detect_cache（向后兼容）
+    bg_cache = (fc.get("detected_region") or fc.get("bg_detect_cache") or {}) if isinstance(fc, dict) else {}
+    _has_cache = bool(bg_cache)
+    _hidden_attr = '' if _has_cache else ' hidden'
+    # v12 用户反馈：「背景图主色」大色块已去掉；下方的几何信息区仍保留（角点+宽高+中心+像素数+原图尺寸）。
+    # 缓存里的几何信息
+    _cache_x = bg_cache.get("x")
+    _cache_y = bg_cache.get("y")
+    _cache_w = bg_cache.get("width")
+    _cache_h = bg_cache.get("height")
+    _cache_cx = bg_cache.get("center_x")
+    _cache_cy = bg_cache.get("center_y")
+    _cache_pixels = bg_cache.get("pixel_count")
+    _cache_native_w = bg_cache.get("image_native_w")
+    _cache_native_h = bg_cache.get("image_native_h")
+    _cache_corners = bg_cache.get("corners") or {}
+    _cache_algo = bg_cache.get("algorithm") or "—"
+    _cache_at = bg_cache.get("detected_at") or ""
+    def _cache_val(v):
+        return "—" if v is None else str(v)
+    def _cache_corner(name):
+        c = _cache_corners.get(name) if isinstance(_cache_corners, dict) else None
+        if not c or not isinstance(c, list) or len(c) != 2:
+            return "—"
+        return f"({c[0]}, {c[1]})"
+    # REQ-20260919-072：背景图检测状态徽章（summary 右侧，折叠时一眼看到进度）
+    if not has_bg:
+        _bg_status_badge = '<span class="slirn-fine-section-status">⏳ 未上传背景图</span>'
+    elif _has_cache and _cache_w and _cache_h:
+        _bg_status_badge = (
+            f'<span class="slirn-fine-section-status">✅ 已检测 '
+            f'{_cache_val(_cache_w)} × {_cache_val(_cache_h)}</span>'
+        )
+    else:
+        _bg_status_badge = '<span class="slirn-fine-section-status">⚠️ 未检测</span>'
+
+    bg_detect_block = (
+        f'<div class="slirn-fine-bg-detect-block">'
+        # v12 用户反馈：「背景图主色」那个大色块看不出有什么用（结果区已含坐标/宽高，
+        # 再展示 RGB/HEX 没意义；主色只是中间量，不是终态交付物）。已去掉主色显示区。
+        f'<div class="slirn-fine-layout-title">🎨 背景图区域检测（4 角点 + 宽高）</div>'
+        # 算法 + 阈值/色容差 + 触发按钮
+        f'<div class="slirn-fine-bg-detect-controls">'
+        f'<span class="slirn-fine-actions-label">算法</span>'
+        f'<select class="slirn-fine-bg-detect-algo" id="slirn-fine-bg-detect-algo">'
+        f'<option value="center_expand" selected>🎯 中心扩展（默认；颜色未知时推荐）</option>'
+        f'<option value="pixel">🔍 像素扫描白色（已知是白色）</option>'
+        f'<option value="ai_color">🤖 AI 识别主色（颜色未知，需彩色 bbox）</option>'
+        f'<option value="ai">🤖 AI 直接给 bbox（已废弃）</option>'
+        f'</select>'
+        # 阈值/容差控件（仅 pixel 算法显示；ai_color 用 ±10 容差不可改，ai 无需）
+        f'<span class="slirn-fine-bg-detect-threshold-row" id="slirn-fine-bg-detect-threshold-row">'
+        f'<span class="slirn-fine-actions-label">阈值</span>'
+        f'<select class="slirn-fine-bg-detect-threshold-sel" id="slirn-fine-bg-detect-threshold-sel">'
+        f'<option value="255">纯白 (255)</option>'
+        f'<option value="250" selected>近白 (250)</option>'
+        f'<option value="240">宽松 (240)</option>'
+        f'<option value="230">很宽松 (230)</option>'
+        f'</select>'
+        f'<input type="number" class="slirn-fine-num" id="slirn-fine-bg-detect-threshold-num" '
+        f'min="200" max="255" step="1" value="250" '
+        f'aria-label="手动输入阈值（200-255）">'
+        f'</span>'
+        f'<button class="slirn-btn slirn-btn-primary" data-action="fine-bg-detect" '
+        f'data-task-id="{_esc(task_id)}" '
+        f'{"disabled" if not has_bg else ""} '
+        f'title="{_esc("请先上传背景图片") if not has_bg else _esc("运行区域检测")}">'
+        f'🔍 检测区域</button>'
+        # v8：清空缓存按钮（用「重新检测」也可，但显式清空能让用户区分「清缓存」与「再跑一次」）
+        f'<button class="slirn-btn slirn-btn-xs" data-action="fine-bg-detect-clear" '
+        f'data-task-id="{_esc(task_id)}" '
+        f'{"disabled" if not _has_cache else ""} '
+        f'title="清空检测缓存（之后可重新检测）">'
+        f'🗑 清空缓存</button>'
+        f'</div>'
+        # 只读结果区
+        f'<div class="slirn-fine-bg-detect-result" id="slirn-fine-bg-detect-result"{_hidden_attr}>'
+        f'<div class="slirn-fine-bg-detect-grid">'
+        f'<span class="slirn-fine-bg-detect-key">左上角 (X, Y)</span>'
+        f'<span class="slirn-fine-bg-detect-val" id="slirn-fine-bg-detect-tl">{_cache_corner("topleft")}</span>'
+        f'<span class="slirn-fine-bg-detect-key">右上角 (X, Y)</span>'
+        f'<span class="slirn-fine-bg-detect-val" id="slirn-fine-bg-detect-tr">{_cache_corner("topright")}</span>'
+        f'<span class="slirn-fine-bg-detect-key">左下角 (X, Y)</span>'
+        f'<span class="slirn-fine-bg-detect-val" id="slirn-fine-bg-detect-bl">{_cache_corner("bottomleft")}</span>'
+        f'<span class="slirn-fine-bg-detect-key">右下角 (X, Y)</span>'
+        f'<span class="slirn-fine-bg-detect-val" id="slirn-fine-bg-detect-br">{_cache_corner("bottomright")}</span>'
+        f'<span class="slirn-fine-bg-detect-key">宽 × 高 (px)</span>'
+        f'<span class="slirn-fine-bg-detect-val" id="slirn-fine-bg-detect-wh">'
+        f'{_cache_val(_cache_w)} × {_cache_val(_cache_h)}'
+        f'</span>'
+        f'<span class="slirn-fine-bg-detect-key">中心 (X, Y)</span>'
+        f'<span class="slirn-fine-bg-detect-val" id="slirn-fine-bg-detect-center">'
+        f'{_cache_val(_cache_cx)}, {_cache_val(_cache_cy)}'
+        f'</span>'
+        f'<span class="slirn-fine-bg-detect-key">白色像素数</span>'
+        f'<span class="slirn-fine-bg-detect-val" id="slirn-fine-bg-detect-pixels">{_cache_val(_cache_pixels)}</span>'
+        f'<span class="slirn-fine-bg-detect-key">原图分辨率</span>'
+        f'<span class="slirn-fine-bg-detect-val" id="slirn-fine-bg-detect-native">'
+        f'{_cache_val(_cache_native_w)} × {_cache_val(_cache_native_h)}'
+        f'</span>'
+        f'<span class="slirn-fine-bg-detect-key">检测算法</span>'
+        f'<span class="slirn-fine-bg-detect-val" id="slirn-fine-bg-detect-algo-used">{_esc(_cache_algo)}</span>'
+        f'<span class="slirn-fine-bg-detect-key">检测时间</span>'
+        f'<span class="slirn-fine-bg-detect-val" id="slirn-fine-bg-detect-time">{_esc(_cache_at)}</span>'
+        f'</div>'
+        f'<div class="slirn-fine-bg-detect-actions">'
+        f'<button class="slirn-btn" data-action="fine-bg-detect-apply" '
+        f'data-task-id="{_esc(task_id)}" title="把白色区域应用到 video：X/Y=区域左上角，crop=从原视频(0,0)取区域宽高，scale=1.0，并把视频限定在该区域内">'
+        f'✅ 填充到视频位置和裁剪</button>'
+        f'</div>'
+        f'</div>'
+        f'<div class="slirn-form-hint">白色 = R/G/B 三通道均 ≥ 阈值；阈值越小（200）越宽松，越大（255）越严格。'
+        f'检测到的坐标都是 1920×1080 设计空间像素，结果自动保存到任务里（避免反复扫描）。</div>'
+        f'</div>'
+    )
+
+    # REQ-20260919-072 v1：上传区域状态徽章（折叠时一眼看到进度）
+    _uploaded_count = sum(
+        1 for k in ("video", "subtitle", "cover", "bg", "reference", "audio")
+        if materials.get(k, {}).get("path")
+    )
+    if _uploaded_count == 0:
+        _upload_status_badge = '<span class="slirn-fine-section-status">⏳ 0/6 已上传</span>'
+    elif _uploaded_count == 6:
+        _upload_status_badge = f'<span class="slirn-fine-section-status">✅ {_uploaded_count}/6 已上传</span>'
+    else:
+        _upload_status_badge = f'<span class="slirn-fine-section-status">⚠️ {_uploaded_count}/6 已上传</span>'
+
+    return (
+        f'<div class="slirn-wb-pane-card">'
+        f'<div class="slirn-wb-pane-title">🎬 精剪视频 · 素材合成器</div>'
+        # REQ-20260919-072 v1：说明挪到最顶端（标题之后立刻显示）
+        f'<div class="slirn-form-hint">📐 位置坐标（X/Y）和缩放（归一化 0-1 / 0.1-2.0）</div>'
+        # REQ-20260919-072 v1：素材上传区可折叠（默认折叠；不写 open 属性）
+        f'<details class="slirn-fine-section" id="slirn-fine-uploads-details">'
+        f'<summary class="slirn-fine-section-summary">📁 上传素材（6 项）{_upload_status_badge}</summary>'
+        f'{upload_html}'
+        f'</details>'
+        # REQ-20260919-072 v1：背景图区域检测可折叠（默认折叠；不写 open 属性）
+        f'<details class="slirn-fine-section" id="slirn-fine-bg-detect-details">'
+        f'<summary class="slirn-fine-section-summary">🎨 背景图区域检测（4 角点 + 宽高）{_bg_status_badge}</summary>'
+        f'{bg_detect_block}'
+        f'</details>'
+        f'{combined_actions_bar}'
+        f'<div class="slirn-form-hint">💡 上传 5 个素材后调滑块调位置/缩放/字体；改动后 300ms 自动保存到当前任务。'
+        f'点「💾 保存设置参数」会同时把当前参数另存为全局模板（未填模板名则弹窗要求填）。</div>'
+        f'{preview_box}'
+        f'{fine_cols_html}'
+        f'{import_modal}'
+        f'</div>'
+    )
+
+
 def _render_workbench(task_id: str, mgr: TaskManager) -> str:
     """剪辑工作台：顶部任务信息 + 左侧阶段步骤条 + 右侧各阶段执行面板。"""
     try:
@@ -1475,6 +3011,16 @@ def _render_workbench(task_id: str, mgr: TaskManager) -> str:
             f'<div class="slirn-wb-stage-body"><div class="slirn-wb-stage-title">{icon} {title}{opt_chip}</div>'
             f'<div class="slirn-wb-stage-desc">{desc}</div></div></div>'
         )
+    # REQ-20260918-053：执行日志 — 非流水线阶段，单独追加在 rail 末尾（不计入
+    # _WB_STAGES，避免 wbAutoNextMaybe 自动跳到此页）
+    stage_items += (
+        f'<div class="slirn-wb-stage slirn-wb-stage-logs pending" '
+        f'data-action="wb-stage" data-pane="logs" '
+        f'title="查看该任务所有阶段的执行历史（含耗时、错误信息）">'
+        f'<span class="slirn-wb-stage-mark">📜</span>'
+        f'<div class="slirn-wb-stage-body"><div class="slirn-wb-stage-title">📜 执行日志</div>'
+        f'<div class="slirn-wb-stage-desc">查看所有阶段执行历史（生成/修订/切分/合成/优化）</div></div></div>'
+    )
 
     # ---- 右：各阶段面板 ----
     def _pane_planned(i: int, desc: str) -> str:
@@ -1500,6 +3046,9 @@ def _render_workbench(task_id: str, mgr: TaskManager) -> str:
         "rough_cut": _render_cutlist_zone(task_id, t, mgr),
         "rough_compose": _render_rough_compose_zone(task_id, t, mgr),
         "fine_review": _render_optimize_zone(task_id, t, mgr),
+        # REQ-20260919-061：精剪视频·四素材合成器（Phase A 骨架）
+        "fine_cut": _render_fine_cut_zone(task_id, t, mgr),
+        "logs": _render_exec_logs_pane(task_id),  # REQ-20260918-053
     }
     for i, (key, _st, _t2, _ic, desc) in enumerate(_WB_STAGES):
         if key in panes:
@@ -1517,6 +3066,8 @@ def _render_workbench(task_id: str, mgr: TaskManager) -> str:
         <div class="slirn-panel-header">
             <div class="slirn-panel-title">✂️ 剪辑工作台 · {_esc(t.name)}</div>
             <div>
+                <button class="slirn-btn slirn-btn-sm" data-action="refresh-wb" data-task-id="{_esc(task_id)}"
+                        title="刷新工作台数据（也可按 F5 / Cmd+R，URL #wb= 自动回到本页）">🔄 刷新</button>
                 <button class="slirn-btn slirn-btn-sm slirn-wb-stages-expand" data-action="wb-toggle-stages"
                         title="展开左侧阶段列表">🧭 展开阶段</button>
                 <button class="slirn-btn slirn-btn-sm" data-action="edit-task" data-task-id="{_esc(task_id)}">✏️ 编辑任务</button>
@@ -1547,6 +3098,49 @@ def _render_workbench(task_id: str, mgr: TaskManager) -> str:
 
 
 # =============== 热词库 ===============
+
+def _render_exec_logs_pane(task_id: str) -> str:
+    """REQ-20260918-053 — 工作台「📜 执行日志」面板。
+
+    不在服务端渲染记录（量大 + 需过滤），仅渲染过滤区 + 列表占位；
+    由 router.js 在面板首次显示时拉 /slirn/api/execution_history_query。
+    """
+    from slirn_home import execution_history
+
+    kind_chips = "".join(
+        f'<button type="button" class="slirn-chip" data-log-kind="{_esc(k)}" '
+        f'title="{_esc(v)}">{_esc(v)}</button>'
+        for k, v in execution_history.KIND_LABELS.items()
+    )
+    return (
+        f'<div class="slirn-wb-pane-card slirn-logs-pane" data-task-id="{_esc(task_id)}">'
+        f'  <div class="slirn-wb-pane-title">📜 执行日志 <span class="slirn-logs-count" data-bind="logs-count">--</span></div>'
+        f'  <div class="slirn-form-hint slirn-logs-hint">'
+        f'    所有阶段的执行历史（含字幕生成/字幕修订/切分修剪/粗剪合成/优化字幕）。点击 chip 多选过滤；输入关键词搜错误信息。'
+        f'  </div>'
+        f'  <div class="slirn-logs-filter">'
+        f'    <div class="slirn-logs-filter-row">'
+        f'      <span class="slirn-logs-filter-label">阶段：</span>{kind_chips}'
+        f'      <button type="button" class="slirn-chip slirn-chip-clear" data-action="logs-clear-kinds" title="清除阶段过滤">清除</button>'
+        f'    </div>'
+        f'    <div class="slirn-logs-filter-row">'
+        f'      <span class="slirn-logs-filter-label">状态：</span>'
+        f'      <button type="button" class="slirn-chip" data-log-status="success" title="仅看成功的">✅ 成功</button>'
+        f'      <button type="button" class="slirn-chip" data-log-status="failed" title="仅看失败的">❌ 失败</button>'
+        f'      <button type="button" class="slirn-chip" data-log-status="running" title="仅看运行中的">⏳ 运行中</button>'
+        f'      <button type="button" class="slirn-chip slirn-chip-clear" data-action="logs-clear-statuses" title="清除状态过滤">清除</button>'
+        f'    </div>'
+        f'    <div class="slirn-logs-filter-row">'
+        f'      <input type="text" class="slirn-input slirn-logs-keyword" id="slirn-logs-keyword" '
+        f'             placeholder="🔍 搜错误信息或阶段（不区分大小写）" />'
+        f'      <button type="button" class="slirn-btn slirn-btn-sm" data-action="logs-refresh" title="按当前过滤条件重新查询">🔄 刷新</button>'
+        f'    </div>'
+        f'  </div>'
+        f'  <div class="slirn-logs-list" id="slirn-logs-list" data-task-id="{_esc(task_id)}">'
+        f'    <div class="slirn-form-hint slirn-logs-empty">尚未查询。点击「🔄 刷新」或切换过滤条件自动加载。</div>'
+        f'  </div>'
+        f'</div>'
+    )
 
 def _render_exec_history_card(task_id: str, mgr) -> str:
     """REQ-20260918-048 — 工作台顶部的执行历史折叠卡片（字幕生成 + 粗剪合成）。
@@ -2247,7 +3841,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
     import uuid as _uuid
     from typing import Optional
 
-    from fastapi import Body
+    # from fastapi import Body  # 已在文件顶部 import
     from fastapi.responses import JSONResponse
 
     # 直接从 starlette.requests 导入 Request，避免 Gradio 6 rebuild 后
@@ -2630,6 +4224,1073 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             return _err("缺少 task_id")
         return _ok(_render_workbench(tid, mgr))
 
+    # ========== REQ-20260919-061：精剪视频·四素材合成器 API ==========
+
+    @app.app.post("/slirn/api/save_fine_layout")
+    async def save_fine_layout(body: dict = Body(default_factory=dict)):
+        """保存精剪视频 4 素材的位置/缩放/启用（含 video 的 crop_* 字段）。
+
+        REQ-20260919-061 用户反馈：原版对不存在的 task_id 抛 500（TaskNotFoundError），
+        导致前端滑块拖动后看到保存失败但不知道为什么。统一走 try/except 返回友好错误。
+        """
+        tid = (body.get("task_id") or "").strip()
+        layout = body.get("layout") or {}
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            t = mgr.get(tid)
+        except Exception as e:  # noqa: BLE001 — TaskNotFoundError 等
+            return _err(f"任务不存在: {tid}")
+        if not t:
+            return _err(f"任务不存在: {tid}")
+        fc = _get_fine_compose(mgr, tid)
+        # 字段白名单（含 crop_* + cover.duration + video.viewport + video.crop_aspect_lock）
+        allowed_keys = (
+            "x", "y", "scale", "enabled",
+            "crop_x", "crop_y", "crop_w", "crop_h",
+            "duration", "viewport", "crop_aspect_lock",
+        )
+        for mat_key, val in layout.items():
+            if mat_key not in _FINE_LAYOUT_DEFAULTS:
+                continue
+            existing = fc["layout"].get(mat_key) or {}
+            existing.update({k: v for k, v in val.items() if k in allowed_keys})
+            # REQ-20260919-062 v18：crop_aspect_lock 强制 bool（前端可能传 true/"on"/1）
+            if mat_key == "video" and "crop_aspect_lock" in existing:
+                existing["crop_aspect_lock"] = bool(existing["crop_aspect_lock"])
+            # REQ-20260919-062 v5：若 video 有 viewport，则把 x/y/scale 夹紧到 viewport 内
+            if mat_key == "video":
+                _clamp_video_to_viewport(existing)
+            fc["layout"][mat_key] = existing
+        _save_fine_compose(mgr, tid, fc)
+        # 返回夹紧后的值，前端可据此同步滑块显示
+        return _ok(
+            toast="位置/缩放已保存",
+            layout={k: dict(v) for k, v in fc["layout"].items()},
+        )
+
+    @app.app.post("/slirn/api/auto_pick_upstream_material")
+    async def auto_pick_upstream_material(body: dict = Body(default_factory=dict)):
+        """REQ-20260919-061：把 video/subtitle 的素材来源切到「自动获取上游产物」。
+
+        - video  → outputs/rough_compose.mp4（粗剪合成阶段产物）
+        - subtitle → optimize_subtitle.json → build_srt() → tmp/optimized_subs.srt
+
+        上游产物不存在时返回错误，前端 toast 提示并保持当前来源。
+        """
+        tid = (body.get("task_id") or "").strip()
+        kind = (body.get("kind") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        if kind not in _FINE_AUTO_KINDS:
+            return _err(f"该素材不支持自动获取: {kind}")
+        t = mgr.get(tid)
+        if not t:
+            return _err(f"任务不存在: {tid}")
+        upstream = _fine_upstream_path(tid, kind, mgr)
+        if not upstream:
+            kind_label = _FINE_MATERIAL_LABELS[kind][1]
+            if kind == "video":
+                return _err(f"上游无粗剪合成产物（rough_compose.mp4），请先完成「粗剪合成」阶段")
+            return _err(f"上游无优化字幕产物，请先完成「优化字幕」阶段并确认保存")
+        fc = _get_fine_compose(mgr, tid)
+        fc["materials"][kind] = {
+            "path": str(upstream.relative_to(mgr.tasks_dir)),
+            "type": "video" if kind == "video" else "srt",
+            "source": "auto",
+        }
+        _save_fine_compose(mgr, tid, fc)
+        kind_label = _FINE_MATERIAL_LABELS[kind][1]
+        return _ok(path=fc["materials"][kind]["path"], toast=f"已自动从上游获取 {kind_label}")
+
+    @app.app.post("/slirn/api/clear_bg_detect_cache")
+    async def clear_bg_detect_cache(body: dict = Body(default_factory=dict)):
+        """REQ-20260919-062 v8：清空背景图区域检测的缓存（让用户能重新检测）。
+        REQ-20260919-065 升级：同时清 detected_region（正式参数）。
+        """
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            mgr.get(tid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+        try:
+            fc = _get_fine_compose(mgr, tid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"读取任务失败: {e}")
+        if "bg_detect_cache" not in fc and "detected_region" not in fc:
+            return _ok(toast="缓存已为空，无需清空")
+        fc.pop("bg_detect_cache", None)
+        fc.pop("detected_region", None)
+        try:
+            _save_fine_compose(mgr, tid, fc)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"保存失败: {e}")
+        return _ok(toast="🗑 已清空检测缓存（下次打开会重新渲染）")
+
+    @app.app.post("/slirn/api/detect_bg_white_area")
+    async def detect_bg_white_area(body: dict = Body(default_factory=dict)):
+        """REQ-20260919-062：检测背景图片的白色区域 4 角坐标 + 宽高。
+
+        算法由前端 body.algorithm 选择：
+          - "pixel": numpy + PIL 在原图分辨率扫描 RGB 三通道均 ≥ threshold 的像素，
+            求连通白色区域的最小外接矩形（bbox）。坐标等比缩放到 1920×1080 设计空间。
+          - "ai":    调多模态 LLM，让模型看图描述「白色矩形区域的左上角和右下角像素坐标」，
+            再按原图分辨率折算回 1920×1080 设计空间。
+        threshold: 像素模式用 RGB 三通道阈值（0-255，默认 250）；AI 模式忽略。
+        返回：{x, y, width, height, center_x, center_y, pixel_count, image_native_w/h, algorithm, threshold}
+        4 个角点：
+          - 左上 (x, y)
+          - 右上 (x + width - 1, y)
+          - 左下 (x, y + height - 1)
+          - 右下 (x + width - 1, y + height - 1)
+        """
+        import numpy as _np
+        from PIL import Image as _PILImage
+
+        tid = (body.get("task_id") or "").strip()
+        algorithm = (body.get("algorithm") or "pixel").strip()
+        try:
+            threshold = int(body.get("threshold") or 250)
+        except (TypeError, ValueError):
+            threshold = 250
+        threshold = max(200, min(255, threshold))
+        if not tid:
+            return _err("缺少 task_id")
+        if algorithm not in ("pixel", "ai", "ai_color", "center_expand"):
+            return _err(f"不支持的算法: {algorithm}")
+        try:
+            mgr.get(tid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+
+        fc = _get_fine_compose(mgr, tid)
+        bg_mat = fc.get("materials", {}).get("bg") or {}
+        bg_path_rel = bg_mat.get("path")
+        if not bg_path_rel:
+            return _err("请先上传背景图片")
+        bg_path_abs = _resolve_mat_abs(mgr, tid, fc["materials"], "bg")
+        if not bg_path_abs or not bg_path_abs.exists():
+            return _err(f"背景图片文件不存在: {bg_path_rel}")
+
+        # 加载图片（保留原图分辨率用于 image_native_w/h 反馈）
+        try:
+            with _PILImage.open(bg_path_abs) as _im:
+                _im.load()
+            img = _PILImage.open(bg_path_abs).convert("RGB")
+        except Exception as e:  # noqa: BLE001
+            return _err(f"背景图片读取失败: {e}")
+        iw, ih = img.size
+        if iw <= 0 or ih <= 0:
+            return _err(f"背景图片尺寸异常: {iw}x{ih}")
+
+        # 用户反馈：先缩放到设计空间（1920×1080）再做白色区域扫描，
+        # 避免原图分辨率不同时坐标还要再折算，输出坐标即设计空间像素。
+        # - pixel 算法：先 resize 再扫描，scan_img 已是 1920×1080，scale = 1
+        # - ai 算法：AI 输出的坐标是原图坐标，仍需按比例折算 → scale_x/y
+        #            （resize 会破坏原图细节，对 LLM 视觉判断不利，所以 AI 路径不 resize）
+        scale_x = _FINE_DESIGN_W / iw
+        scale_y = _FINE_DESIGN_H / ih
+
+        def _result_payload(x_min: int, y_min: int, x_max: int, y_max: int,
+                             pixel_count: int, sx: float = 1.0, sy: float = 1.0):
+            """统一输出格式（设计空间像素 + 4 角点 + 原图尺寸）。
+
+            sx/sy: 把 (x_min, y_min, x_max, y_max) 视为「当前工作图」坐标，乘以缩放系数
+            折算到设计空间（1920×1080）。pixel 路径已 resize 到 1920×1080，sx=sy=1；
+            AI 路径未 resize，sx=1920/iw, sy=1080/ih。
+            """
+            w_native = x_max - x_min + 1
+            h_native = y_max - y_min + 1
+            return {
+                "x": int(round(x_min * sx)),
+                "y": int(round(y_min * sy)),
+                "width": int(round(w_native * sx)),
+                "height": int(round(h_native * sy)),
+                "center_x": int(round(((x_min + x_max) / 2) * sx)),
+                "center_y": int(round(((y_min + y_max) / 2) * sy)),
+                "pixel_count": int(pixel_count),
+                "image_native_w": int(iw),
+                "image_native_h": int(ih),
+                "algorithm": algorithm,
+                "threshold": int(threshold) if algorithm == "pixel" else None,
+                "corners": {
+                    "topleft":     [int(round(x_min * sx)), int(round(y_min * sy))],
+                    "topright":    [int(round(x_max * sx)), int(round(y_min * sy))],
+                    "bottomleft":  [int(round(x_min * sx)), int(round(y_max * sy))],
+                    "bottomright": [int(round(x_max * sx)), int(round(y_max * sy))],
+                },
+            }
+
+        # 缩放到设计空间（LANCZOS 高质量）— pixel / ai_color 共用
+        scan_img = img.resize((_FINE_DESIGN_W, _FINE_DESIGN_H), _PILImage.LANCZOS)
+
+        if algorithm == "pixel":
+            # 在 scan_img（已是设计空间）上扫描白色像素
+            arr = _np.array(scan_img)  # shape (1080, 1920, 3)
+            mask = (
+                (arr[:, :, 0] >= threshold)
+                & (arr[:, :, 1] >= threshold)
+                & (arr[:, :, 2] >= threshold)
+            )
+            ys, xs = _np.where(mask)
+            n = int(xs.size)
+            if n == 0:
+                return _err(
+                    f"未检测到任何白色像素（threshold={threshold}）；"
+                    f"请调低阈值或换张图"
+                )
+            x_min, x_max = int(xs.min()), int(xs.max())
+            y_min, y_max = int(ys.min()), int(ys.max())
+            # scan_img 已是 1920×1080，sx=sy=1.0，输出即设计空间像素
+            payload = _result_payload(x_min, y_min, x_max, y_max, n, 1.0, 1.0)
+            _save_bg_detect_cache(mgr, tid, payload)  # v8：检测后存缓存，避免反复检测
+            return _ok(**payload)
+
+        if algorithm == "center_expand":
+                # 用户反馈 v3：以上方法检测结果都不对。换思路 ——
+            #   1) 以背景图中心点周围 10×10 区域的平均色作为「基本颜色」
+            #   2) 从中心向上/下/左/右 4 个方向扩展（每次扩展一行/列像素）
+            #   3) 扩展信号是「矩线」（矩形边界线）：新行/列所有像素与基本颜色差值都在 ±10 内才继续
+            #   4) 任一方向遇到颜色变化即停
+            #   5) 4 条矩线围成的矩形 = 所求区域，输出左上角 + 宽高
+            # 这个算法的优势：
+            #   - 不需要先知道是什么颜色（自动从中心提取）
+            #   - 对「背景图中央有一片同色区域」的典型布局最稳
+            #   - 4 方向同时扩展，类似 flood fill 但沿坐标轴（更快、更可预测）
+            arr_full = _np.array(scan_img).astype(int)  # (1080, 1920, 3) int
+            ih_d, iw_d = arr_full.shape[:2]
+            cx, cy = iw_d // 2, ih_d // 2
+            # 中心 10×10 平均色（避开单像素噪声）
+            patch_r = 5
+            x0 = max(0, cx - patch_r); x1 = min(iw_d, cx + patch_r + 1)
+            y0 = max(0, cy - patch_r); y1 = min(ih_d, cy + patch_r + 1)
+            patch = arr_full[y0:y1, x0:x1, :]
+            base_rgb = patch.reshape(-1, 3).mean(axis=0)  # (3,) float
+            base_r, base_g, base_b = float(base_rgb[0]), float(base_rgb[1]), float(base_rgb[2])
+            color_tol = 10
+    
+            def _row_match(y: int, x_start: int, x_end: int) -> bool:
+                """行 [x_start..x_end] 所有像素与基本色差值是否都在 ±tol 内（用于水平扫描）。"""
+                row = arr_full[y, x_start:x_end + 1, :]
+                d = _np.abs(row - base_rgb)
+                return bool((d <= color_tol).all())
+    
+            def _col_match(x: int, y_start: int, y_end: int) -> bool:
+                """列 [y_start..y_end] 所有像素与基本色差值是否都在 ±tol 内（用于垂直扫描）。"""
+                col = arr_full[y_start:y_end + 1, x, :]
+                d = _np.abs(col - base_rgb)
+                return bool((d <= color_tol).all())
+    
+            # 左扩展：x_left 一直左移，直到 _row_match 失败
+            x_left = cx
+            while x_left > 0 and _row_match(cy, x_left - 1, x_left - 1):
+                x_left -= 1
+            # 右扩展
+            x_right = cx
+            while x_right < iw_d - 1 and _row_match(cy, x_right + 1, x_right + 1):
+                x_right += 1
+            # 上扩展
+            y_top = cy
+            while y_top > 0 and _col_match(cx, y_top - 1, y_top - 1):
+                y_top -= 1
+            # 下扩展
+            y_bottom = cy
+            while y_bottom < ih_d - 1 and _col_match(cx, y_bottom + 1, y_bottom + 1):
+                y_bottom += 1
+    
+            x_min, x_max = x_left, x_right
+            y_min, y_max = y_top, y_bottom
+            w = x_max - x_min + 1
+            h = y_max - y_min + 1
+            # 像素数估算（外接矩形面积；按真实分布应为同色面积，矩形面积作为上限）
+            n_pixels = w * h
+            # scan_img 已是 1920×1080，sx=sy=1.0
+            payload = _result_payload(x_min, y_min, x_max, y_max, n_pixels, 1.0, 1.0)
+            payload["algorithm"] = "center_expand"
+            payload["threshold"] = None
+            # 把基本颜色也带上，方便 UI 展示
+            payload["detected_color"] = [int(round(base_r)), int(round(base_g)), int(round(base_b))]
+            payload["color_tolerance"] = color_tol
+            rgb_text = "RGB(" + str(int(round(base_r))) + "," + str(int(round(base_g))) + "," + str(int(round(base_b))) + ")"
+            _save_bg_detect_cache(mgr, tid, payload)  # v8：检测后存缓存
+            return _ok(
+                **payload,
+                toast=f"✅ 中心扩展找到区域 {w}x{h}（基本色 {rgb_text}）",
+            )
+
+        # algorithm == "ai_color"
+        # 用户反馈：待检测区域的颜色无法确定时，先让 LLM 看背景图左下角识别主色，
+        # 再用像素扫描找该颜色的 bbox。颜色容差 ±10（覆盖 LLM 略微偏差）。
+        from slirn_home import llm_config, revision_service
+
+        models = llm_config.list_models(repo_root)
+        cur_id = llm_config.get_current(repo_root)
+        cur_entry = next((m for m in models if m.get("id") == cur_id), None)
+        if cur_entry is None or not revision_service._is_vision_entry(cur_entry):
+            vision_alts = [m["id"] for m in models if revision_service._is_vision_entry(m)]
+            hint = (
+                f" — 已注册可用多模态模型：{', '.join(vision_alts)}，请在顶栏 ⚙️ 切换"
+            ) if vision_alts else (
+                " — 请在顶栏 ⚙️ 注册多模态模型（推荐 qwen-vl-plus）"
+            )
+            return _err(
+                f"AI 颜色识别需多模态模型，当前模型不支持图片输入{hint}"
+            )
+
+        # 切左下角象限（设计空间尺寸的 1/4 = 960×540），保存到临时文件供 LLM 读取
+        bl_quad = scan_img.crop((0, _FINE_DESIGN_H // 2, _FINE_DESIGN_W // 2, _FINE_DESIGN_H))
+        # 用 bg_path_abs 同目录避免占用系统临时目录（清理方便）
+        bl_tmp = bg_path_abs.parent / "_bg_bl_quad_tmp.png"
+        try:
+            bl_quad.save(bl_tmp)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"左下角象限保存失败: {e}")
+
+        system_prompt = (
+            "你是图像颜色分析助手。用户提供了一张背景图的左下角区域，"
+            "里面通常有一大片相同颜色的色块（设计上用来放置视频或装饰）。\n\n"
+            "请分析图片，返回该主色块的颜色（RGB 三通道 0-255）。\n"
+            "只输出合法 JSON，不要任何解释文字。格式严格如下：\n"
+            '{"r": <0-255>, "g": <0-255>, "b": <0-255>}\n\n'
+            "约束：r/g/b 都是整数 0-255。如果左下角有多种颜色，"
+            "返回面积最大的那个纯色块的 RGB。"
+        )
+        user_text = (
+            "请分析这张图（左下角象限）的最大色块，返回其 RGB 值。"
+        )
+        try:
+            raw_color = revision_service._call_llm_vision(
+                system_prompt, user_text, [bl_tmp], entry=cur_entry,
+            )
+        except Exception as e:  # noqa: BLE001
+            return _err(f"AI 颜色识别失败: {e}")
+        import re as _re2
+        cleaned = _re2.sub(r"```(?:json)?\s*|\s*```", "", raw_color or "").strip()
+        s_idx, e_idx = cleaned.find("{"), cleaned.rfind("}")
+        if s_idx < 0 or e_idx <= s_idx:
+            return _err(f"AI 颜色输出不是合法 JSON: {(raw_color or '')[:200]}")
+        try:
+            parsed_color = json.loads(cleaned[s_idx:e_idx + 1])
+        except Exception as e:  # noqa: BLE001
+            return _err(f"AI 颜色输出解析失败: {e}")
+        try:
+            cr = int(parsed_color.get("r", -1))
+            cg = int(parsed_color.get("g", -1))
+            cb = int(parsed_color.get("b", -1))
+        except (TypeError, ValueError):
+            return _err(f"AI 颜色输出字段类型错: {parsed_color}")
+        if not (0 <= cr <= 255 and 0 <= cg <= 255 and 0 <= cb <= 255):
+            return _err(
+                f"AI 颜色输出 RGB 越界: r={cr}, g={cg}, b={cb}"
+            )
+
+        # 像素扫描：在设计空间 scan_img 上找与 AI 识别色容差±10 内的像素
+        color_tol = 10
+        arr_full = _np.array(scan_img)
+        diff = _np.abs(arr_full.astype(int) - _np.array([cr, cg, cb]))
+        mask = (diff[:, :, 0] <= color_tol) & (diff[:, :, 1] <= color_tol) & (diff[:, :, 2] <= color_tol)
+        ys, xs = _np.where(mask)
+        n = int(xs.size)
+        if n == 0:
+            return _err(
+                f"未检测到 RGB({cr},{cg},{cb})±{color_tol} 的像素；"
+                f"AI 识别的颜色可能在背景图里不存在（请换图或换算法）"
+            )
+        x_min, x_max = int(xs.min()), int(xs.max())
+        y_min, y_max = int(ys.min()), int(ys.max())
+        # scan_img 已是 1920×1080，sx=sy=1.0
+        payload = _result_payload(x_min, y_min, x_max, y_max, n, 1.0, 1.0)
+        # _result_payload 用的是闭包变量 algorithm（此时是 "ai_color"），
+        # 但 _ok 不允许重复 key — 显式 pop 再覆盖，统一返回 algorithm="ai_color"
+        payload["algorithm"] = "ai_color"
+        payload["threshold"] = None
+        payload["detected_color"] = [cr, cg, cb]
+        payload["color_tolerance"] = color_tol
+        _save_bg_detect_cache(mgr, tid, payload)  # v8：检测后存缓存
+        return _ok(
+            **payload,
+            toast=f"✅ AI 识别主色 RGB({cr},{cg},{cb})，已定位区域",
+            model=cur_id,
+        )
+
+        # algorithm == "ai"
+        from slirn_home import llm_config, revision_service
+
+        models = llm_config.list_models(repo_root)
+        cur_id = llm_config.get_current(repo_root)
+        cur_entry = next((m for m in models if m.get("id") == cur_id), None)
+        if cur_entry is None or not revision_service._is_vision_entry(cur_entry):
+            vision_alts = [m["id"] for m in models if revision_service._is_vision_entry(m)]
+            hint = (
+                f" — 已注册可用多模态模型：{', '.join(vision_alts)}，请在顶栏 ⚙️ 切换"
+            ) if vision_alts else (
+                " — 请在顶栏 ⚙️ 注册多模态模型（推荐 qwen-vl-plus）"
+            )
+            return _err(
+                f"AI 检测需多模态模型，当前模型不支持图片输入{hint}"
+            )
+        system_prompt = (
+            "你是图像区域检测助手。用户上传了一张背景图，里面通常有一个白色矩形区域"
+            "（设计上用来放置视频的位置 — 即背景里的「洞」）。\n\n"
+            "请分析图片，返回该白色矩形区域在**原图像素坐标**下的最小外接矩形。"
+            "只输出合法 JSON，不要任何解释文字。格式严格如下：\n"
+            '{"x_min": <int>, "y_min": <int>, "x_max": <int>, "y_max": <int>}\n\n'
+            "约束：坐标都是原图像素坐标（非归一化、非设计空间），左上角原点；"
+            "x_min < x_max, y_min < y_max。找不到白色矩形就返回全 0：{\"x_min\":0,\"y_min\":0,\"x_max\":0,\"y_max\":0}"
+        )
+        user_text = (
+            f"请分析这张背景图（原图分辨率 {iw}×{ih}），"
+            "输出其中最大白色矩形区域的 bbox（左上角 + 右下角）。"
+        )
+        try:
+            raw = revision_service._call_llm_vision(
+                system_prompt, user_text, [bg_path_abs], entry=cur_entry,
+            )
+        except Exception as e:  # noqa: BLE001
+            return _err(f"AI 检测失败: {e}")
+        import re as _re
+        cleaned = _re.sub(r"```(?:json)?\s*|\s*```", "", raw or "").strip()
+        s_idx, e_idx = cleaned.find("{"), cleaned.rfind("}")
+        if s_idx < 0 or e_idx <= s_idx:
+            return _err(f"AI 输出不是合法 JSON: {(raw or '')[:200]}")
+        try:
+            parsed = json.loads(cleaned[s_idx:e_idx + 1])
+        except Exception as e:  # noqa: BLE001
+            return _err(f"AI 输出解析失败: {e}")
+        try:
+            x_min = int(parsed.get("x_min", 0))
+            y_min = int(parsed.get("y_min", 0))
+            x_max = int(parsed.get("x_max", 0))
+            y_max = int(parsed.get("y_max", 0))
+        except (TypeError, ValueError):
+            return _err(f"AI 输出字段类型错: {parsed}")
+        if x_max <= x_min or y_max <= y_min:
+            return _err(
+                f"AI 未识别到有效白色区域（x_min={x_min}, y_min={y_min}, "
+                f"x_max={x_max}, y_max={y_max}）；请换张图或改用像素扫描"
+            )
+        # 像素数未知，估算 = bbox 面积
+        pixel_count = (x_max - x_min + 1) * (y_max - y_min + 1)
+        # AI 输出是原图坐标，按 scale 折算到设计空间
+        payload = _result_payload(x_min, y_min, x_max, y_max, pixel_count, scale_x, scale_y)
+        _save_bg_detect_cache(mgr, tid, payload)  # v8：检测后存缓存
+        return _ok(
+            **payload,
+            toast=f"✅ AI 已识别白色区域（{cur_id}）",
+            model=cur_id,
+        )
+
+    @app.app.post("/slirn/api/parse_reference_layout")
+
+    @app.app.post("/slirn/api/parse_reference_layout")
+    async def parse_reference_layout(body: dict = Body(default_factory=dict)):
+        """REQ-20260919-061 Phase C：调多模态模型解析参考位置关系图 → 4 素材布局。
+
+        模型选择：自动扫描已注册 entry，挑第一个 _is_vision_entry() 为真的模型；
+        若没有则提示用户在顶栏 ⚙️ 注册一个多模态模型（qwen-vl-plus 等）。
+        响应：写回 fine_compose.json: layout.{video,subtitle,cover,bg}.{x,y,scale,enabled}。
+        """
+        from slirn_home import llm_config, revision_service
+
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            mgr.get(tid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+
+        # 1. 校验参考图
+        fc = _get_fine_compose(mgr, tid)
+        ref_mat = fc.get("materials", {}).get("reference") or {}
+        ref_path_rel = ref_mat.get("path")
+        if not ref_path_rel:
+            return _err("请先上传参考位置关系图（精剪视频面板「参考位置关系图」素材卡）")
+        ref_path_abs = _resolve_mat_abs(mgr, tid, fc["materials"], "reference")
+        if not ref_path_abs or not ref_path_abs.exists():
+            return _err(f"参考图文件不存在: {ref_path_rel}")
+
+        # 2. 选 vision entry：严格使用当前选定的模型（尊重用户 ⚙️ 选择，不静默注册）
+        models = llm_config.list_models(repo_root)
+        cur_id = llm_config.get_current(repo_root)
+        cur_entry = next((m for m in models if m.get("id") == cur_id), None)
+        if cur_entry is None:
+            return _err(
+                "未选择当前模型 — 请在顶栏 ⚙️ 选定一个大模型后再试"
+            )
+        if not revision_service._is_vision_entry(cur_entry):
+            # 列出已注册的多模态备选（如有），帮用户快速切换
+            vision_alts = [m["id"] for m in models if revision_service._is_vision_entry(m)]
+            hint = (
+                f" — 已在配置中找到可用的多模态模型：{', '.join(vision_alts)}，"
+                "请在顶栏 ⚙️ 切换当前模型"
+            ) if vision_alts else (
+                " — 请在顶栏 ⚙️ 添加多模态模型（推荐 qwen-vl-plus），"
+                "需要环境变量 DASHSCOPE_API_KEY"
+            )
+            return _err(
+                f"当前模型「{cur_id}」不支持图片输入{hint}"
+            )
+        vision_entry = cur_entry
+
+        # 3. 调多模态模型 — REQ-20260919-061 用户补充：x/y 改为像素（1920×1080 设计空间）
+        system_prompt = (
+            "你是视频素材布局助手。用户上传了一张参考位置关系图（草图/截图/示意图都可能），"
+            "里面展示了 4 个素材应该放在哪个相对位置：\n"
+            "- video（主视频，通常占中间大面积）\n"
+            "- subtitle（SRT 文件内嵌到视频上的文字）\n"
+            "- cover（封面/角标，小图叠加层）\n"
+            "- bg（背景图片，视频比例不一致时填充背景）\n\n"
+            "请分析图片，输出 4 个素材的位置和缩放（1920×1080 画布的**像素坐标**，原点在左上角）：\n"
+            "只返回合法 JSON，不要任何解释文字。格式严格如下：\n"
+            "{\"video\":{\"x\":0,\"y\":0,\"scale\":1.0,\"enabled\":true},"
+            "\"subtitle\":{\"x\":960,\"y\":972,\"scale\":1.0,\"enabled\":true},"
+            "\"cover\":{\"x\":1536,\"y\":108,\"scale\":0.3,\"enabled\":true},"
+            "\"bg\":{\"x\":0,\"y\":0,\"scale\":1.0,\"enabled\":false}}\n\n"
+            "约束：x 是 -1920–1920 之间的整数像素（允许负数，做'露半边'效果）；"
+            "y 是 -1080–1080 之间的整数像素（允许负数）；"
+            "scale 是 0.1-2.0 之间的浮点数；enabled 必须是布尔值。"
+        )
+        user_text = (
+            f"请分析这张参考位置关系图（任务 ID: {tid}），"
+            f"输出 4 个素材在 {_FINE_DESIGN_W}×{_FINE_DESIGN_H} 画布上的像素坐标。"
+        )
+
+        try:
+            raw = revision_service._call_llm_vision(
+                system_prompt, user_text, [ref_path_abs], entry=vision_entry,
+            )
+        except Exception as e:  # noqa: BLE001
+            return _err(f"多模态模型调用失败: {e}")
+
+        # 4. 防御式解析 JSON
+        import re as _re
+        cleaned = _re.sub(r"```(?:json)?\s*|\s*```", "", raw or "").strip()
+        # 截取首个 { 到最后一个 }
+        s_idx, e_idx = cleaned.find("{"), cleaned.rfind("}")
+        if s_idx < 0 or e_idx <= s_idx:
+            return _err(f"模型输出不是合法 JSON: {(raw or '')[:200]}")
+        try:
+            parsed = json.loads(cleaned[s_idx:e_idx + 1])
+        except Exception as e:  # noqa: BLE001
+            return _err(f"模型输出不是合法 JSON: {e}")
+        if not isinstance(parsed, dict):
+            return _err("模型输出不是 JSON 对象")
+
+        # 5. 字段校验 + 合并回 layout（兼容模型返回 0-1 旧版：自动按比例转像素）
+        keys = ("video", "subtitle", "cover", "bg")
+        merged: dict[str, dict] = {}
+        for k in keys:
+            v = parsed.get(k)
+            if not isinstance(v, dict):
+                continue
+            try:
+                x_raw = float(v.get("x", 0.5))
+                y_raw = float(v.get("y", 0.5))
+                scale = float(v.get("scale", 1.0))
+                enabled = bool(v.get("enabled", True))
+            except (TypeError, ValueError):
+                continue
+            scale = max(0.1, min(2.0, scale))
+            # AI 模型可能仍按旧 prompt 输出 0-1：值在 [0,1] 时按比例放大；否则按像素护栏
+            if 0.0 <= x_raw <= 1.0 and 0.0 <= y_raw <= 1.0:
+                # 边界值 1.0 也按比例放大（避免 y=1.0 误判成「像素 1」）
+                x = int(round(x_raw * _FINE_DESIGN_W))
+                y = int(round(y_raw * _FINE_DESIGN_H))
+            else:
+                # v13：画布 X/Y 允许负数（−画布宽到+画布宽，−画布高到+画布高）
+                x = max(-_FINE_DESIGN_W, min(_FINE_DESIGN_W, int(round(x_raw))))
+                y = max(-_FINE_DESIGN_H, min(_FINE_DESIGN_H, int(round(y_raw))))
+            merged[k] = {"x": x, "y": y, "scale": scale, "enabled": enabled}
+
+        if not merged:
+            return _err(f"模型未输出任何有效素材布局: {(raw or '')[:200]}")
+
+        for k, v in merged.items():
+            fc["layout"][k] = {**fc["layout"].get(k, {}), **v}
+        _save_fine_compose(mgr, tid, fc)
+        return _ok(
+            layout={k: fc["layout"][k] for k in keys},
+            toast=f"✅ AI 已生成布局（{vision_entry['id']}）",
+            model=vision_entry["id"],
+        )
+
+    @app.app.post("/slirn/api/save_fine_font")
+    async def save_fine_font(body: dict = Body(default_factory=dict)):
+        """保存精剪视频字幕字体 5 项设置。"""
+        tid = (body.get("task_id") or "").strip()
+        font = body.get("font") or {}
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            t = mgr.get(tid)
+        except Exception:  # noqa: BLE001 — TaskNotFoundError 等
+            return _err(f"任务不存在: {tid}")
+        if not t:
+            return _err(f"任务不存在: {tid}")
+        fc = _get_fine_compose(mgr, tid)
+        # 字段白名单
+        allowed = set(_FINE_FONT_DEFAULTS.keys())
+        # REQ-20260919-062 v19：颜色字段只接受 #RRGGBB（前端 picker 一定给完整 6 位；
+        # 拒绝非 hex 字符串以防注入或简写 #fff 导致渲染崩溃）
+        for k, v in font.items():
+            if k in allowed:
+                if k in ("color", "stroke_color", "bg_color") and not _HEX_COLOR_OK.match(str(v)):
+                    continue  # 非法值丢弃，保持原值
+                fc["font"][k] = v
+        _save_fine_compose(mgr, tid, fc)
+        return _ok(toast="字体设置已保存")
+
+    @app.app.post("/slirn/api/save_fine_output")
+    async def save_fine_output(body: dict = Body(default_factory=dict)):
+        """保存精剪视频输出设置（分辨率）。"""
+        tid = (body.get("task_id") or "").strip()
+        output = body.get("output") or {}
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            t = mgr.get(tid)
+        except Exception:  # noqa: BLE001 — TaskNotFoundError 等
+            return _err(f"任务不存在: {tid}")
+        if not t:
+            return _err(f"任务不存在: {tid}")
+        fc = _get_fine_compose(mgr, tid)
+        if "resolution" in output and output["resolution"] in ("1080p", "720p", "source"):
+            fc["output"]["resolution"] = output["resolution"]
+        _save_fine_compose(mgr, tid, fc)
+        return _ok(toast="输出设置已保存")
+
+    @app.app.post("/slirn/api/save_fine_audio")
+    async def save_fine_audio(body: dict = Body(default_factory=dict)):
+        """REQ-20260919-061 扩展：保存背景音乐设置（4 项：启用/音量/淡入/淡出）。"""
+        tid = (body.get("task_id") or "").strip()
+        audio = body.get("audio") or {}
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            t = mgr.get(tid)
+        except Exception:  # noqa: BLE001 — TaskNotFoundError 等
+            return _err(f"任务不存在: {tid}")
+        if not t:
+            return _err(f"任务不存在: {tid}")
+        fc = _get_fine_compose(mgr, tid)
+        # 字段白名单 + 类型规整
+        allowed = set(_FINE_AUDIO_DEFAULTS.keys())
+        for k, v in audio.items():
+            if k not in allowed:
+                continue
+            if k == "enabled":
+                fc["audio"][k] = bool(v)
+            else:
+                try:
+                    fc["audio"][k] = float(v)
+                except (TypeError, ValueError):
+                    pass  # 非法值跳过
+        _save_fine_compose(mgr, tid, fc)
+        return _ok(toast="背景音乐设置已保存")
+
+    # ---------- 精剪视频·全局参数模板（REQ-20260919-061 扩展：跨任务复用） ----------
+    from slirn_home import fine_profiles as _fine_profiles
+
+    @app.app.post("/slirn/api/list_fine_global_profiles")
+    async def list_fine_global_profiles(body: dict = Body(default_factory=dict)):
+        """列出所有精剪全局参数模板。"""
+        profiles = _fine_profiles.list_profiles(repo_root)
+        # 仅返回 UI 需要的字段（params 体积较大，省略除非显式需要）
+        out = [
+            {
+                "id": p.get("id"),
+                "name": p.get("name"),
+                "saved_at": p.get("saved_at"),
+                "task_id_origin": p.get("task_id_origin"),
+            }
+            for p in profiles
+        ]
+        return _ok(profiles=out)
+
+    @app.app.post("/slirn/api/save_fine_global_profile")
+    async def save_fine_global_profile(body: dict = Body(default_factory=dict)):
+        """把当前 task 的 layout/font/output/audio 保存为命名模板。"""
+        tid = (body.get("task_id") or "").strip()
+        name = (body.get("name") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        if not name:
+            return _err("模板名不能为空")
+        if len(name) > 30:
+            return _err("模板名不能超过 30 字")
+        try:
+            t = mgr.get(tid)
+        except Exception:  # noqa: BLE001
+            return _err(f"任务不存在: {tid}")
+        if not t:
+            return _err(f"任务不存在: {tid}")
+        fc = _get_fine_compose(mgr, tid)
+        params = {
+            "layout": fc.get("layout") or {},
+            "font": fc.get("font") or {},
+            "output": fc.get("output") or {},
+            "audio": fc.get("audio") or {},
+        }
+        profile = _fine_profiles.save_profile(repo_root, name, params, task_id_origin=tid)
+        return _ok(
+            profile={
+                "id": profile["id"],
+                "name": profile["name"],
+                "saved_at": profile["saved_at"],
+                "task_id_origin": profile["task_id_origin"],
+            },
+            toast=f"✅ 已保存模板「{profile['name']}」",
+        )
+
+    @app.app.post("/slirn/api/apply_fine_global_profile")
+    async def apply_fine_global_profile(body: dict = Body(default_factory=dict)):
+        """把模板 params 写入当前 task 的 fine_compose（覆盖 layout/font/output/audio）。
+
+        不动 materials — 任务自己的素材文件路径保持不变。
+        返回新的 wb HTML，UI 直接替换刷新。
+        """
+        tid = (body.get("task_id") or "").strip()
+        profile_id = (body.get("profile_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        if not profile_id:
+            return _err("缺少 profile_id")
+        try:
+            t = mgr.get(tid)
+        except Exception:  # noqa: BLE001
+            return _err(f"任务不存在: {tid}")
+        if not t:
+            return _err(f"任务不存在: {tid}")
+        profile = _fine_profiles.get_profile(repo_root, profile_id)
+        if not profile:
+            return _err(f"模板不存在或已删除: {profile_id}")
+        fc = _get_fine_compose(mgr, tid)
+        params = profile.get("params") or {}
+        # 只覆盖白名单字段（materials 永不动）
+        for key in _fine_profiles.PROFILE_PARAM_KEYS:
+            if key in params:
+                fc[key] = params[key]
+        _save_fine_compose(mgr, tid, fc)
+        # 返新 wb HTML，前端直接替换 #slirn-tab-workbench-inner
+        wb_html = _render_workbench(tid, mgr)
+        return _ok(html=wb_html, toast=f"✅ 已应用模板「{profile.get('name')}」")
+
+    @app.app.post("/slirn/api/delete_fine_global_profile")
+    async def delete_fine_global_profile(body: dict = Body(default_factory=dict)):
+        """从全局 JSON 移除指定模板（不影响已应用的任务）。"""
+        profile_id = (body.get("profile_id") or "").strip()
+        if not profile_id:
+            return _err("缺少 profile_id")
+        ok = _fine_profiles.delete_profile(repo_root, profile_id)
+        if not ok:
+            return _err(f"模板不存在或已删除: {profile_id}")
+        return _ok(toast="🗑 已删除模板")
+
+    @app.app.post("/slirn/api/rename_fine_global_profile")
+    async def rename_fine_global_profile(body: dict = Body(default_factory=dict)):
+        """重命名指定模板（重名时自动加 `(2)` 后缀）。"""
+        profile_id = (body.get("profile_id") or "").strip()
+        new_name = (body.get("name") or "").strip()
+        if not profile_id:
+            return _err("缺少 profile_id")
+        if not new_name:
+            return _err("新名不能为空")
+        if len(new_name) > 30:
+            return _err("新名不能超过 30 字")
+        ok = _fine_profiles.rename_profile(repo_root, profile_id, new_name)
+        if not ok:
+            return _err(f"模板不存在或已删除: {profile_id}")
+        return _ok(toast="✏️ 已重命名")
+
+    @app.app.post("/slirn/api/export_fine_global_profile")
+    async def export_fine_global_profile(body: dict = Body(default_factory=dict)):
+        """REQ-20260919-070：把单个全局模板参数下载为 JSON 文件。
+
+        与 `export_fine_params`（当前任务）同口径：返回 {filename, content, mime}，
+        前端用 Blob 触发下载。模板不含 materials（按 REQ-20260919-061 设计），
+        故 payload.materials = {}（与任务导出口径一致，导入端按"无 materials"
+        处理）。
+        """
+        pid = (body.get("profile_id") or "").strip()
+        if not pid:
+            return _err("缺少 profile_id")
+        prof = _fine_profiles.get_profile(repo_root, pid)
+        if not prof:
+            return _err(f"模板不存在或已删除: {pid}")
+        params = prof.get("params") or {}
+        payload = {
+            "_schema": 3,
+            "_exported_at": datetime.now().isoformat(timespec="seconds"),
+            "_source_profile_id": pid,
+            "_source_profile_name": prof.get("name", ""),
+            "_source_task_id": prof.get("task_id_origin", ""),
+            "materials": {},  # 全局模板按设计不含素材
+            "layout": params.get("layout"),
+            "font": params.get("font"),
+            "output": params.get("output"),
+            "audio": params.get("audio"),
+            "detected_region": None,  # 全局模板不存 detected_region
+        }
+        # 文件名：清理模板名里的非法字符 + 时间戳
+        safe_name = re.sub(r'[\\/:*?"<>|\s]+', "_", prof.get("name") or "profile")[:30]
+        filename = (
+            f"fine_params_profile_{safe_name}_"
+            f"{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        )
+        try:
+            content = json.dumps(payload, ensure_ascii=False, indent=2)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"序列化失败: {e}")
+        return _ok(filename=filename, content=content, mime="application/json")
+
+    @app.app.post("/slirn/api/render_fine_preview")
+    async def render_fine_preview(body: dict = Body(default_factory=dict)):
+        """REQ-20260919-061 Phase B：渲染精剪视频预览（ffmpeg overlay）。
+
+        REQ-20260919-061 用户反馈：预览时长可调（2–30 秒，默认 10）。body 里读
+        `duration` 字段，无效值兜底 10。
+
+        REQ-20260919-064：新增 `preview_start` 字段（默认 0），让用户能跳到源视频
+        任意时间点预览。start + duration 由后端钳到不超出源视频时长
+        （start 不会负；不会因 ffmpeg 0-frame 报错）。
+
+        输出：outputs/fine_preview.mp4（相对 slirn-standalone 根）
+        """
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            mgr.get(tid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+        # 解析预览时长，钳到 [2, 30]（前端已有 min/max 限制，后端兜底防越界）
+        raw_dur = body.get("duration")
+        try:
+            preview_dur = float(raw_dur)
+        except (TypeError, ValueError):
+            preview_dur = 10.0
+        preview_dur = max(2.0, min(30.0, preview_dur))
+        # REQ-20260919-064：解析预览开始时间，默认 0
+        raw_start = body.get("preview_start", 0)
+        try:
+            preview_start = float(raw_start)
+        except (TypeError, ValueError):
+            preview_start = 0.0
+        preview_start = max(0.0, preview_start)
+        # 钳 start+duration 不超出源视频时长（用 ffprobe 拿时长；失败兜底不钳）
+        try:
+            import subprocess as _sp
+            from pathlib import Path as _P
+            fc_for_dur = _get_fine_compose(mgr, tid)
+            vp = _resolve_mat_abs(mgr, tid, fc_for_dur["materials"], "video")
+            if vp and _P(vp).exists():
+                _pr = _sp.run(
+                    ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                     "-of", "default=nw=1:nk=1", str(vp)],
+                    capture_output=True, text=True, timeout=10,
+                )
+                _vdur = float((_pr.stdout or "0").strip() or "0")
+                if _vdur > 0 and preview_start + preview_dur > _vdur:
+                    # start 后移，让 start+duration = video_duration
+                    preview_start = max(0.0, _vdur - preview_dur)
+        except Exception:
+            pass  # ffprobe 失败 → 不钳，让 ffmpeg 自己处理（最多产生 0-frame 报错）
+        out_path = mgr.tasks_dir / tid / "outputs" / "fine_preview.mp4"
+        result = _run_fine_render(tid, mgr, out_path,
+                                   duration=preview_dur, preview_start=preview_start)
+        if not result.get("ok"):
+            return result
+        return _ok(
+            url=f"/slirn/api/video/{tid}?src=fine_preview&t={int(time.time())}",
+            toast=f"🎬 预览已生成（第 {preview_start:g}–{preview_start + preview_dur:g} 秒）",
+        )
+
+    @app.app.post("/slirn/api/export_fine_video")
+    async def export_fine_video(body: dict = Body(default_factory=dict)):
+        """REQ-20260919-061 Phase B：导出完整精剪视频到 outputs/fine_export.mp4。"""
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            mgr.get(tid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+        out_path = mgr.tasks_dir / tid / "outputs" / "fine_export.mp4"
+        result = _run_fine_render(tid, mgr, out_path, duration=None)
+        if not result.get("ok"):
+            return result
+        return _ok(
+            url=f"/slirn/api/video/{tid}?src=fine_export&t={int(time.time())}",
+            toast="💾 导出完成 → outputs/fine_export.mp4",
+        )
+
+    # REQ-20260919-065：精剪参数 JSON 导出/导入
+    @app.app.post("/slirn/api/export_fine_params")
+    async def export_fine_params(body: dict = Body(default_factory=dict)):
+        """导出精剪参数为 JSON 字符串（不含素材文件本体）。
+        返回 {ok, filename, content, mime} → 前端用 Blob 触发下载。
+        """
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            mgr.get(tid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+        fc = _get_fine_compose(mgr, tid)
+        payload = {
+            "_schema": 3,
+            "_exported_at": datetime.now().isoformat(timespec="seconds"),
+            "_source_task_id": tid,
+            "materials": fc.get("materials", {}),    # 仅 metadata（path/source/type），不含文件本体
+            "layout": fc.get("layout"),
+            "font": fc.get("font"),
+            "output": fc.get("output"),
+            "audio": fc.get("audio"),
+            "detected_region": fc.get("detected_region"),
+        }
+        filename = f"fine_params_{tid}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        try:
+            content = json.dumps(payload, ensure_ascii=False, indent=2)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"序列化失败: {e}")
+        return _ok(filename=filename, content=content, mime="application/json")
+
+    @app.app.post("/slirn/api/import_fine_params")
+    async def import_fine_params(body: dict = Body(default_factory=dict)):
+        """导入精剪参数 JSON 字符串 → 覆盖当前任务 layout/font/output/audio/detected_region。
+        不修改 materials（视频/封面/BGM 文件保持当前任务的）。
+        返回 {ok, applied_fields} → 前端用 toast + 刷新 wb。
+        """
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            mgr.get(tid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+        raw = body.get("content")
+        if not isinstance(raw, str):
+            return _err("导入内容必须为 JSON 字符串")
+        # 64KB 上限（实际参数体积远低于此）
+        if len(raw) > 64 * 1024:
+            return _err("文件过大（>64KB），拒绝导入")
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as e:
+            return _err(f"JSON 解析失败: {e}")
+        if not isinstance(payload, dict):
+            return _err("JSON 顶层必须是对象")
+        schema = payload.get("_schema")
+        if schema not in (2, 3):
+            return _err(
+                f"参数文件 _schema 不兼容（当前仅支持 2/3，文件为 {schema}）"
+            )
+        # 校验 5 个字段类型（必须 dict 或 null/缺省）
+        for key in ("layout", "font", "output", "audio", "detected_region"):
+            v = payload.get(key)
+            if v is not None and not isinstance(v, dict):
+                return _err(f"{key} 必须是 dict 或 null")
+        fc = _get_fine_compose(mgr, tid)
+        applied: list[str] = []
+        for key in ("layout", "font", "output", "audio", "detected_region"):
+            if key in payload:
+                fc[key] = payload[key]
+                applied.append(key)
+        try:
+            _save_fine_compose(mgr, tid, fc)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"保存失败: {e}")
+        return _ok(applied_fields=applied, toast=f"✅ 已应用 {len(applied)} 个字段")
+
+    @app.app.post("/slirn/api/upload_fine_material_form")
+    async def upload_fine_material_form(
+        task_id: str = _Form(...),
+        kind: str = _Form(...),
+        file: UploadFile = File(...),
+    ):
+        """REQ-20260919-061：上传精剪视频素材 — multipart/form-data。
+        file 存到 tasks/{tid}/upload/{kind}_{filename}，路径写到 task.json:fine_compose.materials.{kind}.path
+        """
+        if kind not in _FINE_MATERIAL_KINDS:
+            return _err(f"非法素材类型: {kind}")
+        t = mgr.get(task_id)
+        if not t:
+            return _err(f"任务不存在: {task_id}")
+        # 防路径穿越 + 安全文件名
+        safe_name = Path(file.filename or f"{kind}_upload").name
+        save_dir = repo_root / "tasks" / task_id / "upload"
+        save_dir.mkdir(parents=True, exist_ok=True)
+        save_path = save_dir / f"{kind}_{safe_name}"
+        # 写文件
+        try:
+            content = await file.read()
+            save_path.write_bytes(content)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"保存失败: {e}")
+        # 写回 task.json
+        fc = _get_fine_compose(mgr, task_id)
+        fc["materials"][kind] = {
+            "path": str(save_path.relative_to(repo_root)),
+            "type": {"video": "video", "subtitle": "srt", "audio": "audio"}.get(kind, "image"),
+            "source": "upload",
+        }
+        _save_fine_compose(mgr, task_id, fc)
+        return _ok(path=fc["materials"][kind]["path"], toast=f"{_FINE_MATERIAL_LABELS[kind][1]}已上传")
+
+    # REQ-20260919-063 用户反馈：每个素材都要可预览（图片/视频/音频/SRT 文本）。
+    # 直接 GET 这个端点拿到素材文件本体（带正确 Content-Type），前端用 <img>/<video>/<audio>
+    # 或 fetch() 文本即可。不经 Gradio 文件白名单（任务文件在 slirn-standalone/tasks/ 下）。
+    @app.app.get("/slirn/api/fine_material_file")
+    async def serve_fine_material_file(
+        task_id: str, kind: str,
+    ):
+        """返回指定素材文件本体。前端 <img>/<video>/<audio> 直接 src= 此 URL。
+
+        - 图片（cover/bg/reference）→ image/png|jpeg 等
+        - 视频（video）→ video/mp4 等
+        - 音频（audio）→ audio/mpeg|wav|mp4 等
+        - 字幕（subtitle，.srt）→ text/plain；charset=utf-8
+        """
+        from fastapi.responses import FileResponse as _FR
+        from fastapi import HTTPException as _HTTP
+
+        if kind not in _FINE_MATERIAL_KINDS:
+            raise _HTTP(400, f"非法素材类型: {kind}")
+        try:
+            t = mgr.get(task_id)
+        except Exception:
+            raise _HTTP(404, f"任务不存在: {task_id}")
+        if not t:
+            raise _HTTP(404, f"任务不存在: {task_id}")
+        fc = _get_fine_compose(mgr, task_id)
+        mat = fc.get("materials", {}).get(kind) or {}
+        path_rel = mat.get("path")
+        if not path_rel:
+            raise _HTTP(404, f"任务 {task_id} 未上传 {kind}")
+        abs_path = _resolve_mat_abs(mgr, task_id, fc["materials"], kind)
+        if not abs_path or not abs_path.exists():
+            raise _HTTP(404, f"素材文件不存在: {path_rel}")
+        # 按扩展名选 Content-Type
+        ext = abs_path.suffix.lower()
+        _MT = {
+            ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".webp": "image/webp", ".bmp": "image/bmp", ".gif": "image/gif",
+            ".mp4": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm",
+            ".mkv": "video/x-matroska", ".avi": "video/x-msvideo",
+            ".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4",
+            ".srt": "text/plain; charset=utf-8",
+        }
+        media_type = _MT.get(ext, "application/octet-stream")
+        # 不让浏览器强缓存（任务素材可能被替换）
+        return _FR(
+            abs_path, media_type=media_type,
+            headers={"Cache-Control": "no-cache"},
+        )
+
     @app.app.post("/slirn/api/delete_task")
     async def delete_task(body: dict = Body(default_factory=dict)):
         """删除任务（REQ-20260917-034）— 真删：整个任务目录从磁盘移除，不可恢复。
@@ -2671,6 +5332,8 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         tid = _unquote(scope["path"].rsplit("/", 1)[-1])
         # ?src=original → 完整原视频（编辑页滑全片定位用，REQ-20260915-003）
         # ?src=rough_compose → 粗剪成片（可选阶段产物，REQ-20260916-016）
+        # ?src=fine_preview → 精剪视频前 10 秒预览（Phase B，REQ-20260919-061）
+        # ?src=fine_export → 精剪视频完整导出（Phase B，REQ-20260919-061）
         src_q = _parse_qs(scope.get("query_string", b"").decode("latin-1")).get("src", [""])[0]
         video: Path | None = None
         try:
@@ -2682,6 +5345,9 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
 
                 rc = _comp_mod.rough_compose_path(mgr.tasks_dir / tid / "outputs")
                 video = rc if rc.exists() else None
+            elif src_q in ("fine_preview", "fine_export"):
+                p = mgr.tasks_dir / tid / "outputs" / f"{src_q}.mp4"
+                video = p if p.exists() else None
             else:
                 video, _label = _resolve_task_video(t)
         except Exception:  # noqa: BLE001
@@ -2822,7 +5488,10 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
 
     @app.app.post("/slirn/api/llm_config/add")
     async def llm_config_add(body: dict = Body(default_factory=dict)):
-        """添加模型注册项：{id, provider, base_url, api_key_env, protocol?}。"""
+        """添加模型注册项：{id, provider, base_url, api_key_env, protocol?, vision?}。
+
+        vision（REQ-20260919-061 用户补充）：是否支持图片输入，由用户在 UI 显式勾选。
+        """
         from slirn_home import llm_config
 
         try:
@@ -2831,6 +5500,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
                 body.get("id", ""), body.get("provider", ""),
                 body.get("base_url", ""), body.get("api_key_env", ""),
                 body.get("protocol", "openai"),
+                bool(body.get("vision", False)),
             )
         except llm_config.LLMConfigError as e:
             return _err(str(e))
@@ -2840,7 +5510,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
 
     @app.app.post("/slirn/api/llm_config/update")
     async def llm_config_update(body: dict = Body(default_factory=dict)):
-        """修改模型注册项（REQ-20260916-001）：{id, new_id, provider, base_url, api_key_env, protocol?}。"""
+        """修改模型注册项：{id, new_id, provider, base_url, api_key_env, protocol?, vision?}。"""
         from slirn_home import llm_config
 
         try:
@@ -2849,6 +5519,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
                 str(body.get("id") or ""), body.get("new_id", ""),
                 body.get("provider", ""), body.get("base_url", ""),
                 body.get("api_key_env", ""), body.get("protocol", "openai"),
+                bool(body.get("vision", False)),
             )
         except llm_config.LLMConfigError as e:
             return _err(str(e))
@@ -3098,6 +5769,42 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         return _ok("", link=link, rows=len(cutlist.get("items") or []),
                    linked_at=saved_link.get("linked_at"))
 
+    # REQ-20260919-068：字幕修订阶段关联人员 ID（与切分修剪同口径）。
+    # 修订阶段不强制 all_decided（用户可边决策边关联预览；落盘走 save_revision 路径）。
+    @app.app.post("/slirn/api/rev_speaker_link")
+    async def rev_speaker_link(body: dict = Body(default_factory=dict)):
+        """字幕修订阶段关联人员ID（REQ-20260919-068）：按时间段重叠对齐 subtitle 段级 spk。
+
+        返回每行人员编号 + 按人员统计（未删除决策的行数）。落盘
+        rev_speaker_link.json — 重进面板时徽章 + 统计条直接渲染（渲染端现算，
+        快照仅备查）。修订变化无需重算链接。
+        """
+        from slirn_home import asr_service, rev_speaker, revision_service
+
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            mgr.get(tid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+        outputs_dir = mgr.tasks_dir / tid / "outputs"
+        rev = revision_service.load_revision(outputs_dir)
+        if not (rev and rev.get("entries")):
+            return _err("尚无修订建议，请先在「字幕修订」阶段完成大模型分析")
+        sub_meta = asr_service.load_subtitle(outputs_dir)
+        if not (sub_meta and sub_meta.get("segments")):
+            return _err("缺少字幕生成产物（subtitle.json），请先在「字幕生成」阶段生成字幕")
+        link = rev_speaker.link_speakers(sub_meta, rev)
+        if not link.get("available"):
+            return _err(
+                "字幕无人员编号 — 该任务生成字幕时未开启说话人分离（或为旧任务）。"
+                "请到「字幕生成」阶段开启「区分说话人」重新生成后再关联"
+            )
+        saved_link = rev_speaker.save_link(outputs_dir, link)
+        return _ok("", link=link, rows=len(rev.get("entries") or []),
+                   linked_at=saved_link.get("linked_at"))
+
     @app.app.post("/slirn/api/save_cut_decisions")
     async def save_cut_decisions(body: dict = Body(default_factory=dict)):
         """保存切分决策（REQ-20260916-011）：子段翻转 manual_marks + 字幕级改判 actions。
@@ -3339,6 +6046,49 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         # 倒序（最新在前）；同秒多条按 id 倒序兜底
         items.sort(key=lambda x: (float(x.get("started_at") or 0), str(x.get("id") or "")), reverse=True)
         return _ok("", items=items)
+
+    @app.app.post("/slirn/api/execution_history_query")
+    async def execution_history_query_endpoint(body: dict = Body(default_factory=dict)):
+        """REQ-20260918-053 — 执行日志查询（按阶段/状态过滤 + 关键词搜错误信息）。
+
+        返回倒序最多 N 条（默认 200）；过滤条件全 AND：
+        - kinds  (可选) list[str]  — 限定阶段（如 ["rough_compose","optimize"]）
+        - statuses (可选) list[str] — 限定状态（running/success/failed）
+        - keyword (可选) str        — 搜错误信息 / 阶段串（不区分大小写）
+        - limit (可选) int          — 默认 200，上限 1000
+        """
+        from slirn_home import execution_history
+
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            mgr.get(tid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+        kinds = body.get("kinds") or None
+        statuses = body.get("statuses") or None
+        keyword = body.get("keyword") or ""
+        try:
+            limit = int(body.get("limit") or 200)
+        except Exception:  # noqa: BLE001
+            limit = 200
+        if limit < 1:
+            limit = 1
+        if limit > 1000:
+            limit = 1000
+        # 校验 kinds / statuses 是否合法（防止前端传错）
+        if kinds is not None:
+            kinds = [k for k in kinds if k in execution_history.ALL_KINDS]
+        valid_statuses = {"running", "success", "failed"}
+        if statuses is not None:
+            statuses = [s for s in statuses if s in valid_statuses]
+        outputs_dir = mgr.tasks_dir / tid / "outputs"
+        items = execution_history.query_history(
+            outputs_dir, kinds=kinds, statuses=statuses, keyword=keyword, limit=limit
+        )
+        return _ok("", items=items, total=len(items),
+                   kinds=kinds or sorted(execution_history.ALL_KINDS))
 
     # ---------- 流程配置 + 自动执行（REQ-20260918-047）----------
     # 工作台顶部「⚙ 流程」按钮 → 抽屉编辑器 → 配置存 tasks/<tid>/outputs/pipeline.json

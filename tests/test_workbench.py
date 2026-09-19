@@ -612,6 +612,71 @@ def test_render_fine_cut_zone_includes_audio_volume_slider(tmp_path):
     assert "原说话人语音" in html or "原声" in html
 
 
+def test_render_fine_cut_zone_hint_is_at_top(tmp_path):
+    """REQ-20260919-072：📐 位置坐标 hint 必须在标题之后、第一个折叠区之前。"""
+    from slirn_home.app import _render_workbench
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="hint-top", original_video=video)
+    html = _render_workbench(t.task_id, m)
+    title_pos = html.find("精剪视频 · 素材合成器")
+    hint_pos = html.find("📐 位置坐标")
+    uploads_pos = html.find("slirn-fine-uploads-details")
+    assert title_pos > 0 and hint_pos > 0 and uploads_pos > 0
+    assert title_pos < hint_pos < uploads_pos, (
+        f"标题({title_pos}) < hint({hint_pos}) < 上传区({uploads_pos})，"
+        "确保说明在面板最顶端"
+    )
+
+
+def test_render_fine_cut_zone_uploads_wrapped_in_details(tmp_path):
+    """REQ-20260919-072：素材上传区包在 <details> 里，默认折叠（无 open 属性）。"""
+    from slirn_home.app import _render_workbench
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="uploads-fold", original_video=video)
+    html = _render_workbench(t.task_id, m)
+    # 找 <details ... id="slirn-fine-uploads-details"> 的实际标签起点
+    idx = html.find('<details class="slirn-fine-section" id="slirn-fine-uploads-details"')
+    assert idx > 0, "应有 <details id=slirn-fine-uploads-details> 包裹上传区"
+    # summary 行
+    assert "📁 上传素材（6 项）" in html
+    # 默认折叠 — details 起始 100 字符内不含 open
+    seg = html[idx:idx + 100]
+    assert " open" not in seg, f"默认应折叠，details 起始段含 open：{seg!r}"
+
+
+def test_render_fine_cut_zone_bg_detect_wrapped_in_details(tmp_path):
+    """REQ-20260919-072：背景图区域检测包在 <details> 里，默认折叠。"""
+    from slirn_home.app import _render_workbench
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="bgdetect-fold", original_video=video)
+    html = _render_workbench(t.task_id, m)
+    idx = html.find('<details class="slirn-fine-section" id="slirn-fine-bg-detect-details"')
+    assert idx > 0, "应有 <details id=slirn-fine-bg-detect-details> 包裹背景图检测区"
+    assert "🎨 背景图区域检测（4 角点 + 宽高）" in html
+    seg = html[idx:idx + 100]
+    assert " open" not in seg, f"默认应折叠，details 起始段含 open：{seg!r}"
+
+
+def test_css_spk_find_input_rule_excludes_checkbox():
+    """REQ-20260919-072 v2（连同 checkbox bug 修复）：
+    .slirn-cut-spk-find input / .slirn-rev-spk-find input 必须用 :not([type=checkbox])
+    排除复选框，避免 72px 宽度把 16px 复选框拉成长条 pill。
+    """
+    from pathlib import Path as _P
+    css = (_P(__file__).resolve().parent.parent
+           / "slirn_home" / "static" / "home.css").read_text(encoding="utf-8")
+    # 两处都必须用 :not([type="checkbox"]) 限定
+    assert ".slirn-cut-spk-find input:not([type=\"checkbox\"])" in css, (
+        ".slirn-cut-spk-find input 规则应排除 checkbox（避免 72px 拉成长条）"
+    )
+    assert ".slirn-rev-spk-find input:not([type=\"checkbox\"])" in css, (
+        ".slirn-rev-spk-find input 规则应排除 checkbox（避免 72px 拉成长条）"
+    )
+
+
 def test_run_fine_render_cover_intro_concat_filter(tmp_path, monkeypatch):
     """封面启用 + duration=3s 时 filter_complex 应含 [intro] + concat=n=2:v=1:a=0。
 
