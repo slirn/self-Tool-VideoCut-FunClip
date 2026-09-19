@@ -10,6 +10,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 FUNCLIP_ROOT = Path(__file__).resolve().parent.parent
 SLIRN_STANDALONE = FUNCLIP_ROOT.parent / "slirn-standalone"
 
@@ -554,6 +556,254 @@ def test_anthropic_content_parts_joined(monkeypatch):
     assert out == "前半后半"
 
 
+# ---------- 多模态 vision 模型检测（REQ-20260919-061 Phase C）----------
+
+@pytest.mark.parametrize("mid", [
+    "qwen-vl-plus", "qwen-vl-max", "qvq-max", "qwen2-vl-72b",
+    "qwen2.5-vl-7b-instruct",
+    "gpt-4o", "gpt-4o-mini", "gpt-4-vision-preview", "gpt-4-turbo-vision",
+    "claude-3-opus", "claude-3-5-sonnet", "claude-4-sonnet",
+])
+def test_is_vision_entry_true(mid):
+    """覆盖主流厂商多模态模型名（含 DashScope / OpenAI / Anthropic）。"""
+    from slirn_home import revision_service
+    e = {"id": mid, "protocol": "openai", "provider": "x"}
+    assert revision_service._is_vision_entry(e) is True, f"{mid} 应判为 vision"
+
+
+@pytest.mark.parametrize("mid", [
+    "qwen-plus", "qwen-max", "qwen-turbo",
+    "deepseek-chat", "deepseek-reasoner",
+    "gpt-3.5-turbo", "gpt-4", "gpt-4-turbo",
+    "text-embedding-3-small",
+    "",
+])
+def test_is_vision_entry_false(mid):
+    """文本模型不判为 vision（防止误判到 dashscope 文本模型）。"""
+    from slirn_home import revision_service
+    e = {"id": mid, "protocol": "openai", "provider": "x"}
+    assert revision_service._is_vision_entry(e) is False, f"{mid} 不应判为 vision"
+
+
+# REQ-20260919-061 用户补充：用户显式声明 vision=True/False 优先级最高。
+# 启发式仅作为旧条目（vision 字段缺失）的兜底。
+
+@pytest.mark.parametrize("mid", [
+    # 这些名字本身不含 vision 关键字，但用户显式 vision=True
+    "MiniMax-M3", "local-vllm", "custom-gateway",
+    "MiniMax-abab7-chat",
+])
+def test_is_vision_entry_explicit_true_overrides_name(mid):
+    """用户显式 vision=True → 即使模型名不含 vision 关键字也判为 vision。
+
+    这是 REQ-20260919-061 用户补充的核心：本地 CI（如 MiniMax）支持多模态时，
+    用户可在 ⚙️ 显式勾选「支持图片」，系统立即识别，不再依赖名字猜测。
+    """
+    from slirn_home import revision_service
+    e = {"id": mid, "protocol": "openai", "provider": "x", "vision": True}
+    assert revision_service._is_vision_entry(e) is True, (
+        f"{mid} + vision=True 应判为 vision（用户显式优先）"
+    )
+
+
+@pytest.mark.parametrize("mid", [
+    # 这些名字含 vision 关键字（启发式会判 True），但用户显式 vision=False
+    "qwen-vl-test", "gpt-4o-custom", "claude-sonnet-4-5",
+])
+def test_is_vision_entry_explicit_false_overrides_name(mid):
+    """用户显式 vision=False → 即使模型名含 vision 关键字也判为 False。
+
+    例：自部署网关用 qwen-vl-7b 但不转发图片 / 配额单独走文本通道。
+    """
+    from slirn_home import revision_service
+    e = {"id": mid, "protocol": "openai", "provider": "x", "vision": False}
+    assert revision_service._is_vision_entry(e) is False, (
+        f"{mid} + vision=False 不应判为 vision（用户显式优先）"
+    )
+
+
+def test_is_vision_entry_explicit_true_enables_minimax():
+    """核心场景：用户的本地 MiniMax-M3 显式标 vision=True → AI 按钮可用。"""
+    from slirn_home import revision_service
+    e = {"id": "MiniMax-M3", "protocol": "openai",
+         "provider": "本地 CI", "vision": True}
+    assert revision_service._is_vision_entry(e) is True
+
+
+def test_call_llm_vision_builds_multimodal_payload(tmp_path: Path, monkeypatch):
+    """_call_llm_vision 应把图片以 base64 data URI 形式塞进 messages。"""
+    from slirn_home import revision_service
+
+    # 1. 准备 1x1 PNG 测试文件
+    import base64
+    png_bytes = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+    )
+    img_path = tmp_path / "test.png"
+    img_path.write_bytes(png_bytes)
+
+    # 2. monkeypatch httpx.post 抓取请求体
+    captured: dict = {}
+    class _Resp:
+        status_code = 200
+        text = ""
+        headers = {}
+        def json(self):
+            return {"choices": [{"message": {"content": '{"video":{"x":0.5,"y":0.5,"scale":1.0,"enabled":true}}'}}]}
+    def _fake_post(url, json=None, headers=None, timeout=None):
+        captured["url"] = url
+        captured["json"] = json
+        captured["headers"] = headers
+        return _Resp()
+
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-test")
+    monkeypatch.setattr("httpx.post", _fake_post)
+
+    # 3. 调 vision
+    entry = {"id": "qwen-vl-plus", "provider": "DashScope",
+             "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+             "api_key_env": "DASHSCOPE_API_KEY", "protocol": "openai"}
+    out = revision_service._call_llm_vision(
+        "system prompt", "describe this",
+        [img_path], entry=entry,
+    )
+
+    # 4. 验证
+    assert "video" in out and "x" in out
+    body = captured["json"]
+    assert body["model"] == "qwen-vl-plus"
+    msgs = body["messages"]
+    assert msgs[0]["role"] == "system"
+    assert msgs[1]["role"] == "user"
+    # 多模态：user.content 是 list，含 text + image_url
+    user_content = msgs[1]["content"]
+    assert isinstance(user_content, list)
+    assert user_content[0]["type"] == "text"
+    assert user_content[1]["type"] == "image_url"
+    # data URI 包含 base64 编码
+    data_url = user_content[1]["image_url"]["url"]
+    assert data_url.startswith("data:image/png;base64,")
+    assert "Authorization" in captured["headers"]
+
+
+def test_call_llm_vision_anthropic_protocol_supported(tmp_path: Path, monkeypatch):
+    """REQ-20260919-061 用户补充：anthropic 协议也支持 vision（content parts 含 image base64）。
+
+    用户的 MiniMax 用 Anthropic 兼容端点（`https://api.minimaxi.com/anthropic`）
+    也能传图片给模型（前提是用户在 ⚙️ 勾选 vision=true）。
+    """
+    from slirn_home import revision_service
+    import base64
+
+    # 1x1 PNG
+    png_bytes = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="
+    )
+    png = tmp_path / "tiny.png"
+    png.write_bytes(png_bytes)
+
+    captured: dict = {}
+
+    class _FakeResp:
+        status_code = 200
+        text = '{"content":[{"type":"text","text":"ok"}]}'
+        headers = {}
+        def json(self):
+            return {"content": [{"type": "text",
+                                 "text": '{"video":{"x":0,"y":0,"scale":1.0}}'}],
+                    "stop_reason": "end_turn"}
+
+    def _fake_post(url, json=None, headers=None, timeout=None):
+        captured["url"] = url
+        captured["json"] = json
+        captured["headers"] = headers
+        return _FakeResp()
+
+    monkeypatch.setattr("httpx.post", _fake_post)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+
+    e = {"id": "claude-3-5-sonnet", "provider": "Anthropic",
+         "protocol": "anthropic",
+         "base_url": "https://api.anthropic.com",
+         "api_key_env": "ANTHROPIC_API_KEY"}
+    out = revision_service._call_llm_vision(
+        "system prompt", "user text", [png], entry=e, retries=0)
+    # URL 走 /v1/messages
+    assert captured["url"].endswith("/v1/messages"), captured["url"]
+    # headers: x-api-key + anthropic-version
+    assert captured["headers"]["x-api-key"] == "sk-test"
+    assert captured["headers"]["anthropic-version"] == "2023-06-01"
+    # body: messages[0].content 是 list（text + image base64）
+    msgs = captured["json"]["messages"]
+    parts = msgs[0]["content"]
+    assert parts[0] == {"type": "text", "text": "user text"}
+    img = parts[1]
+    assert img["type"] == "image"
+    assert img["source"]["type"] == "base64"
+    assert img["source"]["media_type"] == "image/png"
+    assert len(img["source"]["data"]) > 0
+    # system 提到顶层（anthropic 协议特征）
+    assert captured["json"]["system"] == "system prompt"
+    assert out == '{"video":{"x":0,"y":0,"scale":1.0}}'
+
+
+def test_call_llm_vision_anthropic_url_normalization(tmp_path: Path, monkeypatch):
+    """anthropic base_url 已带 /v1 → 路径不重复加 /v1。
+
+    用户 MiniMax base_url 是 `https://api.minimaxi.com/anthropic`（无 /v1），
+    应拼成 `https://api.minimaxi.com/anthropic/v1/messages`。
+    """
+    import base64
+    from slirn_home import revision_service
+
+    # 用真实存在的 1x1 PNG（httpx.post 应被调用）
+    png = tmp_path / "tiny.png"
+    png.write_bytes(base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="
+    ))
+
+    captured: dict = {}
+
+    class _FakeResp:
+        status_code = 200
+        text = ""
+        headers = {}
+        def json(self):
+            return {"content": [{"type": "text", "text": "{}"}], "stop_reason": "end_turn"}
+
+    def _fake_post(url, json=None, headers=None, timeout=None):
+        captured["url"] = url
+        return _FakeResp()
+
+    monkeypatch.setattr("httpx.post", _fake_post)
+    monkeypatch.setenv("MINIMAX_API_KEY", "sk-test")
+
+    e = {"id": "MiniMax-M3", "provider": "MiniMax",
+         "protocol": "anthropic", "vision": True,
+         "base_url": "https://api.minimaxi.com/anthropic",
+         "api_key_env": "MINIMAX_API_KEY"}
+    revision_service._call_llm_vision("s", "u", [png], entry=e, retries=0)
+    assert captured["url"] == "https://api.minimaxi.com/anthropic/v1/messages"
+
+
+def test_call_llm_vision_missing_image_raises(tmp_path: Path):
+    """不存在的图片路径 → 清晰错误（不让 base64 阶段才崩）。"""
+    from slirn_home import revision_service
+    e = {"id": "qwen-vl-plus", "protocol": "openai", "provider": "x"}
+    with pytest.raises(RuntimeError, match="图片不存在"):
+        revision_service._call_llm_vision("s", "u", [tmp_path / "no.png"], entry=e)
+
+
+def test_call_llm_vision_oversize_image_rejected(tmp_path: Path):
+    """>10MB 图片拒绝（避免把 base64 撑爆请求体）。"""
+    from slirn_home import revision_service
+    big = tmp_path / "big.png"
+    big.write_bytes(b"\x89PNG" + b"x" * (11 * 1024 * 1024))  # 11MB
+    e = {"id": "qwen-vl-plus", "protocol": "openai", "provider": "x"}
+    with pytest.raises(RuntimeError, match="图片过大"):
+        revision_service._call_llm_vision("s", "u", [big], entry=e)
+
+
 # ---------- 批处理减半 / 回填（REQ-20260915-007）----------
 
 def test_start_job_halves_on_parse_failure(tmp_path: Path, monkeypatch):
@@ -850,4 +1100,4 @@ def test_wb_stage_states_with_revision(tmp_path: Path):
     (outputs / "revision.json").write_text(
         json.dumps({"version": 1, "entries": [{"i": 1, "decision": "accept"}]}), encoding="utf-8"
     )
-    assert _wb_stage_states(m.get(tid)) == ["done", "done", "done", "current"] + ["pending"] * 4
+    assert _wb_stage_states(m.get(tid)) == ["done", "done", "done", "current"] + ["pending"] * 3

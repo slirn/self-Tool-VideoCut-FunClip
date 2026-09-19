@@ -22,6 +22,10 @@ slirn/.temp/
 /*.srt
 /*.log
 
+# CDP 烟测缓存（workbench HTML dump，由 tests/ 下的 _check_ai.py / check_render.py 等写）
+/wb_*.json
+/wb_response.html
+
 # Slirn home runtime temp (moviepy cuts, gradio api info dump)
 /.temp/
 /_info.json

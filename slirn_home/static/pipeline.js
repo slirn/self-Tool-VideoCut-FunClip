@@ -28,37 +28,38 @@
   STAGES.forEach(function(s) { STAGE_LABELS[s.key] = s.label; });
 
   // ---- 3 套内置模板（v4：顶层 stop_after 字符串；null = 跑到底）----
+  // REQ-20260918-049：subtitle_review 加 rigor 字段
   var TEMPLATES = {
-    // 人工全审：字幕修订后停（让用户审 LLM 建议）
+    // 人工全审：字幕修订后停（让用户审 LLM 建议；默认严谨性 = medium）
     default_tpl: {
       label: '人工全审（字幕修订后停）',
       config: {
         subtitle_generation: {speaker_diarization: false},
-        subtitle_review: {accept_all_suggestions: false, skip_categories: []},
+        subtitle_review: {accept_all_suggestions: false, skip_categories: [], rigor: 'medium'},
         rough_cut: {delete_speakers: [], default_decision: 'keep'},
         rough_compose: {},
         optimize: {accept_all_replacements: false},
         stop_after: 'subtitle_review'
       }
     },
-    // 半自动：粗剪合成后停（让人看完粗剪再决定后续）
+    // 半自动：粗剪合成后停（让人看完粗剪再决定后续；严谨性 = medium）
     semi: {
       label: '半自动（粗剪合成后停）',
       config: {
         subtitle_generation: {speaker_diarization: false},
-        subtitle_review: {accept_all_suggestions: true, skip_categories: []},
+        subtitle_review: {accept_all_suggestions: true, skip_categories: [], rigor: 'medium'},
         rough_cut: {delete_speakers: [], default_decision: 'keep'},
         rough_compose: {},
         optimize: {accept_all_replacements: false},
         stop_after: 'rough_compose'
       }
     },
-    // 全自动：跑到底
+    // 全自动：跑到底（严谨性 = medium — 全自动模式建议用户手工调高）
     full: {
       label: '全自动（跑到底）',
       config: {
         subtitle_generation: {speaker_diarization: false},
-        subtitle_review: {accept_all_suggestions: true, skip_categories: []},
+        subtitle_review: {accept_all_suggestions: true, skip_categories: [], rigor: 'medium'},
         rough_cut: {delete_speakers: [], default_decision: 'keep'},
         rough_compose: {},
         optimize: {accept_all_replacements: true},
@@ -116,8 +117,34 @@
     if (stage.key === 'subtitle_review') {
       var aa = stageCfg.accept_all_suggestions ? ' checked' : '';
       var skip = (stageCfg.skip_categories || []).join(',');
+      // REQ-20260918-049：4 卡 rigor picker（与工作台 _render_rigor_picker 同源；
+      // pipe 通道对 custom 档降级为 medium，desc 标注清楚避免误导）
+      var rigorVal = stageCfg.rigor || 'medium';
+      var rigorCards = [
+        {v: 'high',   t: '高 · 严格打磨', d: '逐句精修到成品口播稿水平：语气词、口癖、重复、无意义寒暄全部处理',
+         e: '「嗯呃，那个，就是说，我们今天讲一下神经网络」→ 「我们今天讲一下神经网络」'},
+        {v: 'medium', t: '中 · 意思正确即可', d: '只处理影响理解的问题：明显口误、连续重复、明显不通顺的句子做小幅修剪；小语气词可保留',
+         e: '「嗯，我们今天讲一下神经网络」→ 整行保留（小语气词「嗯」不影响意思）'},
+        {v: 'low',    t: '低 · 只去严重问题', d: '最大限度保留原文：只处理大段纯重复和意思混乱的句子，语气词、轻微口误都保留',
+         e: '「所以我们所以我们所以我们看到」→ 「所以我们看到」（只去掉连续重复）'},
+        {v: 'custom', t: '自 · 自定义', d: 'pipe 通道暂不支持（需在工作台「字幕修订」有独立 textarea 才能填提示词）；选此项时服务端自动降级为 medium',
+         e: '可在工作台自定义严谨性级别后再回 pipe-panel 选择 high/medium/low'}
+      ];
+      var cardsHtml = '<div class="slirn-pipe-subhead">分析严谨性级别（决定大模型挑毛病的严格程度）：</div>'
+        + '<div class="slirn-rigor-cards slirn-pipe-rigor">';
+      rigorCards.forEach(function(c) {
+        var checked = (rigorVal === c.v) ? ' checked' : '';
+        cardsHtml += '<label class="slirn-rigor-card" title="' + escapeHtml(c.d) + '">'
+          + '<input type="radio" name="slirn-rev-rigor" value="' + c.v + '"' + checked + ' />'
+          + '<span class="slirn-rigor-card-title">' + escapeHtml(c.t) + '</span>'
+          + '<span class="slirn-rigor-card-desc">' + escapeHtml(c.d) + '</span>'
+          + '<span class="slirn-rigor-card-example">例：' + escapeHtml(c.e) + '</span>'
+          + '</label>';
+      });
+      cardsHtml += '</div>';
       return '<div class="slirn-pipe-form">'
         + '<div class="slirn-pipe-desc">' + escapeHtml(stage.desc) + '</div>'
+        + cardsHtml
         + '<label class="slirn-pipe-field">'
         + '<input type="checkbox" id="' + fieldId(stage.key, 'accept-all') + '"' + aa + '> 默认接受所有建议（跑完后自动 save_revision 全量 accept）'
         + '</label>'
@@ -160,16 +187,29 @@
   }
 
   // ---- 整个面板渲染（v4：details 包裹整个面板 + 头部下拉 + 每阶段 run-since 按钮）----
+  // REQ-20260918-049：data.history 透传进来，按钮文案自适应（智能续跑 / 从头跑）
   function renderPanel(taskId, data) {
     var panel = document.getElementById('slirn-pipe-panel');
     if (!panel) return;
     panel.setAttribute('data-task-id', taskId);
     var cfg = (data && data.config) || {};
     var updatedAt = (data && data.updated_at) || '';
+    var history = (data && data.history) || [];
 
     // v4 兼容：v3 per-stage boolean / v2 per-stage string 字段丢弃；顶层 stop_after 提升
     cfg = normalizeCfg(cfg);
     var flowStopValue = cfg.stop_after || '';
+
+    // REQ-20260918-049：智能续跑按钮（自适应文案）
+    var sinceKey = computeNextSince(history);
+    var runBtnHtml = sinceKey
+      ? '<button type="button" class="slirn-btn slirn-btn-primary slirn-btn-sm slirn-pipe-run"'
+        + ' data-action="pipe-run" data-since="' + sinceKey + '"'
+        + ' title="上次跑到了「' + escapeHtml(STAGE_LABELS[sinceKey] || sinceKey) + '」之前；点此从该处开始（跳过已完成阶段）">'
+        + '▶ 续跑 (从「' + escapeHtml(STAGE_LABELS[sinceKey] || sinceKey) + '」开始)</button>'
+      : '<button type="button" class="slirn-btn slirn-btn-primary slirn-btn-sm slirn-pipe-run"'
+        + ' data-action="pipe-run"'
+        + ' title="保存并按当前配置顺序执行所有阶段">▶ 从头跑</button>';
 
     var sectionsHtml = STAGES.map(function(stage, idx) {
       return '<details class="slirn-pipe-section" data-pipe-section="' + stage.key + '" open>'
@@ -207,11 +247,14 @@
       + '</select>'
       + '<button type="button" class="slirn-btn slirn-btn-danger slirn-btn-sm" data-action="pipe-stop">⏹ 停止</button>'
       + '<button type="button" class="slirn-btn slirn-btn-sm" data-action="pipe-save">💾 保存配置</button>'
-      + '<button type="button" class="slirn-btn slirn-btn-primary slirn-btn-sm" data-action="pipe-run" title="保存并按当前配置顺序执行所有阶段">▶ 运行流程</button>'
+      + '<button type="button" class="slirn-btn slirn-btn-sm" data-action="pipe-status-show" hidden title="显示状态条（点状态条 ▾ 收起后点此恢复）">📊 状态</button>'
+      + runBtnHtml
       + '</span>'
       + '</summary>'
       + '<div class="slirn-pipe-sections">' + sectionsHtml + '</div>'
       + '</details>';
+    // REQ-20260918-049 v2：渲染完后同步「📊 状态」按钮可见性（status hidden 时显示）
+    refreshStatusToggleBtn();
   }
 
   // ---- v4 兼容：把 v3 per-stage boolean / v2 per-stage string 字段丢弃；顶层 stop_after 保留 ----
@@ -247,7 +290,14 @@
     };
     cfg.subtitle_review = {
       accept_all_suggestions: _checked(fieldId('subtitle_review', 'accept-all'), false),
-      skip_categories: _val(fieldId('subtitle_review', 'skip-cats'), '').split(',').map(function(x){return x.trim();}).filter(Boolean)
+      skip_categories: _val(fieldId('subtitle_review', 'skip-cats'), '').split(',').map(function(x){return x.trim();}).filter(Boolean),
+      // REQ-20260918-049：从 radio cards 读 rigor（pipe 通道对 custom 档降级为 medium，
+      // 与后端 handler_subtitle_review 校验一致）
+      rigor: (function() {
+        var el = document.querySelector('input[name="slirn-rev-rigor"]:checked');
+        var v = el ? el.value : 'medium';
+        return (v === 'high' || v === 'medium' || v === 'low') ? v : 'medium';
+      })()
     };
     cfg.rough_cut = {
       delete_speakers: _val(fieldId('rough_cut', 'del-spk'), '').split(',').map(function(x){return parseInt(x.trim(), 10);}).filter(function(x){return !isNaN(x);}),
@@ -263,13 +313,202 @@
     return cfg;
   }
 
+  // ---- REQ-20260918-049：智能续跑 + 阶段状态回显 helper ----
+  // 从 history 最后一条 summary 算出「下一该跑的 stage key」。
+  // history 顺序：append_history 是 append 到尾部，最新 summary = history[-1]（非 reverse）。
+  // 返回 null 表示「从头跑」（从未跑过 / 首阶段就挂 / 5 阶段全跑完）。
+  function computeNextSince(history) {
+    if (!Array.isArray(history) || history.length === 0) return null;
+    var last = history[history.length - 1];
+    if (!last || typeof last !== 'object') return null;
+    var done = Array.isArray(last.stages_done) ? last.stages_done : [];
+    // 全跑完 → 从头跑
+    if (done.length >= STAGE_KEYS.length) return null;
+    // 取 STAGE_KEYS 里最后一个已被 done 覆盖的索引 + 1 = 下个该跑
+    var lastIdx = -1;
+    for (var i = 0; i < done.length; i++) {
+      var ix = STAGE_KEYS.indexOf(done[i]);
+      if (ix > lastIdx) lastIdx = ix;
+    }
+    return STAGE_KEYS[lastIdx + 1] || null;
+  }
+
+  // 从 status 对象推导已完成的 stage key 列表：
+  // 1) summary.stages_done（已完成 run 才有）→ 2) log 里 '✅ X 完成' 标记（running 中）
+  function deriveStagesDone(st) {
+    if (!st) return [];
+    if (st.summary && Array.isArray(st.summary.stages_done)) {
+      return st.summary.stages_done.slice();
+    }
+    var done = [];
+    var seen = {};
+    var log = Array.isArray(st.log) ? st.log : [];
+    for (var i = 0; i < log.length; i++) {
+      var e = log[i] || {};
+      var k = e.stage, m = e.msg || '';
+      if (!k || seen[k]) continue;
+      // 通用判定：✅/完成 字样视为该阶段已完成
+      if (m.indexOf('✅') >= 0 && m.indexOf('完成') >= 0) {
+        seen[k] = 1;
+        done.push(k);
+      }
+    }
+    return done;
+  }
+
+  // 单个 stage 当前状态：error / running / done / pending
+  function stageStateOf(stageKey, st, doneSet, currentStage) {
+    if (!st) return 'pending';
+    if (st.state === 'error' && currentStage === stageKey) return 'error';
+    if (st.state === 'running' && currentStage === stageKey) return 'running';
+    if (doneSet.indexOf(stageKey) >= 0) return 'done';
+    return 'pending';
+  }
+
+  // 格式化时长（秒 → "X秒" / "X分Y秒" / "X时Y分"）
+  function fmtElapsed(seconds) {
+    seconds = Math.max(0, Math.floor(seconds || 0));
+    if (seconds < 60) return seconds + '秒';
+    if (seconds < 3600) return Math.floor(seconds / 60) + '分' + (seconds % 60) + '秒';
+    return Math.floor(seconds / 3600) + '时' + Math.floor((seconds % 3600) / 60) + '分';
+  }
+
+  // 给每个 stage section 加状态徽章（⏳/✅/⏸/❌）+ 当前阶段百分比 + 已耗时。
+  // 接入 pollStatus（running 中轮询）和 loadPanel（idle 终态读 history）两路径。
+  function updateStageBadges(st) {
+    if (!st) return;
+    var doneSet = deriveStagesDone(st);
+    var currentStage = st.current_stage || null;
+    STAGES.forEach(function(stage, idx) {
+      var sec = document.querySelector(
+        '#slirn-pipe-panel .slirn-pipe-section[data-pipe-section="' + stage.key + '"]'
+      );
+      if (!sec) return;
+      var s = stageStateOf(stage.key, st, doneSet, currentStage);
+      sec.setAttribute('data-pipe-state', s);
+
+      // num 圆形：done → ✓，running → ⏳，其他 → 原始序号
+      var num = sec.querySelector('.slirn-pipe-section-num');
+      if (num) {
+        num.textContent = s === 'done' ? '✓' : s === 'running' ? '⏳' : String(idx + 1);
+      }
+
+      // 徽章：在 label 后插/更新
+      var lbl = sec.querySelector('.slirn-pipe-section-label');
+      if (!lbl) return;
+      var badge = sec.querySelector('.slirn-pipe-section-state');
+      if (!badge) {
+        badge = document.createElement('span');
+        // 插在 label 之后（hint 之前）
+        if (lbl.nextSibling) {
+          lbl.parentNode.insertBefore(badge, lbl.nextSibling);
+        } else {
+          lbl.parentNode.appendChild(badge);
+        }
+      }
+      badge.className = 'slirn-pipe-section-state slirn-pipe-section-state-' + (
+        s === 'running' ? 'running' :
+        s === 'done'    ? 'done'    :
+        s === 'error'   ? 'error'   : 'pending'
+      );
+      var pctTxt = '';
+      if (s === 'running' && st.percent != null) {
+        pctTxt = ' · ' + Math.round(Number(st.percent || 0)) + '%';
+      }
+      var elapsedTxt = '';
+      if (s === 'running' && st.started_at) {
+        elapsedTxt = ' · 已耗时 ' + fmtElapsed((Date.now() / 1000) - Number(st.started_at));
+      }
+      var textMap = {
+        running: '⏳ 运行中' + pctTxt + elapsedTxt,
+        done:    '✅ 已完成',
+        error:   '❌ 出错',
+        pending: '⏸ 待执行'
+      };
+      badge.textContent = textMap[s] || s;
+    });
+  }
+
   // ---- 状态条 ----
   var pipeStatusTimer = null;
+  // 状态条位置持久化 key（per-task，跨 session 保留）
+  function _statusPosKey() {
+    var t = curTaskId() || 'global';
+    return 'slirn-pipe-status-pos-' + t;
+  }
+  function _restoreStatusPos(box) {
+    if (!box) return;
+    try {
+      var raw = localStorage.getItem(_statusPosKey());
+      if (!raw) return;
+      var p = JSON.parse(raw);
+      if (typeof p.top === 'number')   box.style.top   = p.top + 'px';
+      if (typeof p.left === 'number')  box.style.left  = p.left + 'px';
+      // 用 left/top 定位后清掉 right，避免冲突
+      box.style.right = 'auto';
+      box.style.bottom = 'auto';
+    } catch (e) { /* localStorage 不可用时静默 */ }
+  }
+  function _saveStatusPos(box) {
+    if (!box) return;
+    try {
+      var rect = box.getBoundingClientRect();
+      localStorage.setItem(_statusPosKey(), JSON.stringify({
+        top: Math.round(rect.top),
+        left: Math.round(rect.left)
+      }));
+    } catch (e) { /* 静默 */ }
+  }
+  // 状态条拖动：head 是手柄（除了 collapse 按钮）
+  function _bindStatusDrag(box) {
+    if (!box || box.__dragBound) return;
+    var head = box.querySelector('.slirn-pipe-status-head');
+    if (!head) return;  // 没有 head 就不要标记，等 renderStatusBar 写入后再绑
+    box.__dragBound = true;
+    var startX = 0, startY = 0, startLeft = 0, startTop = 0, dragging = false;
+    head.addEventListener('pointerdown', function(ev) {
+      // 拖手柄排除：collapse 按钮本身（它有 data-action）
+      if (ev.target.closest('[data-action]')) return;
+      dragging = true;
+      startX = ev.clientX;
+      startY = ev.clientY;
+      var rect = box.getBoundingClientRect();
+      startLeft = rect.left;
+      startTop = rect.top;
+      // 用 left/top 定位（清掉 right/bottom）
+      box.style.left = startLeft + 'px';
+      box.style.top = startTop + 'px';
+      box.style.right = 'auto';
+      box.style.bottom = 'auto';
+      try { head.setPointerCapture(ev.pointerId); } catch (e) {}
+      ev.preventDefault();
+    });
+    head.addEventListener('pointermove', function(ev) {
+      if (!dragging) return;
+      var dx = ev.clientX - startX;
+      var dy = ev.clientY - startY;
+      var newLeft = Math.max(0, Math.min(window.innerWidth - 100,  startLeft + dx));
+      var newTop  = Math.max(0, Math.min(window.innerHeight - 40, startTop  + dy));
+      box.style.left = newLeft + 'px';
+      box.style.top = newTop + 'px';
+    });
+    var _endDrag = function(ev) {
+      if (!dragging) return;
+      dragging = false;
+      _saveStatusPos(box);
+      try { head.releasePointerCapture(ev.pointerId); } catch (e) {}
+    };
+    head.addEventListener('pointerup', _endDrag);
+    head.addEventListener('pointercancel', _endDrag);
+  }
   function showStatus(taskId) {
     var box = document.getElementById('slirn-pipe-status');
     if (!box) return;
     box.hidden = false;
     box.setAttribute('data-task-id', taskId);
+    _restoreStatusPos(box);
+    _bindStatusDrag(box);
+    refreshStatusToggleBtn();
     if (pipeStatusTimer) { clearInterval(pipeStatusTimer); pipeStatusTimer = null; }
     pipeStatusTimer = setInterval(function() { pollStatus(taskId); }, 1500);
     pollStatus(taskId);
@@ -280,15 +519,46 @@
     box.hidden = true;
     if (pipeStatusTimer) { clearInterval(pipeStatusTimer); pipeStatusTimer = null; }
     box.innerHTML = '';
+    refreshStatusToggleBtn();
+  }
+  // pipe-panel 头部「📊 显示状态」按钮的可见性（仅 hidden 时显示）
+  function refreshStatusToggleBtn() {
+    var box = document.getElementById('slirn-pipe-status');
+    var btn = document.querySelector('#slirn-pipe-panel [data-action="pipe-status-show"]');
+    if (!btn) return;
+    btn.hidden = !(box && box.hidden);
   }
   function pollStatus(taskId) {
     postJSON(SLIRN_API + '/pipeline_status', {task_id: taskId}).then(function(r) {
       if (!r || !r.ok) return;
       renderStatusBar(r);
+      // REQ-20260918-049：每个 stage section 加徽章回显
+      updateStageBadges(r);
       if (r.state !== 'running') {
         if (pipeStatusTimer) { clearInterval(pipeStatusTimer); pipeStatusTimer = null; }
+        // 终态再画一次（确保徽章显示最终态而非中间态）
+        updateStageBadges(r);
+        // REQ-20260918-049 v3：终态后刷新头部「续跑」按钮（让按钮反映最新 stages_done）
+        refreshRunBtnFromStatus(r);
       }
     });
+  }
+  // REQ-20260918-049 v3：终态后从 status 推导 stages_done，更新头部按钮（避免按钮停在「从头跑」误判）
+  function refreshRunBtnFromStatus(r) {
+    var btn = document.querySelector('#slirn-pipe-panel [data-action="pipe-run"]');
+    if (!btn) return;
+    var done = deriveStagesDone(r);
+    var fakeHistory = [{stages_done: done, status: r.state}];
+    var sinceKey = computeNextSince(fakeHistory);
+    if (sinceKey) {
+      btn.setAttribute('data-since', sinceKey);
+      btn.textContent = '▶ 续跑 (从「' + (STAGE_LABELS[sinceKey] || sinceKey) + '」开始)';
+      btn.setAttribute('title', '上次跑到了「' + (STAGE_LABELS[sinceKey] || sinceKey) + '」之前；点此从该处开始（跳过已完成阶段）');
+    } else {
+      btn.removeAttribute('data-since');
+      btn.textContent = '▶ 从头跑';
+      btn.setAttribute('title', '保存并按当前配置顺序执行所有阶段');
+    }
   }
   function renderStatusBar(st) {
     var box = document.getElementById('slirn-pipe-status');
@@ -311,16 +581,18 @@
       idle: '空闲'
     })[st.state] || st.state;
     box.innerHTML =
-      '<div class="slirn-pipe-status-head">'
+      '<div class="slirn-pipe-status-head" title="拖动此处移动状态条">'
       + '<span class="slirn-pipe-status-state slirn-pipe-status-state-' + st.state + '">'
       + (st.state === 'running' ? '⏳' : (st.state === 'done' ? '✅' : (st.state === 'error' ? '❌' : (st.state === 'stopped' ? '⏹' : '•'))))
       + ' ' + escapeHtml(stateLabel) + '</span>'
       + '<span class="slirn-pipe-status-stage">当前阶段：' + escapeHtml(stageLabel) + '</span>'
       + '<progress class="slirn-pipe-status-bar" max="100" value="' + pct + '"></progress>'
-      + '<button type="button" class="slirn-pipe-status-collapse" data-action="pipe-status-collapse" title="收起状态条">▾</button>'
+      + '<button type="button" class="slirn-pipe-status-collapse" data-action="pipe-status-collapse" title="收起状态条（在流程配置头部按钮恢复显示）">▾</button>'
       + '</div>'
       + (last3 ? '<div class="slirn-pipe-status-log">' + last3 + '</div>' : '')
       + (st.error ? '<div class="slirn-pipe-status-err">' + escapeHtml(st.error) + '</div>' : '');
+    // 重渲染时重新绑拖动事件（innerHTML 替换后旧 listener 不在了）
+    _bindStatusDrag(box);
   }
 
   // ---- 入口 ----
@@ -330,9 +602,31 @@
         toast('流程配置读取失败：' + (r && r.error || '未知错误'), 'error');
         return;
       }
-      renderPanel(taskId, {config: r.config, updated_at: r.updated_at});
+      // REQ-20260918-049：透传 history 给 renderPanel（智能按钮文案 + 兜底徽章）
+      renderPanel(taskId, {
+        config: r.config,
+        updated_at: r.updated_at,
+        history: r.history || []
+      });
+      // 状态条 + 阶段徽章回显
       if (r.status && r.status.state === 'running') {
         showStatus(taskId);
+        // running 时立刻画一次徽章（不等下一轮 poll）
+        updateStageBadges(r.status);
+      } else if (r.status) {
+        // idle 态但内存有 job（如刚 stop 完）→ 用 last status 画徽章
+        updateStageBadges(r.status);
+      } else {
+        // 没内存 job 但有 history → 用 history 最后一条做兜底
+        var last = (r.history || []).slice(-1)[0];
+        if (last) {
+          updateStageBadges({
+            state: 'idle',
+            current_stage: null,
+            log: [],
+            summary: last
+          });
+        }
       }
     });
   }
@@ -404,7 +698,13 @@
     var action = t.getAttribute('data-action');
     if (!action) return;
     if (action === 'pipe-save') { ev.preventDefault(); saveConfig(tid); return; }
-    if (action === 'pipe-run') { ev.preventDefault(); runPipeline(tid, null); return; }
+    if (action === 'pipe-run') {
+      ev.preventDefault();
+      // REQ-20260918-049：智能按钮 data-since 在按钮上（renderPanel 按 history 自适应生成）
+      var since = t.getAttribute('data-since') || null;
+      runPipeline(tid, since);
+      return;
+    }
     if (action === 'pipe-run-since') {
       ev.preventDefault();
       var since = t.getAttribute('data-since') || null;
@@ -414,8 +714,26 @@
     if (action === 'pipe-stop') { ev.preventDefault(); stopPipeline(tid); return; }
     if (action === 'pipe-open') { ev.preventDefault(); loadPanel(tid); return; }
     if (action === 'pipe-status-collapse') {
+      ev.preventDefault();
+      hideStatus();
+      return;
+    }
+    if (action === 'pipe-status-show') {
+      ev.preventDefault();
+      // 重新显示状态条：恢复保存的位置并立即拉一次状态
       var box = document.getElementById('slirn-pipe-status');
-      if (box) box.hidden = true;
+      if (!box) return;
+      box.hidden = false;
+      _restoreStatusPos(box);
+      _bindStatusDrag(box);
+      refreshStatusToggleBtn();
+      // 立即拉一次 + 起轮询
+      var t = box.getAttribute('data-task-id') || tid;
+      if (t) {
+        if (pipeStatusTimer) { clearInterval(pipeStatusTimer); pipeStatusTimer = null; }
+        pipeStatusTimer = setInterval(function() { pollStatus(t); }, 1500);
+        pollStatus(t);
+      }
       return;
     }
   });
@@ -471,4 +789,6 @@
   }
 
   window.slirnPipelineHideStatus = hideStatus;
+  // REQ-20260918-049：把徽章更新函数暴露到 window（E2E 测试用，可手动触发刷新）
+  window.slirnPipelineUpdateStageBadges = updateStageBadges;
 })();

@@ -42,6 +42,15 @@ DEFAULT_MODELS: list[dict] = [
         "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
         "api_key_env": "DASHSCOPE_API_KEY",
         "protocol": "openai",
+        "vision": False,
+    },
+    {
+        "id": "qwen-vl-plus",
+        "provider": "阿里云百炼（多模态）",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "api_key_env": "DASHSCOPE_API_KEY",
+        "protocol": "openai",
+        "vision": True,
     },
 ]
 
@@ -62,7 +71,7 @@ class LLMConfigError(ValueError):
 # ---------- 校验 ----------
 
 def _validate_entry(id_: str, provider: str, base_url: str, api_key_env: str,
-                    protocol: str = "openai") -> dict:
+                    protocol: str = "openai", vision: bool = False) -> dict:
     """校验并规范化一个模型注册项；非法抛 LLMConfigError。"""
     mid = str(id_ or "").strip()
     if not _ID_RE.match(mid):
@@ -86,7 +95,12 @@ def _validate_entry(id_: str, provider: str, base_url: str, api_key_env: str,
     proto = str(protocol or "openai").strip().lower() or "openai"
     if proto not in PROTOCOLS:
         raise LLMConfigError(f"协议不合法：{protocol!r}（可选：{' / '.join(PROTOCOLS)}）")
-    return {"id": mid, "provider": prov, "base_url": url, "api_key_env": env, "protocol": proto}
+    # vision 字段：True/False；缺省 False（向后兼容 — 旧条目视为文本模型）
+    vis = bool(vision) if isinstance(vision, bool) else (
+        vision in (1, "1", "true", "True", "yes", "on")
+    )
+    return {"id": mid, "provider": prov, "base_url": url,
+            "api_key_env": env, "protocol": proto, "vision": vis}
 
 
 # ---------- 读写 ----------
@@ -99,6 +113,7 @@ def _load(repo_root: Path | str) -> dict:
     """读配置；无文件/损坏/旧版单模型格式 → 回退默认注册表。
 
     v2 落盘的条目没有 protocol 字段 → 统一补 "openai"（向后兼容）。
+    vision 字段缺省 → 启发式兜底（按模型名关键字判断），用户可在 UI 显式勾选覆盖。
     """
     p = _config_path(repo_root)
     if p.exists():
@@ -108,12 +123,33 @@ def _load(repo_root: Path | str) -> dict:
                 for m in data["models"]:
                     if isinstance(m, dict):
                         m.setdefault("protocol", "openai")
+                        if "vision" not in m:
+                            # 旧条目未声明 vision：按模型名启发式判定（仅供迁移过渡，
+                            # 用户 UI 显式勾选会覆盖）
+                            m["vision"] = _vision_heuristic(str(m.get("id") or ""))
                 return data
             # 旧版单模型格式 {"model": "x"}（本功能当期开发中间态）→ 忽略回默认
             log.warning("llm 配置为旧格式，回退默认注册表")
         except Exception as e:  # noqa: BLE001 — 配置损坏回退默认，不阻断功能
             log.warning("llm 配置损坏（%s），回退默认注册表", e)
     return {"models": [dict(m) for m in DEFAULT_MODELS], "current": DEFAULT_MODELS[0]["id"]}
+
+
+def _vision_heuristic(model_id: str) -> bool:
+    """仅用于旧条目 vision 字段缺失时的兜底判定 — 与 revision_service._is_vision_entry 同步。
+
+    新条目一律由用户在 UI 显式勾选，结果落盘无需启发式。
+    """
+    mid = model_id.strip().lower()
+    if not mid:
+        return False
+    if mid.startswith("qwen-vl") or mid.startswith("qvq") or "qwen2-vl" in mid or "qwen2.5-vl" in mid:
+        return True
+    if mid.startswith("gpt-4o") or "gpt-4-vision" in mid:
+        return True
+    if mid.startswith("claude-3") or mid.startswith("claude-4"):
+        return True
+    return any(k in mid for k in ("vl", "vision", "4o", "opus", "sonnet"))
 
 
 def _save(repo_root: Path | str, data: dict) -> None:
@@ -168,9 +204,12 @@ def get_current_entry(repo_root: Path | str) -> dict | None:
 
 
 def add_model(repo_root: Path | str, id_: str, provider: str, base_url: str,
-              api_key_env: str, protocol: str = "openai") -> list[dict]:
-    """添加模型注册项（id 重复拒绝）。返回新列表。"""
-    entry = _validate_entry(id_, provider, base_url, api_key_env, protocol)
+              api_key_env: str, protocol: str = "openai", vision: bool = False) -> list[dict]:
+    """添加模型注册项（id 重复拒绝）。返回新列表。
+
+    vision：是否支持图片输入（多模态）。由用户在 UI 显式勾选，避免依赖模型名猜测。
+    """
+    entry = _validate_entry(id_, provider, base_url, api_key_env, protocol, vision)
     data = _load(repo_root)
     if any(m.get("id") == entry["id"] for m in data["models"]):
         raise LLMConfigError(f"模型 {entry['id']} 已存在（如需修改请点「编辑」）")
@@ -178,18 +217,21 @@ def add_model(repo_root: Path | str, id_: str, provider: str, base_url: str,
     if not data.get("current"):
         data["current"] = entry["id"]  # 第一个注册项自动成为当前模型
     _save(repo_root, data)
-    log.info("llm 注册模型: %s (%s, %s)", entry["id"], entry["provider"], entry["protocol"])
+    log.info("llm 注册模型: %s (%s, %s, vision=%s)",
+             entry["id"], entry["provider"], entry["protocol"], entry["vision"])
     return data["models"]
 
 
 def update_model(repo_root: Path | str, id_: str, new_id: str, provider: str,
-                 base_url: str, api_key_env: str, protocol: str = "openai") -> list[dict]:
+                 base_url: str, api_key_env: str, protocol: str = "openai",
+                 vision: bool = False) -> list[dict]:
     """修改模型注册项（REQ-20260916-001）。返回新列表。
 
     - 原地替换（保持列表位置）；模型名可改，改后若原条目是当前模型 → current 跟随新名
     - 新名与其他条目冲突 → 拒绝
+    - vision 字段与其它字段一起落盘
     """
-    entry = _validate_entry(new_id, provider, base_url, api_key_env, protocol)
+    entry = _validate_entry(new_id, provider, base_url, api_key_env, protocol, vision)
     data = _load(repo_root)
     mid = str(id_ or "").strip()
     idx = next((k for k, m in enumerate(data["models"]) if m.get("id") == mid), None)
@@ -201,7 +243,7 @@ def update_model(repo_root: Path | str, id_: str, new_id: str, provider: str,
     if data.get("current") == mid:
         data["current"] = entry["id"]
     _save(repo_root, data)
-    log.info("llm 更新模型: %s → %s", mid, entry["id"])
+    log.info("llm 更新模型: %s → %s (vision=%s)", mid, entry["id"], entry["vision"])
     return data["models"]
 
 

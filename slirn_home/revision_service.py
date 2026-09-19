@@ -397,6 +397,136 @@ def _call_llm(system: str, user: str, entry: dict | None = None, retries: int = 
         ) from e
 
 
+def _is_vision_entry(entry: dict) -> bool:
+    """判断模型注册项是否支持多模态（图片输入）。
+
+    判定优先级（REQ-20260919-061 用户补充）：
+    1. 用户在 ⚙️ 显式声明的 `vision` 字段（True/False）— 优先尊重，避免模型名误导
+    2. 缺省时回退启发式（按模型名关键字）— 兼容旧条目
+    """
+    # 1. 用户显式声明（缺省 None 不算 False，启发式接管）
+    v = entry.get("vision")
+    if isinstance(v, bool):
+        return v
+    # 2. 启发式兜底（覆盖主流厂商）
+    mid = str(entry.get("id") or "").strip().lower()
+    if not mid:
+        return False
+    if mid.startswith("qwen-vl") or mid.startswith("qvq") or "qwen2-vl" in mid or "qwen2.5-vl" in mid:
+        return True
+    if mid.startswith("gpt-4o") or "gpt-4-vision" in mid:
+        return True
+    if mid.startswith("claude-3") or mid.startswith("claude-4"):
+        return True
+    if any(k in mid for k in ("vl", "vision", "4o", "opus", "sonnet")):
+        return True
+    return False
+
+
+def _call_llm_vision(
+    system: str,
+    user_text: str,
+    image_paths: list[str | Path],
+    entry: dict | None = None,
+    retries: int = 2,
+    timeout: float = 180.0,
+) -> str:
+    """REQ-20260919-061 Phase C：调多模态模型（图片+文本）→ 文本响应。
+
+    双协议（REQ-20260919-061 用户补充 — MiniMax / Anthropic 兼容网关支持 vision）：
+    - openai：user.content 是 list，含 text + image_url（data URI，base64 编码）
+    - anthropic：messages[0].content 是 list，含 text + image（base64 source）
+    """
+    import base64
+    import httpx
+
+    if entry is None:
+        from slirn_home.llm_config import DEFAULT_MODELS
+
+        entry = dict(DEFAULT_MODELS[0])
+    protocol = str(entry.get("protocol") or "openai").strip().lower()
+
+    # 1. 读取图片 → base64
+    images: list[tuple[str, str]] = []  # (media_type, base64_data)
+    for p in image_paths:
+        path = Path(p)
+        if not path.exists():
+            raise RuntimeError(f"图片不存在: {path}")
+        if path.stat().st_size > 10 * 1024 * 1024:
+            raise RuntimeError(f"图片过大（>10MB）: {path}")
+        ext = path.suffix.lower().lstrip(".")
+        mime = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png",
+                "webp": "webp", "gif": "gif", "bmp": "bmp"}.get(ext, "jpeg")
+        b64 = base64.b64encode(path.read_bytes()).decode("ascii")
+        images.append((f"image/{mime}", b64))
+
+    # 2. 按协议构造 messages / body / headers
+    env = entry.get("api_key_env", "")
+    key = os.environ.get(env, "")
+    if not key:
+        raise RuntimeError(f"未配置环境变量 {env}（{entry.get('provider', '未知厂商')} 的 API Key）")
+
+    if protocol == "anthropic":
+        # Anthropic 协议 — content parts: text + image(base64 source)
+        content_parts: list[dict] = [{"type": "text", "text": user_text}]
+        for media_type, b64 in images:
+            content_parts.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": media_type, "data": b64},
+            })
+        messages = [{"role": "user", "content": content_parts}]
+        base = str(entry.get("base_url", "")).rstrip("/")
+        if base.endswith("/v1/messages"):
+            url = base
+        elif base.endswith("/v1"):
+            url = base + "/messages"
+        else:
+            url = base + "/v1/messages"
+        body = {
+            "model": entry.get("id", ""),
+            "max_tokens": 4096,
+            "messages": messages,
+        }
+        if system:
+            body["system"] = system
+        headers = {"x-api-key": key, "anthropic-version": "2023-06-01"}
+        extract = _extract_anthropic_resp
+    else:
+        # OpenAI 兼容协议（默认）— content parts: text + image_url
+        content_parts = [{"type": "text", "text": user_text}]
+        for media_type, b64 in images:
+            content_parts.append({
+                "type": "image_url",
+                "image_url": {"url": f"data:{media_type};base64,{b64}"},
+            })
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": content_parts},
+        ]
+        base = str(entry.get("base_url", "")).rstrip("/")
+        url = base if base.endswith("/chat/completions") else base + "/chat/completions"
+        body = {"model": entry.get("id", ""), "messages": messages, "stream": False}
+        headers = {"Authorization": f"Bearer {key}"}
+        extract = _extract_openai_resp
+
+    last_err: Exception | None = None
+    for attempt in range(retries + 1):
+        try:
+            resp = httpx.post(url, json=body, headers=headers, timeout=timeout)
+            return extract(resp, entry)
+        except ValueError:
+            raise  # 截断等输出质量问题
+        except LLMBusinessError:
+            raise  # 确定性业务失败
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            if attempt < retries:
+                wait = 2.0 * (attempt + 1)
+                log.warning("[vision] LLM 调用失败（第 %d 次，%.0fs 后重试）: %s", attempt + 1, wait, e)
+                time.sleep(wait)
+    raise RuntimeError(f"网络/服务端错误（重试 {retries} 次后仍失败）: {last_err}")
+
+
 _FENCE_RE = re.compile(r"```(?:json)?\s*|\s*```")
 
 

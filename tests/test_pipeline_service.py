@@ -447,3 +447,258 @@ def test_handler_subtitle_generation_skips_when_already_done(tmp_path: Path):
     assert callable(P.handler_rough_cut)
     assert callable(P.handler_rough_compose)
     assert callable(P.handler_optimize)
+
+
+# =============== REQ-20260918-049：rigor 字段 + 续跑语义 ===============
+
+
+def test_default_config_subtitle_review_has_rigor_medium():
+    """REQ-049 v1：subtitle_review 默认带 rigor='medium'。"""
+    cfg = P.default_config()
+    assert cfg["subtitle_review"].get("rigor") == "medium"
+
+
+def test_validate_config_normalizes_invalid_rigor_to_medium():
+    """REQ-049 v1：脏数据（脏 rigor 值）→ validate 回落 medium。"""
+    bad_inputs = [
+        {"subtitle_review": {"rigor": "super-high"}},     # 未知
+        {"subtitle_review": {"rigor": ""}},                # 空串
+        {"subtitle_review": {"rigor": None}},              # None
+        {"subtitle_review": {"rigor": 123}},               # 非字符串
+        {"subtitle_review": {}},                           # 缺字段（用 default）
+    ]
+    for cfg_in in bad_inputs:
+        cfg = P.validate_config(cfg_in)
+        rigor = cfg["subtitle_review"].get("rigor")
+        assert rigor == "medium", f"期望 medium，实际 {rigor!r} (输入={cfg_in!r})"
+
+
+def test_validate_config_accepts_valid_rigor_values():
+    """REQ-049 v1：合法 rigor 值（high/medium/low/custom）原样保留。"""
+    for valid in ("high", "medium", "low", "custom"):
+        cfg = P.validate_config({"subtitle_review": {"rigor": valid}})
+        assert cfg["subtitle_review"]["rigor"] == valid
+
+
+def test_handler_subtitle_review_passes_rigor_from_cfg(tmp_path: Path, monkeypatch):
+    """REQ-049 v1：handler_subtitle_review 把 cfg.rigor 透传给 /revise_subtitle。"""
+    out = tmp_path / "outputs"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "subtitle.json").write_text("{}", encoding="utf-8")
+
+    captured = []
+
+    def fake_http_post(api, path, payload, *, timeout=30.0):
+        captured.append({"api": api, "path": path, "payload": payload})
+        return {"ok": True}
+
+    monkeypatch.setattr(P, "_http_post", fake_http_post)
+    monkeypatch.setattr(P, "_poll_status", lambda *a, **kw: ("done", ""))
+
+    job = P.PipelineJob(state="running", started_at=time.time(),
+                       current_stage="subtitle_review", percent=40.0)
+    ok, msg = P.handler_subtitle_review(
+        "tid-rigor", {"rigor": "high", "accept_all_suggestions": False},
+        out, "http://api", job,
+    )
+    assert ok is True
+    # 找到 /revise_subtitle 调用
+    revise_calls = [c for c in captured if c["path"] == "/revise_subtitle"]
+    assert len(revise_calls) == 1, f"期望 1 次 /revise_subtitle 调用，实际 {len(revise_calls)}"
+    payload = revise_calls[0]["payload"]
+    assert payload["rigor"] == "high"
+    assert payload["task_id"] == "tid-rigor"
+
+
+def test_handler_subtitle_review_normalizes_invalid_rigor(tmp_path: Path, monkeypatch):
+    """REQ-049 v1：handler 收到非法 rigor → 回落 medium（防御层）。"""
+    out = tmp_path / "outputs"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "subtitle.json").write_text("{}", encoding="utf-8")
+
+    captured = []
+
+    def fake_http_post(api, path, payload, *, timeout=30.0):
+        captured.append(payload)
+        return {"ok": True}
+
+    monkeypatch.setattr(P, "_http_post", fake_http_post)
+    monkeypatch.setattr(P, "_poll_status", lambda *a, **kw: ("done", ""))
+
+    job = P.PipelineJob(state="running", started_at=time.time(),
+                       current_stage="subtitle_review", percent=40.0)
+    # 注入非法 rigor（理论上 validate 已拦，这里是 handler 层兜底）
+    P.handler_subtitle_review(
+        "tid-bad-rigor", {"rigor": "ultra-mega", "accept_all_suggestions": False},
+        out, "http://api", job,
+    )
+    revise_payloads = [p for p in captured if p.get("task_id") == "tid-bad-rigor"]
+    assert revise_payloads
+    assert revise_payloads[0]["rigor"] == "medium"
+
+
+def test_history_stages_done_persists_through_runs(tmp_path: Path):
+    """REQ-049 v1：连续两次 run 完后 history 含两条 summary，
+    最新一条的 stages_done 反映第二次的范围（since 跳过早期阶段）。
+
+    模拟：第一次跑 1 阶段（mock handler 立即 ok）；第二次 since='rough_cut'，
+    stages_done 应该只含 ['rough_cut', 'rough_compose', 'optimize']。
+    """
+    out = tmp_path / "outputs"
+    out.mkdir(parents=True, exist_ok=True)
+    api = "http://127.0.0.1:1"
+
+    # 第一次 run：仅 mock subtitle_generation / subtitle_review 通过
+    orig = dict(P.HANDLERS)
+
+    def ok_g(*a, **kw): return (True, "")
+    def ok_r(tid, cfg, outputs_dir, api, job): return (True, "")  # 不 mock 其他阶段
+    def slow_other(tid, cfg, outputs_dir, api, job):
+        return (False, "其他阶段未实现 mock → fail → 停止")
+    P.HANDLERS["subtitle_generation"] = ok_g
+    P.HANDLERS["subtitle_review"] = ok_r
+    P.HANDLERS["rough_cut"] = slow_other
+    P.HANDLERS["rough_compose"] = slow_other
+    P.HANDLERS["optimize"] = slow_other
+    try:
+        # 配置顶层 stop_after='subtitle_review'（默认），跑完前两阶段后停在 stop_after
+        P.save_pipeline(out, {"config": P.default_config()})
+        assert P.run_pipeline("tid-hist", api, out) is True
+        # 等第一次跑完
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            st = P.pipeline_status("tid-hist")
+            if st and st["state"] != "running":
+                break
+            time.sleep(0.05)
+        first_st = P.pipeline_status("tid-hist")
+        assert first_st is not None
+        assert first_st["state"] == "stopped", f"第一次期望 stopped，实际 {first_st['state']}"
+        assert "subtitle_generation" in first_st["summary"]["stages_done"]
+        assert "subtitle_review" in first_st["summary"]["stages_done"]
+
+        # 第二次 since='rough_cut'（接上次停点之后的 rough_cut）
+        P.HANDLERS["rough_cut"] = ok_g
+        P.HANDLERS["rough_compose"] = slow_other  # optimize 仍 fail
+        P.run_pipeline("tid-hist", api, out, since="rough_cut")
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            st = P.pipeline_status("tid-hist")
+            if st and st["state"] in ("error", "stopped"):
+                break
+            time.sleep(0.05)
+        second_st = P.pipeline_status("tid-hist")
+        # 第二次 stages_done 应该包含 rough_cut（前面 2 个被 since 跳过）
+        done = second_st["summary"]["stages_done"]
+        assert "rough_cut" in done
+        # 跳过的 subtitle_generation/subtitle_review 不应再入 done
+        assert "subtitle_generation" not in done
+        assert "subtitle_review" not in done
+    finally:
+        P.HANDLERS.clear()
+        P.HANDLERS.update(orig)
+
+    # 落盘 history 应该含 2 条
+    data = P.load_pipeline(out)
+    assert data is not None
+    history = data["history"]
+    assert len(history) == 2
+    # 最新一条在 history[-1]
+    assert "rough_cut" in history[-1]["stages_done"]
+    assert history[-1]["since"] == "rough_cut"
+    # 第一条没 since（或 None）
+    assert history[0].get("since") in (None, "None")
+    assert "subtitle_generation" in history[0]["stages_done"]
+
+
+def test_append_history_max_10_entries(tmp_path: Path):
+    """REQ-049 v1：连续 12 次 append_history 后 history 最多保留 10 条。"""
+    out = tmp_path / "outputs"
+    out.mkdir(parents=True, exist_ok=True)
+    for i in range(12):
+        P.append_history(out, {
+            "started_at": i, "finished_at": i + 1, "duration_ms": 1000,
+            "status": "done", "stages_done": [], "since": None, "error": None,
+        })
+    data = P.load_pipeline(out)
+    assert data is not None
+    history = data["history"]
+    assert len(history) == 10
+    # 最新 10 条 = i ∈ [2, 11]
+    assert history[-1]["started_at"] == 11
+    assert history[0]["started_at"] == 2
+
+
+# =============== 前端 computeNextSince 逻辑（Python 复刻，便于单测） ===============
+# 说明：JS 端 computeNextSince 与 STAGE_KEYS 强耦合，前端单测暂未建立。
+# 这里用 Python 复刻同一算法逻辑，验证「下一个该跑的 stage」语义。
+
+STAGE_KEYS = [s[0] for s in P.STAGE_ORDER]
+
+
+def _compute_next_since_py(history):
+    """Python 版 computeNextSince（与 JS pipeline.js:computeNextSince 同源）。
+
+    边界：
+    - 空 history → None（从头跑）
+    - last.stages_done 含全部 5 个 → None（从头跑）
+    - last.stages_done 含若干前缀 → 返回最后一个 done 之后的那个 key
+    """
+    if not isinstance(history, list) or len(history) == 0:
+        return None
+    last = history[-1]
+    if not isinstance(last, dict):
+        return None
+    done = last.get("stages_done") or []
+    if not isinstance(done, list):
+        return None
+    if len(done) >= len(STAGE_KEYS):
+        return None
+    last_idx = -1
+    for k in done:
+        if k in STAGE_KEYS:
+            ix = STAGE_KEYS.index(k)
+            if ix > last_idx:
+                last_idx = ix
+    if last_idx + 1 >= len(STAGE_KEYS):
+        return None
+    return STAGE_KEYS[last_idx + 1]
+
+
+def test_compute_next_since_empty_history():
+    """空 history → 从头跑。"""
+    assert _compute_next_since_py([]) is None
+    assert _compute_next_since_py(None) is None
+
+
+def test_compute_next_since_first_stage_done():
+    """stages_done 含 ['subtitle_generation'] → 下一个 subtitle_review。"""
+    history = [{"stages_done": ["subtitle_generation"], "status": "stopped"}]
+    assert _compute_next_since_py(history) == "subtitle_review"
+
+
+def test_compute_next_since_two_stages_done():
+    """stages_done 含前 2 个 → 下一个 rough_cut。"""
+    history = [{"stages_done": ["subtitle_generation", "subtitle_review"], "status": "stopped"}]
+    assert _compute_next_since_py(history) == "rough_cut"
+
+
+def test_compute_next_since_all_done():
+    """stages_done 含全部 5 个 → 从头跑（覆盖重跑场景）。"""
+    history = [{"stages_done": list(STAGE_KEYS), "status": "done"}]
+    assert _compute_next_since_py(history) is None
+
+
+def test_compute_next_since_with_error_midway():
+    """stages_done = ['subtitle_generation']，status=error（subtitle_review 挂）→
+    下一个仍是 subtitle_review（让用户重试出错阶段）。"""
+    history = [{"stages_done": ["subtitle_generation"], "status": "error",
+                "error": "字幕修订出错"}]
+    assert _compute_next_since_py(history) == "subtitle_review"
+
+
+def test_compute_next_since_unknown_stage_ignored():
+    """history 里有未知 stage key → 防御性忽略（不影响 next 计算）。"""
+    history = [{"stages_done": ["subtitle_generation", "unknown_stage"], "status": "stopped"}]
+    # 'unknown_stage' 不在 STAGE_KEYS 里 → last_idx 仍是 0
+    assert _compute_next_since_py(history) == "subtitle_review"
