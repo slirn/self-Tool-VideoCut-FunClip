@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import gradio as gr
-from fastapi import Body, File, Form as _Form, UploadFile  # REQ-061：精剪视频上传用
+from fastapi import Body, File, Form as _Form, Request, UploadFile  # REQ-061：精剪视频上传用；REQ-075：Request 读 X-Slirn-Auto
 
 log = logging.getLogger(__name__)
 
@@ -102,7 +102,8 @@ def _stats(mgr: TaskManager) -> dict:
             week_new += 1
         if s.status == TaskStatus.DRAFT:
             draft += 1
-        elif s.status == TaskStatus.MUXED:
+        # REQ-20260919-075：终态判断同时认 MUXED（旧任务）+ FINE_CUT_DONE（新任务）
+        elif s.status in (TaskStatus.MUXED, TaskStatus.FINE_CUT_DONE):
             done += 1
     return {"total": total, "week": week_new, "draft": draft, "done": done}
 
@@ -123,7 +124,7 @@ def _render_dashboard(mgr: TaskManager, repo_root: Path) -> str:
             ("📋", "总任务数", stats["total"], "所有状态汇总"),
             ("✨", "本周新建", stats["week"], "最近 7 天 ↑"),
             ("📝", "草稿数", stats["draft"], "待处理"),
-            ("✅", "已完成", stats["done"], "视频字幕合成"),
+            ("✅", "已完成", stats["done"], "精剪视频导出完成"),
         ]
     ])
 
@@ -165,7 +166,8 @@ def _render_dashboard(mgr: TaskManager, repo_root: Path) -> str:
 def _status_dot_class(status) -> str:
     if status == TaskStatus.DRAFT:
         return "draft"
-    if status == TaskStatus.MUXED:
+    # REQ-20260919-075：终态同时认 MUXED + FINE_CUT_DONE
+    if status in (TaskStatus.MUXED, TaskStatus.FINE_CUT_DONE):
         return "done"
     return "progress"
 
@@ -1422,6 +1424,8 @@ def _render_task_detail(task_id: str, mgr: TaskManager) -> str:
 # =============== 剪辑工作台（REQ-20260915-003） ===============
 
 # 阶段定义：(key, 对应 TaskStatus, 标题, 图标, 说明) — 与 TaskStatus 管线一一对应
+# REQ-20260919-075：去掉第八阶段「字幕合成/MUXED」（已被精剪视频的最终导出覆盖）；
+# 任务终态改为 FINE_CUT_DONE。TaskStatus.MUXED 枚举保留（向后兼容），但不再有 UI 阶段引导到它。
 _WB_STAGES = [
     ("assets",          "ASSETS_READY",         "素材准备", "📦", "上传视频 · 时间截取 · 任务热词"),
     ("subtitle",        "SUBTITLE_GENERATED",   "字幕生成", "🎙", "FunASR seaco-paraformer + 热词识别"),
@@ -1430,7 +1434,6 @@ _WB_STAGES = [
     ("rough_compose",  "FINE_SUBTITLE_DONE",   "粗剪合成", "🎥", "按切分保留内容用上游 VideoClipper 合成粗剪视频（含随片字幕）"),
     ("fine_review",     "FINE_SUBTITLE_REVIEWED", "优化字幕", "✨", "重识别粗剪成片字幕，大模型提取不明确字词，人工替换并保存对应关系"),
     ("fine_cut",        "FINE_CUT_DONE",        "精剪视频", "🎬", "按精剪段生成成品视频"),
-    ("mux",             "MUXED",                "字幕合成", "🎞️", "字幕烧录进画面 / 封装输出成品"),
 ]
 
 
@@ -4566,7 +4569,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         return _ok(toast="🗑 已清空检测缓存（下次打开会重新渲染）")
 
     @app.app.post("/slirn/api/detect_bg_white_area")
-    async def detect_bg_white_area(body: dict = Body(default_factory=dict)):
+    async def detect_bg_white_area(request: Request, body: dict = Body(default_factory=dict)):
         """REQ-20260919-062：检测背景图片的白色区域 4 角坐标 + 宽高。
 
         算法由前端 body.algorithm 选择：
@@ -4581,9 +4584,14 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
           - 右上 (x + width - 1, y)
           - 左下 (x, y + height - 1)
           - 右下 (x + width - 1, y + height - 1)
+
+        REQ-20260919-075：检测动作也写执行历史（之前没有）。
         """
         import numpy as _np
         from PIL import Image as _PILImage
+
+        # REQ-20260919-075：auto 透传；检测区域写日志
+        _auto = request.headers.get("X-Slirn-Auto") == "1"
 
         tid = (body.get("task_id") or "").strip()
         algorithm = (body.get("algorithm") or "pixel").strip()
@@ -5735,7 +5743,9 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
     )
 
     @app.app.post("/slirn/api/gen_subtitle")
-    async def gen_subtitle(body: dict = Body(default_factory=dict)):
+    async def gen_subtitle(request: Request, body: dict = Body(default_factory=dict)):
+        # REQ-20260919-075：auto 透传 — pipeline_service 调时会带 X-Slirn-Auto header
+        _auto = request.headers.get("X-Slirn-Auto") == "1"
         tid = (body.get("task_id") or "").strip()
         if not tid:
             return _err("缺少 task_id")
@@ -5774,6 +5784,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         started = _asr.start_job(
             tid, video, hotwords, outputs_dir,
             source=source, base_offset_ms=base_off_ms, sd=sd_on, on_success=_on_success,
+            auto=_auto,
         )
         if not started:
             return _ok("", toast="⏳ 该任务已在生成中，请等待完成")
@@ -6009,11 +6020,13 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         return _ok("", toast=toast, decided=decided, total=total, finished=finished)
 
     @app.app.post("/slirn/api/build_cutlist")
-    async def build_cutlist(body: dict = Body(default_factory=dict)):
+    async def build_cutlist(request: Request, body: dict = Body(default_factory=dict)):
         """生成切分修剪清单（REQ-20260916-008）：决策落盘 cutlist.json + 推进 ROUGH_CUT_DONE。"""
         import time as _time
 
-        from slirn_home import asr_service, cutlist_service, revision_service
+        # REQ-20260919-075：auto 透传；执行切分修剪写日志
+        _auto = request.headers.get("X-Slirn-Auto") == "1"
+        from slirn_home import asr_service, cutlist_service, execution_history, revision_service
 
         tid = (body.get("task_id") or "").strip()
         if not tid:
@@ -6032,10 +6045,16 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         sub_meta = asr_service.load_subtitle(outputs_dir)
         if not (sub_meta and sub_meta.get("segments")):
             return _err("缺少字幕生成产物（subtitle.json），请先在「字幕生成」阶段生成字幕")
+        # REQ-20260919-075：开始记录 — 执行切分修剪
+        exec_id = execution_history.record_start(
+            outputs_dir, execution_history.KIND_ROUGH_CUT,
+            auto=_auto,
+        )
         try:
             cutlist = cutlist_service.build_cutlist(sub_meta, rev)
             cutlist_service.save_cutlist(outputs_dir, cutlist)
         except Exception as e:  # noqa: BLE001
+            execution_history.record_finish(outputs_dir, exec_id, success=False, error=str(e))
             return _err(f"生成切分清单失败: {e}")
         stats = cutlist.get("stats", {})
         try:
@@ -6043,20 +6062,28 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         except Exception as e:  # noqa: BLE001
             revision_service.log.warning("更新任务 %s 状态失败: %s", tid, e)
         saved_at = _time.strftime("%Y-%m-%dT%H:%M:%S")
+        # REQ-20260919-075：完成时回填具体执行情况
+        execution_history.patch_fields(outputs_dir, exec_id, {
+            "description": (f"按切分决策生成切分清单：带入 {stats.get('brought', 0)} 段，"
+                            f"剔除 {stats.get('dropped', 0)} 条，切分子段 {stats.get('split_subs', 0)}")
+        })
+        execution_history.record_finish(outputs_dir, exec_id, success=True, error="")
         return _ok("", toast=(
             f"✅ 切分清单已生成（带入 {stats.get('brought', 0)} 段 · 剔除 {stats.get('dropped', 0)} 条"
             f" · 切分子段 {stats.get('split_subs', 0)}）· 切分修剪完成，可进入精剪字幕"
         ), saved_at=saved_at, stats=stats)
 
     @app.app.post("/slirn/api/cut_speaker_link")
-    async def cut_speaker_link(body: dict = Body(default_factory=dict)):
+    async def cut_speaker_link(request: Request, body: dict = Body(default_factory=dict)):
         """切分修剪阶段关联人员ID（REQ-20260917-031）：按时间段重叠对齐 subtitle 段级 spk。
 
         服务端实时重建切分清单预览（与面板同口径：修订实时 + 已保存手工决策并入），
         返回每行人员编号 + 按人员统计（总数/执行口径保留数）。不落盘 — 再次点击
         即按最新时间窗重算；删除改判的落盘走既有 save_cut_decisions。
         """
-        from slirn_home import asr_service, cut_speaker, cutlist_service, revision_service
+        # REQ-20260919-075：auto 透传；关联人员ID写日志
+        _auto = request.headers.get("X-Slirn-Auto") == "1"
+        from slirn_home import asr_service, cut_speaker, cutlist_service, execution_history, revision_service
 
         tid = (body.get("task_id") or "").strip()
         if not tid:
@@ -6081,14 +6108,37 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             manual_marks=(saved or {}).get("manual_marks") if saved else None,
             actions=(saved or {}).get("actions") if saved else None,
         )
-        link = cut_speaker.link_speakers(sub_meta, cutlist)
-        if not link.get("available"):
-            return _err(
-                "字幕无人员编号 — 该任务生成字幕时未开启说话人分离（或为旧任务）。"
-                "请到「字幕生成」阶段开启「区分说话人」重新生成后再关联"
-            )
-        # REQ-033：关联状态落盘 — 重进面板时徽章 + 统计条直接渲染（渲染端现算，快照备查）
-        saved_link = cut_speaker.save_link(outputs_dir, link)
+        # REQ-20260919-075：开始记录 — 关联人员ID
+        exec_id = execution_history.record_start(
+            outputs_dir, execution_history.KIND_ROUGH_CUT_LINK_PERSON,
+            extra={"rows": len(cutlist.get("items") or [])},
+            auto=_auto,
+        )
+        try:
+            link = cut_speaker.link_speakers(sub_meta, cutlist)
+            if not link.get("available"):
+                execution_history.patch_fields(outputs_dir, exec_id, {
+                    "description": "字幕无人员编号（生成字幕时未开启说话人分离），跳过关联"
+                })
+                execution_history.record_finish(outputs_dir, exec_id, success=True, error="")
+                return _err(
+                    "字幕无人员编号 — 该任务生成字幕时未开启说话人分离（或为旧任务）。"
+                    "请到「字幕生成」阶段开启「区分说话人」重新生成后再关联"
+                )
+            # REQ-033：关联状态落盘 — 重进面板时徽章 + 统计条直接渲染（渲染端现算，快照备查）
+            saved_link = cut_speaker.save_link(outputs_dir, link)
+        except Exception as e:  # noqa: BLE001
+            execution_history.record_finish(outputs_dir, exec_id, success=False, error=str(e))
+            return _err(f"关联失败: {e}")
+        # REQ-20260919-075：完成时回填具体执行情况
+        # cut_speaker.link_speakers 返回 stats: [{spk, count}, ...] — 取 spk 集合的大小
+        stats_list = link.get("stats") or []
+        speakers_count = len({s.get("spk") for s in stats_list if s.get("spk") is not None})
+        execution_history.patch_fields(outputs_dir, exec_id, {
+            "description": (f"切分 {len(cutlist.get('items') or [])} 段关联到人员ID，"
+                            f"识别 {speakers_count} 位说话人")
+        })
+        execution_history.record_finish(outputs_dir, exec_id, success=True, error="")
         return _ok("", link=link, rows=len(cutlist.get("items") or []),
                    linked_at=saved_link.get("linked_at"))
 
@@ -6212,7 +6262,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         return _ok("", toast=" · ".join(parts), stats=stats)
 
     @app.app.post("/slirn/api/compose_rough")
-    async def compose_rough(body: dict = Body(default_factory=dict)):
+    async def compose_rough(request: Request, body: dict = Body(default_factory=dict)):
         """启动粗剪合成（REQ-20260916-018，必做阶段）：上游 VideoClipper 方法合成。
 
         口径与切分修剪面板一致（修订实时 + 已保存手工翻转/改判）；行文本取
@@ -6220,6 +6270,8 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         「处理之后的字幕 + 原视频」交给上游合成方法（video_clip）。
         不推进任务状态。已在跑 → 返回 running 供前端接续轮询。
         """
+        # REQ-20260919-075：auto 透传
+        _auto = request.headers.get("X-Slirn-Auto") == "1"
         from slirn_home import asr_service, compose_service, cutlist_service, fine_service, revision_service
 
         tid = (body.get("task_id") or "").strip()
@@ -6263,7 +6315,8 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         keep_ms = sum(int(u["end_ms"]) - int(u["start_ms"]) for u in units)
         n_merged = len(compose_service.merge_intervals_ms(intervals_ms))
         started = compose_service.start_compose(
-            tid, video, intervals_ms, compose_service.rough_compose_path(outputs_dir), lines)
+            tid, video, intervals_ms, compose_service.rough_compose_path(outputs_dir), lines,
+            auto=_auto)
         job = compose_service.job_status(tid) or {}
         return _ok("", running=bool(started), job=job,
                    toast="🎬 合成已启动" if started else "🎬 合成已在进行中",
@@ -6286,8 +6339,10 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         return _ok("", job=job)
 
     @app.app.post("/slirn/api/compose_rough_delete")
-    async def compose_rough_delete(body: dict = Body(default_factory=dict)):
+    async def compose_rough_delete(request: Request, body: dict = Body(default_factory=dict)):
         """删除粗剪成片（REQ-20260916-019）：用户主动清理产物以便重合成。"""
+        # REQ-20260919-075：auto 透传
+        _auto = request.headers.get("X-Slirn-Auto") == "1"
         from slirn_home import compose_service
 
         tid = (body.get("task_id") or "").strip()
@@ -6298,7 +6353,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         except Exception as e:  # noqa: BLE001
             return _err(f"任务不存在: {e}")
         outputs_dir = mgr.tasks_dir / tid / "outputs"
-        res = compose_service.delete_rough_compose(outputs_dir)
+        res = compose_service.delete_rough_compose(outputs_dir, auto=_auto)
         return _ok("", deleted=res["deleted"],
                    toast="🗑️ " + res["message"] if res["deleted"] else None,
                    removed=res["removed"], remaining=res["remaining"],
@@ -6523,11 +6578,13 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         return _ok("", stopped=True, toast="⏹ 已请求停止（当前阶段完成后退出）")
 
     @app.app.post("/slirn/api/optimize_subtitle")
-    async def optimize_subtitle(body: dict = Body(default_factory=dict)):
+    async def optimize_subtitle(request: Request, body: dict = Body(default_factory=dict)):
         """启动优化字幕（REQ-20260917-030）：ASR 重识别粗剪成片 → 大模型提取不明确字词。
 
         已有优化结果时须 force（前端二次确认）。热词为空不阻塞（提示级）。
         """
+        # REQ-20260919-075：auto 透传
+        _auto = request.headers.get("X-Slirn-Auto") == "1"
         from slirn_home import compose_service, llm_config, optimize_service
 
         tid = (body.get("task_id") or "").strip()
@@ -6554,6 +6611,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             return _err("未注册任何大模型 — 请先点顶栏 ⚙️ 添加模型")
         started = optimize_service.start_job(
             tid, artifact, hotwords, t.name, outputs_dir, entry=entry,
+            auto=_auto,
         )
         if not started:
             return _ok("", toast="⏳ 该任务已在优化中，请等待完成")
@@ -6584,16 +6642,20 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         return _ok("", job=j)
 
     @app.app.post("/slirn/api/save_optimize_subtitle")
-    async def save_optimize_subtitle(body: dict = Body(default_factory=dict)):
+    async def save_optimize_subtitle(request: Request, body: dict = Body(default_factory=dict)):
         """保存优化字幕人工替换决定（REQ-20260917-030）：决定合并落盘 + 阶段完成。
 
         decisions：[{occ_id, applied, after}] 全量口径 — 未列出的出现项一律不
         采纳；after 可为人工编辑值（生效要求非空且 ≠ 原文）。幂等推进
         FINE_SUBTITLE_REVIEWED。
+
+        REQ-20260919-075：「确认保存」动作也写执行日志（之前只有大模型分析记录）。
         """
+        # REQ-20260919-075：auto 透传；确认保存写日志
+        _auto = request.headers.get("X-Slirn-Auto") == "1"
         from tasklib.models import TaskStatus
 
-        from slirn_home import optimize_service
+        from slirn_home import execution_history, optimize_service
 
         tid = (body.get("task_id") or "").strip()
         if not tid:
@@ -6606,12 +6668,25 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         if not isinstance(decisions, list):
             return _err("decisions 必须是数组")
         outputs_dir = mgr.tasks_dir / tid / "outputs"
+        # REQ-20260919-075：开始记录 — 确认保存
+        exec_id = execution_history.record_start(
+            outputs_dir, execution_history.KIND_OPTIMIZE,
+            extra={"decisions_count": len(decisions)},
+            auto=_auto,
+        )
         try:
             data, applied_n = optimize_service.save_decisions(outputs_dir, decisions)
         except Exception as e:  # noqa: BLE001
+            execution_history.record_finish(outputs_dir, exec_id, success=False, error=str(e))
             return _err(f"保存失败: {e}")
         est = optimize_service.effective_stats(data)
         mgr.update_status(tid, TaskStatus.FINE_SUBTITLE_REVIEWED)  # 幂等：结果在盘即完成
+        # REQ-20260919-075：完成时回填具体执行情况
+        execution_history.patch_fields(outputs_dir, exec_id, {
+            "description": (f"优化字幕保存：{len(decisions)} 条人工决定，生效 {applied_n} 处"
+                            f"（未采纳 {est.get('skipped', 0)} 处）")
+        })
+        execution_history.record_finish(outputs_dir, exec_id, success=True, error="")
         return _ok("", toast=(f"✅ 已保存替换对应关系：生效 {applied_n} 处"
                               f"（未采纳 {est['skipped']} 处）"), stats=est)
 

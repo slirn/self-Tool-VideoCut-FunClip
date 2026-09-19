@@ -345,12 +345,17 @@ def start_job(
     base_offset_ms: int = 0,
     sd: bool = True,
     on_success: Callable[[list[dict]], None] | None = None,
+    *,
+    auto: bool = False,
 ) -> bool:
     """启动字幕生成线程。已在跑 → 返回 False（不重复起）。
 
     sd=True 时同时做说话人分离（cam++），结果带 1 起始人员编号 + 每人句数
     统计（REQ-20260917-029）。
     on_success(segments) 在 worker 线程内、结果落盘之后调用（app 层用它迁任务状态）。
+
+    REQ-20260919-075：auto=True 表示流程自动触发（pipeline_service 调用），
+    写入 execution_history 的 auto 字段用于前端区分手动/自动。
     """
     with _JOBS_LOCK:
         existing = _JOBS.get(task_id)
@@ -366,9 +371,10 @@ def start_job(
         }
 
     # REQ-20260918-048：执行历史（落盘，单写锁）。开始即记一条 running；完成/失败回填。
+    # REQ-20260919-075：传 auto 让 history 标记自动/手动。
     exec_id = execution_history.record_start(
         outputs_dir, execution_history.KIND_SUBTITLE_GENERATION,
-        extra={"sd": sd, "source": source})
+        extra={"sd": sd, "source": source}, auto=auto)
 
     def _run():
         job = _JOBS[task_id]
@@ -424,6 +430,11 @@ def start_job(
             execution_history.patch_extra(outputs_dir, exec_id,
                                           {"segments": len(segments),
                                            "speakers": len(stats) if stats else 0})
+            # REQ-20260919-075：完成时回填具体执行情况（带段数 / 说话人数）
+            execution_history.patch_fields(outputs_dir, exec_id, {
+                "description": (f"FunASR 识别原始视频，共识别 {len(segments)} 段"
+                                + (f"，{len(stats)} 位说话人" if stats else ""))
+            })
             execution_history.record_finish(outputs_dir, exec_id, success=True,
                                             error="")
         except SystemExit as e:  # 上游 video_recog 对无音频视频 sys.exit(1)

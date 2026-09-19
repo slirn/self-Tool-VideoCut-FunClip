@@ -31,7 +31,68 @@ _WRITE_LOCK = threading.Lock()
 
 # 已知 kind 常量（便于 app 层枚举）
 KIND_SUBTITLE_GENERATION = "subtitle_generation"
+KIND_SUBTITLE_REVIEW = "subtitle_review"
+KIND_ROUGH_CUT = "rough_cut"
+KIND_ROUGH_CUT_LINK_PERSON = "rough_cut_link_person"
 KIND_ROUGH_COMPOSE = "rough_compose"
+KIND_ROUGH_COMPOSE_DELETE = "rough_compose_delete"
+KIND_OPTIMIZE = "optimize"
+KIND_FINE_AI_LAYOUT = "fine_ai_layout"
+KIND_FINE_BG_DETECT = "fine_bg_detect"
+KIND_FINE_PREVIEW = "fine_preview"
+KIND_FINE_EXPORT = "fine_export"
+
+# 阶段中文标签（前端展示用）
+KIND_LABELS: dict[str, str] = {
+    KIND_SUBTITLE_GENERATION: "生成字幕",
+    KIND_SUBTITLE_REVIEW: "字幕修订",
+    KIND_ROUGH_CUT: "执行切分修剪",
+    KIND_ROUGH_CUT_LINK_PERSON: "关联人员ID",
+    KIND_ROUGH_COMPOSE: "合成初剪视频",
+    KIND_ROUGH_COMPOSE_DELETE: "删除粗剪成品",
+    KIND_OPTIMIZE: "确认保存",
+    KIND_FINE_AI_LAYOUT: "AI智能布局",
+    KIND_FINE_BG_DETECT: "检测区域",
+    KIND_FINE_PREVIEW: "生成预览",
+    KIND_FINE_EXPORT: "最终导出视频",
+}
+
+# kind → 所属工作台阶段 key（前端分组 / 颜色）
+KIND_TO_STAGE: dict[str, str] = {
+    KIND_SUBTITLE_GENERATION: "subtitle",
+    KIND_SUBTITLE_REVIEW: "subtitle_review",
+    KIND_ROUGH_CUT: "rough_cut",
+    KIND_ROUGH_CUT_LINK_PERSON: "rough_cut",
+    KIND_ROUGH_COMPOSE: "rough_compose",
+    KIND_ROUGH_COMPOSE_DELETE: "rough_compose",
+    KIND_OPTIMIZE: "fine_review",
+    KIND_FINE_AI_LAYOUT: "fine_cut",
+    KIND_FINE_BG_DETECT: "fine_cut",
+    KIND_FINE_PREVIEW: "fine_cut",
+    KIND_FINE_EXPORT: "fine_cut",
+}
+
+# 默认 description 模板（调用方未传 description 时使用）
+DEFAULT_DESCRIPTIONS: dict[str, str] = {
+    KIND_SUBTITLE_GENERATION: "FunASR seaco-paraformer 识别原始视频，提取字幕段",
+    KIND_SUBTITLE_REVIEW: "字幕修订保存",
+    KIND_ROUGH_CUT: "按切分决策生成粗剪片段",
+    KIND_ROUGH_CUT_LINK_PERSON: "切分片段关联到人员ID",
+    KIND_ROUGH_COMPOSE: "ffmpeg 拼接片段，输出初剪视频（含随片字幕）",
+    KIND_ROUGH_COMPOSE_DELETE: "删除上一轮粗剪成品（mp4 + srt 副产物）",
+    KIND_OPTIMIZE: "优化字幕保存：识别成片 + 大模型提取不明确字词",
+    KIND_FINE_AI_LAYOUT: "LLM 分析视频画面，生成精剪布局建议",
+    KIND_FINE_BG_DETECT: "检测视频主体区域，记录到 detected_region",
+    KIND_FINE_PREVIEW: "生成精剪预览切片（可调起止时间）",
+    KIND_FINE_EXPORT: "ffmpeg 渲染精剪视频（异步后台任务）",
+}
+
+# 全部合法 kind（路由层校验非法请求）
+ALL_KINDS = {KIND_SUBTITLE_GENERATION, KIND_SUBTITLE_REVIEW,
+             KIND_ROUGH_CUT, KIND_ROUGH_CUT_LINK_PERSON,
+             KIND_ROUGH_COMPOSE, KIND_ROUGH_COMPOSE_DELETE,
+             KIND_OPTIMIZE, KIND_FINE_AI_LAYOUT, KIND_FINE_BG_DETECT,
+             KIND_FINE_PREVIEW, KIND_FINE_EXPORT}
 
 
 def _now_iso(ts: float) -> str:
@@ -68,24 +129,33 @@ def _write_atomic(outputs_dir: Path, items: list[dict]) -> None:
     tmp.replace(outputs_dir / HISTORY_FILENAME)
 
 
-def record_start(outputs_dir: Path, kind: str, extra: dict | None = None) -> str:
+def record_start(outputs_dir: Path, kind: str, extra: dict | None = None, *,
+                 description: str | None = None, auto: bool = False) -> str:
     """记录一次执行启动（status=running）。返回本次 execution id（start 时生成，
     finish 时按 id 定位同一记录）。
+
+    REQ-20260919-075：新增 description（操作描述）和 auto（流程自动触发标识）。
+    description 为空时按 kind 从 DEFAULT_DESCRIPTIONS 取默认；stage 自动从
+    KIND_TO_STAGE 查（前端分组用）。
 
     失败也吞掉（历史记录失败不影响主流程）。
     """
     try:
         ts = time.time()
+        desc = description if description else DEFAULT_DESCRIPTIONS.get(kind, "")
         item: dict[str, Any] = {
             "id": "exh-" + datetime.fromtimestamp(ts).strftime("%Y%m%d-%H%M%S")
                   + "-" + uuid.uuid4().hex[:6],
             "kind": kind,
+            "stage": KIND_TO_STAGE.get(kind, ""),
             "started_at": ts,
             "started_at_iso": _now_iso(ts),
             "finished_at": None,
             "finished_at_iso": None,
             "duration_ms": None,
             "status": "running",
+            "description": desc,
+            "auto": bool(auto),
             "error": "",
             "extra": extra or {},
         }
@@ -156,10 +226,71 @@ def patch_extra(outputs_dir: Path, exec_id: str, extra: dict) -> None:
         log.warning("[history][%s] patch_extra 失败: %s", outputs_dir, e)
 
 
+def patch_fields(outputs_dir: Path, exec_id: str, fields: dict) -> None:
+    """REQ-20260919-075：合并覆写指定记录的顶层字段（如 description）。
+
+    仅允许白名单字段写入，避免外部乱改 status / kind / id。
+    """
+    if not exec_id or not fields:
+        return
+    allowed = {"description", "stage"}
+    safe = {k: v for k, v in fields.items() if k in allowed}
+    if not safe:
+        return
+    try:
+        with _WRITE_LOCK:
+            items = _read(outputs_dir)
+            for it in items:
+                if it.get("id") == exec_id:
+                    for k, v in safe.items():
+                        it[k] = v
+                    break
+            _write_atomic(outputs_dir, items)
+    except Exception as e:  # noqa: BLE001
+        log.warning("[history][%s] patch_fields 失败: %s", outputs_dir, e)
+
+
 def load_history(outputs_dir: Path) -> list[dict]:
     """读全量历史（不截断，调用方决定展示多少条）。"""
     with _WRITE_LOCK:
         return _read(outputs_dir)
+
+
+def query_history(outputs_dir: Path, *,
+                  kinds: list[str] | None = None,
+                  statuses: list[str] | None = None,
+                  keyword: str = "",
+                  limit: int = 200) -> list[dict]:
+    """REQ-20260918-053：执行日志查询（按阶段/状态过滤 + 关键词搜错误信息）。
+
+    返回倒序最近 N 条；前端分页用 limit 控制。过滤条件全 AND。
+    """
+    items = load_history(outputs_dir)
+    # 倒序：最新在前
+    items = sorted(items, key=lambda x: x.get("started_at") or 0, reverse=True)
+    kw = (keyword or "").strip().lower()
+    if kinds:
+        kind_set = set(kinds)
+    else:
+        kind_set = None
+    if statuses:
+        status_set = set(statuses)
+    else:
+        status_set = None
+    out: list[dict] = []
+    for it in items:
+        if kind_set is not None and it.get("kind") not in kind_set:
+            continue
+        if status_set is not None and it.get("status") not in status_set:
+            continue
+        if kw:
+            blob = (str(it.get("error") or "") + "\n" + str(it.get("kind") or "")).lower()
+            if kw not in blob:
+                continue
+        out.append(it)
+        if len(out) >= limit:
+            break
+    return out
 
 
 def format_duration(ms: int | None) -> str:

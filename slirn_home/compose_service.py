@@ -209,8 +209,11 @@ def compose_from_srt(src: Path, srt_path: Path, dst: Path, on_progress=None) -> 
     return result
 
 
-def delete_rough_compose(outputs_dir: Path) -> dict:
+def delete_rough_compose(outputs_dir: Path, *, auto: bool = False) -> dict:
     """删除粗剪成片（mp4 + srt 副产物）。同步、毫秒级，不进 job 表。
+
+    REQ-20260919-075：删除操作本身也写执行历史（之前只有合成动作记录），
+    便于"查看历史时看到删除粗剪成品"。
 
     Returns:
         {"deleted": bool, "removed": [...], "remaining": [...], "message": str}
@@ -227,6 +230,25 @@ def delete_rough_compose(outputs_dir: Path) -> dict:
             except OSError as e:
                 log.warning("[compose] 删除失败 %s: %s", p, e)
     remaining = [n for n in (mp4.name, srt.name) if (out_dir / n).exists()]
+    # REQ-20260919-075：删除动作也记执行历史
+    try:
+        eid = execution_history.record_start(
+            out_dir, execution_history.KIND_ROUGH_COMPOSE_DELETE,
+            extra={"removed": removed, "remaining": remaining},
+            auto=auto,
+        )
+        if removed:
+            execution_history.patch_fields(out_dir, eid, {
+                "description": f"删除粗剪成品：{' + '.join(removed)}"
+            })
+            execution_history.record_finish(out_dir, eid, success=True, error="")
+        else:
+            execution_history.patch_fields(out_dir, eid, {
+                "description": "粗剪成片不存在，无需删除（无操作）"
+            })
+            execution_history.record_finish(out_dir, eid, success=True, error="")
+    except Exception as e:  # noqa: BLE001 — 历史写失败不影响主流程
+        log.warning("[compose][history] delete_rough_compose 记录失败: %s", e)
     if removed:
         return {"deleted": True, "removed": removed,
                 "remaining": remaining, "message": f"已删除 {' + '.join(removed)}"}
@@ -415,8 +437,11 @@ def job_status(task_id: str) -> dict | None:
 
 
 def start_compose(task_id: str, video_path: Path, intervals_ms: list[tuple[int, int]],
-                  dst: Path, lines: list[dict]) -> bool:
-    """启动合成线程。已在跑 → 返回 False（不重复起）。"""
+                  dst: Path, lines: list[dict], *, auto: bool = False) -> bool:
+    """启动合成线程。已在跑 → 返回 False（不重复起）。
+
+    REQ-20260919-075：auto 透传到 execution_history。
+    """
     with _JOBS_LOCK:
         existing = _JOBS.get(task_id)
         if existing and existing.get("state") == "running":
@@ -430,7 +455,8 @@ def start_compose(task_id: str, video_path: Path, intervals_ms: list[tuple[int, 
     outputs_dir = dst.parent
     exec_id = execution_history.record_start(
         outputs_dir, execution_history.KIND_ROUGH_COMPOSE,
-        extra={"intervals": len(intervals_ms), "lines": len(lines)})
+        extra={"intervals": len(intervals_ms), "lines": len(lines)},
+        auto=auto)
 
     def _run():
         job = _JOBS[task_id]
@@ -448,6 +474,11 @@ def start_compose(task_id: str, video_path: Path, intervals_ms: list[tuple[int, 
             execution_history.patch_extra(outputs_dir, exec_id,
                                           {"segments": result.get("segments"),
                                            "output": dst.name})
+            # REQ-20260919-075：完成时回填具体执行情况（段数 + 输出文件 + 合成时长）
+            n_seg = result.get("segments") or 0
+            execution_history.patch_fields(outputs_dir, exec_id, {
+                "description": (f"ffmpeg 拼接 {n_seg} 段片段，输出初剪视频 {dst.name}（{len(intervals_ms)} 个区间）")
+            })
             execution_history.record_finish(outputs_dir, exec_id, success=True, error="")
         except Exception as e:  # noqa: BLE001 — 后台线程必须全兜底
             job["state"] = "error"

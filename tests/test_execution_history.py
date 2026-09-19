@@ -294,3 +294,313 @@ def test_render_workbench_exec_card_empty_state(tmp_path: Path):
     html = _render_workbench(t.task_id, mgr)
     assert "尚无执行记录" in html
     assert "0 次" in html
+
+
+# ---------- REQ-20260918-053：query_history 过滤 + 新 KIND 覆盖 ----------
+
+def test_query_history_filters_by_kinds(tmp_path: Path):
+    """按 kinds 过滤：只返回指定阶段；多选 = OR。"""
+    from slirn_home.execution_history import (
+        KIND_OPTIMIZE, KIND_ROUGH_CUT, KIND_ROUGH_COMPOSE,
+        record_finish, record_start, query_history,
+    )
+
+    out = _outputs(tmp_path)
+    e1 = record_start(out, KIND_ROUGH_CUT)
+    record_finish(out, e1, success=True)
+    e2 = record_start(out, KIND_ROUGH_COMPOSE)
+    record_finish(out, e2, success=True)
+    e3 = record_start(out, KIND_OPTIMIZE)
+    record_finish(out, e3, success=True)
+
+    items = query_history(out, kinds=[KIND_ROUGH_CUT, KIND_OPTIMIZE])
+    assert {it["kind"] for it in items} == {KIND_ROUGH_CUT, KIND_OPTIMIZE}, \
+        f"应只含 rough_cut + optimize；实际 = {[it['kind'] for it in items]}"
+
+    items = query_history(out, kinds=[KIND_ROUGH_COMPOSE])
+    assert len(items) == 1
+    assert items[0]["kind"] == KIND_ROUGH_COMPOSE
+
+
+def test_query_history_filters_by_statuses(tmp_path: Path):
+    """按 statuses 过滤：只返回指定状态。"""
+    from slirn_home.execution_history import (
+        KIND_OPTIMIZE, record_finish, record_start, query_history,
+    )
+
+    out = _outputs(tmp_path)
+    e1 = record_start(out, KIND_OPTIMIZE)
+    record_finish(out, e1, success=True)
+    e2 = record_start(out, KIND_OPTIMIZE)
+    record_finish(out, e2, success=False, error="OOM 内存不足")
+
+    items = query_history(out, statuses=["success"])
+    assert len(items) == 1 and items[0]["status"] == "success"
+
+    items = query_history(out, statuses=["failed"])
+    assert len(items) == 1 and items[0]["status"] == "failed"
+    assert "OOM" in items[0]["error"]
+
+
+def test_query_history_keyword_search(tmp_path: Path):
+    """关键词搜 error：大小写不敏感，命中 substring。"""
+    from slirn_home.execution_history import (
+        KIND_OPTIMIZE, record_finish, record_start, query_history,
+    )
+
+    out = _outputs(tmp_path)
+    e1 = record_start(out, KIND_OPTIMIZE)
+    record_finish(out, e1, success=False, error="out of memory")
+    e2 = record_start(out, KIND_OPTIMIZE)
+    record_finish(out, e2, success=False, error="network timeout")
+
+    items = query_history(out, keyword="memory")
+    assert len(items) == 1 and "memory" in items[0]["error"]
+
+    items = query_history(out, keyword="TIMEOUT")  # 大写
+    assert len(items) == 1 and "timeout" in items[0]["error"]
+
+
+def test_query_history_returns_desc_order(tmp_path: Path):
+    """返回倒序：最新在前。"""
+    from slirn_home.execution_history import (
+        KIND_OPTIMIZE, record_finish, record_start, query_history,
+    )
+
+    out = _outputs(tmp_path)
+    e1 = record_start(out, KIND_OPTIMIZE)
+    time.sleep(0.01)
+    e2 = record_start(out, KIND_OPTIMIZE)
+    time.sleep(0.01)
+    e3 = record_start(out, KIND_OPTIMIZE)
+    record_finish(out, e1, success=True)
+    record_finish(out, e2, success=True)
+    record_finish(out, e3, success=True)
+
+    items = query_history(out)
+    assert items[0]["id"] == e3, "最新 e3 应在前"
+    assert items[2]["id"] == e1
+
+
+def test_query_history_limit_caps_results(tmp_path: Path):
+    """limit 截断返回最多 N 条（不报错，超出也只返 N）。"""
+    from slirn_home.execution_history import (
+        KIND_OPTIMIZE, record_finish, record_start, query_history,
+    )
+
+    out = _outputs(tmp_path)
+    for _ in range(5):
+        e = record_start(out, KIND_OPTIMIZE)
+        record_finish(out, e, success=True)
+
+    items = query_history(out, limit=2)
+    assert len(items) == 2
+
+
+def test_all_new_kinds_are_valid(tmp_path: Path):
+    """REQ-053 新增的 3 个 kind（review/cut/optimize）必须可被记录且能查到。
+
+    REQ-20260919-075：扩展到 11 个 kind + 校验 description / auto / stage 字段。
+    """
+    from slirn_home.execution_history import (
+        ALL_KINDS, KIND_FINE_AI_LAYOUT, KIND_FINE_BG_DETECT,
+        KIND_FINE_EXPORT, KIND_FINE_PREVIEW, KIND_LABELS,
+        KIND_OPTIMIZE, KIND_ROUGH_CUT, KIND_ROUGH_COMPOSE_DELETE,
+        KIND_ROUGH_CUT_LINK_PERSON, KIND_SUBTITLE_REVIEW,
+        record_finish, record_start, query_history,
+    )
+
+    assert KIND_SUBTITLE_REVIEW in ALL_KINDS
+    assert KIND_ROUGH_CUT in ALL_KINDS
+    assert KIND_OPTIMIZE in ALL_KINDS
+    # 中文标签：前端工作台筛选按钮文案用
+    assert KIND_LABELS[KIND_SUBTITLE_REVIEW] == "字幕修订"
+    assert KIND_LABELS[KIND_ROUGH_CUT] == "执行切分修剪"
+    assert KIND_LABELS[KIND_OPTIMIZE] == "确认保存"
+    # REQ-20260919-075：新增 7 个 kind 的 label 存在性
+    for k in (KIND_ROUGH_CUT_LINK_PERSON, KIND_ROUGH_COMPOSE_DELETE,
+              KIND_FINE_AI_LAYOUT, KIND_FINE_BG_DETECT,
+              KIND_FINE_PREVIEW, KIND_FINE_EXPORT):
+        assert k in KIND_LABELS, f"缺少 label: {k}"
+
+    out = _outputs(tmp_path)
+    e1 = record_start(out, KIND_SUBTITLE_REVIEW)
+    record_finish(out, e1, success=True)
+    e2 = record_start(out, KIND_ROUGH_CUT)
+    record_finish(out, e2, success=True)
+    e3 = record_start(out, KIND_OPTIMIZE)
+    record_finish(out, e3, success=True)
+
+    items = query_history(out)
+    assert {it["kind"] for it in items} == {KIND_SUBTITLE_REVIEW, KIND_ROUGH_CUT, KIND_OPTIMIZE}
+
+
+def test_execution_history_query_endpoint_filters(tmp_path: Path):
+    """服务端 API：query 端点支持 kinds/statuses/keyword 过滤。"""
+    from fastapi.testclient import TestClient
+    from tasklib import TaskManager
+
+    from slirn_home import build_app
+    from slirn_home.execution_history import (
+        KIND_OPTIMIZE, KIND_ROUGH_CUT,
+        record_finish, record_start,
+    )
+
+    video = tmp_path / "v.mp4"
+    video.write_bytes(b"v")
+    mgr = TaskManager(tmp_path)
+    t = mgr.create(name="q-test", original_video=video)
+    outputs_dir = mgr.tasks_dir / t.task_id / "outputs"
+
+    e1 = record_start(outputs_dir, KIND_ROUGH_CUT)
+    record_finish(outputs_dir, e1, success=True)
+    e2 = record_start(outputs_dir, KIND_OPTIMIZE)
+    record_finish(outputs_dir, e2, success=False, error="out of memory")
+
+    app = build_app(repo_root=mgr.repo_root)
+    client = TestClient(app.app)
+    # kinds 过滤
+    r = client.post("/slirn/api/execution_history_query",
+                    json={"task_id": t.task_id, "kinds": ["optimize"]})
+    assert r.status_code == 200, r.text
+    items = r.json()["items"]
+    assert len(items) == 1 and items[0]["kind"] == "optimize"
+    # statuses 过滤
+    r = client.post("/slirn/api/execution_history_query",
+                    json={"task_id": t.task_id, "statuses": ["success"]})
+    items = r.json()["items"]
+    assert len(items) == 1 and items[0]["status"] == "success"
+    # keyword 过滤
+    r = client.post("/slirn/api/execution_history_query",
+                    json={"task_id": t.task_id, "keyword": "memory"})
+    items = r.json()["items"]
+    assert len(items) == 1 and "memory" in items[0]["error"]
+    # 无 task_id → 业务 ok=false
+    r = client.post("/slirn/api/execution_history_query", json={})
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is False
+
+
+# ---------- REQ-20260919-075：description / auto / stage 字段 + 新 kind ----------
+
+
+def test_record_start_with_description_and_auto(tmp_path: Path):
+    """REQ-075：record_start 支持 description + auto 参数，并写入记录。"""
+    from slirn_home.execution_history import (
+        KIND_ROUGH_COMPOSE, record_start, load_history,
+    )
+
+    out = _outputs(tmp_path)
+    eid = record_start(out, KIND_ROUGH_COMPOSE,
+                       description="自定义描述：测试", auto=True)
+    items = load_history(out)
+    assert len(items) == 1
+    assert items[0]["description"] == "自定义描述：测试"
+    assert items[0]["auto"] is True
+    # 不传 description → 走默认描述（来自 DEFAULT_DESCRIPTIONS）
+    eid2 = record_start(out, KIND_ROUGH_COMPOSE, auto=False)
+    items = load_history(out)
+    assert items[0]["description"] == "自定义描述：测试"
+    assert items[1]["description"] != ""  # 默认非空
+    assert items[1]["auto"] is False
+
+
+def test_kind_to_stage_mapping_complete():
+    """REQ-075：所有 kind 必须能映射到工作台 stage key。"""
+    from slirn_home.execution_history import ALL_KINDS, KIND_TO_STAGE
+
+    for k in ALL_KINDS:
+        assert k in KIND_TO_STAGE, f"kind={k} 未在 KIND_TO_STAGE 中映射"
+        assert KIND_TO_STAGE[k] != "", f"kind={k} 映射到空 stage"
+
+
+def test_default_descriptions_cover_all_kinds():
+    """REQ-075：每个 kind 都有默认 description 模板。"""
+    from slirn_home.execution_history import ALL_KINDS, DEFAULT_DESCRIPTIONS
+
+    for k in ALL_KINDS:
+        assert k in DEFAULT_DESCRIPTIONS, f"kind={k} 缺少默认 description"
+        assert DEFAULT_DESCRIPTIONS[k], f"kind={k} 默认 description 为空"
+
+
+def test_patch_fields_updates_description(tmp_path: Path):
+    """REQ-075：patch_fields 允许回填 description 字段。"""
+    from slirn_home.execution_history import (
+        KIND_SUBTITLE_GENERATION, load_history, patch_fields, record_start,
+    )
+
+    out = _outputs(tmp_path)
+    eid = record_start(out, KIND_SUBTITLE_GENERATION)
+    patch_fields(out, eid, {"description": "完成后回填的描述：识别 5 段"})
+    items = load_history(out)
+    assert items[0]["description"] == "完成后回填的描述：识别 5 段"
+
+
+def test_patch_fields_ignores_disallowed_keys(tmp_path: Path):
+    """REQ-075：patch_fields 白名单保护 — 不允许改 status/kind/id。"""
+    from slirn_home.execution_history import (
+        KIND_SUBTITLE_GENERATION, load_history, patch_fields, record_start,
+    )
+
+    out = _outputs(tmp_path)
+    eid = record_start(out, KIND_SUBTITLE_GENERATION, description="原始")
+    # 尝试改 status/kind/id 应被忽略
+    patch_fields(out, eid, {
+        "description": "新描述",
+        "status": "failed",  # 不允许
+        "kind": "fake",      # 不允许
+        "id": "forged-id",   # 不允许
+    })
+    items = load_history(out)
+    assert items[0]["description"] == "新描述"
+    assert items[0]["status"] == "running"
+    assert items[0]["kind"] == KIND_SUBTITLE_GENERATION
+    assert items[0]["id"] == eid
+
+
+def test_stage_field_auto_set_from_kind(tmp_path: Path):
+    """REQ-075：record_start 自动从 kind 推导 stage 字段。"""
+    from slirn_home.execution_history import (
+        KIND_FINE_EXPORT, KIND_ROUGH_CUT_LINK_PERSON,
+        load_history, record_start,
+    )
+
+    out = _outputs(tmp_path)
+    record_start(out, KIND_FINE_EXPORT)
+    record_start(out, KIND_ROUGH_CUT_LINK_PERSON)
+    items = load_history(out)
+    by_kind = {it["kind"]: it for it in items}
+    assert by_kind[KIND_FINE_EXPORT]["stage"] == "fine_cut"
+    assert by_kind[KIND_ROUGH_CUT_LINK_PERSON]["stage"] == "rough_cut"
+
+
+def test_old_history_files_load_with_defaults(tmp_path: Path):
+    """REQ-075：旧 execution_history.json 缺字段时，load 后用空值兜底（不抛错）。"""
+    import json
+    from slirn_home import execution_history as eh
+
+    out = _outputs(tmp_path)
+    # 写一条旧格式记录（无 description/auto/stage）
+    old_item = {
+        "id": "exh-old-001",
+        "kind": "rough_compose",
+        "started_at": 1700000000.0,
+        "started_at_iso": "2026-09-19T00:00:00",
+        "finished_at": 1700000060.0,
+        "finished_at_iso": "2026-09-19T00:01:00",
+        "duration_ms": 60000,
+        "status": "success",
+        "error": "",
+        "extra": {},
+    }
+    out.mkdir(parents=True, exist_ok=True)
+    (out / eh.HISTORY_FILENAME).write_text(json.dumps([old_item], ensure_ascii=False),
+                                            encoding="utf-8")
+    items = eh.load_history(out)
+    assert len(items) == 1
+    # 旧字段值原样保留
+    assert items[0]["id"] == "exh-old-001"
+    # 缺字段时 __getitem__ 不抛 KeyError（前端读 .description 时取空字符串）
+    assert items[0].get("description", "") == ""
+    assert items[0].get("auto", False) is False
+    assert items[0].get("stage", "") == ""

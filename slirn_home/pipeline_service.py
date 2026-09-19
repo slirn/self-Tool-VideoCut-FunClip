@@ -104,6 +104,9 @@ def default_config() -> dict:
         "subtitle_review": {
             "accept_all_suggestions": False,
             "skip_categories": [],
+            # REQ-20260918-049：大模型分析严谨性级别（pipe 通道支持高/中/低；
+            # custom 档需在 pipe-panel 外的工作台才有 textarea，前端降级为 medium）
+            "rigor": "medium",
         },
         "rough_cut": {
             "delete_speakers": [],
@@ -152,6 +155,10 @@ def validate_config(cfg: dict) -> dict:
             elif k in merged:
                 merged[k] = v
         base[stage_key] = merged
+    # REQ-20260918-049：subtitle_review.rigor 校验（脏数据容错 → 回落 medium）
+    valid_rigor = ("high", "medium", "low", "custom")
+    if base["subtitle_review"].get("rigor") not in valid_rigor:
+        base["subtitle_review"]["rigor"] = "medium"
     return base
 
 
@@ -276,13 +283,16 @@ def _http_post(api: str, path: str, payload: dict, *, timeout: float = 30.0) -> 
 
     与前端 router.js 的 postJSON 同源思路；用 urllib 零依赖。
     不抛异常：网络/解析错误 → 返回 {ok: False, error: <msg>}。
+
+    REQ-20260919-075：自动加 X-Slirn-Auto=1 header，让后端 endpoint 把当前调用
+    识别为流程自动触发（写入 execution_history 的 auto=true）。
     """
     url = api.rstrip("/") + path
     body = json.dumps(payload or {}).encode("utf-8")
     req = urllib.request.Request(
         url,
         data=body,
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "X-Slirn-Auto": "1"},
         method="POST",
     )
     try:
@@ -390,52 +400,93 @@ def handler_subtitle_review(tid: str, cfg: dict, outputs_dir: Path, api: str,
 
     prereq：subtitle.json 存在（由 handler 顺序保证，但兜底再 check）。
     """
-    ok, err = _check_prereq(outputs_dir, ["subtitle.json"])
-    if not ok:
-        _log(job, "subtitle_review", f"跳过：{err}", "warn")
-        return (True, "skip")  # 跳过不算失败（设计文档 AC-6）
-    # 大模型分析必选严谨性级别 — 没现成选择就用 'medium' 默认（设计文档 §2.7 范围外）
-    rigor = "medium"
-    accept_all = bool(cfg.get("accept_all_suggestions", True))
-    skip_cats = list(cfg.get("skip_categories") or [])
-    _log(job, "subtitle_review", f"启动大模型分析（严谨性 {rigor}）")
-    r = _http_post(api, "/revise_subtitle", {"task_id": tid, "rigor": rigor, "force": True})
-    if not r.get("ok"):
-        return (False, f"启动修订失败：{r.get('error')}")
-    _log(job, "subtitle_review", "等待大模型分析完成…")
-    state, err = _poll_status(api, "/revise_status", tid)
-    if state != "done":
-        return (False, f"字幕修订{state}：{err}")
-    if not accept_all:
-        _log(job, "subtitle_review", "⏸ 配置要求人工决策修订 — 不自动 save_revision，等人工去工作台处理", "info")
-        # v3：accept_all_suggestions=False 时只跑 revise，不自动 save_revision。
-        # 是否停在该阶段由 stage_cfg.stop_after 单独决定（调度器主循环判），
-        # 这里不再 _request_stop。
-        return (True, "revision 待人工决策")
-    # 全接受：构造 save_revision payload 把所有 entry 决策为 accept
-    rev_path = outputs_dir / "revision.json"
-    if not rev_path.exists():
-        return (False, "修订产物 revision.json 不存在")
+    # REQ-20260918-053：执行日志 — 字幕修订（LLM 调用，分钟级）
+    from .execution_history import (
+        KIND_SUBTITLE_REVIEW, record_start, record_finish, patch_extra,
+    )
+    rev_id = record_start(outputs_dir, KIND_SUBTITLE_REVIEW,
+                          extra={"rigor": cfg.get("rigor"), "accept_all": bool(cfg.get("accept_all_suggestions", True))})
+    # 用容器存结果（finally 里统一 record_finish — 7 个 return 点不会再漏）
+    _result: list = [False, ""]
     try:
-        rev = json.loads(rev_path.read_text(encoding="utf-8"))
-    except Exception as e:  # noqa: BLE001
-        return (False, f"revision.json 解析失败：{e}")
-    entries = (rev or {}).get("entries") or []
-    # skip_categories 处理：跳过该类别的建议 → 决策为 pending（留给人工）
-    decisions = []
-    for e in entries:
-        cat = str(e.get("category") or "")
-        if cat in skip_cats:
-            decisions.append({"i": int(e.get("i", 0)), "decision": "pending", "user_note": ""})
-        else:
-            decisions.append({"i": int(e.get("i", 0)), "decision": "accept", "user_note": ""})
-    _log(job, "subtitle_review", f"应用全部接受决策（{len(decisions)} 条）")
-    r = _http_post(api, "/save_revision",
-                   {"task_id": tid, "decisions": decisions})
-    if not r.get("ok"):
-        return (False, f"save_revision 失败：{r.get('error')}")
-    _log(job, "subtitle_review", "✅ 字幕修订完成（全部接受）", "ok")
-    return (True, "")
+        ok, err = _check_prereq(outputs_dir, ["subtitle.json"])
+        if not ok:
+            _log(job, "subtitle_review", f"跳过：{err}", "warn")
+            _result[0] = True
+            _result[1] = "skip"
+            return (True, "skip")  # 跳过不算失败（设计文档 AC-6）
+        # REQ-20260918-049：从配置读 rigor（pipe 通道只支持 high/medium/low，
+        # custom 档在工作台有独立 textarea；前端读 form 时已降级为 medium，
+        # 这里再校验一次兜底防御）
+        rigor = str(cfg.get("rigor") or "medium")
+        if rigor not in ("high", "medium", "low"):
+            rigor = "medium"
+        accept_all = bool(cfg.get("accept_all_suggestions", True))
+        skip_cats = list(cfg.get("skip_categories") or [])
+        _log(job, "subtitle_review", f"启动大模型分析（严谨性 {rigor}）")
+        r = _http_post(api, "/revise_subtitle", {"task_id": tid, "rigor": rigor, "force": True})
+        if not r.get("ok"):
+            _result[0] = False
+            _result[1] = f"启动修订失败：{r.get('error')}"
+            return (False, _result[1])
+        _log(job, "subtitle_review", "等待大模型分析完成…")
+        state, err = _poll_status(api, "/revise_status", tid)
+        if state != "done":
+            _result[0] = False
+            _result[1] = f"字幕修订{state}：{err}"
+            return (False, _result[1])
+        if not accept_all:
+            _log(job, "subtitle_review", "⏸ 配置要求人工决策修订 — 不自动 save_revision，等人工去工作台处理", "info")
+            # v3：accept_all_suggestions=False 时只跑 revise，不自动 save_revision。
+            # 是否停在该阶段由 stage_cfg.stop_after 单独决定（调度器主循环判），
+            # 这里不再 _request_stop。
+            _result[0] = True
+            _result[1] = "revision 待人工决策"
+            return (True, _result[1])
+        # 全接受：构造 save_revision payload 把所有 entry 决策为 accept
+        rev_path = outputs_dir / "revision.json"
+        if not rev_path.exists():
+            _result[0] = False
+            _result[1] = "修订产物 revision.json 不存在"
+            return (False, _result[1])
+        try:
+            rev = json.loads(rev_path.read_text(encoding="utf-8"))
+        except Exception as e:  # noqa: BLE001
+            _result[0] = False
+            _result[1] = f"revision.json 解析失败：{e}"
+            return (False, _result[1])
+        entries = (rev or {}).get("entries") or []
+        # skip_categories 处理：跳过该类别的建议 → 决策为 pending（留给人工）
+        decisions = []
+        for e in entries:
+            cat = str(e.get("category") or "")
+            if cat in skip_cats:
+                decisions.append({"i": int(e.get("i", 0)), "decision": "pending", "user_note": ""})
+            else:
+                decisions.append({"i": int(e.get("i", 0)), "decision": "accept", "user_note": ""})
+        _log(job, "subtitle_review", f"应用全部接受决策（{len(decisions)} 条）")
+        r = _http_post(api, "/save_revision",
+                       {"task_id": tid, "decisions": decisions})
+        if not r.get("ok"):
+            _result[0] = False
+            _result[1] = f"save_revision 失败：{r.get('error')}"
+            return (False, _result[1])
+        # 补 extra 摘要
+        try:
+            patch_extra(outputs_dir, rev_id,
+                        {"entries": len(entries), "decisions": len(decisions), "accept_all": accept_all})
+        except Exception:
+            pass
+        _log(job, "subtitle_review", "✅ 字幕修订完成（全部接受）", "ok")
+        _result[0] = True
+        _result[1] = ""
+        return (True, _result[1])
+    except Exception as e:
+        _result[0] = False
+        _result[1] = f"异常：{e}"
+        raise
+    finally:
+        record_finish(outputs_dir, rev_id, success=_result[0], error=_result[1])
 
 
 def handler_rough_cut(tid: str, cfg: dict, outputs_dir: Path, api: str,
@@ -444,82 +495,146 @@ def handler_rough_cut(tid: str, cfg: dict, outputs_dir: Path, api: str,
 
     prereq：revision.json 已保存（且 all_decided）。由 handler 顺序保证。
     """
-    ok, err = _check_prereq(outputs_dir, ["subtitle.json", "revision.json"])
-    if not ok:
-        _log(job, "rough_cut", f"跳过：{err}", "warn")
-        return (True, "skip")
-    # 默认决策：keep（与设计文档 §2.1 默认同源）
-    default_decision = str(cfg.get("default_decision") or "keep")
-    _log(job, "rough_cut", f"生成切分清单（默认决策={default_decision}）")
-    r = _http_post(api, "/build_cutlist", {"task_id": tid})
-    if not r.get("ok"):
-        return (False, f"build_cutlist 失败：{r.get('error')}")
-    # 若配置删除说话人 → 调 cut_speaker + 标记 spk 全部行 delete
-    del_spks = list(cfg.get("delete_speakers") or [])
-    if del_spks:
-        _log(job, "rough_cut", f"删除说话人 {del_spks} 的全部记录")
-        # link speakers（自动算 rows）
-        r = _http_post(api, "/cut_speaker_link", {"task_id": tid})
+    # REQ-20260918-053：执行日志 — 切分修剪（短任务，但逻辑步骤多，便于排查）
+    from .execution_history import (
+        KIND_ROUGH_CUT, record_start, record_finish, patch_extra,
+    )
+    rc_id = record_start(outputs_dir, KIND_ROUGH_CUT,
+                         extra={"delete_speakers": list(cfg.get("delete_speakers") or [])})
+    _result: list = [False, ""]
+    try:
+        ok, err = _check_prereq(outputs_dir, ["subtitle.json", "revision.json"])
+        if not ok:
+            _log(job, "rough_cut", f"跳过：{err}", "warn")
+            _result[0] = True
+            _result[1] = "skip"
+            return (True, _result[1])
+        # 默认决策：keep（与设计文档 §2.1 默认同源）
+        default_decision = str(cfg.get("default_decision") or "keep")
+        _log(job, "rough_cut", f"生成切分清单（默认决策={default_decision}）")
+        r = _http_post(api, "/build_cutlist", {"task_id": tid})
         if not r.get("ok"):
-            _log(job, "rough_cut", f"cut_speaker_link 失败：{r.get('error')}", "warn")
-        # 标 actions：每个 spk → delete
-        actions = {str(s): "delete" for s in del_spks if s}
-        r = _http_post(api, "/save_cut_decisions",
-                       {"task_id": tid, "actions": actions})
-        if not r.get("ok"):
-            return (False, f"save_cut_decisions 失败：{r.get('error')}")
-        # save_cut_decisions 默认 actions 覆盖其它 spk → 用 manual_marks 补回：
-        # 设计文档没要求补非目标 spk 的 keep，按 actions = del_spks→delete（其它维持 keep）
-        # 该端点设计是 actions 仅覆盖所列 spk，未列出的保留 default
-    _log(job, "rough_cut", "✅ 切分修剪完成", "ok")
-    return (True, "")
+            _result[0] = False
+            _result[1] = f"build_cutlist 失败：{r.get('error')}"
+            return (False, _result[1])
+        # 若配置删除说话人 → 调 cut_speaker + 标记 spk 全部行 delete
+        del_spks = list(cfg.get("delete_speakers") or [])
+        if del_spks:
+            _log(job, "rough_cut", f"删除说话人 {del_spks} 的全部记录")
+            # link speakers（自动算 rows）
+            r = _http_post(api, "/cut_speaker_link", {"task_id": tid})
+            if not r.get("ok"):
+                _log(job, "rough_cut", f"cut_speaker_link 失败：{r.get('error')}", "warn")
+            # 标 actions：每个 spk → delete
+            actions = {str(s): "delete" for s in del_spks if s}
+            r = _http_post(api, "/save_cut_decisions",
+                           {"task_id": tid, "actions": actions})
+            if not r.get("ok"):
+                _result[0] = False
+                _result[1] = f"save_cut_decisions 失败：{r.get('error')}"
+                return (False, _result[1])
+            # save_cut_decisions 默认 actions 覆盖其它 spk → 用 manual_marks 补回：
+            # 设计文档没要求补非目标 spk 的 keep，按 actions = del_spks→delete（其它维持 keep）
+            # 该端点设计是 actions 仅覆盖所列 spk，未列出的保留 default
+            try:
+                patch_extra(outputs_dir, rc_id, {"del_speakers_count": len(del_spks)})
+            except Exception:
+                pass
+        _log(job, "rough_cut", "✅ 切分修剪完成", "ok")
+        _result[0] = True
+        _result[1] = ""
+        return (True, _result[1])
+    except Exception as e:
+        _result[0] = False
+        _result[1] = f"异常：{e}"
+        raise
+    finally:
+        record_finish(outputs_dir, rc_id, success=_result[0], error=_result[1])
 
 
 def handler_rough_compose(tid: str, cfg: dict, outputs_dir: Path, api: str,
                           job: PipelineJob) -> tuple[bool, str]:
-    """粗剪合成阶段 — 调 /compose_rough + 等 /compose_rough_status。"""
-    ok, err = _check_prereq(outputs_dir, ["subtitle.json", "revision.json"])
-    if not ok:
-        _log(job, "rough_compose", f"跳过：{err}", "warn")
-        return (True, "skip")
-    _log(job, "rough_compose", "启动粗剪合成")
-    r = _http_post(api, "/compose_rough", {"task_id": tid})
-    if not r.get("ok"):
-        return (False, f"启动合成失败：{r.get('error')}")
-    _log(job, "rough_compose", "等待合成完成（重编码约 10+ 分钟）")
-    state, err = _poll_status(api, "/compose_rough_status", tid, timeout=6 * 3600.0)
-    if state == "done":
-        _log(job, "rough_compose", "✅ 粗剪合成完成", "ok")
-        return (True, "")
-    return (False, f"粗剪合成{state}：{err}")
+    """粗剪合成阶段 — 调 /compose_rough + 等 /compose_rough_status（重编码，10+ 分钟）。
+
+    注意：执行日志由 compose_service.start_compose 自行落盘（REQ-20260918-048 既有）；
+    这里只做编排，避免双记录。
+    """
+    _result: list = [False, ""]
+    try:
+        ok, err = _check_prereq(outputs_dir, ["subtitle.json", "revision.json"])
+        if not ok:
+            _log(job, "rough_compose", f"跳过：{err}", "warn")
+            _result[0] = True
+            _result[1] = "skip"
+            return (True, _result[1])
+        _log(job, "rough_compose", "启动粗剪合成")
+        r = _http_post(api, "/compose_rough", {"task_id": tid})
+        if not r.get("ok"):
+            _result[0] = False
+            _result[1] = f"启动合成失败：{r.get('error')}"
+            return (False, _result[1])
+        _log(job, "rough_compose", "等待合成完成（重编码约 10+ 分钟）")
+        state, err = _poll_status(api, "/compose_rough_status", tid, timeout=6 * 3600.0)
+        if state == "done":
+            _log(job, "rough_compose", "✅ 粗剪合成完成", "ok")
+            _result[0] = True
+            _result[1] = ""
+            return (True, _result[1])
+        _result[0] = False
+        _result[1] = f"粗剪合成{state}：{err}"
+        return (False, _result[1])
+    except Exception as e:
+        _result[0] = False
+        _result[1] = f"异常：{e}"
+        raise
 
 
 def handler_optimize(tid: str, cfg: dict, outputs_dir: Path, api: str,
                      job: PipelineJob) -> tuple[bool, str]:
-    """优化字幕阶段 — /optimize_subtitle + 等完成 + (可选) 全接受。"""
-    # prereq：rough_compose.mp4
-    ok, err = _check_prereq(outputs_dir, ["rough_compose.mp4"])
-    if not ok:
-        _log(job, "optimize", f"跳过：{err}", "warn")
-        return (True, "skip")
-    accept_all = bool(cfg.get("accept_all_replacements", True))
-    _log(job, "optimize", "启动优化字幕分析")
-    r = _http_post(api, "/optimize_subtitle",
-                   {"task_id": tid, "force": True})
-    if not r.get("ok"):
-        return (False, f"启动优化失败：{r.get('error')}")
-    _log(job, "optimize", "等待分析完成…")
-    state, err = _poll_status(api, "/optimize_subtitle_status", tid, timeout=6 * 3600.0)
-    if state != "done":
-        return (False, f"优化字幕{state}：{err}")
-    if accept_all:
-        _log(job, "optimize", "应用全部替换（accepted all applied=True）")
-        r = _http_post(api, "/save_optimize_subtitle",
-                       {"task_id": tid, "applied_all": True})
+    """优化字幕阶段 — /optimize_subtitle + 等完成 + (可选) 全接受（LLM 调用，分钟级）。
+
+    注意：执行日志由 optimize_service.start_job 自行落盘（REQ-20260918-053 接入）；
+    这里只做编排，避免双记录。
+    """
+    _result: list = [False, ""]
+    try:
+        # prereq：rough_compose.mp4
+        ok, err = _check_prereq(outputs_dir, ["rough_compose.mp4"])
+        if not ok:
+            _log(job, "optimize", f"跳过：{err}", "warn")
+            _result[0] = True
+            _result[1] = "skip"
+            return (True, _result[1])
+        accept_all = bool(cfg.get("accept_all_replacements", True))
+        _log(job, "optimize", "启动优化字幕分析")
+        r = _http_post(api, "/optimize_subtitle",
+                       {"task_id": tid, "force": True})
         if not r.get("ok"):
-            return (False, f"save_optimize_subtitle 失败：{r.get('error')}")
-    _log(job, "optimize", "✅ 优化字幕完成", "ok")
-    return (True, "")
+            _result[0] = False
+            _result[1] = f"启动优化失败：{r.get('error')}"
+            return (False, _result[1])
+        _log(job, "optimize", "等待分析完成…")
+        state, err = _poll_status(api, "/optimize_subtitle_status", tid, timeout=6 * 3600.0)
+        if state != "done":
+            _result[0] = False
+            _result[1] = f"优化字幕{state}：{err}"
+            return (False, _result[1])
+        if accept_all:
+            _log(job, "optimize", "应用全部替换（accepted all applied=True）")
+            r = _http_post(api, "/save_optimize_subtitle",
+                           {"task_id": tid, "applied_all": True})
+            if not r.get("ok"):
+                _result[0] = False
+                _result[1] = f"save_optimize_subtitle 失败：{r.get('error')}"
+                return (False, _result[1])
+        _log(job, "optimize", "✅ 优化字幕完成", "ok")
+        _result[0] = True
+        _result[1] = ""
+        return (True, _result[1])
+    except Exception as e:
+        _result[0] = False
+        _result[1] = f"异常：{e}"
+        raise
 
 
 HANDLERS: dict[str, Callable] = {

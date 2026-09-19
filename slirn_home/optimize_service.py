@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Callable
 
 from slirn_home.fine_service import apply_replacements
+from slirn_home import execution_history
 
 log = logging.getLogger(__name__)
 
@@ -247,10 +248,14 @@ def start_job(
     outputs_dir: Path,
     entry: dict | None = None,
     on_success: Callable[[dict], None] | None = None,
+    *,
+    auto: bool = False,
 ) -> bool:
     """启动优化字幕线程（ASR 识别成片 → 大模型提取 → 落盘）。已在跑 → False。
 
     video_path：粗剪成片（rough_compose.mp4）；entry：本次使用的模型注册项。
+
+    REQ-20260919-075：auto 透传到 execution_history（pipeline 自动调用标记）。
     """
     with _JOBS_LOCK:
         existing = _JOBS.get(task_id)
@@ -261,6 +266,13 @@ def start_job(
             "started_at": time.time(), "finished_at": None,
             "lines": 0, "occurrences": 0,
         }
+
+    # REQ-20260918-053：执行日志 — 优化字幕（LLM 调用，分钟级）
+    # REQ-20260919-075：auto 透传；用户手动调为 False，pipeline 自动调为 True
+    exec_id = execution_history.record_start(
+        outputs_dir, execution_history.KIND_OPTIMIZE,
+        extra={"model": (entry or {}).get("id") or ""},
+        auto=auto)
 
     def _run():
         job = _JOBS[task_id]
@@ -367,6 +379,20 @@ def start_job(
             job["finished_at"] = time.time()
             log.info("[opt][%s] 完成：识别 %d 行 · 不明确出现 %d 处（%d 个词）",
                      task_id, len(segments), len(occurrences), len(data["words"]))
+            # REQ-20260918-053：执行日志 — 补结果摘要 + 标记 success
+            try:
+                execution_history.patch_extra(outputs_dir, exec_id,
+                                                {"lines": len(segments),
+                                                 "occurrences": len(occurrences),
+                                                 "words": len(data["words"])})
+                # REQ-20260919-075：完成时回填具体执行情况（行数 + 词数 + 出现次数）
+                execution_history.patch_fields(outputs_dir, exec_id, {
+                    "description": (f"优化字幕保存：识别 {len(segments)} 行字幕，"
+                                    f"提取 {len(occurrences)} 处不明确字词（{len(data['words'])} 个词）")
+                })
+                execution_history.record_finish(outputs_dir, exec_id, success=True, error="")
+            except Exception as eh:  # noqa: BLE001
+                log.warning("[opt][%s] history record_finish 失败: %s", task_id, eh)
             if on_success:
                 try:
                     on_success(data)
@@ -380,6 +406,11 @@ def start_job(
             job["state"] = "error"
             job["error"] = msg
             job["finished_at"] = time.time()
+            # REQ-20260918-053：执行日志 — 失败落盘
+            try:
+                execution_history.record_finish(outputs_dir, exec_id, success=False, error=msg)
+            except Exception as eh:  # noqa: BLE001
+                log.warning("[opt][%s] history record_finish(failed) 失败: %s", task_id, eh)
 
     threading.Thread(target=_run, name=f"optimize-{task_id}", daemon=True).start()
     return True

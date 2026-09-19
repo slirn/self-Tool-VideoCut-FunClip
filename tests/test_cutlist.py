@@ -538,4 +538,4 @@ def test_wb_stage_states_with_cutlist(tmp_path: Path):
     assert _wb_stage_states(m.get(tid))[3] == "current"
     (outputs / "cutlist.json").write_text(
         json.dumps({"version": 1, "items": [{"id": "1"}]}), encoding="utf-8")
-    assert _wb_stage_states(m.get(tid)) == ["done", "done", "done", "done", "current"] + ["pending"] * 3
+    assert _wb_stage_states(m.get(tid)) == ["done", "done", "done", "done", "current"] + ["pending"] * 2

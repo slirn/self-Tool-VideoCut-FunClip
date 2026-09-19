@@ -121,7 +121,7 @@ def test_wb_stage_states_fresh_task(tmp_path: Path):
 
     m, video = _make_mgr(tmp_path)
     t = m.create(name="t", original_video=video)
-    assert _wb_stage_states(t) == ["done", "current"] + ["pending"] * 6
+    assert _wb_stage_states(t) == ["done", "current"] + ["pending"] * 5
 
 
 def test_wb_stage_states_with_subtitle(tmp_path: Path):
@@ -134,7 +134,7 @@ def test_wb_stage_states_with_subtitle(tmp_path: Path):
     (outputs / "subtitle.json").write_text(
         '{"version":1,"segments":[{"i":1,"start_ms":0,"end_ms":1,"start":"0","end":"0","text":"x"}]}',
         encoding="utf-8")
-    assert _wb_stage_states(t) == ["done", "done", "current"] + ["pending"] * 5
+    assert _wb_stage_states(t) == ["done", "done", "current"] + ["pending"] * 4
 
 
 def test_wb_stage_states_by_status_rank(tmp_path: Path):
@@ -147,7 +147,7 @@ def test_wb_stage_states_by_status_rank(tmp_path: Path):
     t = m.create(name="t", original_video=video)
     m.update_status(t.task_id, TaskStatus.ROUGH_CUT_DONE)
     states = _wb_stage_states(m.get(t.task_id))
-    assert states == ["done"] * 4 + ["current"] + ["pending"] * 3
+    assert states == ["done"] * 4 + ["current"] + ["pending"] * 2
 
 
 def test_wb_stage_states_optimize_done(tmp_path: Path):
@@ -167,7 +167,9 @@ def test_wb_stage_states_optimize_done(tmp_path: Path):
         '{"version":1,"saved_at":"2026-09-17T10:00:00","segments":[],"occurrences":[]}',
         encoding="utf-8")
     states = _wb_stage_states(m.get(t.task_id))
-    assert states == ["done"] * 6 + ["current", "pending"]
+    # REQ-20260919-075：去掉第 8 阶段「字幕合成」→ 7 阶段
+    # assets/subtitle/subtitle_review/rough_cut/rough_compose/fine_review = 6 done，fine_cut = current
+    assert states == ["done"] * 6 + ["current"]
 
     (outputs / "optimize_subtitle.json").unlink()
     (outputs / "fine_revision.json").write_text(
@@ -185,10 +187,12 @@ def test_render_workbench_layout(tmp_path: Path):
     assert "剪辑工作台 · 工作台任务" in html
     assert "📁 lecture.mp4（" in html
     assert "未截取 · 使用完整原视频" in html
-    # 左侧 8 阶段 + 状态（+ REQ-20260918-053：末尾追加 1 个「执行日志」非流水线视图 = 9）
-    assert html.count('class="slirn-wb-stage ') == 9
+    # 左侧 7 阶段 + 状态（+ REQ-20260918-053：末尾追加 1 个「执行日志」非流水线视图 = 8）
+    # REQ-20260919-075：原 8 阶段去掉「字幕合成」= 7 阶段
+    assert html.count('class="slirn-wb-stage ') == 8
     assert "slirn-wb-stage done" in html and "slirn-wb-stage current" in html
-    assert "素材准备" in html and "字幕生成" in html and "字幕合成" in html and "执行日志" in html
+    assert "素材准备" in html and "字幕生成" in html and "执行日志" in html
+    assert "字幕合成" not in html, "REQ-075：去掉了第八阶段「字幕合成」"
     # 右侧面板：素材清单 + 字幕区（含生成按钮）+ 字幕修订区 + 切分修剪区
     # （REQ-005 后修订区真实化；REQ-20260916-008 后切分修剪区真实化）+ 4 个规划占位
     assert "📦 资产清单" in html
@@ -206,8 +210,8 @@ def test_render_workbench_layout(tmp_path: Path):
     assert "✨ 优化字幕" in html
     assert "不明确字词" in html
     assert 'id="slirn-wb-pane-fine_review"' in html
-    # REQ-20260919-061：fine_cut 已实现（占位 stage 减少到 1 个 = mux）
-    assert html.count("规划中 — 该阶段将在后续版本提供") == 1
+    # REQ-20260919-075：去掉了 mux 阶段 → 0 个占位（所有阶段都已实现）
+    assert html.count("规划中 — 该阶段将在后续版本提供") == 0
     assert html.count("slirn-wb-pane\"") >= 1  # 面板容器齐备
     # 聚焦 current（字幕生成）→ 字幕面板默认显示
     import re
@@ -249,8 +253,9 @@ def test_render_workbench_stages_collapse_controls(tmp_path: Path):
     # 两处开关：阶段卡头部收起 + 顶栏展开（展开按钮只在收起后由 CSS 显示）
     assert "« 收起" in html and "🧭 展开阶段" in html
     assert "slirn-wb-stages-expand" in html
-    # 阶段条目不受影响（8 流水线 + 1 执行日志视图 = 9）
-    assert html.count('class="slirn-wb-stage ') == 9
+    # 阶段条目不受影响（7 流水线 + 1 执行日志视图 = 8）
+    # REQ-20260919-075：原 8 阶段去掉「字幕合成」→ 7 阶段
+    assert html.count('class="slirn-wb-stage ') == 8
 
 
 def test_render_workbench_stages_rail(tmp_path):
