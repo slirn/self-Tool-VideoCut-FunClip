@@ -41,3 +41,4 @@ slirn/.temp/
 
 # 公共热词库为运行时数据（界面维护；缺失时 HotwordLibrary 自动创建）
 /hotwords/
+tmp_test_vid/
