@@ -25,6 +25,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -74,6 +75,9 @@ class PipelineJob:
     error: str | None = None
     history: list[dict] = field(default_factory=list)  # 本次运行的日志（结构见 _append_log）
     summary: dict | None = None  # 完成后写回的 summary {stages_done, total_ms, status}
+    # REQ-20260920-081：自动流会话 ID；run_pipeline 启动时生成；handler 调 _http_post
+    # 时透传给后端 endpoint，写入 execution_history 的 auto_session_id 字段。
+    auto_session_id: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -278,7 +282,8 @@ def _clear_stop(tid: str) -> None:
 # =============== 调度器 ===============
 
 
-def _http_post(api: str, path: str, payload: dict, *, timeout: float = 30.0) -> dict:
+def _http_post(api: str, path: str, payload: dict, *, timeout: float = 30.0,
+               auto_session_id: str = "") -> dict:
     """in-process HTTP client：POST {api}{path} → JSON 响应。
 
     与前端 router.js 的 postJSON 同源思路；用 urllib 零依赖。
@@ -286,13 +291,19 @@ def _http_post(api: str, path: str, payload: dict, *, timeout: float = 30.0) -> 
 
     REQ-20260919-075：自动加 X-Slirn-Auto=1 header，让后端 endpoint 把当前调用
     识别为流程自动触发（写入 execution_history 的 auto=true）。
+
+    REQ-20260920-081：auto_session_id 非空时附加 X-Slirn-Auto-Session header，
+    让后端 endpoint 把同一次自动流的多次操作聚合到同一个 session。
     """
     url = api.rstrip("/") + path
     body = json.dumps(payload or {}).encode("utf-8")
+    headers = {"Content-Type": "application/json", "X-Slirn-Auto": "1"}
+    if auto_session_id:
+        headers["X-Slirn-Auto-Session"] = str(auto_session_id)
     req = urllib.request.Request(
         url,
         data=body,
-        headers={"Content-Type": "application/json", "X-Slirn-Auto": "1"},
+        headers=headers,
         method="POST",
     )
     try:
@@ -383,7 +394,8 @@ def handler_subtitle_generation(tid: str, cfg: dict, outputs_dir: Path, api: str
     """字幕生成阶段 — 调 /gen_subtitle + 等 /subtitle_status。"""
     sd_on = bool(cfg.get("speaker_diarization", False))
     _log(job, "subtitle_generation", f"启动字幕生成（区分说话人={sd_on}）")
-    r = _http_post(api, "/gen_subtitle", {"task_id": tid, "sd": sd_on})
+    r = _http_post(api, "/gen_subtitle", {"task_id": tid, "sd": sd_on},
+                   auto_session_id=job.auto_session_id)
     if not r.get("ok"):
         return (False, f"启动字幕生成失败：{r.get('error') or '未知错误'}")
     _log(job, "subtitle_generation", "等待字幕生成完成（后台运行中…）")
@@ -405,7 +417,8 @@ def handler_subtitle_review(tid: str, cfg: dict, outputs_dir: Path, api: str,
         KIND_SUBTITLE_REVIEW, record_start, record_finish, patch_extra,
     )
     rev_id = record_start(outputs_dir, KIND_SUBTITLE_REVIEW,
-                          extra={"rigor": cfg.get("rigor"), "accept_all": bool(cfg.get("accept_all_suggestions", True))})
+                          extra={"rigor": cfg.get("rigor"), "accept_all": bool(cfg.get("accept_all_suggestions", True))},
+                          auto=True, auto_session_id=job.auto_session_id)
     # 用容器存结果（finally 里统一 record_finish — 7 个 return 点不会再漏）
     _result: list = [False, ""]
     try:
@@ -424,7 +437,8 @@ def handler_subtitle_review(tid: str, cfg: dict, outputs_dir: Path, api: str,
         accept_all = bool(cfg.get("accept_all_suggestions", True))
         skip_cats = list(cfg.get("skip_categories") or [])
         _log(job, "subtitle_review", f"启动大模型分析（严谨性 {rigor}）")
-        r = _http_post(api, "/revise_subtitle", {"task_id": tid, "rigor": rigor, "force": True})
+        r = _http_post(api, "/revise_subtitle", {"task_id": tid, "rigor": rigor, "force": True},
+                       auto_session_id=job.auto_session_id)
         if not r.get("ok"):
             _result[0] = False
             _result[1] = f"启动修订失败：{r.get('error')}"
@@ -466,7 +480,8 @@ def handler_subtitle_review(tid: str, cfg: dict, outputs_dir: Path, api: str,
                 decisions.append({"i": int(e.get("i", 0)), "decision": "accept", "user_note": ""})
         _log(job, "subtitle_review", f"应用全部接受决策（{len(decisions)} 条）")
         r = _http_post(api, "/save_revision",
-                       {"task_id": tid, "decisions": decisions})
+                       {"task_id": tid, "decisions": decisions},
+                       auto_session_id=job.auto_session_id)
         if not r.get("ok"):
             _result[0] = False
             _result[1] = f"save_revision 失败：{r.get('error')}"
@@ -500,7 +515,8 @@ def handler_rough_cut(tid: str, cfg: dict, outputs_dir: Path, api: str,
         KIND_ROUGH_CUT, record_start, record_finish, patch_extra,
     )
     rc_id = record_start(outputs_dir, KIND_ROUGH_CUT,
-                         extra={"delete_speakers": list(cfg.get("delete_speakers") or [])})
+                         extra={"delete_speakers": list(cfg.get("delete_speakers") or [])},
+                         auto=True, auto_session_id=job.auto_session_id)
     _result: list = [False, ""]
     try:
         ok, err = _check_prereq(outputs_dir, ["subtitle.json", "revision.json"])
@@ -512,7 +528,8 @@ def handler_rough_cut(tid: str, cfg: dict, outputs_dir: Path, api: str,
         # 默认决策：keep（与设计文档 §2.1 默认同源）
         default_decision = str(cfg.get("default_decision") or "keep")
         _log(job, "rough_cut", f"生成切分清单（默认决策={default_decision}）")
-        r = _http_post(api, "/build_cutlist", {"task_id": tid})
+        r = _http_post(api, "/build_cutlist", {"task_id": tid},
+                       auto_session_id=job.auto_session_id)
         if not r.get("ok"):
             _result[0] = False
             _result[1] = f"build_cutlist 失败：{r.get('error')}"
@@ -522,13 +539,15 @@ def handler_rough_cut(tid: str, cfg: dict, outputs_dir: Path, api: str,
         if del_spks:
             _log(job, "rough_cut", f"删除说话人 {del_spks} 的全部记录")
             # link speakers（自动算 rows）
-            r = _http_post(api, "/cut_speaker_link", {"task_id": tid})
+            r = _http_post(api, "/cut_speaker_link", {"task_id": tid},
+                           auto_session_id=job.auto_session_id)
             if not r.get("ok"):
                 _log(job, "rough_cut", f"cut_speaker_link 失败：{r.get('error')}", "warn")
             # 标 actions：每个 spk → delete
             actions = {str(s): "delete" for s in del_spks if s}
             r = _http_post(api, "/save_cut_decisions",
-                           {"task_id": tid, "actions": actions})
+                           {"task_id": tid, "actions": actions},
+                           auto_session_id=job.auto_session_id)
             if not r.get("ok"):
                 _result[0] = False
                 _result[1] = f"save_cut_decisions 失败：{r.get('error')}"
@@ -568,7 +587,8 @@ def handler_rough_compose(tid: str, cfg: dict, outputs_dir: Path, api: str,
             _result[1] = "skip"
             return (True, _result[1])
         _log(job, "rough_compose", "启动粗剪合成")
-        r = _http_post(api, "/compose_rough", {"task_id": tid})
+        r = _http_post(api, "/compose_rough", {"task_id": tid},
+                       auto_session_id=job.auto_session_id)
         if not r.get("ok"):
             _result[0] = False
             _result[1] = f"启动合成失败：{r.get('error')}"
@@ -608,7 +628,8 @@ def handler_optimize(tid: str, cfg: dict, outputs_dir: Path, api: str,
         accept_all = bool(cfg.get("accept_all_replacements", True))
         _log(job, "optimize", "启动优化字幕分析")
         r = _http_post(api, "/optimize_subtitle",
-                       {"task_id": tid, "force": True})
+                       {"task_id": tid, "force": True},
+                       auto_session_id=job.auto_session_id)
         if not r.get("ok"):
             _result[0] = False
             _result[1] = f"启动优化失败：{r.get('error')}"
@@ -622,7 +643,8 @@ def handler_optimize(tid: str, cfg: dict, outputs_dir: Path, api: str,
         if accept_all:
             _log(job, "optimize", "应用全部替换（accepted all applied=True）")
             r = _http_post(api, "/save_optimize_subtitle",
-                           {"task_id": tid, "applied_all": True})
+                           {"task_id": tid, "applied_all": True},
+                           auto_session_id=job.auto_session_id)
             if not r.get("ok"):
                 _result[0] = False
                 _result[1] = f"save_optimize_subtitle 失败：{r.get('error')}"
@@ -654,11 +676,23 @@ def run_pipeline(tid: str, api: str, outputs_dir: Path, *,
     """启动后台守护线程跑流程；已有 running job → False。
 
     api = Gradio FastAPI 应用的 base URL（通常是 `http://127.0.0.1:<port>`）。
+
+    REQ-20260920-081：启动时生成 auto_session_id（uuid4.hex[:12]），写到 job 上，
+    handler 调 _http_post 时透传给后端 endpoint → 写入 execution_history 的
+    auto_session_id 字段 → 前端按 session_id 聚合显示「同一次自动流」。
     """
     if _is_running(tid):
         return False
     _clear_stop(tid)
-    job = PipelineJob(state="running", started_at=time.time(), current_stage=None, percent=0.0)
+    # REQ-20260920-081：本次自动流唯一 ID；12 字符 / 48bit 足够唯一
+    auto_session_id = uuid.uuid4().hex[:12]
+    job = PipelineJob(
+        state="running",
+        started_at=time.time(),
+        current_stage=None,
+        percent=0.0,
+        auto_session_id=auto_session_id,
+    )
     _set_job(tid, job)
 
     def _run() -> None:
