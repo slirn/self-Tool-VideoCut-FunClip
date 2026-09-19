@@ -130,13 +130,17 @@ def _write_atomic(outputs_dir: Path, items: list[dict]) -> None:
 
 
 def record_start(outputs_dir: Path, kind: str, extra: dict | None = None, *,
-                 description: str | None = None, auto: bool = False) -> str:
+                 description: str | None = None, auto: bool = False,
+                 auto_session_id: str = "") -> str:
     """记录一次执行启动（status=running）。返回本次 execution id（start 时生成，
     finish 时按 id 定位同一记录）。
 
     REQ-20260919-075：新增 description（操作描述）和 auto（流程自动触发标识）。
     description 为空时按 kind 从 DEFAULT_DESCRIPTIONS 取默认；stage 自动从
     KIND_TO_STAGE 查（前端分组用）。
+
+    REQ-20260920-081：新增 auto_session_id（流程配置自动执行时的会话 ID），
+    手动调用为空字符串；前端按 session_id 聚合显示「同一次自动流」的多次操作。
 
     失败也吞掉（历史记录失败不影响主流程）。
     """
@@ -156,6 +160,7 @@ def record_start(outputs_dir: Path, kind: str, extra: dict | None = None, *,
             "status": "running",
             "description": desc,
             "auto": bool(auto),
+            "auto_session_id": str(auto_session_id or ""),
             "error": "",
             "extra": extra or {},
         }
@@ -260,8 +265,14 @@ def query_history(outputs_dir: Path, *,
                   kinds: list[str] | None = None,
                   statuses: list[str] | None = None,
                   keyword: str = "",
-                  limit: int = 200) -> list[dict]:
+                  limit: int = 200,
+                  time_from_ts: float | None = None,
+                  time_to_ts: float | None = None,
+                  auto: str = "any") -> list[dict]:
     """REQ-20260918-053：执行日志查询（按阶段/状态过滤 + 关键词搜错误信息）。
+
+    REQ-20260920-081：新增 time_from_ts / time_to_ts（epoch 秒，按 started_at 区间
+    过滤）和 auto（"manual" | "auto" | "any"，按执行模式过滤）。
 
     返回倒序最近 N 条；前端分页用 limit 控制。过滤条件全 AND。
     """
@@ -277,14 +288,28 @@ def query_history(outputs_dir: Path, *,
         status_set = set(statuses)
     else:
         status_set = None
+    auto_mode = (auto or "any").lower()
     out: list[dict] = []
     for it in items:
         if kind_set is not None and it.get("kind") not in kind_set:
             continue
         if status_set is not None and it.get("status") not in status_set:
             continue
+        # 时间段过滤（按 started_at）
+        started = it.get("started_at")
+        if time_from_ts is not None and started is not None and started < time_from_ts:
+            continue
+        if time_to_ts is not None and started is not None and started > time_to_ts:
+            continue
+        # 模式过滤（manual = auto=False；auto = auto=True）
+        if auto_mode == "manual" and it.get("auto"):
+            continue
+        if auto_mode == "auto" and not it.get("auto"):
+            continue
         if kw:
-            blob = (str(it.get("error") or "") + "\n" + str(it.get("kind") or "")).lower()
+            blob = (str(it.get("error") or "") + "\n" + str(it.get("kind") or "")
+                    + "\n" + str(it.get("auto_session_id") or "")
+                    + "\n" + str(it.get("description") or "")).lower()
             if kw not in blob:
                 continue
         out.append(it)
