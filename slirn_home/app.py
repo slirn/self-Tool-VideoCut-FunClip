@@ -4592,6 +4592,24 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
 
         # REQ-20260919-075：auto 透传；检测区域写日志
         _auto = request.headers.get("X-Slirn-Auto") == "1"
+        from slirn_home import execution_history
+
+        # REQ-20260919-075：失败路径也写历史（用包装函数替代裸 return _err）
+        _bg_outputs_dir: Path | None = None
+        _bg_exec_id: str = ""
+
+        def _bg_finish_err(msg: str):
+            """记录失败并返回 _err。"""
+            try:
+                if _bg_exec_id and _bg_outputs_dir:
+                    execution_history.patch_fields(_bg_outputs_dir, _bg_exec_id, {
+                        "description": f"检测失败：{msg[:80]}"
+                    })
+                    execution_history.record_finish(_bg_outputs_dir, _bg_exec_id,
+                                                    success=False, error=msg)
+            except Exception:  # noqa: BLE001
+                pass
+            return _err(msg)
 
         tid = (body.get("task_id") or "").strip()
         algorithm = (body.get("algorithm") or "pixel").strip()
@@ -4609,14 +4627,24 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         except Exception as e:  # noqa: BLE001
             return _err(f"任务不存在: {e}")
 
+        outputs_dir = mgr.tasks_dir / tid / "outputs"
+        _bg_outputs_dir = outputs_dir
+        # REQ-20260919-075：开始记录 — 检测区域
+        exec_id = execution_history.record_start(
+            outputs_dir, execution_history.KIND_FINE_BG_DETECT,
+            extra={"algorithm": algorithm, "threshold": threshold},
+            auto=_auto,
+        )
+        _bg_exec_id = exec_id
+
         fc = _get_fine_compose(mgr, tid)
         bg_mat = fc.get("materials", {}).get("bg") or {}
         bg_path_rel = bg_mat.get("path")
         if not bg_path_rel:
-            return _err("请先上传背景图片")
+            return _bg_finish_err("请先上传背景图片")
         bg_path_abs = _resolve_mat_abs(mgr, tid, fc["materials"], "bg")
         if not bg_path_abs or not bg_path_abs.exists():
-            return _err(f"背景图片文件不存在: {bg_path_rel}")
+            return _bg_finish_err(f"背景图片文件不存在: {bg_path_rel}")
 
         # 加载图片（保留原图分辨率用于 image_native_w/h 反馈）
         try:
@@ -4624,10 +4652,10 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
                 _im.load()
             img = _PILImage.open(bg_path_abs).convert("RGB")
         except Exception as e:  # noqa: BLE001
-            return _err(f"背景图片读取失败: {e}")
+            return _bg_finish_err(f"背景图片读取失败: {e}")
         iw, ih = img.size
         if iw <= 0 or ih <= 0:
-            return _err(f"背景图片尺寸异常: {iw}x{ih}")
+            return _bg_finish_err(f"背景图片尺寸异常: {iw}x{ih}")
 
         # 用户反馈：先缩放到设计空间（1920×1080）再做白色区域扫描，
         # 避免原图分辨率不同时坐标还要再折算，输出坐标即设计空间像素。
@@ -4681,7 +4709,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             ys, xs = _np.where(mask)
             n = int(xs.size)
             if n == 0:
-                return _err(
+                return _bg_finish_err(
                     f"未检测到任何白色像素（threshold={threshold}）；"
                     f"请调低阈值或换张图"
                 )
@@ -4690,6 +4718,16 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             # scan_img 已是 1920×1080，sx=sy=1.0，输出即设计空间像素
             payload = _result_payload(x_min, y_min, x_max, y_max, n, 1.0, 1.0)
             _save_bg_detect_cache(mgr, tid, payload)  # v8：检测后存缓存，避免反复检测
+            # REQ-20260919-075：检测成功时回填执行情况
+            try:
+                execution_history.patch_fields(outputs_dir, exec_id, {
+                    "description": (f"检测算法 {algorithm} 完成：发现白色区域"
+                                    f" ({payload['width']}×{payload['height']} 像素，"
+                                    f" {n} 白色像素)")
+                })
+                execution_history.record_finish(outputs_dir, exec_id, success=True, error="")
+            except Exception as _eh:  # noqa: BLE001
+                log.warning("[bg_detect][%s] history 记录失败: %s", tid, _eh)
             return _ok(**payload)
 
         if algorithm == "center_expand":
@@ -4779,7 +4817,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             ) if vision_alts else (
                 " — 请在顶栏 ⚙️ 注册多模态模型（推荐 qwen-vl-plus）"
             )
-            return _err(
+            return _bg_finish_err(
                 f"AI 颜色识别需多模态模型，当前模型不支持图片输入{hint}"
             )
 
@@ -4790,7 +4828,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         try:
             bl_quad.save(bl_tmp)
         except Exception as e:  # noqa: BLE001
-            return _err(f"左下角象限保存失败: {e}")
+            return _bg_finish_err(f"左下角象限保存失败: {e}")
 
         system_prompt = (
             "你是图像颜色分析助手。用户提供了一张背景图的左下角区域，"
@@ -4809,12 +4847,12 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
                 system_prompt, user_text, [bl_tmp], entry=cur_entry,
             )
         except Exception as e:  # noqa: BLE001
-            return _err(f"AI 颜色识别失败: {e}")
+            return _bg_finish_err(f"AI 颜色识别失败: {e}")
         import re as _re2
         cleaned = _re2.sub(r"```(?:json)?\s*|\s*```", "", raw_color or "").strip()
         s_idx, e_idx = cleaned.find("{"), cleaned.rfind("}")
         if s_idx < 0 or e_idx <= s_idx:
-            return _err(f"AI 颜色输出不是合法 JSON: {(raw_color or '')[:200]}")
+            return _bg_finish_err(f"AI 颜色输出不是合法 JSON: {(raw_color or '')[:200]}")
         try:
             parsed_color = json.loads(cleaned[s_idx:e_idx + 1])
         except Exception as e:  # noqa: BLE001
@@ -4929,14 +4967,17 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
     @app.app.post("/slirn/api/parse_reference_layout")
 
     @app.app.post("/slirn/api/parse_reference_layout")
-    async def parse_reference_layout(body: dict = Body(default_factory=dict)):
+    async def parse_reference_layout(request: Request, body: dict = Body(default_factory=dict)):
         """REQ-20260919-061 Phase C：调多模态模型解析参考位置关系图 → 4 素材布局。
 
         模型选择：自动扫描已注册 entry，挑第一个 _is_vision_entry() 为真的模型；
         若没有则提示用户在顶栏 ⚙️ 注册一个多模态模型（qwen-vl-plus 等）。
         响应：写回 fine_compose.json: layout.{video,subtitle,cover,bg}.{x,y,scale,enabled}。
+
+        REQ-20260919-075：AI 智能布局写执行历史。
         """
-        from slirn_home import llm_config, revision_service
+        from slirn_home import execution_history, llm_config, revision_service
+        _auto = request.headers.get("X-Slirn-Auto") == "1"
 
         tid = (body.get("task_id") or "").strip()
         if not tid:
@@ -4945,6 +4986,14 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             mgr.get(tid)
         except Exception as e:  # noqa: BLE001
             return _err(f"任务不存在: {e}")
+
+        outputs_dir = mgr.tasks_dir / tid / "outputs"
+        # REQ-20260919-075：开始记录 — AI 智能布局
+        exec_id = execution_history.record_start(
+            outputs_dir, execution_history.KIND_FINE_AI_LAYOUT,
+            extra={},
+            auto=_auto,
+        )
 
         # 1. 校验参考图
         fc = _get_fine_compose(mgr, tid)
@@ -5050,11 +5099,22 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             merged[k] = {"x": x, "y": y, "scale": scale, "enabled": enabled}
 
         if not merged:
+            execution_history.patch_fields(outputs_dir, exec_id, {
+                "description": f"AI 未输出任何有效布局（{vision_entry['id']}）"
+            })
+            execution_history.record_finish(outputs_dir, exec_id, success=False,
+                                            error="模型未输出任何有效素材布局")
             return _err(f"模型未输出任何有效素材布局: {(raw or '')[:200]}")
 
         for k, v in merged.items():
             fc["layout"][k] = {**fc["layout"].get(k, {}), **v}
         _save_fine_compose(mgr, tid, fc)
+        # REQ-20260919-075：完成时回填具体执行情况
+        execution_history.patch_fields(outputs_dir, exec_id, {
+            "description": (f"AI 生成布局（{vision_entry['id']}）：{len(merged)} 个素材位置"
+                            f"（{', '.join(merged.keys())}）")
+        })
+        execution_history.record_finish(outputs_dir, exec_id, success=True, error="")
         return _ok(
             layout={k: fc["layout"][k] for k in keys},
             toast=f"✅ AI 已生成布局（{vision_entry['id']}）",
