@@ -628,6 +628,12 @@
           });
         }
       }
+      // REQ-20260920-082：loadPanel 完成时触发默认 BGM 列表加载。
+      // 修复 REQ-20260920-078 遗留 bug：fineDefaultBgmLoad 函数存在但从未被调用，
+      // 导致下拉只有「— 不选 —」一个 option。
+      if (typeof window.fineDefaultBgmLoad === 'function') {
+        try { window.fineDefaultBgmLoad(); } catch (e) { console.warn('[bgm-load]', e); }
+      }
     });
   }
   function saveConfig(taskId) {

@@ -3861,8 +3861,9 @@
 
   // REQ-20260920-078：系统默认 BGM 列表 + 选择（一键选 5 个 lo-fi mp3 之一）。
   // 复用现有 fineSaveAll 自动保存机制（不弹 toast）。
+  // REQ-20260920-082：暴露到 window 让 pipeline.js loadPanel 完成后调用。
   var _defaultBgmsCache = null;
-  async function fineDefaultBgmLoad() {
+  window.fineDefaultBgmLoad = async function fineDefaultBgmLoad() {
     var sel = document.getElementById('slirn-fine-default-bgm');
     if (!sel) return;
     if (sel.dataset.loaded === '1') return;
