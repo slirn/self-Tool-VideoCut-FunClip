@@ -2261,17 +2261,71 @@ _JOB_LOCK = threading.Lock()
 _JOB_TTL_SEC = 300  # 完成后保留 5 分钟，便于前端最后一次查询拿到结果
 
 
-def _cleanup_stale_jobs() -> int:
-    """清理已完成且超过 TTL 的 job。返回清理数量。线程安全。"""
+def _cleanup_stale_jobs(mgr) -> int:
+    """清理已完成且超过 TTL 的 job。返回清理数量。线程安全。
+
+    REQ-20260920-084：清理内存时同步删 .export_job.json。
+    """
     now = time.time()
     removed = 0
     with _JOB_LOCK:
         for jid in list(_JOB_REGISTRY.keys()):
             j = _JOB_REGISTRY[jid]
             if j.finished_at and (now - j.wall_finished_at) > _JOB_TTL_SEC:
+                task_id_to_clean = j.task_id
                 del _JOB_REGISTRY[jid]
                 removed += 1
+                # REQ-20260920-084：内存清理时同步删 .export_job.json
+                try:
+                    _delete_active_export_job(mgr, task_id_to_clean)
+                except Exception:
+                    pass
     return removed
+
+
+# REQ-20260920-084：task 级 active export job 落盘文件（页面刷新后回显用）
+def _active_export_job_path(mgr, tid: str) -> Path:
+    """REQ-20260920-084：task 级 export job 状态文件路径。"""
+    return mgr.tasks_dir / tid / "outputs" / ".export_job.json"
+
+
+def _write_active_export_job(mgr, tid: str, job_id: str, state: str) -> None:
+    """REQ-20260920-084：写 job_id 到 task 级文件，供页面刷新后回查。"""
+    p = _active_export_job_path(mgr, tid)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        import json as _json
+        p.write_text(
+            _json.dumps(
+                {"job_id": job_id, "state": state, "started_at": time.time()},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+    except Exception as e:  # noqa: BLE001
+        log.warning("[REQ-084] 写 .export_job.json 失败: %s", e)
+
+
+def _read_active_export_job(mgr, tid: str) -> dict | None:
+    """REQ-20260920-084：读 task 级 .export_job.json；解析失败返回 None。"""
+    p = _active_export_job_path(mgr, tid)
+    if not p.exists():
+        return None
+    try:
+        import json as _json
+        d = _json.loads(p.read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else None
+    except Exception:
+        return None
+
+
+def _delete_active_export_job(mgr, tid: str) -> None:
+    """REQ-20260920-084：删 task 级文件（job 终态 5 分钟后 / 用户取消 / 失败时）。"""
+    p = _active_export_job_path(mgr, tid)
+    try:
+        p.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 def _kill_proc_with_grace(proc, grace_sec: float = 5.0) -> None:
@@ -2340,6 +2394,9 @@ def _run_fine_render_async(job: _RenderJob, tid: str, mgr, out_path: Path,
                 )
             except Exception:
                 pass
+        # REQ-20260920-084：assemble 失败删 .export_job.json
+        try: _delete_active_export_job(mgr, tid)
+        except Exception: pass
         return
 
     sub_input_tmp = asm["sub_input_tmp"]
@@ -2399,6 +2456,9 @@ def _run_fine_render_async(job: _RenderJob, tid: str, mgr, out_path: Path,
                 )
             except Exception:
                 pass
+        # REQ-20260920-084：ffmpeg 不存在删 .export_job.json
+        try: _delete_active_export_job(mgr, tid)
+        except Exception: pass
         return
 
     job.proc = proc
@@ -2496,6 +2556,9 @@ def _run_fine_render_async(job: _RenderJob, tid: str, mgr, out_path: Path,
                 )
             except Exception:
                 pass
+        # REQ-20260920-084：用户取消删 .export_job.json
+        try: _delete_active_export_job(mgr, tid)
+        except Exception: pass
         return  # 取消路径不判断 returncode
     if proc.returncode == 0:
         job.state = "done"
@@ -2532,6 +2595,9 @@ def _run_fine_render_async(job: _RenderJob, tid: str, mgr, out_path: Path,
                 )
             except Exception:
                 pass
+        # REQ-20260920-084：渲染失败删 .export_job.json
+        try: _delete_active_export_job(mgr, tid)
+        except Exception: pass
 
 
 def _get_fine_compose(mgr, task_id: str) -> dict:
@@ -5803,7 +5869,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             return _err(f"任务不存在: {e}")
 
         # 清理过期 job
-        _cleanup_stale_jobs()
+        _cleanup_stale_jobs(mgr)
 
         # 同一任务已有运行中/排队的 job → 拒绝重启（避免并发写同一文件）
         with _JOB_LOCK:
@@ -5820,6 +5886,8 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         job = _RenderJob(job_id=job_id, task_id=tid)
         with _JOB_LOCK:
             _JOB_REGISTRY[job_id] = job
+        # REQ-20260920-084：写 .export_job.json 落盘文件，供页面刷新后回查
+        _write_active_export_job(mgr, tid, job_id, "queued")
 
         # REQ-20260920-081：执行历史埋点（立即记 running；后台线程 4 个出口都补 finish）
         fc_for_extra = _get_fine_compose(mgr, tid)
@@ -5853,6 +5921,9 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         """REQ-20260919-074：返回指定 job 的实时进度。
 
         前端每 1.5 秒轮询一次。完成后保留 5 分钟供最后一次查询拿到 output_url。
+
+        REQ-20260920-084：elapsed_sec 在 GET 时实时算（基于 time.monotonic()），
+        避免 ffmpeg init 阶段没输出 out_time_ms= 导致进度时间一直 0。
         """
         if not job_id:
             return _err("缺少 job_id")
@@ -5860,11 +5931,18 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             job = _JOB_REGISTRY.get(job_id)
         if not job:
             return _err(f"job 不存在或已过期（>{_JOB_TTL_SEC // 60} 分钟）: {job_id}")
+        # REQ-20260920-084：实时算 elapsed（不依赖 ffmpeg progress 行）
+        if job.state == "running" and job.started_at > 0:
+            elapsed_live = time.monotonic() - job.started_at
+        elif job.state in ("done", "failed", "cancelled") and job.started_at > 0 and job.finished_at > 0:
+            elapsed_live = job.finished_at - job.started_at
+        else:
+            elapsed_live = job.elapsed_sec  # queued 或未启动
         return _ok(
             job_id=job.job_id,
             task_id=job.task_id,
             state=job.state,
-            elapsed_sec=round(job.elapsed_sec, 1),
+            elapsed_sec=round(elapsed_live, 1),
             progress_pct=round(job.progress_pct, 1),
             progress_time_ms=job.progress_time_ms,
             total_duration_ms=job.total_duration_ms,
@@ -5873,6 +5951,49 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             error=job.error,
             output_url=job.output_url,
         )
+
+    @app.app.get("/slirn/api/active_export_for_task")
+    async def active_export_for_task(task_id: str):
+        """REQ-20260920-084：查指定 task 是否有 in-flight 导出 job（页面刷新后回显）。
+
+        优先查内存 _JOB_REGISTRY（权威、实时）；落盘 .export_job.json 兜底
+        （服务重启但 ffmpeg 仍在的场景）。
+        返回：{ok: true, job: {job_id, state, started_at, source, warning?}} 或 job: null
+        """
+        if not task_id:
+            return _err("缺少 task_id")
+        try:
+            mgr.get(task_id)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+
+        # 优先：内存注册表（权威，实时）
+        with _JOB_LOCK:
+            for j in _JOB_REGISTRY.values():
+                if j.task_id == task_id and j.state in ("queued", "running"):
+                    return _ok(job={
+                        "job_id": j.job_id,
+                        "state": j.state,
+                        "started_at": j.wall_started_at,
+                        "source": "registry",
+                    })
+
+        # 兜底：落盘文件（服务重启但 ffmpeg 仍在跑）
+        disk = _read_active_export_job(mgr, task_id)
+        if not disk:
+            return _ok(job=None)
+        job_id_disk = disk.get("job_id") or ""
+        if not job_id_disk:
+            try: _delete_active_export_job(mgr, task_id)
+            except Exception: pass
+            return _ok(job=None)
+        return _ok(job={
+            "job_id": job_id_disk,
+            "state": disk.get("state", "running"),
+            "started_at": disk.get("started_at", 0),
+            "source": "disk",
+            "warning": "内存无此 job（服务可能已重启）；ffmpeg 状态未知",
+        })
 
     @app.app.post("/slirn/api/cancel_render")
     async def cancel_render(body: dict = Body(default_factory=dict)):
