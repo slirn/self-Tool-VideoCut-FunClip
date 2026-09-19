@@ -3855,6 +3855,99 @@
     toast('✅ 已应用「' + (preset === 'full' ? '全幅' : preset === '16x9' ? '16:9 居中' : '1:1 居中') + '」');
   }
 
+  // REQ-20260920-078：系统默认 BGM 列表 + 选择（一键选 5 个 lo-fi mp3 之一）。
+  // 复用现有 fineSaveAll 自动保存机制（不弹 toast）。
+  var _defaultBgmsCache = null;
+  async function fineDefaultBgmLoad() {
+    var sel = document.getElementById('slirn-fine-default-bgm');
+    if (!sel) return;
+    if (sel.dataset.loaded === '1') return;
+    try {
+      var r = await fetch('/slirn/api/list_default_bgms', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: '{}',
+      });
+      var j = await r.json();
+      if (!j.ok) return;
+      _defaultBgmsCache = j.bgms || [];
+      // 清空已有 options（保留「— 不选 —」）
+      while (sel.options.length > 1) sel.remove(1);
+      _defaultBgmsCache.forEach(function(b) {
+        var opt = document.createElement('option');
+        opt.value = b.id;
+        if (b.available) {
+          var mb = (b.size_bytes / 1048576).toFixed(1);
+          opt.textContent = '🎵 ' + b.name + '（' + mb + ' MB）';
+        } else {
+          opt.textContent = '⚠️ ' + b.name + '（文件缺失）';
+          opt.disabled = true;
+        }
+        sel.appendChild(opt);
+      });
+      sel.dataset.loaded = '1';
+      // 同步当前 fc.materials.audio.path → 对应 ID
+      fineDefaultBgmSyncFromFc();
+    } catch (e) {
+      console.warn('[list_default_bgms]', e);
+    }
+  }
+
+  function fineDefaultBgmSyncFromFc() {
+    var sel = document.getElementById('slirn-fine-default-bgm');
+    if (!sel) return;
+    // 从页面状态推断：当前 audio 路径里若含 "<bgm_id>.mp3" 则选中
+    var matPath = '';
+    // 通过现有 audio 控件的 data-* 推断（materials.audio.path 由 save 时收集）
+    // 简化：直接对比 _lastSavedAudioPath（保存回调里写入）
+    if (window._slirnFineAudioPath) {
+      var fname = String(window._slirnFineAudioPath).split('/').pop() || '';
+      var match = _defaultBgmsCache && _defaultBgmsCache.find(function(b) {
+        return fname === b.id + '.mp3';
+      });
+      sel.value = match ? match.id : '';
+    }
+  }
+
+  async function fineDefaultBgmSelect(bgmId, tid) {
+    if (!bgmId) {
+      // 选「— 不选（清空）—」：不动 fc.materials.audio（保留已上传 BGM）；
+      // 只清掉自动启用标记，不强制取消
+      return;
+    }
+    try {
+      var r = await fetch('/slirn/api/select_default_bgm', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({task_id: tid, bgm_id: bgmId}),
+      });
+      var j = await r.json();
+      if (!j.ok) { toast('❌ ' + (j.error || '选择失败')); return; }
+      toast(j.toast || '✅ 已选 BGM');
+      // 自动勾选「启用背景音乐」checkbox
+      var cb = document.querySelector('.slirn-fine-enabled[data-key="audio"]');
+      if (cb && !cb.checked) {
+        cb.checked = true;
+        cb.dispatchEvent(new Event('change', {bubbles: true}));
+      }
+      // 触发 fineSaveAll 自动保存（后台静默，showToast=false, asTemplate=false）
+      if (typeof fineSaveAll === 'function') {
+        try { await fineSaveAll(false, false); } catch (e) { /* 静默 */ }
+      }
+      // 缓存当前路径，供 sync 用
+      window._slirnFineAudioPath = 'materials/audio/' + bgmId + '.mp3';
+    } catch (e) {
+      toast('❌ 网络错误: ' + (e.message || e));
+    }
+  }
+
+  // 委托 change 事件：用户在「📦 系统默认 BGM」下拉选某项
+  document.addEventListener('change', function(e) {
+    if (e.target && e.target.id === 'slirn-fine-default-bgm') {
+      var _tid = e.target.getAttribute('data-task-id') || _fineTid();
+      var val = e.target.value || '';
+      fineDefaultBgmSelect(val, _tid);
+    }
+  });
+
   // REQ-20260919-062 v14 用户反馈：视频缩放 = 视频原裁剪宽度 / 背景图片宽度。
   // 公式 scale = crop_w / 1920。点「🎯 按裁剪宽度」按钮应用此公式。
   // 设计空间 bg_w = 1920；视频裁剪宽度 = crop_w（来自滑块）。
