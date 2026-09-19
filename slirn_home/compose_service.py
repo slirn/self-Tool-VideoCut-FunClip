@@ -209,11 +209,14 @@ def compose_from_srt(src: Path, srt_path: Path, dst: Path, on_progress=None) -> 
     return result
 
 
-def delete_rough_compose(outputs_dir: Path, *, auto: bool = False) -> dict:
+def delete_rough_compose(outputs_dir: Path, *, auto: bool = False,
+                       auto_session_id: str = "") -> dict:
     """删除粗剪成片（mp4 + srt 副产物）。同步、毫秒级，不进 job 表。
 
     REQ-20260919-075：删除操作本身也写执行历史（之前只有合成动作记录），
     便于"查看历史时看到删除粗剪成品"。
+
+    REQ-20260920-081：auto_session_id 透传，同一次自动流的多次操作共用 session_id。
 
     Returns:
         {"deleted": bool, "removed": [...], "remaining": [...], "message": str}
@@ -236,6 +239,7 @@ def delete_rough_compose(outputs_dir: Path, *, auto: bool = False) -> dict:
             out_dir, execution_history.KIND_ROUGH_COMPOSE_DELETE,
             extra={"removed": removed, "remaining": remaining},
             auto=auto,
+            auto_session_id=auto_session_id,
         )
         if removed:
             execution_history.patch_fields(out_dir, eid, {
@@ -437,10 +441,12 @@ def job_status(task_id: str) -> dict | None:
 
 
 def start_compose(task_id: str, video_path: Path, intervals_ms: list[tuple[int, int]],
-                  dst: Path, lines: list[dict], *, auto: bool = False) -> bool:
+                  dst: Path, lines: list[dict], *, auto: bool = False,
+                  auto_session_id: str = "") -> bool:
     """启动合成线程。已在跑 → 返回 False（不重复起）。
 
     REQ-20260919-075：auto 透传到 execution_history。
+    REQ-20260920-081：auto_session_id 透传，同一次自动流的多次操作共用 session_id。
     """
     with _JOBS_LOCK:
         existing = _JOBS.get(task_id)
@@ -456,7 +462,8 @@ def start_compose(task_id: str, video_path: Path, intervals_ms: list[tuple[int, 
     exec_id = execution_history.record_start(
         outputs_dir, execution_history.KIND_ROUGH_COMPOSE,
         extra={"intervals": len(intervals_ms), "lines": len(lines)},
-        auto=auto)
+        auto=auto,
+        auto_session_id=auto_session_id)
 
     def _run():
         job = _JOBS[task_id]

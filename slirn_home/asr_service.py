@@ -347,6 +347,7 @@ def start_job(
     on_success: Callable[[list[dict]], None] | None = None,
     *,
     auto: bool = False,
+    auto_session_id: str = "",
 ) -> bool:
     """启动字幕生成线程。已在跑 → 返回 False（不重复起）。
 
@@ -356,6 +357,9 @@ def start_job(
 
     REQ-20260919-075：auto=True 表示流程自动触发（pipeline_service 调用），
     写入 execution_history 的 auto 字段用于前端区分手动/自动。
+
+    REQ-20260920-081：auto_session_id 透传给 execution_history，便于前端聚合显示
+    「同一次自动流」。手动调用时为空字符串。
     """
     with _JOBS_LOCK:
         existing = _JOBS.get(task_id)
@@ -374,7 +378,8 @@ def start_job(
     # REQ-20260919-075：传 auto 让 history 标记自动/手动。
     exec_id = execution_history.record_start(
         outputs_dir, execution_history.KIND_SUBTITLE_GENERATION,
-        extra={"sd": sd, "source": source}, auto=auto)
+        extra={"sd": sd, "source": source}, auto=auto,
+        auto_session_id=auto_session_id)
 
     def _run():
         job = _JOBS[task_id]
