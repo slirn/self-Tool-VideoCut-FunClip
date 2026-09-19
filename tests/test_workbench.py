@@ -5124,6 +5124,48 @@ def test_cancel_render_returns_err_for_unknown_job(tmp_path):
     assert "不存在" in body.get("error", "")
 
 
+def test_render_async_uses_line_buffered_stdout():
+    """REQ-20260920-077：_run_fine_render_async 应在 Popen 后手动重包
+    stdout/stderr 为 line-buffered TextIOWrapper。
+
+    原实现 `text=True, bufsize=1` 在 Windows 上无效：`text=True` 会用
+    io.TextIOWrapper 包装 stdout，默认 8KB 缓冲；ffmpeg 每 ~0.4s 写一行
+    `out_time_ms=...`，Python 要等攒够 8KB 才喂给 readline()，进度条
+    看似卡住 5-15 秒。
+
+    改用 `bufsize=0`（unbuffered 给底层 BufferedReader）+ 手动重包
+    `io.TextIOWrapper(..., line_buffering=True)` 保证每行立即 flush。
+
+    此测试只做源码静态检查（不启动真实 ffmpeg，避免依赖 + 耗时）。
+    """
+    import inspect
+    from slirn_home import app as _appmod
+
+    src = inspect.getsource(_appmod._run_fine_render_async)
+    # 1. Popen 调用本身不应再使用 `text=True`（用更精确的检查：找 Popen 后面的 kwargs 区域）
+    import re
+    popen_match = re.search(r"subprocess\.Popen\(([^)]+)\)", src, flags=re.DOTALL)
+    assert popen_match, "REQ-077：_run_fine_render_async 应有 subprocess.Popen 调用"
+    popen_kwargs = popen_match.group(1)
+    assert "text=True" not in popen_kwargs, (
+        "REQ-077：Popen kwargs 不应再使用 text=True（Windows 8KB 缓冲卡死）。"
+        f"当前 Popen 参数:\n{popen_kwargs[:300]}"
+    )
+    # 2. 必须显式重包 stdout 为 line_buffering TextIOWrapper
+    assert "io.TextIOWrapper" in src, (
+        "REQ-077：应使用 io.TextIOWrapper 重包 stdout/stderr"
+    )
+    assert "line_buffering=True" in src, (
+        "REQ-077：TextIOWrapper 必须显式 line_buffering=True 才能解决 8KB 缓冲"
+    )
+    assert "proc.stdout" in src, (
+        "REQ-077：应重包 proc.stdout"
+    )
+    assert "proc.stderr" in src, (
+        "REQ-077：应重包 proc.stderr（错误信息读取也走 TextIOWrapper）"
+    )
+
+
 def test_router_fine_export_calls_async_endpoint_with_progress_modal():
     """REQ-20260919-074：router.js 中 fine-export 应走异步路径 +
     openFineExportProgress 弹出模态框。

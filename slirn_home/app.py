@@ -2207,10 +2207,17 @@ def _run_fine_render_async(job: _RenderJob, tid: str, mgr, out_path: Path) -> No
     ]
 
     # 启动 ffmpeg
+    # REQ-20260920-077：解 Windows TextIOWrapper 8KB 缓冲卡死。
+    # 原写法 `text=True, bufsize=1` 在 Windows 上无效 — `text=True` 会用
+    # `io.TextIOWrapper` 包装 stdout，默认 8KB 缓冲；ffmpeg 每 ~0.4s 写一行
+    # `out_time_ms=...`（~20 字节），要攒够 8KB 才喂给 `readline()`，进度条
+    # 看似卡住 5-15 秒。改用 `text=False, bufsize=0`（unbuffered 给底层
+    # BufferedReader），再手动重包为 `TextIOWrapper(line_buffering=True)`
+    # 保证每行立即 flush。
     try:
         proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", bufsize=1,
+            bufsize=0,
         )
     except FileNotFoundError:
         job.state = "failed"
@@ -2223,6 +2230,20 @@ def _run_fine_render_async(job: _RenderJob, tid: str, mgr, out_path: Path) -> No
         return
 
     job.proc = proc
+
+    # REQ-20260920-077：重包 stdout/stderr 为 line-buffered TextIOWrapper。
+    # 原 `text=True` 在 Windows 上的 8KB 默认缓冲会让 `out_time_ms` 行被积压，
+    # 导致进度看似卡死。改为手动重包并显式 `line_buffering=True`，每行立即 flush。
+    import io as _io
+    proc.stdout = _io.TextIOWrapper(
+        proc.stdout, encoding="utf-8", newline="\n",
+        line_buffering=True,
+    )
+    if proc.stderr:
+        proc.stderr = _io.TextIOWrapper(
+            proc.stderr, encoding="utf-8", newline="\n",
+            line_buffering=True,
+        )
 
     # 主循环：读 stdout（progress key=value），算 elapsed + ETA
     last_update = 0.0
