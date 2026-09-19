@@ -3663,3 +3663,27 @@ input[type="checkbox"]:focus-visible {
 }
 .slirn-fine-export-status[data-state="done"] .slirn-fine-export-bar { background: #2ea043; }
 .slirn-fine-export-status[data-state="failed"] .slirn-fine-export-bar { background: #d1242f; }
+
+/* REQ-20260920-078：系统默认 BGM 下拉（一键选 5 个 lo-fi mp3 之一） */
+.slirn-fine-default-bgm-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border, rgba(128,128,128,0.25));
+}
+.slirn-fine-default-bgm-select {
+  flex: 1;
+  padding: 5px 8px;
+  font-size: 12px;
+  border: 1px solid var(--border, rgba(128,128,128,0.3));
+  border-radius: 6px;
+  background: var(--input-bg, #fff);
+  color: var(--text, #1e293b);
+  cursor: pointer;
+}
+.slirn-fine-default-bgm-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
