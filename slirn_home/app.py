@@ -1581,6 +1581,41 @@ _FINE_OUTPUT_DEFAULTS = {
     "codec":       "h264",
     "audio_codec": "aac",
 }
+
+
+# REQ-20260920-078：系统默认 BGM 备选列表（绝对路径硬编码，不动态扫描）。
+# 来源目录：D:\tmp\tttttt\（用户给的固定路径，不进 git）。
+# 启动时校验 available；缺失则 UI 灰显，不报错。
+_DEFAULT_BGMS_DIR = Path(r"D:\tmp\tttttt")
+_DEFAULT_BGMS = [
+    {"id": "lofi_beat_1",    "name": "Pretty John — Lo-Fi Beat",
+     "filename": "prettyjohn1-lo-fi-beat-580021.mp3"},
+    {"id": "lofi_love_loop", "name": "Sonican — Sentimental Jazzy Love",
+     "filename": "sonican-lo-fi-music-loop-sentimental-jazzy-love-473154.mp3"},
+    {"id": "the_mountain",   "name": "The Mountain — Lo-Fi Beat",
+     "filename": "the_mountain-lo-fi-beat-567432.mp3"},
+    {"id": "zephira_lofi",   "name": "Zephira Music — Lo-Fi",
+     "filename": "zephiramusic-lo-fi-581502.mp3"},
+    {"id": "zephira_relax",  "name": "Zephira Music — Relaxing Lo-Fi",
+     "filename": "zephiramusic-relaxing-lo-fi-587547.mp3"},
+]
+
+
+def _get_default_bgms() -> list[dict]:
+    """返回系统默认 BGM 列表（启动时校验存在性，available 字段标识）。"""
+    out = []
+    for bgm in _DEFAULT_BGMS:
+        p = _DEFAULT_BGMS_DIR / bgm["filename"]
+        size = 0
+        if p.exists():
+            try:
+                size = p.stat().st_size
+            except OSError:
+                size = 0
+        out.append({**bgm, "available": p.exists(), "size_bytes": size})
+    return out
+
+
 # REQ-20260919-061 用户补充：video/subtitle 既可手动上传，也可默认从上游产物获取
 _FINE_AUTO_KINDS = frozenset({"video", "subtitle"})
 
@@ -2832,6 +2867,13 @@ def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
         f'</div>'
         f'<div class="slirn-form-hint">上传 mp3/wav/m4a 文件 → 原说话人语音 + BGM 同时播放；'
         f'短 BGM 自动循环填充。</div>'
+        # REQ-20260920-078：系统默认 BGM 下拉（一键选 5 个 lo-fi mp3 之一）
+        f'<div class="slirn-fine-default-bgm-row">'
+        f'<span class="slirn-fine-actions-label">📦 系统默认 BGM</span>'
+        f'<select id="slirn-fine-default-bgm" class="slirn-fine-default-bgm-select">'
+        f'<option value="">— 不选（清空选择）—</option>'
+        f'</select>'
+        f'</div>'
         f'</div>'
     )
 
@@ -5223,6 +5265,70 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
                     pass  # 非法值跳过
         _save_fine_compose(mgr, tid, fc)
         return _ok(toast="背景音乐设置已保存")
+
+    # ---------- 精剪视频·系统默认 BGM（REQ-20260920-078） ----------
+    @app.app.post("/slirn/api/list_default_bgms")
+    async def list_default_bgms(body: dict = Body(default_factory=dict)):
+        """REQ-20260920-078：列出系统默认 BGM（带 available 标记）。
+
+        前端在精剪面板「🎵 背景音乐」块加载时 fetch，渲染下拉选项；
+        文件缺失则灰显，避免运行时崩溃。
+        """
+        return _ok(bgms=_get_default_bgms())
+
+    @app.app.post("/slirn/api/select_default_bgm")
+    async def select_default_bgm(body: dict = Body(default_factory=dict)):
+        """REQ-20260920-078：选某个系统默认 BGM → 复制到任务目录 + 写 fc。
+
+        流程：
+        1. 校验 bgm_id 在白名单内
+        2. 校验源文件存在
+        3. shutil.copy2 复制到 tasks/{tid}/materials/audio/<id>.mp3
+        4. fc.materials.audio = {"path": "materials/audio/<id>.mp3"}
+        5. fc.audio.enabled = True（自动启用）
+        6. 返回 audio_url 用于前端预览
+        """
+        import shutil as _sh
+        tid = (body.get("task_id") or "").strip()
+        bgm_id = (body.get("bgm_id") or "").strip()
+        if not tid or not bgm_id:
+            return _err("缺少 task_id 或 bgm_id")
+        bgm = next((b for b in _DEFAULT_BGMS if b["id"] == bgm_id), None)
+        if not bgm:
+            return _err(f"未知的 bgm_id: {bgm_id}")
+        src = _DEFAULT_BGMS_DIR / bgm["filename"]
+        if not src.exists():
+            return _err(f"系统默认 BGM 文件不存在: {src}")
+        try:
+            t = mgr.get(tid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+        if not t:
+            return _err(f"任务不存在: {tid}")
+
+        # 目标路径：tasks/{tid}/materials/audio/<id>.mp3
+        mat_dir = mgr.tasks_dir / tid / "materials" / "audio"
+        mat_dir.mkdir(parents=True, exist_ok=True)
+        dst = mat_dir / f"{bgm_id}.mp3"
+        try:
+            _sh.copy2(src, dst)
+        except OSError as e:
+            return _err(f"复制 BGM 失败: {e}")
+
+        # 写 fc：materials.audio.path + audio.enabled=True
+        fc = _get_fine_compose(mgr, tid)
+        fc.setdefault("materials", {})["audio"] = {
+            "path": f"materials/audio/{bgm_id}.mp3",
+        }
+        fc.setdefault("audio", {})["enabled"] = True
+        _save_fine_compose(mgr, tid, fc)
+
+        audio_url = f"/slirn/api/video/{tid}?src=mat&kind=audio&t={int(time.time())}"
+        return _ok(
+            audio_url=audio_url,
+            name=bgm["name"],
+            toast=f"✅ 已选 BGM: {bgm['name']}",
+        )
 
     # ---------- 精剪视频·全局参数模板（REQ-20260919-061 扩展：跨任务复用） ----------
     from slirn_home import fine_profiles as _fine_profiles
