@@ -6627,3 +6627,279 @@ def test_upload_non_audio_does_not_toggle_audio_enabled(tmp_path):
     assert fc_after["audio"]["enabled"] is False, (
         "REQ-085：上传 cover/video 不应改变 audio.enabled 状态"
     )
+
+
+# =====================================================================
+# REQ-20260920-086：执行日志 → 移除工作台顶部折叠卡 + 分页 tab + 阶段分隔条
+# =====================================================================
+
+def test_workbench_does_not_render_exec_history_card(tmp_path):
+    """REQ-086：工作台 HTML 不再含 .slirn-exec-card（折叠卡移到日志 tab）。
+    REQ-086 顺带修复历史 BUG：日志 pane（id=slirn-wb-pane-logs）之前根本没渲染，
+    现在也补上（默认 display:none，点 rail logs tab 才显示）。"""
+    from slirn_home.app import _render_workbench
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="no-exec-card", original_video=video)
+    html = _render_workbench(t.task_id, m)
+    # 顶部折叠卡类不再出现
+    assert 'slirn-exec-card' not in html, (
+        "REQ-086：工作台顶部「📜 执行历史」折叠卡应已被移除，"
+        "但 HTML 中仍出现 .slirn-exec-card"
+    )
+    # 但日志面板（pane）仍渲染（点击 logs tab 后可见）
+    # REQ-086：之前是历史 BUG——pane_html 只迭代 _WB_STAGES，logs 不在其中，
+    # 所以 id="slirn-wb-pane-logs" 从未出现在 HTML 里；现已修复。
+    assert 'id="slirn-wb-pane-logs"' in html, (
+        "REQ-086：日志面板（pane）必须保留在 _render_workbench 渲染里"
+    )
+    # 日志 pane 默认隐藏（focus 不是 logs）
+    import re
+    m_pane = re.search(r'<div class="slirn-wb-pane" id="slirn-wb-pane-logs"[^>]*>', html)
+    assert m_pane, "REQ-086：logs pane 必须在 HTML 中"
+    pane_open_tag = m_pane.group(0)
+    assert "display:none" in pane_open_tag, (
+        f"REQ-086：logs pane 默认应隐藏（focus 不是 logs），"
+        f"实际 open tag={pane_open_tag}"
+    )
+    assert 'slirn-logs-pane' in html, "REQ-086：日志面板类仍存在"
+
+
+def test_workbench_rail_has_divider_before_logs(tmp_path):
+    """REQ-086：rail 在 logs stage 之前有 .slirn-wb-rail-divider。"""
+    from slirn_home.app import _render_workbench
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="rail-divider", original_video=video)
+    html = _render_workbench(t.task_id, m)
+    # 分隔条存在
+    assert 'slirn-wb-rail-divider' in html, (
+        "REQ-086：应在 rail 加 .slirn-wb-rail-divider 分隔条，"
+        "明确「执行日志不属于流水线阶段」"
+    )
+    # 分隔条位置：在 logs stage 之前（DOM 顺序）
+    divider_idx = html.find('slirn-wb-rail-divider')
+    logs_idx = html.find('slirn-wb-stage-logs')
+    assert divider_idx >= 0 and logs_idx >= 0 and divider_idx < logs_idx, (
+        f"REQ-086：分隔条应位于 logs stage 之前；"
+        f"divider_idx={divider_idx}, logs_idx={logs_idx}"
+    )
+    # 分隔条文案带「不属于流水线阶段」
+    assert "不属于流水线阶段" in html, (
+        "REQ-086：分隔条文字应包含「不属于流水线阶段」"
+    )
+
+
+def test_workbench_logs_stage_has_extra_class(tmp_path):
+    """REQ-086：logs stage 含 .slirn-wb-stage-extra 类（修 wbAutoNextMaybe 选择器对齐）。"""
+    from slirn_home.app import _render_workbench
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="logs-extra-class", original_video=video)
+    html = _render_workbench(t.task_id, m)
+    # logs stage 的 class 含 'slirn-wb-stage-extra'
+    # 用正则定位 logs stage 的 class 字符串
+    import re
+    m_logs = re.search(
+        r'class="slirn-wb-stage[^"]*slirn-wb-stage-logs[^"]*"',
+        html,
+    )
+    assert m_logs, (
+        "REQ-086：找不到 logs stage 的 class 字符串"
+    )
+    cls = m_logs.group(0)
+    assert "slirn-wb-stage-extra" in cls, (
+        f"REQ-086：logs stage class 必须含 slirn-wb-stage-extra，"
+        f"否则 router.js wbAutoNextMaybe 的 :not(.slirn-wb-stage-extra) "
+        f"会把它当流水线阶段处理；实际 class={cls}"
+    )
+
+
+def test_render_exec_logs_pane_has_pager(tmp_path):
+    """REQ-086：日志面板 HTML 含分页控件 .slirn-logs-pager。"""
+    from slirn_home.app import _render_exec_logs_pane
+
+    html = _render_exec_logs_pane("test-task-id")
+    # 分页容器
+    assert 'slirn-logs-pager' in html, (
+        "REQ-086：日志面板必须含 .slirn-logs-pager 分页容器"
+    )
+    # 四个翻页按钮
+    for action in ("first", "prev", "next", "last"):
+        assert f'data-pager="{action}"' in html, (
+            f"REQ-086：分页必须有「{action}」按钮"
+        )
+    # 每页大小下拉
+    assert 'slirn-pager-size' in html, (
+        "REQ-086：必须有每页大小下拉 .slirn-pager-size"
+    )
+    # 信息显示元素
+    assert 'data-bind="page"' in html
+    assert 'data-bind="total-pages"' in html
+    assert 'data-bind="total"' in html
+
+
+def _seed_execution_history(outputs_dir, n: int, status: str = "success",
+                            base_ts: float = 1700000000.0):
+    """REQ-086 测试辅助：往 outputs_dir 写 n 条 execution history 记录。
+
+    用 record_start / record_finish 写完后，**直接改 execution_history.json 的
+    started_at**（让排序可预测；record_start 内部用 time.time() 无法直接控制）。
+    """
+    import json as _json
+    from slirn_home.execution_history import (
+        KIND_SUBTITLE_GENERATION, record_start, record_finish,
+    )
+
+    for i in range(n):
+        rid = record_start(outputs_dir, kind=KIND_SUBTITLE_GENERATION,
+                          description=f"rec-{i}", extra={"idx": i})
+        record_finish(outputs_dir, rid, success=(status == "success"),
+                      error="" if status == "success" else "fake error")
+
+    # 改 started_at 让排序可预测（rec-i 的 started_at = base_ts + i）
+    hist_file = outputs_dir / "execution_history.json"
+    if not hist_file.exists():
+        # 写兜底
+        hist_file.parent.mkdir(parents=True, exist_ok=True)
+        hist_file.write_text("[]", encoding="utf-8")
+    items = _json.loads(hist_file.read_text(encoding="utf-8"))
+    # 按 idx 排序后改 started_at
+    items.sort(key=lambda x: (x.get("extra") or {}).get("idx", 0))
+    for i, it in enumerate(items):
+        it["started_at"] = base_ts + i
+        it["finished_at"] = base_ts + i + 5
+        it["duration_ms"] = 5000
+    _json.dump_atomic = None  # noqa
+    hist_file.write_text(_json.dumps(items, ensure_ascii=False), encoding="utf-8")
+    return items
+
+
+def test_list_logs_supports_offset_and_returns_total_pages(tmp_path):
+    """REQ-086：list_logs 端点支持 offset + 返回 total / page / page_size / total_pages。"""
+    from fastapi.testclient import TestClient
+    from slirn_home.app import build_app
+
+    mgr, video = _make_mgr(tmp_path)
+    t = mgr.create(name="logs-paged-test", original_video=video)
+    outputs_dir = mgr.tasks_dir / t.task_id / "outputs"
+
+    _seed_execution_history(outputs_dir, n=25)
+
+    app = build_app(repo_root=tmp_path)
+    client = TestClient(app.app)
+
+    # 默认请求（不传 offset/page）：应返回第 1 页 20 条
+    r = client.post("/slirn/api/list_logs", json={"task_id": t.task_id})
+    body = r.json()
+    assert body["ok"] is True, body
+    assert body["total"] == 25, f"total 应为 25，得到 {body['total']}"
+    assert body["page"] == 1, f"page 应为 1，得到 {body['page']}"
+    assert body["page_size"] == 20, f"page_size 应为 20（默认值），得到 {body['page_size']}"
+    assert body["total_pages"] == 2, f"25/20 应为 2 页，得到 {body['total_pages']}"
+    assert len(body["items"]) == 20, f"第 1 页应 20 条，得到 {len(body['items'])}"
+
+    # 第 2 页（offset=20）：应返回剩余 5 条
+    r2 = client.post("/slirn/api/list_logs",
+                     json={"task_id": t.task_id, "offset": 20})
+    body2 = r2.json()
+    assert body2["ok"] is True, body2
+    assert body2["page"] == 2, f"page 应为 2，得到 {body2['page']}"
+    assert body2["total"] == 25
+    assert body2["total_pages"] == 2
+    assert len(body2["items"]) == 5, f"第 2 页应 5 条，得到 {len(body2['items'])}"
+
+    # 第 1 页和第 2 页数据不重叠
+    ids_p1 = {it["id"] for it in body["items"]}
+    ids_p2 = {it["id"] for it in body2["items"]}
+    assert ids_p1.isdisjoint(ids_p2), "REQ-086：第 1 页和第 2 页数据不应重叠"
+
+
+def test_list_logs_offset_uses_page_param(tmp_path):
+    """REQ-086：list_logs 端点支持 page 参数（1-based）→ 自动转 offset。"""
+    from fastapi.testclient import TestClient
+    from slirn_home.app import build_app
+
+    mgr, video = _make_mgr(tmp_path)
+    t = mgr.create(name="page-param-test", original_video=video)
+    outputs_dir = mgr.tasks_dir / t.task_id / "outputs"
+
+    _seed_execution_history(outputs_dir, n=7)
+
+    app = build_app(repo_root=tmp_path)
+    client = TestClient(app.app)
+
+    # page=2 limit=3 → offset=3, 应返回 3 条（rec-3/2/1，倒序）
+    r = client.post("/slirn/api/list_logs",
+                    json={"task_id": t.task_id, "page": 2, "limit": 3})
+    body = r.json()
+    assert body["ok"] is True, body
+    assert body["page"] == 2
+    assert body["total"] == 7
+    assert body["page_size"] == 3
+    assert body["total_pages"] == 3, f"7/3 应为 3 页（ceil(7/3)），得到 {body['total_pages']}"
+    assert len(body["items"]) == 3, f"第 2 页 3 条，得到 {len(body['items'])}"
+
+
+def test_list_logs_total_reflects_filtered_count(tmp_path):
+    """REQ-086：total = 过滤后总数（不被 limit 截断；30 条 success + 5 条 failed）。"""
+    from fastapi.testclient import TestClient
+    from slirn_home.app import build_app
+
+    mgr, video = _make_mgr(tmp_path)
+    t = mgr.create(name="total-filtered", original_video=video)
+    outputs_dir = mgr.tasks_dir / t.task_id / "outputs"
+
+    # 30 条 success + 5 条 failed
+    _seed_execution_history(outputs_dir, n=30, status="success", base_ts=1700000000.0)
+    _seed_execution_history(outputs_dir, n=5, status="failed", base_ts=1700000100.0)
+
+    app = build_app(repo_root=tmp_path)
+    client = TestClient(app.app)
+
+    # 只看 failed：limit=10 → total 应是 5（不是 10），total_pages=1
+    r = client.post("/slirn/api/list_logs",
+                    json={"task_id": t.task_id, "statuses": ["failed"], "limit": 10})
+    body = r.json()
+    assert body["ok"] is True, body
+    assert body["total"] == 5, f"REQ-086：total 应为过滤后总数 5，得到 {body['total']}"
+    assert body["total_pages"] == 1
+    assert len(body["items"]) == 5
+
+    # 只看 success：limit=10 → total=30，total_pages=3
+    r2 = client.post("/slirn/api/list_logs",
+                     json={"task_id": t.task_id, "statuses": ["success"], "limit": 10})
+    body2 = r2.json()
+    assert body2["total"] == 30
+    assert body2["total_pages"] == 3
+    assert len(body2["items"]) == 10
+
+
+def test_router_logs_state_has_page_and_page_size():
+    """REQ-086：router.js logsState 必须含 page / pageSize 字段。"""
+    FUNCLIP_ROOT = Path(__file__).resolve().parent.parent
+    router_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "router.js").read_text(
+        encoding="utf-8"
+    )
+    # 找 logsState 对象定义
+    import re
+    m = re.search(r"var logsState\s*=\s*\{[^}]*\}", router_js)
+    assert m, "router.js 找不到 logsState 定义"
+    body = m.group(0)
+    assert "page:" in body, "REQ-086：logsState 必须含 page 字段"
+    assert "pageSize:" in body, "REQ-086：logsState 必须含 pageSize 字段"
+    # 翻页按钮 click handler 存在
+    assert "slirn-pager-btn" in router_js, (
+        "REQ-086：router.js 必须处理 .slirn-pager-btn click"
+    )
+    assert "data-pager" in router_js, (
+        "REQ-086：router.js 必须读 data-pager 属性"
+    )
+    # 过滤变化重置 page
+    assert "logsState.page = 1" in router_js, (
+        "REQ-086：router.js 过滤变化时必须重置 logsState.page = 1"
+    )
+    # _renderLogsPager 函数
+    assert "_renderLogsPager" in router_js, (
+        "REQ-086：router.js 必须有 _renderLogsPager 函数"
+    )

@@ -244,7 +244,12 @@ def test_execution_history_endpoint(tmp_path: Path):
 
 
 def test_render_workbench_exec_card(tmp_path: Path):
-    """工作台顶部渲染执行历史卡片：折叠壳 + 倒序行 + 空态文案。"""
+    """REQ-20260920-086：折叠卡已删除；工作台 HTML 不再渲染 exec:history 折叠壳。
+
+    旧版（REQ-048）会在工作台顶部渲染「📜 执行历史」折叠卡。REQ-086 把日志
+    展示统一到 rail logs tab + 分页；折叠卡删除。日志条目现在通过
+    /slirn/api/list_logs 端点 + 前端 loadLogs 拉取 + 分页显示。
+    """
     from tasklib import TaskManager
 
     from slirn_home.app import _render_workbench
@@ -268,20 +273,23 @@ def test_render_workbench_exec_card(tmp_path: Path):
     record_finish(outputs_dir, e2, success=False, error="no audio")
 
     html = _render_workbench(t.task_id, mgr)
-    # 折叠壳 + 头
-    assert 'data-col-key="exec:history"' in html
-    assert "📜 执行历史" in html
-    # 两条行：成功 / 失败
-    assert "✅ 成功" in html
-    assert "❌ 失败" in html
-    assert "no audio" in html, "失败行的 error 必须可见"
-    assert "5 区间" in html, "extra 摘要（5 区间）必须渲染"
-    # 共 2 次徽章
-    assert "2 次" in html
+    # REQ-086：折叠卡已移除（不再渲染 data-col-key="exec:history"）
+    assert 'data-col-key="exec:history"' not in html, (
+        "REQ-086：工作台顶部「📜 执行历史」折叠卡应已被移除"
+    )
+    assert "尚无执行记录" not in html, (
+        "REQ-086：折叠卡的空态文案「尚无执行记录」也应不再渲染"
+    )
+    # 但 rail 上 logs stage + 分隔条仍渲染（日志改走 tab）
+    assert "📜 执行日志" in html
+    assert "不属于流水线阶段" in html
+    # 日志面板（pane）也渲染（之前历史 BUG：pane_html 只迭代 _WB_STAGES，
+    # logs 不在其中 → id="slirn-wb-pane-logs" 根本不出现，REQ-086 修复）
+    assert 'id="slirn-wb-pane-logs"' in html
 
 
 def test_render_workbench_exec_card_empty_state(tmp_path: Path):
-    """无任何执行记录 → 友好空态（不显示空列表）。"""
+    """REQ-20260920-086：折叠卡已删除；空态文案也不再渲染（信息现在在 logs tab 里）。"""
     from tasklib import TaskManager
 
     from slirn_home.app import _render_workbench
@@ -292,8 +300,12 @@ def test_render_workbench_exec_card_empty_state(tmp_path: Path):
     t = mgr.create(name="exec-empty", original_video=video)
 
     html = _render_workbench(t.task_id, mgr)
-    assert "尚无执行记录" in html
-    assert "0 次" in html
+    # REQ-086：折叠卡空态文案不再出现
+    assert "尚无执行记录" not in html
+    assert "0 次" not in html
+    # logs tab + 分隔条仍渲染
+    assert "📜 执行日志" in html
+    assert "不属于流水线阶段" in html
 
 
 # ---------- REQ-20260918-053：query_history 过滤 + 新 KIND 覆盖 ----------
