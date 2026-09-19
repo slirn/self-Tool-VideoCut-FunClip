@@ -1680,6 +1680,12 @@ def _resolve_mat_abs(mgr, task_id: str, materials: dict, kind: str) -> Path | No
     cand2 = (mgr.repo_root / pp).resolve()
     if cand2.exists():
         return cand2
+    # REQ-20260920-083：候选 3 — tasks_dir + task_id + pp（兼容 select_default_bgm 旧数据，
+    # 旧版写 "materials/audio/<id>.mp3" 不含前缀；文件实际在 tasks/<tid>/materials/audio/）。
+    # 用 exists() 检查兜底 — 不会误命中其他 kind 的同名文件。
+    cand3 = (mgr.tasks_dir / task_id / pp).resolve()
+    if cand3.exists():
+        return cand3
     # 都找不到：返回最近似的（让上层报错信息有真实路径）
     return cand1
 
@@ -5500,9 +5506,12 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             return _err(f"复制 BGM 失败: {e}")
 
         # 写 fc：materials.audio.path + audio.enabled=True
+        # REQ-20260920-083：路径必须含 tasks/<tid>/ 前缀，让 _resolve_mat_abs cand2 命中
+        # （与 upload_fine_material_form 写的路径约定一致；旧版写 'materials/audio/<id>.mp3'
+        # 无前缀 → resolver 找不到 → audio 被静默禁用 → 预览/导出没 BGM）
         fc = _get_fine_compose(mgr, tid)
         fc.setdefault("materials", {})["audio"] = {
-            "path": f"materials/audio/{bgm_id}.mp3",
+            "path": f"tasks/{tid}/materials/audio/{bgm_id}.mp3",
         }
         fc.setdefault("audio", {})["enabled"] = True
         _save_fine_compose(mgr, tid, fc)

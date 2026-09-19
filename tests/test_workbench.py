@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -5333,7 +5334,7 @@ def test_list_default_bgms_returns_five_with_availability(tmp_path):
 def test_select_default_bgm_copies_to_task_and_enables_audio(tmp_path):
     """REQ-20260920-078：POST /slirn/api/select_default_bgm 选某项 →
     1) 复制到 tasks/{tid}/materials/audio/<id>.mp3
-    2) fc.materials.audio.path 设置正确
+    2) fc.materials.audio.path 设置正确（含 tasks/<tid>/ 前缀 — REQ-20260920-083）
     3) fc.audio.enabled = True（自动启用）
     """
     from fastapi.testclient import TestClient
@@ -5375,8 +5376,13 @@ def test_select_default_bgm_copies_to_task_and_enables_audio(tmp_path):
     assert expected_dst.stat().st_size == bgm["size_bytes"]
 
     # 2) fc.materials.audio.path 设置正确
+    # REQ-20260920-083：必须含 tasks/<tid>/ 前缀（让 _resolve_mat_abs cand2 命中）
     fc_after = _get_fine_compose(mgr, t.task_id)
-    assert fc_after["materials"]["audio"]["path"] == f"materials/audio/{bgm['id']}.mp3"
+    expected_path = f"tasks/{t.task_id}/materials/audio/{bgm['id']}.mp3"
+    assert fc_after["materials"]["audio"]["path"] == expected_path, (
+        f"fc.materials.audio.path 必须是 {expected_path}，"
+        f"实际是 {fc_after['materials']['audio']['path']}（REQ-20260920-083 修复）"
+    )
 
     # 3) fc.audio.enabled = True
     assert fc_after["audio"]["enabled"] is True
@@ -5396,6 +5402,204 @@ def test_select_default_bgm_unknown_id_returns_error(tmp_path):
     body = resp.json()
     assert body["ok"] is False
     assert "未知" in body["error"] or "bgm_id" in body["error"]
+
+
+def test_resolve_mat_abs_finds_bgm_via_cand3_fallback(tmp_path):
+    """REQ-20260920-083：_resolve_mat_abs cand3 兼容 select_default_bgm 旧数据。
+
+    旧版写 'materials/audio/<id>.mp3'（无前缀） → cand1/cand2 都不命中 →
+    cand3 = tasks_dir/<tid>/<pp> 兜底命中（文件实际位置 tasks/<tid>/materials/audio/）。
+    """
+    from slirn_home.app import _resolve_mat_abs
+
+    mgr, video = _make_mgr(tmp_path)
+    t = mgr.create(name="cand3-fallback", original_video=video)
+
+    # 真实创建旧版 select_default_bgm 的目标文件（tasks/<tid>/materials/audio/）
+    mat_dir = mgr.tasks_dir / t.task_id / "materials" / "audio"
+    mat_dir.mkdir(parents=True, exist_ok=True)
+    fake_mp3 = mat_dir / "lofi_beat_1.mp3"
+    fake_mp3.write_bytes(b"\x00" * 1024)  # fake mp3 内容
+
+    # 写 fc 用旧格式（无前缀）— 模拟用户已选过 BGM 但 fc 是旧版写的
+    fc_path = mgr.tasks_dir / t.task_id / "fine_compose.json"
+    fc = {
+        "schema_version": 2,
+        "materials": {
+            "audio": {"path": "materials/audio/lofi_beat_1.mp3"},  # 旧格式 — 无前缀
+        },
+        "layout": {
+            "video": {"x": 0, "y": 0, "scale": 1.0, "crop_x": 0, "crop_y": 0,
+                      "crop_w": 1920, "crop_h": 1080, "enabled": True, "crop_aspect_lock": True},
+            "subtitle": {"x": 672, "y": 972, "scale": 1.0, "enabled": False},
+            "cover": {"enabled": False, "duration": 2.0},
+            "bg": {"x": 0, "y": 0, "scale": 1.0, "enabled": False},
+        },
+        "output": {"resolution": "1080p"},
+        "font": {"size": 36, "color": "#FFFFFF", "bg_color": "#000000",
+                 "bg_enabled": False, "family": "STHeitiMedium"},
+        "audio": {"enabled": True, "volume": 0.4, "fade_in": 0.0, "fade_out": 0.0},
+        "detected_region": None,
+        "_schema": 2,
+    }
+    fc_path.write_text(
+        __import__("json").dumps(fc, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    # 调用 _resolve_mat_abs —— 必须命中 cand3 fallback
+    audio_path = _resolve_mat_abs(mgr, t.task_id, fc["materials"], "audio")
+    assert audio_path is not None, "_resolve_mat_abs 返回 None"
+    assert audio_path.exists(), (
+        f"REQ-20260920-083：cand3 fallback 应命中旧版 BGM 文件，"
+        f"但 {audio_path} 不存在"
+    )
+    assert audio_path == fake_mp3.resolve(), (
+        f"应解析到 {fake_mp3}，实际 {audio_path}"
+    )
+
+
+def test_assemble_fine_filter_does_not_silently_disable_bgm(tmp_path):
+    """REQ-20260920-083：选了 BGM 后 _assemble_fine_filter 不再走
+    audio_cfg['enabled'] = False 分支 → input_args 含音频文件 + filter_complex 含 [bgm]。
+    """
+    import shutil
+    from slirn_home.app import _assemble_fine_filter, _save_fine_compose
+
+    mgr, video = _make_mgr(tmp_path)
+    t = mgr.create(name="no-silent-disable", original_video=video)
+
+    # 复制一份视频到 upload 目录（_resolve_mat_abs cand2 约定）
+    upload_dir = mgr.tasks_dir / t.task_id / "upload"
+    upload_dir.mkdir(exist_ok=True)
+    uploaded_video = upload_dir / "video.mp4"
+    shutil.copy(video, uploaded_video)
+    uploaded_mp3 = upload_dir / "audio_my_bgm.mp3"
+    uploaded_mp3.write_bytes(b"\x00" * 2048)  # fake mp3
+
+    # 写 fc：materials.audio.path 含 tasks/<tid>/ 前缀（upload 约定）
+    fc = {
+        "schema_version": 2,
+        "materials": {
+            "video": {"path": f"tasks/{t.task_id}/upload/video.mp4",
+                      "source": "upload", "type": "video"},
+            "audio": {"path": f"tasks/{t.task_id}/upload/audio_my_bgm.mp3",
+                      "source": "upload", "type": "audio"},
+        },
+        "layout": {
+            "video": {"x": 0, "y": 0, "scale": 1.0, "crop_x": 0, "crop_y": 0,
+                      "crop_w": 1920, "crop_h": 1080, "enabled": True, "crop_aspect_lock": True},
+            "subtitle": {"x": 672, "y": 972, "scale": 1.0, "enabled": False},
+            "cover": {"enabled": False, "duration": 2.0},
+            "bg": {"x": 0, "y": 0, "scale": 1.0, "enabled": False},
+        },
+        "output": {"resolution": "1080p"},
+        "font": {"size": 36, "color": "#FFFFFF", "bg_color": "#000000",
+                 "bg_enabled": False, "family": "STHeitiMedium"},
+        "audio": {"enabled": True, "volume": 0.4, "fade_in": 0.0, "fade_out": 0.0},
+        "detected_region": None,
+        "_schema": 2,
+    }
+    _save_fine_compose(mgr, t.task_id, fc)
+
+    asm = _assemble_fine_filter(t.task_id, mgr, duration=10.0, preview_start=0.0)
+    assert asm.get("ok") is True, asm
+    input_args = asm.get("input_args", [])
+
+    # 1. input_args 必须含音频文件路径（-i 出现 2 次：video + audio）
+    audio_input_count = sum(
+        1 for i, tok in enumerate(input_args)
+        if tok == "-i" and i + 1 < len(input_args)
+        and "audio_my_bgm.mp3" in input_args[i + 1]
+    )
+    assert audio_input_count == 1, (
+        f"REQ-20260920-083：input_args 必须含 1 个 audio -i（选 BGM 后不静默禁用），"
+        f"实际 audio -i 数量 = {audio_input_count}；input_args={input_args}"
+    )
+
+    # 2. filter_complex 必须含 [bgm] label + amix=inputs=2
+    fc_str = asm.get("filter_complex", "")
+    assert "[bgm]" in fc_str, (
+        f"REQ-20260920-083：filter_complex 必须含 [bgm] label，"
+        f"实际：\n{fc_str}"
+    )
+    assert "amix=inputs=2" in fc_str, (
+        f"filter_complex 必须含 amix=inputs=2，实际：\n{fc_str}"
+    )
+    assert "[voice][bgm]amix" in fc_str, (
+        f"filter_complex 必须含 [voice][bgm]amix 链，实际：\n{fc_str}"
+    )
+
+
+def test_select_default_bgm_then_assemble_includes_audio(tmp_path, monkeypatch):
+    """REQ-20260920-083：完整端到端 — select_default_bgm 端点 + _assemble_fine_filter。
+
+    模拟用户操作流程：
+    1. 上传视频
+    2. 调 select_default_bgm 选第一个可用 BGM
+    3. 调 _assemble_fine_filter → input_args 含音频 + filter_complex 含 [bgm]
+    """
+    import json
+    from fastapi.testclient import TestClient
+    from slirn_home.app import build_app, _assemble_fine_filter, _get_fine_compose
+
+    mgr, _ = _make_mgr(tmp_path)
+    app = build_app(repo_root=tmp_path)
+    client = TestClient(app.app)
+
+    # 准备任务 + 上传视频
+    video = tmp_path / "src.mp4"
+    video.write_bytes(b"\x00" * 1024)
+    t = mgr.create(name="e2e-bgm", original_video=video)
+    upload_dir = tmp_path / "tasks" / t.task_id / "upload"
+    upload_dir.mkdir(exist_ok=True)
+    shutil.copy(video, upload_dir / "video_src.mp4")
+
+    # 写 fc 启用 audio 并指向刚上传的视频
+    fc = _get_fine_compose(mgr, t.task_id)
+    fc["materials"]["video"] = {
+        "path": f"tasks/{t.task_id}/upload/video_src.mp4",
+        "source": "upload",
+        "type": "video",
+    }
+    fc["audio"]["enabled"] = True
+    _save_fine_compose_safe = getattr(
+        __import__("slirn_home.app", fromlist=["_save_fine_compose"]),
+        "_save_fine_compose",
+    )
+    _save_fine_compose_safe(mgr, t.task_id, fc)
+
+    # 选第一个可用 BGM（环境依赖 D:\tmp\tttttt\；没有就跳过）
+    list_resp = client.post("/slirn/api/list_default_bgms", json={}).json()
+    available = [b for b in list_resp["bgms"] if b["available"]]
+    if not available:
+        return  # 跳过：测试环境无源文件
+    bgm = available[0]
+
+    resp = client.post("/slirn/api/select_default_bgm", json={
+        "task_id": t.task_id, "bgm_id": bgm["id"],
+    })
+    assert resp.json()["ok"] is True, resp.json()
+
+    # 调 _assemble_fine_filter → input_args 应含音频（路径含 'materials/audio'）
+    asm = _assemble_fine_filter(t.task_id, mgr, duration=10.0, preview_start=0.0)
+    assert asm.get("ok") is True, asm
+    input_args = asm.get("input_args", [])
+    audio_in_args = any(
+        ("materials" in (input_args[i + 1] if i + 1 < len(input_args) else "")
+         and "audio" in (input_args[i + 1] if i + 1 < len(input_args) else "")
+         and ".mp3" in (input_args[i + 1] if i + 1 < len(input_args) else ""))
+        for i, tok in enumerate(input_args) if tok == "-i"
+    )
+    assert audio_in_args, (
+        f"REQ-20260920-083：select_default_bgm 后 audio 应进入 input_args，"
+        f"但没找到；input_args={input_args}"
+    )
+    # filter_complex 必须含 [bgm] + amix=inputs=2
+    fc_str = asm.get("filter_complex", "")
+    assert "[bgm]" in fc_str and "amix=inputs=2" in fc_str, (
+        f"filter_complex 必须含 [bgm] + amix=inputs=2；实际：\n{fc_str}"
+    )
 
 
 def test_render_fine_cut_zone_has_default_bgm_select(tmp_path):
