@@ -859,6 +859,73 @@ input[type="checkbox"]:focus-visible {
   to { opacity: 1; transform: translateX(0); }
 }
 
+/* ============ 工作台加载等待弹窗（REQ-20260918-051）============ */
+/* 任务列表点「剪辑」时弹出：内容多的任务接口耗时长，用户需要明确反馈。
+   全屏半透明遮罩 + 居中卡片（spinner + 任务名 + 提示），避免误以为
+   页面卡死。Fetch 完成（成功 / 失败 / 超时）自动关闭，去重：多次点击
+   同一个任务不会叠出多个弹窗。 */
+.slirn-wb-loader-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.35);
+  backdrop-filter: blur(2px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9998;
+  animation: slirn-fade-in 0.15s ease-out;
+}
+@keyframes slirn-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.slirn-wb-loader-card {
+  background: var(--card-bg);
+  backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid var(--card-border);
+  border-radius: 14px;
+  box-shadow: var(--card-shadow-hover);
+  padding: 24px 28px;
+  min-width: 280px;
+  max-width: 420px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  text-align: center;
+}
+.slirn-wb-loader-spinner {
+  width: 36px;
+  height: 36px;
+  border: 3px solid var(--accent-soft, rgba(102, 126, 234, 0.2));
+  border-top-color: var(--accent-solid, #667eea);
+  border-radius: 50%;
+  animation: slirn-spin 0.8s linear infinite;
+}
+@keyframes slirn-spin {
+  to { transform: rotate(360deg); }
+}
+.slirn-wb-loader-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+}
+.slirn-wb-loader-task {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin: 0;
+  max-width: 360px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.slirn-wb-loader-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin: 0;
+}
+
 /* ============ 上传进度弹窗 ============ */
 .slirn-modal-overlay {
   position: fixed;
@@ -871,6 +938,7 @@ input[type="checkbox"]:focus-visible {
   z-index: 10000;
   animation: slirn-modal-fade-in 0.18s ease-out;
 }
+.slirn-modal-overlay[hidden] { display: none !important; }
 .slirn-modal-card {
   background: var(--card-bg, #fff);
   border: 1px solid var(--card-border, rgba(255,255,255,0.18));
@@ -959,6 +1027,30 @@ input[type="checkbox"]:focus-visible {
   border-radius: 6px;
   margin-left: 8px;
   white-space: nowrap;
+}
+/* REQ-20260919-061 用户补充：「多模态」徽章 — 用户在 ⚙️ 显式声明 vision=true */
+.slirn-llm-item-vision {
+  font-weight: 500;
+  font-size: 11px;
+  color: #b45309;
+  background: rgba(245, 158, 11, 0.12);
+  padding: 0 6px;
+  border-radius: 6px;
+  margin-left: 6px;
+  white-space: nowrap;
+  cursor: help;
+}
+/* REQ-20260919-061 用户补充：表单里「支持图片」勾选框行 */
+.slirn-llm-chk {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text, #1e293b);
+  cursor: pointer;
+}
+.slirn-llm-chk input[type="checkbox"] {
+  cursor: pointer;
 }
 /* 当前使用中徽章（替代按钮位置 — REQ-20260916-001） */
 .slirn-llm-item-cur {
@@ -1332,7 +1424,20 @@ input[type="checkbox"]:focus-visible {
 
 .slirn-wb-panes { min-width: 0; }
 .slirn-wb-pane-card { background: var(--card-bg, inherit); border-radius: 12px; padding: 14px 16px; }
-.slirn-wb-pane-title { font-weight: 700; font-size: 14px; margin-bottom: 10px; }
+.slirn-wb-pane-title { font-weight: 700; font-size: 14px; margin-bottom: 10px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+/* REQ-20260919-061 用户反馈：保存按钮 + 状态指示器（紧跟 pane 标题） */
+.slirn-wb-pane-title .slirn-btn-xs { margin-left: auto; }
+.slirn-fine-save-status {
+  font-size: 11.5px; font-weight: 400; color: var(--text-muted);
+  background: rgba(0, 0, 0, 0.04); padding: 3px 10px; border-radius: 10px;
+  border: 1px solid var(--border, rgba(0, 0, 0, 0.08));
+  font-variant-numeric: tabular-nums;  /* 数字等宽 — 时间格式稳定 */
+  transition: color 0.2s, background 0.2s;
+}
+.slirn-fine-save-status[data-state="saving"] { color: #b8860b; background: rgba(255, 215, 0, 0.12); }
+.slirn-fine-save-status[data-state="saved"] { color: #2e7d32; background: rgba(46, 125, 50, 0.10); }
+.slirn-fine-save-status[data-state="error"] { color: #c62828; background: rgba(198, 40, 40, 0.10); }
 
 /* ===== 阶段列表收起/展开（REQ-20260916-002）===== */
 .slirn-wb-stages-head {
@@ -1399,15 +1504,25 @@ input[type="checkbox"]:focus-visible {
 .slirn-rev-row.active .slirn-rev-note { color: rgba(255, 255, 255, 0.92); }
 .slirn-rev-row.active .slirn-rev-keeptext { color: #ffffff; }
 .slirn-rev-row.active .slirn-rev-toggle { color: rgba(255, 255, 255, 0.85); }
-/* 主行：与字幕生成列表同列（序号|时间|文本）+ 决策下拉 + 展开钮（REQ-20260916-002） */
+/* 主行：与字幕生成列表同列（序号|人员徽章|时间|文本）+ 决策下拉 + 展开钮
+   REQ-20260916-002 原始 5 轨；REQ-20260919-068 加人员徽章第 2 轨（auto 宽，
+   未关联时塌缩为 0，布局与无徽章一致 — 复用切分阶段的 036 显式列位方案）*/
 .slirn-rev-line {
   display: grid;
-  grid-template-columns: 44px 216px 1fr 150px 26px;
+  grid-template-columns: 44px auto 216px 1fr 150px 26px;
   gap: 10px;
   padding: 6px 14px;
   align-items: center;
   min-height: 34px;
 }
+/* REQ-20260919-071：显式列位 — 与切分阶段 036 方案同款，
+   人员徽章固定第 2 轨（序号后、时间戳前），未关联时该轨塌缩为 0 */
+.slirn-rev-line > .slirn-sub-idx    { grid-column: 1; }
+.slirn-rev-line > .slirn-rev-spk    { grid-column: 2; justify-self: start; }
+.slirn-rev-line > .slirn-sub-time   { grid-column: 3; }
+.slirn-rev-line > .slirn-sub-text   { grid-column: 4; }
+.slirn-rev-line > .slirn-rev-select { grid-column: 5; }
+.slirn-rev-line > .slirn-rev-toggle { grid-column: 6; }
 .slirn-rev-line .slirn-rev-badge { margin-right: 7px; vertical-align: 1px; }
 .slirn-rev-toggle {
   border: none; background: transparent; color: var(--text-muted);
@@ -1557,6 +1672,47 @@ input[type="checkbox"]:focus-visible {
   cursor: pointer; white-space: nowrap; color: var(--text-secondary);
 }
 .slirn-cut-spk-hint { color: var(--text-muted); font-size: 11px; }
+
+/* ===== REQ-20260919-068：字幕修订阶段关联人员ID =====
+   复用 cut-spk-* 的视觉规格，命名空间用 slirn-rev-spk-* 避免和切分阶段样式混淆。 */
+.slirn-rev-spk {
+  display: inline-block; padding: 1px 8px; border-radius: 999px;
+  font-size: 11px; font-weight: 600; white-space: nowrap;
+  color: #fff; background: #3178c6;
+  min-width: 0;
+}
+.slirn-rev-spk:empty { display: none; }
+.slirn-rev-row.active .slirn-rev-spk {
+  background: rgba(49, 120, 198, 0.85);
+}
+.slirn-rev-spk-bar {
+  margin: 10px 0 2px 0; padding: 10px 14px;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: rgba(49, 120, 198, 0.06); font-size: 12px;
+}
+.slirn-rev-spk-title { font-weight: 600; color: var(--text-primary); margin-bottom: 6px; }
+.slirn-rev-spk-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.slirn-rev-spk-chip {
+  display: inline-block; padding: 2px 10px; border-radius: 999px;
+  font-size: 11.5px; font-weight: 600; cursor: pointer;
+  color: #3178c6; background: rgba(49, 120, 198, 0.14);
+  border: 1px solid rgba(49, 120, 198, 0.35); white-space: nowrap;
+}
+.slirn-rev-spk-chip:hover { background: rgba(49, 120, 198, 0.26); }
+.slirn-rev-spk-chip b { font-weight: 700; }
+.slirn-rev-spk-find {
+  display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  color: var(--text-secondary);
+}
+.slirn-rev-spk-find input {
+  width: 72px; padding: 2px 8px; border-radius: 6px;
+  border: 1px solid var(--border); font-size: 12px;
+}
+.slirn-rev-spk-find label {
+  display: inline-flex; align-items: center; gap: 4px;
+  cursor: pointer; white-space: nowrap; color: var(--text-secondary);
+}
+.slirn-rev-spk-hint { color: var(--text-muted); font-size: 11px; }
 /* 修订更新 → 已保存清单过期黄条（REQ-20260916-011） */
 .slirn-cut-stale {
   padding: 6px 12px; border-radius: 10px; margin-top: 8px;
@@ -1827,7 +1983,9 @@ input[type="checkbox"]:focus-visible {
   margin-top: 6px; font-size: 11.5px; line-height: 1.5; color: var(--text-muted);
 }
 @media (max-width: 720px) {
-  .slirn-rev-line { grid-template-columns: 32px 1fr 118px 22px; }
+  /* REQ-20260919-071：与常规态同款 — 第 2 轨 auto（人员徽章，未关联塌缩 0），
+     第 3 轨隐藏时间戳（auto 塌缩 0），保留文本 1fr */
+  .slirn-rev-line { grid-template-columns: 32px auto auto 1fr 118px 22px; }
   .slirn-rev-line .slirn-sub-time { display: none; }
   .slirn-rev-detail { padding-left: 32px; }
   .slirn-rigor-cards { grid-template-columns: 1fr; }
@@ -1840,6 +1998,39 @@ input[type="checkbox"]:focus-visible {
   font-weight: 600; cursor: help;
 }
 .slirn-fw-stats { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+/* REQ-20260918-050：词频列表固定 2 列网格（每行 2 条）+ 分页 */
+#slirn-opt-words {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px 14px;
+  margin-top: 6px;
+}
+#slirn-opt-words .slirn-opt-word-hidden { display: none; }
+.slirn-opt-words-pager {
+  display: flex; align-items: center; justify-content: center; gap: 14px;
+  margin-top: 12px; padding: 8px 12px;
+  background: var(--card-bg-2, rgba(0, 0, 0, 0.025));
+  border-radius: 6px;
+  font-size: 12px; color: var(--text-secondary);
+}
+.slirn-opt-words-pager button {
+  border: 1px solid var(--border);
+  background: var(--input-bg, #fff);
+  color: var(--text-primary);
+  padding: 4px 12px; border-radius: 4px;
+  cursor: pointer; font-size: 12px; font-weight: 600;
+}
+.slirn-opt-words-pager button:hover:not(:disabled) {
+  background: rgba(49, 120, 198, 0.08);
+  border-color: rgba(49, 120, 198, 0.4);
+}
+.slirn-opt-words-pager button:disabled {
+  opacity: 0.35; cursor: not-allowed;
+}
+.slirn-opt-words-pager .slirn-opt-page-info {
+  font-weight: 600; color: var(--text-primary);
+  min-width: 180px; text-align: center;
+}
 .slirn-fw-word {
   padding: 3px 10px; border-radius: 999px; font-size: 12.5px; font-weight: 600;
   background: rgba(255, 176, 32, 0.14); color: #8a5a00;
@@ -1886,8 +2077,33 @@ input[type="checkbox"]:focus-visible {
 .slirn-opt-chip b { margin-left: 4px; font-weight: 700; }
 /* 不明确字词频次列表（REQ-20260917-038）：词 + 频次 chip + 进度 + 处理完成标识，
    顶部按钮按 全部/未完成/已完成 过滤 */
-.slirn-opt-word-filters { display: flex; gap: 6px; margin: 8px 0 6px 0; }
+.slirn-opt-word-filters { display: flex; gap: 6px; margin: 8px 0 6px 0; align-items: center; }
 .slirn-opt-word-filters .slirn-btn.active { background: #3178c6; color: #fff; }
+/* REQ-20260918-057B：文字输入过滤（与状态过滤 chips 同一行右对齐） */
+.slirn-opt-word-text-filter {
+  display: inline-flex; align-items: center;
+  margin-left: auto; gap: 4px;
+}
+.slirn-opt-word-text-filter input#slirn-opt-word-text {
+  width: 160px; padding: 2px 8px;
+  font-size: 11.5px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--input-bg, #fff);
+  color: var(--text);
+}
+.slirn-opt-word-text-filter input#slirn-opt-word-text:focus {
+  outline: none;
+  border-color: var(--accent, #3178c6);
+  box-shadow: 0 0 0 2px rgba(49, 120, 198, 0.15);
+}
+.slirn-opt-word-text-filter .slirn-opt-word-text-clear {
+  border: none; background: transparent;
+  color: var(--text-muted);
+  cursor: pointer; font-size: 13px;
+  padding: 0 4px;
+}
+.slirn-opt-word-text-filter .slirn-opt-word-text-clear:hover { color: var(--text); }
 .slirn-opt-word {
   display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
   padding: 4px 8px; border-bottom: 1px dashed var(--border);
@@ -1920,6 +2136,47 @@ input[type="checkbox"]:focus-visible {
 }
 .slirn-opt-row:last-child { border-bottom: none; }
 .slirn-opt-row:hover { background: var(--accent-soft); }
+/* REQ-20260918-052：点词后，target 行高亮（淡黄底 + 左色条），上下文行不变 */
+.slirn-opt-row.slirn-opt-row-target {
+  background: rgba(245, 158, 11, 0.10);
+  border-left: 3px solid #f59e0b;
+  padding-left: 7px;  /* 抵消 border-left 3px，保持网格对齐 */
+}
+.slirn-opt-row.slirn-opt-row-target .slirn-sub-idx { color: #b45309; font-weight: 600; }
+/* REQ-20260918-054：播放中字幕行高亮（与 cut/rev 同款 .active 语义）。
+   视觉比 .slirn-opt-row-target（淡黄底）更强：蓝色渐变 + 左粗色条 + pulse。
+   active 后写以压过 target（target∩active 时视觉上是 active）。 */
+.slirn-opt-row.active {
+  background: linear-gradient(90deg, rgba(49, 120, 198, 0.16) 0%, rgba(49, 120, 198, 0.06) 100%);
+  border-left: 4px solid var(--accent, #3178c6);
+  padding-left: 6px;  /* 抵消 border-left 4px，保持网格对齐 */
+  animation: slirn-opt-playing-pulse 1.6s ease-in-out infinite;
+}
+.slirn-opt-row.active .slirn-sub-idx {
+  color: var(--accent, #3178c6);
+  font-weight: 700;
+}
+/* target∩active：复合选择器特异性 (0,2,0) > 单类 (0,1,0)，active 视觉压过 */
+.slirn-opt-row.slirn-opt-row-target.active {
+  border-left-color: var(--accent, #3178c6);
+  background: linear-gradient(90deg, rgba(49, 120, 198, 0.20) 0%, rgba(49, 120, 198, 0.07) 100%);
+}
+@keyframes slirn-opt-playing-pulse {
+  0%, 100% { box-shadow: inset 0 0 0 0 rgba(49, 120, 198, 0); }
+  50%      { box-shadow: inset 0 0 0 2px rgba(49, 120, 198, 0.30); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .slirn-opt-row.active { animation: none; }
+}
+.slirn-opt-filter-hint {
+  margin: 10px 0 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  border-radius: 6px;
+  padding: 6px 10px;
+}
 .slirn-opt-row .slirn-sub-idx { font-size: 11px; color: var(--text-muted);
   font-variant-numeric: tabular-nums; text-align: right; }
 /* 替换栏（REQ-032）：行最右独立列，多处 occ 竖直 stack */
@@ -1933,16 +2190,29 @@ input[type="checkbox"]:focus-visible {
   display: inline-flex; align-items: center; gap: 4px; margin: 0 2px;
   padding: 1px 4px; border-radius: 6px; background: rgba(255, 176, 32, 0.12);
   vertical-align: baseline;
+  /* REQ-20260918-058：长替换词允许换到下一行（input 占整行 100% 宽度） */
+  flex-wrap: wrap;
 }
 .slirn-opt-occ .slirn-opt-before {
   text-decoration: line-through; color: var(--text-muted); font-size: 12.5px;
 }
 .slirn-opt-occ .slirn-opt-arrow { color: var(--text-muted); font-size: 11px; }
 .slirn-opt-occ input.slirn-opt-after {
-  flex: 1 1 auto; min-width: 0; padding: 1px 6px;
+  flex: 1 1 auto; min-width: 60px; padding: 1px 6px;
   font-size: 12.5px; font-weight: 600; line-height: 1.5;
   border: 1px solid rgba(255, 176, 32, 0.55); border-radius: 6px;
   background: var(--input-bg); color: var(--text);
+}
+/* REQ-20260918-058：input 内容溢出时整行换行 + col 自适应扩展（关键：原来 col 固定 260px，
+   即使 input wrapped 占 100% 也只 260px，仍装不下 ~30 个中文字符 ~375px）。
+   用 :has() 让含 wrapped 的行 grid 第 4 列 minmax(360px,1fr) — 该列最少 360px，最大占满剩余空间。 */
+.slirn-opt-occ.wrapped input.slirn-opt-after {
+  flex-basis: 100%;
+  min-width: 0;
+  text-overflow: clip;  /* 不要省略号（完整显示） */
+}
+.slirn-opt-row:has(.slirn-opt-occ.wrapped) {
+  grid-template-columns: 44px 92px 1fr minmax(360px, 1fr);
 }
 .slirn-opt-occ input.slirn-opt-after:focus { outline: none;
   border-color: rgba(255, 176, 32, 0.9); }
@@ -1952,6 +2222,17 @@ input[type="checkbox"]:focus-visible {
 .slirn-opt-occ[data-applied="0"] .slirn-opt-before { text-decoration: none; color: inherit; }
 .slirn-opt-occ[data-applied="0"] input.slirn-opt-after {
   text-decoration: line-through; border-color: var(--border); }
+/* REQ-20260918-055：替换值输入框回车确认完成的瞬时视觉反馈（600ms 内淡绿闪一下） */
+.slirn-opt-occ.slirn-opt-occ-just-done {
+  animation: slirn-opt-occ-done-flash 0.6s ease-out;
+}
+@keyframes slirn-opt-occ-done-flash {
+  0%   { background: rgba(34, 197, 94, 0.45); }
+  100% { background: rgba(255, 176, 32, 0.12); }  /* 还原到默认 adopted 状态 */
+}
+@media (prefers-reduced-motion: reduce) {
+  .slirn-opt-occ.slirn-opt-occ-just-done { animation: none; }
+}
 /* 过滤：只看有不明确字词的行 */
 .slirn-opt-list.slirn-opt-only-occ .slirn-opt-row:not(.has-occ) { display: none; }
 @media (max-width: 720px) {
@@ -2095,6 +2376,155 @@ input[type="checkbox"]:focus-visible {
 .slirn-col.off > :not(.slirn-col-head) { display: none; }
 .slirn-col.off .slirn-col-chev { transform: rotate(-90deg); }
 
+/* REQ-20260919-062：背景图白色区域检测面板 — 独立块，只读结果 + 一键填充 */
+.slirn-fine-bg-detect-block {
+  padding: 10px;
+  border: 1px solid var(--border, rgba(128,128,128,0.2));
+  border-radius: 8px;
+  background: rgba(128,128,128,0.03);
+  border-left: 3px solid #f59e0b;  /* amber 色条提示「辅助工具」 */
+  margin: 12px 0;
+}
+.slirn-fine-bg-detect-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 8px 0;
+}
+.slirn-fine-bg-detect-controls select {
+  padding: 4px 8px;
+  font-size: 12.5px;
+  border: 1px solid var(--border, rgba(128,128,128,0.3));
+  border-radius: 4px;
+  background: var(--input-bg, #fff);
+  color: var(--text);
+}
+.slirn-fine-bg-detect-result {
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: rgba(245, 158, 11, 0.06);
+  border: 1px dashed rgba(245, 158, 11, 0.35);
+  border-radius: 6px;
+}
+.slirn-fine-bg-detect-grid {
+  display: grid;
+  grid-template-columns: 130px 1fr 130px 1fr;
+  gap: 6px 12px;
+  font-size: 12px;
+}
+.slirn-fine-bg-detect-key {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+.slirn-fine-bg-detect-val {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+.slirn-fine-bg-detect-actions {
+  margin-top: 10px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+/* REQ-20260919-062 v12：去掉「背景图主色」大色块后，相关 CSS 已无用，一并删除 */
+/* （历史 v2/v8 样式：bg-detect 主色相关 8 条规则全部删除；几何信息区保留在结果区）*/
+#slirn-fine-bg-detect-threshold-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ============ 精剪素材预览浮层（REQ-20260919-063） ============ */
+.slirn-mat-preview-float {
+  position: fixed;
+  z-index: 9997;
+  /* 默认尺寸 + 缩放范围；用户拖右下角可调 */
+  width: 480px;
+  height: 320px;
+  min-width: 240px;
+  min-height: 160px;
+  max-width: 90vw;
+  max-height: 85vh;
+  background: rgba(15, 15, 35, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.55);
+  overflow: hidden;
+  backdrop-filter: blur(16px) saturate(160%);
+  resize: both;
+  display: flex;
+  flex-direction: column;
+}
+.slirn-mat-preview-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  background: rgba(0, 0, 0, 0.35);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  font-size: 13px;
+  cursor: move;
+  user-select: none;
+  flex: 0 0 auto;
+}
+.slirn-mat-preview-title {
+  color: var(--text);
+  font-weight: 500;
+}
+.slirn-mat-preview-close {
+  background: transparent;
+  border: 0;
+  color: var(--text-muted);
+  font-size: 18px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+.slirn-mat-preview-close:hover {
+  color: var(--text);
+}
+.slirn-mat-preview-body {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  padding: 8px;
+  background: rgba(0, 0, 0, 0.2);
+}
+.slirn-mat-preview-body img,
+.slirn-mat-preview-body video {
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  object-fit: contain;
+  display: block;
+}
+.slirn-mat-preview-body audio {
+  width: 90%;
+  margin: auto;
+}
+.slirn-mat-preview-body pre {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  color: #d4d4d8;
+  font-size: 12px;
+  font-family: ui-monospace, "Cascadia Code", "Consolas", monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow: auto;
+  background: transparent;
+}
+.slirn-mat-preview-body .slirn-mat-preview-error {
+  color: #fca5a5;
+  font-size: 13px;
+  text-align: center;
+}
+
 /* ============ 视频浮层（REQ-20260918-043） ============ */
 .slirn-video-float {
   position: fixed;
@@ -2106,6 +2536,13 @@ input[type="checkbox"]:focus-visible {
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
   overflow: hidden;
   backdrop-filter: blur(16px) saturate(160%);
+  /* REQ-20260919-061a v7 用户反馈：浮动视频窗口要能调整大小。右下角自动出现拖手柄，
+     与拖动标题栏（cursor:move）互不冲突。设置 min/max 防止拖到不可用尺寸。 */
+  resize: both;
+  min-width: 320px;
+  min-height: 240px;
+  max-width: 90vw;
+  max-height: 85vh;
 }
 .slirn-video-float[hidden] { display: none; }
 .slirn-vf-bar {
@@ -2213,6 +2650,86 @@ input[type="checkbox"]:focus-visible {
   color: var(--text-muted);
   font-size: 12px;
   padding: 4px 0;
+}
+
+/* ============ REQ-20260918-053：执行日志面板 ============ */
+.slirn-logs-pane {
+  /* 沿用 slirn-wb-pane-card 样式；只补充内部布局 */
+  display: flex; flex-direction: column; gap: 10px;
+}
+.slirn-logs-hint {
+  margin-top: -4px;
+}
+.slirn-logs-filter {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px 12px;
+  background: var(--input-bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.slirn-logs-filter-row {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+}
+.slirn-logs-filter-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-weight: 600;
+  min-width: 40px;
+}
+.slirn-chip {
+  display: inline-flex; align-items: center;
+  padding: 4px 10px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--card-bg);
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  user-select: none;
+}
+.slirn-chip:hover {
+  background: var(--input-bg);
+  color: var(--text-primary);
+}
+.slirn-chip.active {
+  background: var(--accent-solid);
+  color: #fff;
+  border-color: var(--accent-solid);
+}
+.slirn-chip-clear {
+  background: transparent;
+  border-style: dashed;
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+.slirn-logs-keyword {
+  flex: 1;
+  min-width: 200px;
+  font-size: 12px;
+}
+.slirn-logs-list {
+  display: flex; flex-direction: column; gap: 6px;
+  max-height: 65vh;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+.slirn-logs-empty {
+  color: var(--text-muted);
+  font-size: 12px;
+  padding: 8px 4px;
+}
+.slirn-logs-count {
+  font-size: 11.5px;
+  color: var(--text-muted);
+  font-weight: 400;
+  margin-left: 8px;
+}
+/* logs 阶段在 rail 末尾，加个小分隔 */
+.slirn-wb-stage-logs {
+  margin-top: 12px;
+  border-top: 1px dashed var(--border);
+  padding-top: 10px;
 }
 
 /* ===== REQ-20260918-047 流程配置 + 自动执行 ===== */
@@ -2327,6 +2844,99 @@ input[type="checkbox"]:focus-visible {
   white-space: nowrap;
   max-width: 60%;
 }
+
+/* REQ-20260918-049：阶段状态徽章（label 右侧，hint 之前） +
+   num 圆形按 data-pipe-state 变色 + pulse 动画 */
+.slirn-pipe-section-state {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  margin-left: 8px;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.slirn-pipe-section-state-running {
+  background: rgba(59, 130, 246, 0.15);
+  color: #2563eb;
+}
+[data-theme="dark"] .slirn-pipe-section-state-running {
+  background: rgba(96, 165, 250, 0.20);
+  color: #93c5fd;
+}
+.slirn-pipe-section-state-done {
+  background: rgba(34, 197, 94, 0.15);
+  color: #16a34a;
+}
+[data-theme="dark"] .slirn-pipe-section-state-done {
+  background: rgba(74, 222, 128, 0.18);
+  color: #86efac;
+}
+.slirn-pipe-section-state-pending {
+  background: rgba(148, 163, 184, 0.15);
+  color: #64748b;
+}
+[data-theme="dark"] .slirn-pipe-section-state-pending {
+  background: rgba(148, 163, 184, 0.18);
+  color: #94a3b8;
+}
+.slirn-pipe-section-state-error {
+  background: rgba(239, 68, 68, 0.15);
+  color: #dc2626;
+}
+[data-theme="dark"] .slirn-pipe-section-state-error {
+  background: rgba(248, 113, 113, 0.20);
+  color: #fca5a5;
+}
+
+/* num 圆形按 data-pipe-state 变色（done=绿 / running=蓝+脉动 / error=红） */
+.slirn-pipe-section[data-pipe-state="done"] .slirn-pipe-section-num {
+  background: #2e9e5b;
+  color: #fff;
+}
+.slirn-pipe-section[data-pipe-state="running"] .slirn-pipe-section-num {
+  background: #4f7cff;
+  color: #fff;
+  animation: slirn-pipe-pulse 1.4s ease-in-out infinite;
+}
+.slirn-pipe-section[data-pipe-state="error"] .slirn-pipe-section-num {
+  background: #dc2626;
+  color: #fff;
+}
+/* done 后整个 summary 灰一点（视觉降权） */
+.slirn-pipe-section[data-pipe-state="done"] .slirn-pipe-section-label {
+  color: var(--text-muted);
+}
+@keyframes slirn-pipe-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(79, 124, 255, 0.45); }
+  50%      { box-shadow: 0 0 0 6px rgba(79, 124, 255, 0); }
+}
+
+/* REQ-20260918-049：pipe-panel 内嵌的 rigor 4 卡（复用 .slirn-rigor-card 全样式，
+   pipe 通道因为面板较窄 → 强制 2 列；description/example 字号略缩以塞下） */
+.slirn-pipe-rigor {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 6px 0;
+}
+.slirn-pipe-rigor .slirn-rigor-card {
+  padding: 8px 10px;
+}
+.slirn-pipe-rigor .slirn-rigor-card-title { font-size: 12.5px; }
+.slirn-pipe-rigor .slirn-rigor-card-desc { font-size: 11.5px; line-height: 1.5; }
+.slirn-pipe-rigor .slirn-rigor-card-example { font-size: 11px; line-height: 1.45; }
+.slirn-pipe-subhead {
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+@media (max-width: 720px) {
+  .slirn-pipe-rigor { grid-template-columns: 1fr; }
+}
+
 .slirn-pipe-section-body { padding: 4px 14px 14px; }
 .slirn-pipe-form { display: flex; flex-direction: column; gap: 10px; }
 .slirn-pipe-desc {
@@ -2422,7 +3032,12 @@ input[type="checkbox"]:focus-visible {
   gap: 8px;
   padding: 8px 12px;
   background: rgba(255, 255, 255, 0.5);
+  cursor: move;          /* 拖动手柄（REQ-20260918-049 v2：状态条可拖动调整位置） */
+  user-select: none;
+  -webkit-user-select: none;
 }
+.slirn-pipe-status-head:active { cursor: grabbing; }
+.slirn-pipe-status-head > .slirn-pipe-status-collapse { cursor: pointer; }
 .slirn-pipe-status-state {
   padding: 2px 8px;
   border-radius: 10px;
@@ -2510,3 +3125,432 @@ input[type="checkbox"]:focus-visible {
 :root[data-theme="dark"] .slirn-pipe-desc {
   background: rgba(102, 126, 234, 0.15);
 }
+
+/* ============ REQ-20260919-061：精剪视频·六素材合成器 ============
+   REQ-20260919-067：4+2 布局 — 一行四张上传卡，第 5、6 自动换行。
+   之前是 5+1（5 列 grid 挤得偏方）；改为 4 列更舒展，6 张素材占两行。 */
+.slirn-fine-uploads {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+  margin: 12px 0;
+}
+.slirn-fine-upload-card {
+  padding: 10px;
+  border: 1px dashed var(--border, rgba(128,128,128,0.3));
+  border-radius: 8px;
+  background: rgba(128,128,128,0.04);
+  transition: all 0.2s ease;
+}
+.slirn-fine-upload-card.has-file {
+  border-style: solid;
+  border-color: rgba(34, 197, 94, 0.55);
+  background: rgba(34, 197, 94, 0.08);
+}
+.slirn-fine-upload-label { font-weight: 600; font-size: 12.5px; margin-bottom: 4px; }
+.slirn-fine-upload-hint { font-size: 11px; color: var(--text-muted); margin-bottom: 6px; }
+.slirn-fine-upload-card input[type="file"] {
+  display: block;
+  font-size: 11px;
+  margin-bottom: 6px;
+  width: 100%;
+}
+.slirn-fine-upload-status { font-size: 11.5px; margin-top: 4px; color: var(--text-muted); }
+.slirn-fine-upload-card.has-file .slirn-fine-upload-status { color: rgba(34, 197, 94, 1); font-weight: 500; }
+
+/* REQ-20260919-061：素材来源徽章（auto/upload 显示在 label 右侧） */
+.slirn-fine-source-badge {
+  display: inline-block;
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 1px 6px;
+  margin-left: 6px;
+  border-radius: 10px;
+  vertical-align: middle;
+}
+.slirn-fine-source-badge.auto {
+  background: rgba(34, 197, 94, 0.15);
+  color: rgba(34, 140, 60, 1);
+  border: 1px solid rgba(34, 197, 94, 0.4);
+}
+.slirn-fine-source-badge.upload {
+  background: rgba(49, 120, 198, 0.12);
+  color: rgba(49, 120, 198, 1);
+  border: 1px solid rgba(49, 120, 198, 0.4);
+}
+.slirn-fine-upload-hint code {
+  font-family: ui-monospace, "Cascadia Code", Menlo, monospace;
+  font-size: 10.5px;
+  padding: 0 4px;
+  background: rgba(128, 128, 128, 0.1);
+  border-radius: 3px;
+}
+
+/* REQ-20260919-061：视频源裁剪（从源画面里截 16:9 矩形） */
+.slirn-fine-crop-block {
+  margin: 12px 0; padding: 12px;
+  border: 1px solid var(--border, rgba(128,128,128,0.3));
+  border-radius: 8px;
+  background: rgba(128,128,128,0.03);
+}
+.slirn-fine-crop-presets { display: flex; gap: 6px; margin: 6px 0 10px; flex-wrap: wrap; }
+.slirn-fine-crop-aspect {
+  font-size: 11.5px; color: var(--text-muted);
+  padding: 4px 8px; margin-bottom: 8px;
+  background: rgba(128,128,128,0.06); border-radius: 4px;
+}
+.slirn-fine-crop-aspect span { font-weight: 600; color: var(--accent, #3178c6); }
+.slirn-fine-crop-link-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: 4px 0;
+  cursor: pointer;
+}
+.slirn-fine-crop-link-toggle input[type="checkbox"] {
+  margin: 0;
+  cursor: pointer;
+}
+
+.slirn-fine-layouts { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0; }
+.slirn-fine-layout-block {
+  padding: 10px;
+  border: 1px solid var(--border, rgba(128,128,128,0.2));
+  border-radius: 8px;
+  background: rgba(128,128,128,0.03);
+}
+/* REQ-20260919-062 v7：视频块的"显示尺寸"只读信息行 */
+.slirn-fine-video-info {
+  margin-top: 8px;
+  padding: 6px 8px;
+  font-size: 12px;
+  color: var(--slirn-text-secondary, #555);
+  background: rgba(128,128,128,0.05);
+  border-left: 3px solid var(--accent, #5b8def);
+  border-radius: 4px;
+  line-height: 1.6;
+}
+.slirn-fine-video-info strong {
+  color: var(--slirn-text-primary, #222);
+  font-variant-numeric: tabular-nums;
+}
+.slirn-fine-layout-title { font-weight: 600; font-size: 13px; margin-bottom: 8px; }
+.slirn-fine-layout-title label { cursor: pointer; user-select: none; }
+/* REQ-20260919-061 用户反馈：把「保存设置参数」+ 引用参数搬到顶部操作栏 */
+/* REQ-20260919-061a v6：合并 preview-bar + actions-bar 到同一行；flex-wrap: nowrap
+   保证元素都在一行（视口窄时整体横向滚动，不换行打乱布局） */
+.slirn-fine-actions-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  margin: 8px 0;
+  background: var(--hover-bg, rgba(255,255,255,0.4));
+  border: 1px solid var(--border, rgba(128,128,128,0.25));
+  border-radius: 10px;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+}
+/* 视觉分组：AI/预览/导出 vs 模板名/保存/引用 — 用一根细竖线分开 */
+.slirn-fine-actions-bar-sep {
+  width: 1px;
+  align-self: stretch;
+  background: var(--border, rgba(128,128,128,0.25));
+  margin: 0 4px;
+  flex-shrink: 0;
+}
+.slirn-fine-actions-bar .slirn-fine-profile-name {
+  flex: 1;
+  min-width: 200px;
+  padding: 6px 10px;
+  font-size: 13px;
+  border: 1px solid var(--border, rgba(128,128,128,0.3));
+  border-radius: 6px;
+  background: var(--input-bg, #fff);
+  color: var(--text);
+}
+.slirn-fine-actions-bar .slirn-fine-profile-name:focus {
+  outline: none;
+  border-color: var(--accent, #3178c6);
+  box-shadow: 0 0 0 2px rgba(49, 120, 198, 0.15);
+}
+.slirn-fine-actions-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+.slirn-fine-save-status {
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  background: var(--input-bg, #fff);
+  color: var(--text-muted, #94a3b8);
+  border: 1px solid var(--border, rgba(128,128,128,0.2));
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+.slirn-fine-save-status[data-state="saving"] {
+  color: var(--accent, #3178c6);
+  border-color: var(--accent, #3178c6);
+  background: rgba(49, 120, 198, 0.08);
+}
+.slirn-fine-save-status[data-state="saved"] {
+  color: #2ea043;
+  border-color: #2ea043;
+  background: rgba(46, 160, 67, 0.08);
+}
+.slirn-fine-save-status[data-state="error"] {
+  color: #d1242f;
+  border-color: #d1242f;
+  background: rgba(209, 36, 47, 0.08);
+}
+.slirn-fine-save-status.err {
+  color: #d1242f;
+}
+
+/* 预览时长条（v6：合并入 .slirn-fine-actions-bar，不单独成行） */
+.slirn-fine-preview-duration {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  background: var(--hover-bg, rgba(255,255,255,0.4));
+  border: 1px solid var(--border, rgba(128,128,128,0.25));
+  border-radius: 6px;
+}
+.slirn-fine-preview-duration .slirn-fine-num { width: 60px; }
+.slirn-fine-preview-duration .slirn-fine-step-btn { width: 22px; }
+
+/* REQ-20260919-064：预览开始时间条（与 preview-duration 同样式）
+   REQ-20260919-066：开始时间改 时:分:秒 三段窄输入框。 */
+.slirn-fine-preview-start {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  background: var(--hover-bg, rgba(255,255,255,0.4));
+  border: 1px solid var(--border, rgba(128,128,128,0.25));
+  border-radius: 6px;
+}
+.slirn-fine-preview-start .slirn-fine-num { width: 48px; }
+.slirn-fine-preview-start .slirn-fine-preview-time { width: 44px; text-align: center; }
+.slirn-fine-preview-start .slirn-fine-time-sep {
+  font-weight: 600;
+  color: var(--text-muted, #666);
+  padding: 0 1px;
+}
+
+/* REQ-20260919-064：拆成两行后，行与行之间留间距 */
+.slirn-fine-actions-bar + .slirn-fine-actions-bar {
+  margin-top: 8px;
+}
+
+/* 引用参数 modal 列表 */
+.slirn-fine-import-card {
+  min-width: 480px;
+  max-width: 640px;
+  text-align: left;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+.slirn-fine-import-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 50vh;
+  overflow-y: auto;
+  margin-top: 8px;
+  padding: 4px;
+  border: 1px solid var(--border, rgba(128,128,128,0.2));
+  border-radius: 8px;
+  background: var(--hover-bg, rgba(255,255,255,0.3));
+}
+.slirn-fine-import-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border, rgba(128,128,128,0.18));
+  border-radius: 6px;
+  background: var(--input-bg, #fff);
+  font-size: 13px;
+}
+.slirn-fine-import-info {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+}
+.slirn-fine-import-name { font-weight: 600; color: var(--text); }
+.slirn-fine-import-time {
+  font-size: 11px;
+  color: var(--text-muted, #94a3b8);
+  font-variant-numeric: tabular-nums;
+}
+.slirn-fine-import-ops {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+/* REQ-20260919-061a 用户反馈 v3：精剪面板整体按左右两个区域展示（每列内单列堆叠）。
+   - 外层 .slirn-fine-cols = 2 列网格，把 8 个设置块（视频位置/字幕位置/背景位置/
+     视频源裁剪/片头封面/背景音乐/字体设置/输出设置）4+4 分到左右列。
+   - 每个 .slirn-fine-params（block 内的参数组）= 单列 flex 纵向堆叠。
+   - 单个参数块 = label + slider + (num + ▲▼ 一体)。 */
+.slirn-fine-cols {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  margin: 8px 0 4px 0;
+  align-items: start;
+}
+.slirn-fine-col {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+.slirn-fine-params {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 6px 0;
+}
+.slirn-fine-param {
+  display: grid;
+  /* REQ-20260919-061a v7 用户反馈：num 框外不再加自定义 ▲▼ 按钮（与浏览器原生
+     stepper 重复），整个 param 减为 3 列 = label | slider | num。
+     - 标签列宽 160px（让「音量（0–1，0.4 = 不压人声）」这类长标签完整显示）
+     - slider 占 1fr（自适应剩余宽度）
+     - num auto（取内容宽度，含原生 stepper） */
+  grid-template-columns: 160px 1fr auto;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+.slirn-fine-param-label {
+  font-size: 12px;
+  color: var(--text-muted);
+  white-space: normal;
+  line-height: 1.25;
+  word-break: break-word;
+}
+/* REQ-20260919-061a v7：num 直接显示（不再嵌在 num-group 容器里），加自身边框。
+   width 70px 含浏览器原生 stepper 的 ~16px，显示 4 位整数（如 1920）刚好。 */
+.slirn-fine-num {
+  width: 70px;
+  padding: 3px 6px;
+  font-size: 12px;
+  border: 1px solid var(--border, rgba(128,128,128,0.3));
+  border-radius: 4px;
+  background: var(--input-bg, #fff);
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  box-sizing: border-box;
+  height: 24px;
+}
+.slirn-fine-num:focus {
+  outline: none;
+  border-color: var(--accent, #3178c6);
+  box-shadow: 0 0 0 2px rgba(49, 120, 198, 0.15);
+}
+
+.slirn-fine-font-block,
+.slirn-fine-output-block,
+.slirn-fine-cover-block,
+.slirn-fine-audio-block,
+.slirn-fine-profile-block {
+  padding: 10px;
+  border: 1px solid var(--border, rgba(128,128,128,0.2));
+  border-radius: 8px;
+  background: rgba(128,128,128,0.03);
+  margin: 12px 0;
+}
+/* REQ-20260919-061 扩展：片头封面/背景音乐/全局模板块 — 顶部色条提示 */
+.slirn-fine-cover-block { border-left: 3px solid #5b8def; }
+.slirn-fine-audio-block { border-left: 3px solid #d65aad; }
+.slirn-fine-profile-block { border-left: 3px solid #2ea043; }
+
+/* REQ-20260919-061 扩展：全局参数模板 — 列表行 + 操作行 */
+.slirn-fine-profile-actions {
+  display: flex; gap: 8px; align-items: center; margin: 8px 0 10px 0;
+}
+.slirn-fine-profile-actions input.slirn-fine-profile-name {
+  flex: 1; padding: 5px 10px; font-size: 13px;
+  border: 1px solid var(--border, rgba(128,128,128,0.3));
+  border-radius: 6px; background: var(--input-bg, #fff); color: var(--text);
+}
+.slirn-fine-profile-actions input.slirn-fine-profile-name:focus {
+  outline: none; border-color: var(--accent, #2ea043);
+  box-shadow: 0 0 0 2px rgba(46, 160, 67, 0.15);
+}
+.slirn-fine-profile-list {
+  display: flex; flex-direction: column; gap: 6px; max-height: 200px; overflow-y: auto;
+}
+.slirn-fine-profile-empty {
+  padding: 12px; text-align: center; font-size: 12px;
+  color: var(--text-muted, #94a3b8);
+  border: 1px dashed var(--border, rgba(128,128,128,0.35)); border-radius: 8px;
+}
+.slirn-fine-profile-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; padding: 6px 10px;
+  border: 1px solid var(--border, rgba(128,128,128,0.25));
+  border-radius: 8px; background: var(--hover-bg, rgba(255,255,255,0.4));
+  font-size: 12.5px;
+}
+.slirn-fine-profile-info {
+  display: flex; align-items: baseline; gap: 10px; flex: 1; min-width: 0;
+}
+.slirn-fine-profile-name { font-weight: 600; color: var(--text); }
+.slirn-fine-profile-time {
+  font-size: 11px; color: var(--text-muted, #94a3b8);
+  font-variant-numeric: tabular-nums;
+}
+.slirn-fine-profile-ops {
+  display: flex; gap: 4px; flex-shrink: 0;
+}
+.slirn-fine-font-title { font-weight: 600; font-size: 13px; margin-bottom: 8px; }
+.slirn-fine-font-row {
+  display: grid;
+  grid-template-columns: 120px 1fr;
+  gap: 8px;
+  align-items: center;
+  margin: 4px 0;
+}
+.slirn-fine-font-label { font-size: 12px; color: var(--text-muted); }
+.slirn-fine-font-num,
+.slirn-fine-font-sel {
+  padding: 3px 8px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--input-bg, #fff);
+  color: var(--text);
+  max-width: 200px;
+}
+.slirn-fine-font-color {
+  width: 36px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.slirn-fine-font-slider { width: 100%; }
+.slirn-fine-font-val { font-size: 12px; padding: 0 6px; }
+
+/* REQ-20260919-062 v10 用户反馈：去掉页面内的预览框（设计空间画布），
+   不再渲染 .slirn-fine-preview 容器；预览通过 .slirn-mat-preview-float 弹窗。
+   保留 .slirn-fine-preview-empty 样式供未来可能的占位提示用。*/
+.slirn-fine-preview-empty { color: #999; text-align: center; padding: 30px 0; font-size: 12.5px; }
+/* REQ-20260919-062 v10 用户反馈：去掉页面内的预览框（设计空间画布），不再渲染
+   <video> / .slirn-fine-preview-stage；预览通过 .slirn-mat-preview-float 弹窗。
+   保留 .slirn-fine-preview-empty 用于无文件时的占位提示（hidden）。*/

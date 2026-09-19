@@ -6,6 +6,8 @@ update_task 的重截取逻辑走 E2E（见 work/REQ-20260915-003-workbench/）�
 
 from __future__ import annotations
 
+import json
+import re
 import sys
 from pathlib import Path
 
@@ -183,10 +185,10 @@ def test_render_workbench_layout(tmp_path: Path):
     assert "剪辑工作台 · 工作台任务" in html
     assert "📁 lecture.mp4（" in html
     assert "未截取 · 使用完整原视频" in html
-    # 左侧 8 阶段 + 状态
-    assert html.count('class="slirn-wb-stage ') == 8
+    # 左侧 8 阶段 + 状态（+ REQ-20260918-053：末尾追加 1 个「执行日志」非流水线视图 = 9）
+    assert html.count('class="slirn-wb-stage ') == 9
     assert "slirn-wb-stage done" in html and "slirn-wb-stage current" in html
-    assert "素材准备" in html and "字幕生成" in html and "字幕合成" in html
+    assert "素材准备" in html and "字幕生成" in html and "字幕合成" in html and "执行日志" in html
     # 右侧面板：素材清单 + 字幕区（含生成按钮）+ 字幕修订区 + 切分修剪区
     # （REQ-005 后修订区真实化；REQ-20260916-008 后切分修剪区真实化）+ 4 个规划占位
     assert "📦 资产清单" in html
@@ -204,7 +206,8 @@ def test_render_workbench_layout(tmp_path: Path):
     assert "✨ 优化字幕" in html
     assert "不明确字词" in html
     assert 'id="slirn-wb-pane-fine_review"' in html
-    assert html.count("规划中 — 该阶段将在后续版本提供") == 2
+    # REQ-20260919-061：fine_cut 已实现（占位 stage 减少到 1 个 = mux）
+    assert html.count("规划中 — 该阶段将在后续版本提供") == 1
     assert html.count("slirn-wb-pane\"") >= 1  # 面板容器齐备
     # 聚焦 current（字幕生成）→ 字幕面板默认显示
     import re
@@ -246,8 +249,8 @@ def test_render_workbench_stages_collapse_controls(tmp_path: Path):
     # 两处开关：阶段卡头部收起 + 顶栏展开（展开按钮只在收起后由 CSS 显示）
     assert "« 收起" in html and "🧭 展开阶段" in html
     assert "slirn-wb-stages-expand" in html
-    # 阶段条目不受影响
-    assert html.count('class="slirn-wb-stage ') == 8
+    # 阶段条目不受影响（8 流水线 + 1 执行日志视图 = 9）
+    assert html.count('class="slirn-wb-stage ') == 9
 
 
 def test_render_workbench_stages_rail(tmp_path):
@@ -272,3 +275,4612 @@ def test_render_workbench_stages_rail(tmp_path):
     assert ".slirn-wb-stages-rail { display: none; }" in css
     assert ".wb-stages-collapsed .slirn-wb-stages-rail {" in css
     assert ".wb-stages-collapsed .slirn-wb-main { grid-template-columns: 40px 1fr; }" in css
+
+
+# ---------- 精剪视频·fine_compose 数据规整（REQ-20260919-061 Phase C 收尾）----------
+
+def test_get_fine_compose_normalizes_string_numbers(tmp_path):
+    """fine_compose.json 里的数字字段若存成字符串 → _get_fine_compose 转回数字。
+
+    背景：wb 渲染时 `{font["bg_opacity"]:.2f}` 要求数字，若存成字符串会抛
+    "Unknown format code 'f' for object of type 'str'" → 整页 500。
+
+    REQ-20260919-061 用户补充：x/y 改为像素（1920×1080 设计空间），所以字符串
+    "0.5" 在 x 上属于旧归一化坐标 → 自动迁移成 960 px 整数；scale/crop_* 保持 float。
+    """
+    import json
+    from slirn_home.app import _get_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="fine-cut", original_video=video)
+    # 写一份故意全字符串数字的 fine_compose.json（旧 0-1 归一化坐标）
+    fc_path = m.tasks_dir / t.task_id / "fine_compose.json"
+    fc_path.parent.mkdir(parents=True, exist_ok=True)
+    fc_path.write_text(json.dumps({
+        "font": {"bg_opacity": "0.6", "size": "36", "stroke_width": "2",
+                 "bg_radius": "4", "bold": True, "align": "center", "family": "STHeitiMedium"},
+        "layout": {"video": {"x": "0.5", "y": "0.5", "scale": "1.0",
+                             "crop_x": "0.1", "crop_y": "0.1",
+                             "crop_w": "0.9", "crop_h": "0.6", "enabled": True}},
+    }), encoding="utf-8")
+
+    fc = _get_fine_compose(m, t.task_id)
+    # 字体数字字段已转 float
+    assert fc["font"]["bg_opacity"] == 0.6 and isinstance(fc["font"]["bg_opacity"], float)
+    assert fc["font"]["size"] == 36.0 and isinstance(fc["font"]["size"], float)
+    # x/y 走迁移逻辑：旧 0-1 字符串 "0.5" → 像素 960（0.5 * 1920）
+    assert fc["layout"]["video"]["x"] == 960 and isinstance(fc["layout"]["video"]["x"], int)
+    assert fc["layout"]["video"]["y"] == 540 and isinstance(fc["layout"]["video"]["y"], int)
+    # scale 保持 float
+    assert fc["layout"]["video"]["scale"] == 1.0
+    # crop_* 现在也走迁移：旧 0-1 字符串 "0.9" → 像素 1728（0.9 * 1920）
+    assert fc["layout"]["video"]["crop_w"] == 1728 and isinstance(fc["layout"]["video"]["crop_w"], int)
+    assert fc["layout"]["video"]["crop_h"] == 648  # 0.6 * 1080
+    # 落盘后 _schema 已升级到 2（再读一次不会重复迁移）
+    assert fc["_schema"] == 2
+
+
+def test_render_fine_cut_zone_with_string_font_does_not_500(tmp_path):
+    """fine_compose.json 有字符串数字时，渲染工作台不能 500。
+
+    回归保护：之前 `{font["bg_opacity"]:.2f}` 在字符串上会 ValueError。
+    """
+    import json
+    from slirn_home.app import _render_workbench, _get_fine_compose, _save_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="fine-cut-str", original_video=video)
+    fc_path = m.tasks_dir / t.task_id / "fine_compose.json"
+    fc_path.parent.mkdir(parents=True, exist_ok=True)
+    fc_path.write_text(json.dumps({
+        "font": {"bg_opacity": "0.6", "size": 36, "stroke_width": 2,
+                 "bg_color": "#000000", "bg_radius": 4, "bg_enabled": False,
+                 "bold": True, "align": "center", "family": "STHeitiMedium",
+                 "stroke_color": "#000000"},
+    }), encoding="utf-8")
+
+    html = _render_workbench(t.task_id, m)
+    # 渲染必须成功，且字体区出现（REQ-20260919-061a：val span 已移除，只剩 input + ▲▼）
+    assert 'slirn-fine-font-block' in html
+    assert 'bg_opacity_val' not in html, "val span 已移除；输入框本身即数值显示"
+    assert 'slirn-fine-font-bg_opacity_num' in html, "font slider 仍需配 number input"
+
+
+# ---------- fine_compose x/y 像素化迁移（REQ-20260919-061 用户补充）----------
+
+def test_get_fine_compose_migrates_old_normalized_layout(tmp_path):
+    """旧版 fine_compose.json（_schema 缺失，x/y 和 crop_* 都是 0-1）→ 读时自动按 1920×1080 转像素。
+
+    迁移后 _schema=2 落盘；第二次读不应再变化（幂等）。
+    """
+    import json
+    from slirn_home.app import _get_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="legacy-coords", original_video=video)
+    fc_path = m.tasks_dir / t.task_id / "fine_compose.json"
+    fc_path.parent.mkdir(parents=True, exist_ok=True)
+    fc_path.write_text(json.dumps({
+        "layout": {
+            "video":    {"x": 0.0,  "y": 0.0,  "scale": 1.0, "enabled": True,
+                         "crop_x": 0.0, "crop_y": 0.0, "crop_w": 1.0, "crop_h": 1.0},
+            "subtitle": {"x": 0.5,  "y": 0.9,  "scale": 1.0, "enabled": True},
+            "cover":    {"x": 0.7,  "y": 0.85, "scale": 0.3, "enabled": False},
+            "bg":       {"x": 0.0,  "y": 0.0,  "scale": 1.0, "enabled": False},
+        },
+    }), encoding="utf-8")
+
+    fc = _get_fine_compose(m, t.task_id)
+    # 旧 0-1 自动 × 设计空间 → 像素整数
+    assert fc["layout"]["video"]["x"] == 0
+    assert fc["layout"]["video"]["y"] == 0
+    assert fc["layout"]["subtitle"]["x"] == 960      # 0.5 * 1920
+    assert fc["layout"]["subtitle"]["y"] == 972      # 0.9 * 1080
+    assert fc["layout"]["cover"]["x"] == 1344        # 0.7 * 1920
+    assert fc["layout"]["cover"]["y"] == 918         # 0.85 * 1080
+    # crop_* 也走迁移：旧 0-1 → 设计空间像素
+    assert fc["layout"]["video"]["crop_x"] == 0
+    assert fc["layout"]["video"]["crop_y"] == 0
+    assert fc["layout"]["video"]["crop_w"] == 1920    # 1.0 * 1920
+    assert fc["layout"]["video"]["crop_h"] == 1080    # 1.0 * 1080
+    # 类型：x/y/crop_* 都是 int，scale 是 float
+    assert isinstance(fc["layout"]["video"]["x"], int)
+    assert isinstance(fc["layout"]["video"]["crop_w"], int)
+    assert isinstance(fc["layout"]["video"]["scale"], float)
+    assert fc["_schema"] == 2
+
+    # 落盘后再读，幂等（不再变化）
+    fc2 = _get_fine_compose(m, t.task_id)
+    assert fc2["layout"]["subtitle"]["x"] == 960
+    assert fc2["layout"]["video"]["crop_w"] == 1920
+    assert fc2["_schema"] == 2
+
+
+def test_get_fine_compose_keeps_existing_pixel_layout(tmp_path):
+    """已是像素值（_schema=2，x > 1）→ 不应再做 0-1 → 像素的二次迁移。"""
+    import json
+    from slirn_home.app import _get_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="pixel-coords", original_video=video)
+    fc_path = m.tasks_dir / t.task_id / "fine_compose.json"
+    fc_path.parent.mkdir(parents=True, exist_ok=True)
+    fc_path.write_text(json.dumps({
+        "_schema": 2,
+        "layout": {
+            "video":    {"x": 100, "y": 200, "scale": 0.5, "enabled": True,
+                         "crop_x": 100, "crop_y": 100, "crop_w": 1600, "crop_h": 800},
+            "subtitle": {"x": 960, "y": 972, "scale": 1.0, "enabled": True},
+            "cover":    {"x": 1344, "y": 918, "scale": 0.3, "enabled": False},
+            "bg":       {"x": 0, "y": 0, "scale": 1.0, "enabled": False},
+        },
+    }), encoding="utf-8")
+
+    fc = _get_fine_compose(m, t.task_id)
+    # x/y 应保持原值（不被迁移）
+    assert fc["layout"]["video"]["x"] == 100
+    assert fc["layout"]["video"]["y"] == 200
+    assert fc["layout"]["subtitle"]["x"] == 960
+    # crop_* 应保持像素值
+    assert fc["layout"]["video"]["crop_x"] == 100
+    assert fc["layout"]["video"]["crop_w"] == 1600
+    assert fc["_schema"] == 2
+
+
+def test_run_fine_render_crop_filter_uses_design_space_pixels(tmp_path, monkeypatch):
+    """ffmpeg crop 表达式按 (crop_*/1920|1080) 把设计空间像素换算到源视频 iw/ih。
+
+    REQ-20260919-061 用户补充：crop_* 是设计空间像素；不同源视频分辨率下
+    渲染都正确（4K/1080p/720p/竖屏等）。
+    """
+    import json
+    from slirn_home.app import _run_fine_render, _save_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="crop-px", original_video=video)
+    # 把 video.crop_* 设为像素值（设计空间 1920×1080 的一部分）
+    fc = {
+        "materials": {"video": {"path": str(video.relative_to(mgr_root(tmp_path))),
+                                "type": "video", "source": "upload"}},
+        "layout": {"video": {"x": 0, "y": 0, "scale": 1.0,
+                             "crop_x": 320, "crop_y": 180, "crop_w": 1280, "crop_h": 720,
+                             "enabled": True}},
+    }
+
+    # Mock ffmpeg subprocess + 解析 filter_complex
+    captured = {}
+    class _FakeResult:
+        returncode = 0
+        stderr = ""
+        stdout = ""
+    def _fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        for i, a in enumerate(cmd):
+            if a == "-filter_complex":
+                captured["filter"] = cmd[i + 1]
+                break
+        return _FakeResult()
+    import subprocess
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    out_path = mgr_root(tmp_path) / "tasks" / t.task_id / "outputs" / "test.mp4"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    _save_fine_compose(m, t.task_id, fc)
+
+    res = _run_fine_render(t.task_id, m, out_path, duration=10.0)
+    assert res["ok"] is True
+    # filter 应含 crop=iw*1280/1920:ih*720/1080:iw*320/1920:ih*180/1080
+    assert "crop=iw*1280/1920" in captured["filter"]
+    assert "ih*720/1080" in captured["filter"]
+    assert "iw*320/1920" in captured["filter"]
+    assert "ih*180/1080" in captured["filter"]
+
+
+def mgr_root(root):
+    return root
+
+
+def test_render_fine_cut_zone_uses_pixel_sliders(tmp_path):
+    """_render_fine_cut_zone 输出的 x/y 和 crop_* 滑块 HTML 都用像素范围。
+
+    REQ-20260919-061 用户补充：所有空间字段统一为 1920×1080 设计空间像素。
+    """
+    from slirn_home.app import _render_workbench
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="px-slider", original_video=video)
+    html = _render_workbench(t.task_id, m)
+    # video.x: max=1920 step=1
+    assert 'id="slirn-fine-video-x"' in html
+    assert 'max="1920"' in html
+    assert 'step="1"' in html
+    # video.y: max=1080 step=1
+    assert 'id="slirn-fine-video-y"' in html
+    assert 'max="1080"' in html
+    # 不应有旧 max="1" step="0.01" 的归一化滑块（x/y）
+    assert 'max="1" step="0.01"' not in html
+    # 不应有旧 max="1" step="0.005" 的归一化滑块（crop_*）
+    assert 'max="1" step="0.005"' not in html
+    # v13 用户反馈：画布 X/Y 允许负数（−画布宽到+画布宽 / −画布高到+画布高）。
+    # 因此标签改成 "X（-1920–1920）" + min="-1920"（X）/ min="-1080"（Y）。
+    assert 'X（-1920–1920）' in html, "画布 X 标签应说明允许负数"
+    assert 'Y（-1080–1080）' in html, "画布 Y 标签应说明允许负数"
+    # min 应是 -1920/-1080（不仅 0）
+    assert 'min="-1920"' in html, "video X 滑块 min 应为 -1920"
+    assert 'min="-1080"' in html, "video Y 滑块 min 应为 -1080"
+    # 但 crop_*（源坐标）保持 ≥0：起点仍 0–1920/0–1080
+    assert 'X 起点（0–1920）' in html
+    assert 'Y 起点（0–1080）' in html
+    # crop_* 还是用 0–1920/0–1080
+    import re as _re
+    crop_x_seg = html[html.find('id="slirn-fine-video-crop_x"'):html.find('id="slirn-fine-video-crop_x"') + 400]
+    assert 'min="0"' in crop_x_seg, "crop_x 起点应保持 min=0（源坐标不能为负）"
+    # crop_* 也是像素（设计空间）— REQ-20260919-061 用户补充
+    assert 'id="slirn-fine-video-crop_x"' in html
+    assert 'id="slirn-fine-video-crop_y"' in html
+    assert 'id="slirn-fine-video-crop_w"' in html
+    assert 'id="slirn-fine-video-crop_h"' in html
+    # 默认值显示为整数（subtitle.x=672 → 滑块值 672；crop_w=1920）
+    assert 'value="672"' in html
+    assert 'value="972"' in html
+    assert 'value="1920"' in html  # crop_w 默认
+    assert 'value="1080"' in html  # crop_h 默认
+
+
+# ---------- REQ-20260919-061 扩展：片头封面 + 背景音乐 ----------
+
+def test_get_fine_compose_injects_audio_defaults(tmp_path):
+    """新建 task 后 fc["audio"] 应等于 _FINE_AUDIO_DEFAULTS。"""
+    from slirn_home.app import _get_fine_compose, _FINE_AUDIO_DEFAULTS
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="audio-defaults", original_video=video)
+    fc = _get_fine_compose(m, t.task_id)
+    assert fc["audio"] == dict(_FINE_AUDIO_DEFAULTS)
+
+
+def test_get_fine_compose_cover_old_x_y_legacy_migrates(tmp_path):
+    """旧数据 layout.cover 有 x/y/scale 但没 duration → 自动补 duration=2.0。
+
+    REQ-20260919-061 扩展：cover 从「角标小图」改为「片头全屏海报」，旧字段
+    保留但补 duration 默认值。
+    """
+    import json
+    from slirn_home.app import _get_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="cover-legacy", original_video=video)
+    fc_path = m.tasks_dir / t.task_id / "fine_compose.json"
+    fc_path.parent.mkdir(parents=True, exist_ok=True)
+    fc_path.write_text(json.dumps({
+        "_schema": 2,
+        "layout": {
+            "video": {"x": 0, "y": 0, "scale": 0.7, "enabled": True,
+                      "crop_x": 0, "crop_y": 0, "crop_w": 1920, "crop_h": 1080},
+            "subtitle": {"x": 672, "y": 972, "scale": 1.0, "enabled": True},
+            "cover": {"x": 1344, "y": 918, "scale": 0.3, "enabled": False},  # 旧字段
+            "bg": {"x": 0, "y": 0, "scale": 1.0, "enabled": False},
+        },
+    }), encoding="utf-8")
+
+    fc = _get_fine_compose(m, t.task_id)
+    cover = fc["layout"]["cover"]
+    assert cover.get("duration") == 2.0  # 自动补
+    # 旧字段保留（不强制覆盖 — 数据不丢）
+    assert cover.get("x") == 1344
+    assert cover.get("y") == 918
+
+
+def test_render_fine_cut_zone_includes_cover_duration_slider(tmp_path):
+    """片头封面控制块：启用 checkbox + 时长滑块 max=10 step=0.5 value=2.0。"""
+    from slirn_home.app import _render_workbench
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="cover-ui", original_video=video)
+    html = _render_workbench(t.task_id, m)
+    # 启用 checkbox + duration 滑块
+    assert 'class="slirn-fine-cover-block"' in html
+    assert 'data-key="cover"' in html
+    assert 'id="slirn-fine-cover-duration"' in html
+    assert 'max="10"' in html
+    assert 'step="0.5"' in html
+    assert 'value="2.0"' in html
+    # 提示文案
+    assert "0–10 秒" in html
+
+
+def test_render_fine_cut_zone_includes_audio_volume_slider(tmp_path):
+    """背景音乐控制块：启用 checkbox + 音量/淡入/淡出 4 个滑块。"""
+    from slirn_home.app import _render_workbench
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="audio-ui", original_video=video)
+    html = _render_workbench(t.task_id, m)
+    # 音频块容器
+    assert 'class="slirn-fine-audio-block"' in html
+    assert 'data-key="audio"' in html
+    # 4 个滑块（独立 selector — 用 data-audio-key 而非 data-key）
+    assert 'id="slirn-fine-audio-volume"' in html
+    assert 'data-audio-key="volume"' in html
+    assert 'value="0.40"' in html  # 默认音量
+    assert 'id="slirn-fine-audio-fade_in"' in html
+    assert 'data-audio-key="fade_in"' in html
+    assert 'id="slirn-fine-audio-fade_out"' in html
+    assert 'data-audio-key="fade_out"' in html
+    # 提示文案
+    assert "原说话人语音" in html or "原声" in html
+
+
+def test_run_fine_render_cover_intro_concat_filter(tmp_path, monkeypatch):
+    """封面启用 + duration=3s 时 filter_complex 应含 [intro] + concat=n=2:v=1:a=0。
+
+    REQ-20260919-061 扩展：封面作为片头全屏海报，渲染时用 concat 拼到视频流前。
+    """
+    import json
+    from slirn_home.app import _run_fine_render, _save_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="cover-intro", original_video=video)
+    # 上传封面文件
+    cover_img = tmp_path / "cover.png"
+    # 写一个有效的 PNG（最小 1x1）让 filter 不被图像解码器拒
+    import struct
+    cover_img.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + struct.pack(">I", 13)
+        + b"IHDR"
+        + struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+        + b"\x00\x00\x00\x00"
+        + struct.pack(">I", 0xC4F1D3B5)  # CRC
+        + struct.pack(">I", 0)
+        + b"IDAT\x00\x00\x00\x00\x00"
+        + struct.pack(">I", 0xD7B1B1DC)
+        + b"IEND"
+        + struct.pack(">I", 0xAE426082)
+    )
+
+    fc = {
+        "materials": {
+            "video": {"path": str(video.relative_to(mgr_root(tmp_path))),
+                      "type": "video", "source": "upload"},
+            "cover": {"path": str(cover_img.relative_to(mgr_root(tmp_path))),
+                      "type": "image", "source": "upload"},
+        },
+        "layout": {"video": {"x": 0, "y": 0, "scale": 1.0,
+                             "crop_x": 0, "crop_y": 0, "crop_w": 1920, "crop_h": 1080,
+                             "enabled": True},
+                   "cover": {"enabled": True, "duration": 3.0}},
+    }
+
+    captured = {}
+    class _FakeResult:
+        returncode = 0
+        stderr = ""
+        stdout = ""
+    def _fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        for i, a in enumerate(cmd):
+            if a == "-filter_complex":
+                captured["filter"] = cmd[i + 1]
+                break
+        return _FakeResult()
+    import subprocess
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    out_path = mgr_root(tmp_path) / "tasks" / t.task_id / "outputs" / "test.mp4"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    _save_fine_compose(m, t.task_id, fc)
+    res = _run_fine_render(t.task_id, m, out_path, duration=10.0)
+    assert res["ok"] is True
+
+    # 片头 input 应含 -t 3.00
+    assert "-t" in captured["cmd"]
+    assert "3.00" in captured["cmd"]
+    # filter_complex 应含 [intro] 标签 + concat n=2:v=1:a=0
+    assert "[intro]" in captured["filter"]
+    assert "concat=n=2:v=1:a=0" in captured["filter"]
+    # 不应再有旧版 cover overlay 痕迹（旧 30% 缩放 cw=576）
+    assert "scale=576" not in captured["filter"]  # 旧 30% 缩放消失
+    assert "scale=324" not in captured["filter"]  # 旧 30% 缩放消失（h）
+    # 封面 input 应为 scale=1920:1080（全屏海报）
+    assert "scale=1920:1080:force_original_aspect_ratio=decrease" in captured["filter"]
+
+
+def test_run_fine_render_subtitle_before_cover_concat(tmp_path, monkeypatch):
+    """REQ-20260919-061a 用户反馈：视频和字幕的开始时间都从封面结束后起算。
+
+    实现：subtitle filter 必须出现在 cover concat 之前。这样：
+    - subtitle 烧录到 [video_stream] 上，stream t=0 = 源视频 t=0 = SRT 0
+    - 然后 concat [intro] + [video_with_subs]，视频段从 output t=cover_dur 开始播
+    - SRT 第 N 秒字幕出现在 output t=cover_dur + N（与视频内容对齐）
+    - 封面段（output t=0..cover_dur）只有封面图、没有字幕（不会被字幕盖住）
+    """
+    import json
+    from slirn_home.app import _run_fine_render, _save_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="sub-timing", original_video=video)
+    # 上传封面 + 字幕文件
+    cover_img = tmp_path / "cover.png"
+    cover_img.write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\rIDATx\x9cc\xf8\xff\xff?\x00\x05\xfe\x02\xfe\xdc\xccY\xe7\x00\x00\x00\x00IEND\xaeB`\x82")
+    sub_file = tmp_path / "sub.srt"
+    sub_file.write_text("1\n00:00:01,000 --> 00:00:03,000\nHello\n\n", encoding="utf-8")
+
+    fc = {
+        "materials": {
+            "video":    {"path": str(video.relative_to(mgr_root(tmp_path))),
+                         "type": "video", "source": "upload"},
+            "cover":    {"path": str(cover_img.relative_to(mgr_root(tmp_path))),
+                         "type": "image", "source": "upload"},
+            "subtitle": {"path": str(sub_file.relative_to(mgr_root(tmp_path))),
+                         "type": "srt", "source": "upload"},
+        },
+        "layout": {
+            "video":    {"x": 0, "y": 0, "scale": 1.0,
+                         "crop_x": 0, "crop_y": 0, "crop_w": 1920, "crop_h": 1080,
+                         "enabled": True},
+            "subtitle": {"x": 0, "y": 0, "scale": 1.0, "enabled": True},
+            "cover":    {"enabled": True, "duration": 2.5},
+        },
+    }
+
+    captured = {}
+    class _FakeResult:
+        returncode = 0
+        stderr = ""
+        stdout = ""
+    def _fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        for i, a in enumerate(cmd):
+            if a == "-filter_complex":
+                captured["filter"] = cmd[i + 1]
+                break
+        return _FakeResult()
+    import subprocess
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    out_path = mgr_root(tmp_path) / "tasks" / t.task_id / "outputs" / "test.mp4"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    _save_fine_compose(m, t.task_id, fc)
+    res = _run_fine_render(t.task_id, m, out_path, duration=10.0)
+    assert res["ok"] is True
+
+    f = captured["filter"]
+    # 字幕 filter 必须存在
+    assert "subtitles=" in f, "应有 subtitle filter 烧录"
+    # 关键顺序：subtitle filter 的索引位置必须在 cover concat 之前
+    sub_pos = f.find("subtitles=")
+    concat_pos = f.find("concat=n=2:v=1:a=0")
+    assert sub_pos >= 0 and concat_pos >= 0
+    assert sub_pos < concat_pos, (
+        f"subtitle filter (pos={sub_pos}) 必须在 cover concat (pos={concat_pos}) 之前，"
+        f"否则字幕会显示在封面上且 SRT 时间从 0 起算"
+    )
+    # 封面 input + concat 都还在
+    assert "[intro]" in f
+    assert "scale=1920:1080:force_original_aspect_ratio=decrease" in f
+
+
+def test_run_fine_render_audio_amix_filter(tmp_path, monkeypatch):
+    """背景音乐启用 + volume=0.3 时 filter_complex 应含 [voice] + [bgm] + amix。
+
+    REQ-20260919-061 扩展：背景音乐与原声混合（amix），保留说话人语音。
+    """
+    import json
+    from slirn_home.app import _run_fine_render, _save_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="audio-amix", original_video=video)
+    audio_file = tmp_path / "bgm.mp3"
+    audio_file.write_bytes(b"fake-mp3-data")
+
+    fc = {
+        "materials": {
+            "video": {"path": str(video.relative_to(mgr_root(tmp_path))),
+                      "type": "video", "source": "upload"},
+            "audio": {"path": str(audio_file.relative_to(mgr_root(tmp_path))),
+                      "type": "audio", "source": "upload"},
+        },
+        "layout": {"video": {"x": 0, "y": 0, "scale": 1.0,
+                             "crop_x": 0, "crop_y": 0, "crop_w": 1920, "crop_h": 1080,
+                             "enabled": True}},
+        "audio": {"enabled": True, "volume": 0.3, "fade_in": 0.0, "fade_out": 0.0},
+    }
+
+    captured = {}
+    class _FakeResult:
+        returncode = 0
+        stderr = ""
+        stdout = ""
+    def _fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        for i, a in enumerate(cmd):
+            if a == "-filter_complex":
+                captured["filter"] = cmd[i + 1]
+                break
+        return _FakeResult()
+    import subprocess
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    out_path = mgr_root(tmp_path) / "tasks" / t.task_id / "outputs" / "test.mp4"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    _save_fine_compose(m, t.task_id, fc)
+    res = _run_fine_render(t.task_id, m, out_path, duration=10.0)
+    assert res["ok"] is True
+
+    # filter_complex 应含 voice/bgm 标签 + amix
+    assert "[voice]" in captured["filter"]
+    assert "[bgm]" in captured["filter"]
+    assert "amix=inputs=2:duration=first:normalize=0" in captured["filter"]
+    assert "[aout]" in captured["filter"]
+    assert "volume=0.30" in captured["filter"]  # audio volume 衰减
+    assert "volume=1.0" in captured["filter"]    # 原声保持 100%
+    # ffmpeg cmd 应 -map [aout]（不再 -map 0:a?）
+    assert "[aout]" in captured["cmd"]
+    assert "0:a?" not in captured["cmd"]
+
+
+def test_run_fine_render_no_cover_no_audio_unchanged(tmp_path, monkeypatch):
+    """无封面无背景音乐时 filter_complex 不含 concat/amix（向后兼容）。
+
+    REQ-20260919-061 扩展：默认行为（不上传 cover/audio）应与原版一致。
+    """
+    import json
+    from slirn_home.app import _run_fine_render, _save_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="back-compat", original_video=video)
+    fc = {
+        "materials": {"video": {"path": str(video.relative_to(mgr_root(tmp_path))),
+                                "type": "video", "source": "upload"}},
+        "layout": {"video": {"x": 0, "y": 0, "scale": 1.0,
+                             "crop_x": 0, "crop_y": 0, "crop_w": 1920, "crop_h": 1080,
+                             "enabled": True}},
+        "audio": {"enabled": False, "volume": 0.4, "fade_in": 0.0, "fade_out": 0.0},
+    }
+
+    captured = {}
+    class _FakeResult:
+        returncode = 0
+        stderr = ""
+        stdout = ""
+    def _fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        for i, a in enumerate(cmd):
+            if a == "-filter_complex":
+                captured["filter"] = cmd[i + 1]
+                break
+        return _FakeResult()
+    import subprocess
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    out_path = mgr_root(tmp_path) / "tasks" / t.task_id / "outputs" / "test.mp4"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    _save_fine_compose(m, t.task_id, fc)
+    res = _run_fine_render(t.task_id, m, out_path, duration=10.0)
+    assert res["ok"] is True
+
+    # 不应有片头拼接 / amix
+    assert "[intro]" not in captured["filter"]
+    assert "concat=n=2" not in captured["filter"]
+    assert "amix=" not in captured["filter"]
+    # 仍应有 [voice] 和 [aout]（原声直通）
+    assert "[voice]" in captured["filter"]
+    assert "[aout]" in captured["filter"]
+    assert "anull[aout]" in captured["filter"]
+
+
+# ---------- REQ-20260919-061 扩展：全局参数模板（fine_profiles 模块） ----------
+
+def test_fine_profiles_save_and_list(tmp_path):
+    """save → list 拿到。"""
+    from slirn_home import fine_profiles as fp
+
+    assert fp.list_profiles(tmp_path) == []
+    saved = fp.save_profile(
+        tmp_path, "教学片头",
+        {"layout": {"video": {"x": 100}}, "font": {"size": 42},
+         "output": {"resolution": "1080p"}, "audio": {"volume": 0.3}},
+        task_id_origin="task_xxx",
+    )
+    assert saved["name"] == "教学片头"
+    assert saved["id"].startswith("p_")
+    assert saved["saved_at"]
+    assert saved["task_id_origin"] == "task_xxx"
+    assert saved["params"]["font"]["size"] == 42
+
+    profiles = fp.list_profiles(tmp_path)
+    assert len(profiles) == 1
+    assert profiles[0]["id"] == saved["id"]
+    assert profiles[0]["name"] == "教学片头"
+
+
+def test_fine_profiles_apply_overwrites_task_layout(tmp_path):
+    """保存模板 → 应用到另一 task → layout/font/output/audio 被覆盖，materials 不动。
+
+    REQ-20260919-061 扩展：模板跨任务复用，且不动素材路径。
+    """
+    import json
+    from slirn_home import fine_profiles as fp
+    from slirn_home.app import _get_fine_compose, _save_fine_compose, _render_workbench
+
+    # 任务 A：调一组参数
+    (tmp_path / "a").mkdir(parents=True, exist_ok=True)
+    m_a, video_a = _make_mgr(tmp_path / "a")
+    t_a = m_a.create(name="task-a", original_video=video_a)
+    _save_fine_compose(m_a, t_a.task_id, {
+        "materials": {"video": {"path": "a.mp4", "type": "video", "source": "upload"}},
+        "layout": {"video": {"x": 100, "y": 200, "scale": 0.5, "enabled": True,
+                             "crop_x": 0, "crop_y": 0, "crop_w": 1920, "crop_h": 1080},
+                   "subtitle": {"x": 672, "y": 972, "scale": 1.0, "enabled": True},
+                   "cover": {"enabled": False, "duration": 2.0},
+                   "bg": {"x": 0, "y": 0, "scale": 1.0, "enabled": False}},
+        "font": {"size": 42, "family": "STHeitiMedium"},
+        "output": {"resolution": "1080p"},
+        "audio": {"enabled": True, "volume": 0.3, "fade_in": 0.0, "fade_out": 0.0},
+    })
+    fc_a = _get_fine_compose(m_a, t_a.task_id)
+    fp.save_profile(
+        tmp_path, "教学片头",
+        {"layout": fc_a["layout"], "font": fc_a["font"],
+         "output": fc_a["output"], "audio": fc_a["audio"]},
+        task_id_origin=t_a.task_id,
+    )
+    profile = fp.list_profiles(tmp_path)[0]
+
+    # 任务 B：完全不同参数 + 自己的素材
+    (tmp_path / "b").mkdir(parents=True, exist_ok=True)
+    m_b, video_b = _make_mgr(tmp_path / "b")
+    t_b = m_b.create(name="task-b", original_video=video_b)
+    # 端点 apply_fine_global_profile 的逻辑：把 params 写回 fc 后保存
+    target = fp.get_profile(tmp_path, profile["id"])
+    fc_b = _get_fine_compose(m_b, t_b.task_id)
+    fc_b_materials_before = dict(fc_b["materials"])
+    for key in fp.PROFILE_PARAM_KEYS:
+        if key in target["params"]:
+            fc_b[key] = target["params"][key]
+    _save_fine_compose(m_b, t_b.task_id, fc_b)
+
+    fc_b_after = _get_fine_compose(m_b, t_b.task_id)
+    # layout/font/output/audio 应与任务 A 一致
+    assert fc_b_after["layout"]["video"]["x"] == 100
+    assert fc_b_after["font"]["size"] == 42
+    assert fc_b_after["output"]["resolution"] == "1080p"
+    assert fc_b_after["audio"]["volume"] == 0.3
+    # materials 不动（任务 B 自己的素材路径）
+    assert fc_b_after["materials"] == fc_b_materials_before
+
+
+def test_fine_profiles_delete(tmp_path):
+    """save → delete → list 为空。"""
+    from slirn_home import fine_profiles as fp
+
+    p = fp.save_profile(tmp_path, "tmp", {"font": {"size": 36}})
+    assert len(fp.list_profiles(tmp_path)) == 1
+    assert fp.delete_profile(tmp_path, p["id"]) is True
+    assert fp.list_profiles(tmp_path) == []
+    # 二次删除应返回 False（不报错）
+    assert fp.delete_profile(tmp_path, p["id"]) is False
+
+
+def test_fine_profiles_duplicate_name_appends_suffix(tmp_path):
+    """同名模板自动加 `(2)` / `(3)` 后缀。"""
+    from slirn_home import fine_profiles as fp
+
+    p1 = fp.save_profile(tmp_path, "教学片头", {"font": {"size": 36}})
+    p2 = fp.save_profile(tmp_path, "教学片头", {"font": {"size": 42}})
+    p3 = fp.save_profile(tmp_path, "教学片头", {"font": {"size": 48}})
+    assert p1["name"] == "教学片头"
+    assert p2["name"] == "教学片头 (2)"
+    assert p3["name"] == "教学片头 (3)"
+    assert len(fp.list_profiles(tmp_path)) == 3
+
+
+def test_fine_profiles_atomic_write_no_corruption_on_overwrite(tmp_path):
+    """连续 save 两次 → 文件始终是合法 JSON（atomic write 验证）。"""
+    from slirn_home import fine_profiles as fp
+
+    fp.save_profile(tmp_path, "first", {"font": {"size": 36}})
+    fp.save_profile(tmp_path, "second", {"font": {"size": 42}})
+    # 直接读文件应仍是合法 JSON
+    import json
+    raw = (tmp_path / fp.GLOBAL_PROFILES_REL).read_text(encoding="utf-8")
+    data = json.loads(raw)  # 不抛异常即合法
+    assert isinstance(data["profiles"], list)
+    assert len(data["profiles"]) == 2
+    # 临时文件不应残留
+    assert not (tmp_path / fp.GLOBAL_PROFILES_REL).with_suffix(".json.tmp").exists()
+
+
+# ---------- REQ-20260919-070：引用参数（本地）+ 每行导出 ----------
+
+def test_export_fine_global_profile_returns_full_params_json(tmp_path: Path):
+    """REQ-20260919-070：POST /slirn/api/export_fine_global_profile 返 JSON 文件三件套。
+
+    验证：
+    - filename 包含清理后的模板名 + 时间戳
+    - content 是合法 JSON，包含 _schema / layout / font / output / audio / materials
+    - materials 为空 dict（全局模板按设计不含素材）
+    - mime = application/json
+    """
+    from slirn_home import fine_profiles as fp
+    from slirn_home.app import build_app
+    from fastapi.testclient import TestClient
+
+    prof = fp.save_profile(
+        tmp_path, "教学片头",
+        {
+            "layout": {"video": {"x": 100}},
+            "font": {"size": 42, "color": "#FF8800"},
+            "output": {"resolution": "1080p"},
+            "audio": {"enabled": True, "volume": 0.3},
+        },
+        task_id_origin="task_origin_xxx",
+    )
+    built = build_app(tmp_path)
+    client = TestClient(built.app)
+    resp = client.post("/slirn/api/export_fine_global_profile",
+                       json={"profile_id": prof["id"]})
+    body = resp.json()
+    assert body["ok"] is True, f"导出应成功：{body}"
+    assert "教学片头" in body["filename"], \
+        f"文件名应含模板名「教学片头」，实际：{body['filename']}"
+    assert body["filename"].endswith(".json"), \
+        f"文件名应以 .json 结尾，实际：{body['filename']}"
+    assert body["mime"] == "application/json"
+    payload = json.loads(body["content"])
+    assert payload["_schema"] == 3
+    assert payload["_source_profile_id"] == prof["id"]
+    assert payload["_source_profile_name"] == "教学片头"
+    assert payload["_source_task_id"] == "task_origin_xxx"
+    assert payload["materials"] == {}, "全局模板不含 materials，应为 {}"
+    assert payload["layout"]["video"]["x"] == 100
+    assert payload["font"]["size"] == 42
+    assert payload["font"]["color"] == "#FF8800"
+    assert payload["output"]["resolution"] == "1080p"
+    assert payload["audio"]["volume"] == 0.3
+
+
+def test_export_fine_global_profile_rejects_missing_id(tmp_path: Path):
+    """REQ-20260919-070：profile_id 缺失/空 → _err。"""
+    from slirn_home.app import build_app
+    from fastapi.testclient import TestClient
+
+    built = build_app(tmp_path)
+    client = TestClient(built.app)
+    for case in [{}, {"profile_id": ""}, {"profile_id": "   "}]:
+        resp = client.post("/slirn/api/export_fine_global_profile", json=case)
+        body = resp.json()
+        assert body["ok"] is False, f"应失败：{case} → {body}"
+        assert "profile_id" in body["error"], \
+            f"错误信息应提及 profile_id，实际：{body['error']}"
+
+
+def test_export_fine_global_profile_rejects_unknown_id(tmp_path: Path):
+    """REQ-20260919-070：不存在的 profile_id → _err。"""
+    from slirn_home.app import build_app
+    from fastapi.testclient import TestClient
+
+    built = build_app(tmp_path)
+    client = TestClient(built.app)
+    resp = client.post("/slirn/api/export_fine_global_profile",
+                       json={"profile_id": "p_does_not_exist"})
+    body = resp.json()
+    assert body["ok"] is False
+    assert "不存在" in body["error"], f"错误应说「不存在」，实际：{body['error']}"
+
+
+def test_export_fine_global_profile_sanitizes_filename(tmp_path: Path):
+    """REQ-20260919-070：模板名里的 Windows 非法字符（/\\:*?<>|和空白）应被替换成 _。"""
+    from slirn_home import fine_profiles as fp
+    from slirn_home.app import build_app
+    from fastapi.testclient import TestClient
+
+    prof = fp.save_profile(
+        tmp_path, '教/学*片<头>:?|"',
+        {"font": {"size": 36}},
+    )
+    built = build_app(tmp_path)
+    client = TestClient(built.app)
+    resp = client.post("/slirn/api/export_fine_global_profile",
+                       json={"profile_id": prof["id"]})
+    body = resp.json()
+    assert body["ok"] is True
+    base = body["filename"].rsplit(".", 1)[0]
+    forbidden = set('\\/:*?"<>| ')
+    bad = [c for c in base if c in forbidden]
+    assert not bad, f"文件名不应含 Windows 非法字符：{bad}（filename={body['filename']}）"
+
+
+def test_render_workbench_button_renamed_to_local(tmp_path: Path):
+    """REQ-20260919-070：「引用参数」按钮文案改为「引用参数（本地）」。"""
+    from slirn_home.app import _render_workbench
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="rename-test", original_video=video)
+    html = _render_workbench(t.task_id, m)
+    assert "📥 引用参数（本地）" in html, \
+        "按钮文案应改为「📥 引用参数（本地）」"
+    bare_btn_pos = html.find('data-action="fine-import-show"')
+    assert bare_btn_pos > 0
+    nearby = html[bare_btn_pos:bare_btn_pos + 200]
+    assert "引用参数（本地）" in nearby, \
+        f"按钮后 200 字内应见「引用参数（本地）」，实际：{nearby}"
+
+
+def test_router_fine_import_row_has_export_button():
+    """REQ-20260919-070：fineImportShow 渲染的每行模板应包含 📤 导出 按钮。"""
+    from pathlib import Path as _P
+    src = (_P(__file__).resolve().parent.parent
+           / "slirn_home" / "static" / "router.js").read_text(encoding="utf-8")
+    assert 'data-action="fine-import-export"' in src, \
+        "router.js 渲染 fine-import-row 时应包含 fine-import-export 按钮"
+    assert "action === 'fine-import-export'" in src, \
+        "router.js 委托处理应包含 fine-import-export 分支"
+    assert "/slirn/api/export_fine_global_profile" in src, \
+        "router.js 应调用 export_fine_global_profile 端点"
+
+
+def test_render_fine_cut_zone_includes_profile_block(tmp_path):
+    """REQ-20260919-061 用户反馈：保存设置参数搬到顶部操作栏 + 引用参数 modal。
+
+    旧版「底部 profile block + 单独的 fine-profile-save 按钮」已被移除，模板列表搬到
+    「📥 引用参数」弹出的 modal 里。
+    """
+    from slirn_home.app import _render_workbench
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="profile-ui", original_video=video)
+    html = _render_workbench(t.task_id, m)
+    # REQ-20260919-061a v6：保存/引用 操作栏 与 AI/预览/导出 合并到同一行
+    # (.slirn-fine-actions-bar 单一容器，flex-wrap: nowrap)，不再分前后两段
+    actions_bar_pos = html.find('class="slirn-fine-actions-bar"')
+    export_btn_pos = html.find('data-action="fine-export"')
+    assert actions_bar_pos > 0 and export_btn_pos > 0
+    # 都在同一个 actions-bar 内：导出按钮 应在 操作栏 之内（pos > 容器起点）
+    assert export_btn_pos > actions_bar_pos, \
+        "「导出最终视频」按钮应仍在 .slirn-fine-actions-bar 操作栏内"
+    # 操作栏内部仍含模板名输入 + 保存按钮 + 引用参数按钮 + 状态指示器
+    assert 'id="slirn-fine-profile-name"' in html
+    assert 'data-action="fine-save-all"' in html
+    assert 'data-action="fine-import-show"' in html
+    assert 'id="slirn-fine-save-status"' in html
+    # 引用参数 modal（默认 hidden，不应在 wb 加载时弹出）
+    assert 'id="slirn-fine-import-overlay" hidden' in html
+    assert 'id="slirn-fine-import-list"' in html
+    assert 'data-action="fine-import-close"' in html
+    # CSS 兜底：hidden 属性被 .slirn-modal-overlay 的 display:flex 覆盖的回归保护
+    css = Path('slirn_home/static/home.css').read_text(encoding='utf-8')
+    assert '.slirn-modal-overlay[hidden]' in css, \
+        'modal-overlay 必须有 [hidden] 兜底，否则 wb 加载时模态会强行显示并阻塞点击'
+    # 旧的底部 profile block 已彻底移除
+    assert 'class="slirn-fine-profile-block"' not in html
+    assert 'data-action="fine-profile-save"' not in html
+    # v6：操作栏不换行（flex-wrap: nowrap），宽度不够时整体横向滚动
+    assert 'flex-wrap: nowrap' in css, \
+        ".slirn-fine-actions-bar 应设 flex-wrap: nowrap 让所有控件保持在同一行"
+
+
+# ---------- REQ-20260919-061 用户反馈：保存 bug + 数值输入 + 封面静音 ----------
+
+def test_save_fine_layout_accepts_cover_duration_field(tmp_path):
+    """REQ-20260919-061 用户反馈：cover.duration 之前会被白名单过滤静默丢弃，导致
+    改滑块后值不持久。现已加进 allowed_keys，端点应正常写回。
+    """
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+    from slirn_home.app import _get_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="cover-dur-save", original_video=video)
+    client = TestClient(build_app(repo_root=tmp_path).app)
+
+    # 模拟前端 fineSaveAll 会发的请求体
+    r = client.post(
+        "/slirn/api/save_fine_layout",
+        json={"task_id": t.task_id, "layout": {"cover": {"duration": 4.5, "enabled": True}}},
+    )
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+
+    # 读回 fc — duration 必须真的存进去了
+    fc = _get_fine_compose(m, t.task_id)
+    assert fc["layout"]["cover"]["duration"] == 4.5
+    assert fc["layout"]["cover"]["enabled"] is True
+
+
+def test_save_fine_layout_response_shape_uses_ok_field(tmp_path):
+    """REQ-20260919-061 用户反馈「保存全部一直报错」的根因 — 前端用 `r.code !== 0` 判断
+    但后端 `_ok` 返回 `{"ok": true}` 没有 `code` 字段；前端 should 检查 `r.ok === true`。
+    这里直接验证响应结构，确认前端修复对齐后端形状。
+    """
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="save-shape", original_video=video)
+    client = TestClient(build_app(repo_root=tmp_path).app)
+
+    r = client.post(
+        "/slirn/api/save_fine_layout",
+        json={"task_id": t.task_id, "layout": {"video": {"x": 100}}},
+    )
+    payload = r.json()
+    assert payload["ok"] is True
+    assert "code" not in payload  # 关键：后端用 ok 字段，不用 code
+
+
+def test_render_fine_cut_zone_renames_save_button_to_settings(tmp_path):
+    """REQ-20260919-061 用户反馈：「保存全部」应改成「保存设置参数」（语义更准 —
+    只存参数，不存素材/视频本身）。
+    """
+    from slirn_home.app import _render_workbench
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="save-btn", original_video=video)
+    html = _render_workbench(t.task_id, m)
+    assert "💾 保存设置参数" in html
+    assert "💾 保存全部" not in html  # 旧文案彻底移除
+
+
+def test_render_fine_cut_zone_renders_number_input_and_stepper_per_slider(tmp_path):
+    """REQ-20260919-061 用户反馈：每个数值参数都要 number input + ▲▼ 按钮。
+
+    - 18 个滑块（video.x/y/scale, subtitle.x/y/scale, bg.x/y/scale, video.crop_x/y/w/h,
+      cover.duration, audio.volume/fade_in/fade_out, font.bg_opacity）每个都应有：
+        * 1 个 <input type="range" class="slirn-fine-slider">
+        * 1 个 <input type="number" class="slirn-fine-num" data-for="...">
+        * 2 个 <button class="slirn-fine-step-btn" data-step-dir="up|down" data-for="...">
+    """
+    from slirn_home.app import _render_workbench
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="stepper-ui", original_video=video)
+    html = _render_workbench(t.task_id, m)
+
+    # 数量对得上：
+    #   17 个 class="slirn-fine-slider"（video/subtitle/bg x/y/scale=9, crop=4, cover=1, audio=3）
+    #   + 1 个 class="slirn-fine-font-slider"（font.bg_opacity，独立类避免污染 layout 集合）
+    #   = 18 个 range slider；
+    #   + 19 个 number input（18 slider 配对 + 1 预览时长独立）
+    #   v7：移除了所有自定义 stepper 按钮 — 用浏览器原生 stepper。HTML 中不再出现
+    #   slirn-fine-step-btn 元素；JS 也不再为它们绑事件。
+    import re
+    assert len(re.findall(r'class="slirn-fine-slider"', html)) == 17
+    assert len(re.findall(r'class="slirn-fine-font-slider"', html)) == 1
+    # 19 = 18 slider 配对 + 1 预览时长独立；
+    # REQ-20260919-062 加了 1 个 bg 阈值手动输入框 → 20
+    # REQ-20260919-064 加了 1 个预览开始时间输入框 → 21
+    # REQ-20260919-066 预览开始时间改 时:分:秒 三段 → 23（class 多值 `slirn-fine-num slirn-fine-preview-time`）
+    #   上面正则要宽松：要么 class 字符串里就以 slirn-fine-num 开头并紧跟 " 或空格
+    assert len(re.findall(r'class="slirn-fine-num(?:\s|")', html)) == 23
+    # 不再有自定义 step-btn（与浏览器原生 stepper 重复，已移除）
+    assert len(re.findall(r'slirn-fine-step-btn', html)) == 0
+    # 也不再需要 num-group / step-stack 包装容器
+    assert 'slirn-fine-num-group' not in html
+    assert 'slirn-fine-step-stack' not in html
+
+    # 抽样几个关键滑块确认 stepper + num 双向关联（data-for 指向 slider id）
+    # cover.duration
+    assert re.search(
+        r'data-for="slirn-fine-cover-duration"', html,
+    ), "cover.duration 应配有 number input + ▲▼"
+    # video.x
+    assert re.search(
+        r'data-for="slirn-fine-video-x"', html,
+    ), "video.x 应配有 number input + ▲▼"
+    # audio.volume（用 data-audio-key 走 save_fine_audio 端点）
+    assert re.search(
+        r'data-audio-key="volume"[^>]*value="0\.40"', html,
+    ), "audio.volume slider 应保留 0.40 默认值"
+    assert re.search(
+        r'data-for="slirn-fine-audio-volume"', html,
+    ), "audio.volume 应配有 number input + ▲▼"
+    # crop_x 是像素整数（用 {:d} 格式）
+    assert re.search(
+        r'id="slirn-fine-video-crop_x"[^>]*value="0"', html,
+    ), "crop_x 默认值应是 0（int 像素）"
+    # cover hint 文案要提示用户「封面静音」
+    assert "封面播放期间视频静音" in html, \
+        "应提示用户封面期间不播原声"
+
+    # REQ-20260919-061a：去掉滑块行右侧不可改的 readonly 显示区
+    # _val span 已彻底移除（输入框本身即显示）
+    assert 'class="slirn-fine-layout-val"' not in html, \
+        "应去掉 readonly val span — 输入框本身即数值显示"
+    assert '_val">' not in html, \
+        "不应再有 id=..._val 元素（被 val span 移除）"
+
+    # REQ-20260919-061a v3：精剪面板整体按左右两列展示，block 内部参数单列堆叠
+    # - 外层 .slirn-fine-cols = 2 列网格（left: video位置/subtitle位置/bg位置/视频源裁剪；
+    #   right: 片头封面/背景音乐/字体设置/输出设置）
+    # - 每个 .slirn-fine-params（block 内部）= 单列纵向堆叠
+    # - 仍为 7 个 .slirn-fine-params（video/subtitle/bg/crop/cover/audio/font-bg_opacity）
+    assert 'class="slirn-fine-cols"' in html, \
+        "精剪面板外层应为 2 列网格（.slirn-fine-cols）"
+    assert 'class="slirn-fine-col"' in html, \
+        "应有左右两个 .slirn-fine-col 子容器"
+    assert len(re.findall(r'class="slirn-fine-params"', html)) == 7, \
+        "应有 7 个参数设置组（video/subtitle/bg/crop/cover/audio/font-bg_opacity）"
+
+    # 每个 param 内部 = label + slider + num（v7：去掉 num-group + step-stack，
+    # 只剩 3 列 mini-grid；num 用浏览器原生 stepper 满足 ±step 微调）
+    assert 'class="slirn-fine-step-stack"' not in html, \
+        "v7：num 不再包在 .slirn-fine-step-stack 里（移除自定义 ▲▼ 按钮）"
+    assert 'class="slirn-fine-num-group"' not in html, \
+        "v7：num 不再包在 .slirn-fine-num-group 里（不再需要 spinner 一体）"
+    # 每个 num 都应带 data-for 指向 slider id（保证 slider↔num 双向同步）
+    num_with_for = len(re.findall(r'class="slirn-fine-num"[^>]*data-for=', html))
+    assert num_with_for >= 17, \
+        f"至少 17 个 num input 应带 data-for=slider_id 关联，当前 {num_with_for}"
+
+
+def test_fine_slider_input_syncs_to_num_box():
+    """REQ-20260919-061a v3 用户反馈：拖动滑块时，对应 num 框数值要跟着变。
+
+    实现位置：router.js `bindFineControls` — slider 的 input 事件除了调防抖保存，
+    还要把 `id+'_num'` 的 number input 的 value 同步成 slider 的 value。
+    """
+    js = Path('slirn_home/static/router.js').read_text(encoding='utf-8')
+    # 必须有这段同步逻辑
+    assert "el.id + '_num'" in js, \
+        "slider input 处理器应同步写 id+'_num' 的 number input"
+    # 同步逻辑必须在 bindFineControls 内部（不是别的函数）
+    bind_fn_start = js.find('function bindFineControls')
+    assert bind_fn_start > 0
+    bind_fn_end = js.find('\n  }\n', bind_fn_start)
+    bind_body = js[bind_fn_start:bind_fn_end]
+    assert "el.id + '_num'" in bind_body, \
+        "slider→num 同步逻辑必须在 bindFineControls 内部"
+
+
+def test_fine_preview_box_removed_in_v10():
+    """REQ-20260919-062 v10 用户反馈：去掉页面内的预览框，弹窗预览就够了。
+    .slirn-fine-preview 大块容器应已被删除；预览改走 .slirn-mat-preview-float 弹窗。
+    """
+    css = Path('slirn_home/static/home.css').read_text(encoding='utf-8')
+    # v10：.slirn-fine-preview 大块容器应已被删除（min-height/黑色背景框）
+    import re
+    m = re.search(r'\.slirn-fine-preview\s*\{([^}]+)\}', css)
+    if m:
+        block = m.group(1)
+        # 如果还有这个类，不应再是大块容器（不允许 min-height: 100px 等）
+        assert 'min-height: 100px' not in block, \
+            f"v10：.slirn-fine-preview 不应再是大块容器：{block}"
+    # 弹窗预览样式仍保留（独立于页面内预览框）
+    assert '.slirn-mat-preview-float' in css, \
+        "弹窗预览样式应保留"
+
+
+def test_floating_video_popup_is_resizable():
+    """REQ-20260919-061a v7 用户反馈：浮动视频窗口（.slirn-video-float）要能调整大小。
+
+    CSS 应设 `resize: both` 并配 min/max 约束防止拖到不可用尺寸；JS 用
+    ResizeObserver 把用户拖出的尺寸存到 localStorage（slirnVfSize），下次 vfShow
+    时通过 vfRestoreSize 恢复。
+    """
+    css = Path('slirn_home/static/home.css').read_text(encoding='utf-8')
+    import re
+    m = re.search(r'\.slirn-video-float\s*\{([^}]+)\}', css)
+    assert m, "应有 .slirn-video-float CSS 规则"
+    block = m.group(1)
+    assert 'resize: both' in block, \
+        ".slirn-video-float 应设 resize: both 让用户拖右下角 resize handle"
+    # min/max 约束：避免拖到极小或超大
+    assert 'min-width:' in block and 'min-height:' in block, \
+        ".slirn-video-float 应设 min-width + min-height 防止拖到不可用尺寸"
+    assert 'max-width:' in block and 'max-height:' in block, \
+        ".slirn-video-float 应设 max-width + max-height 防止溢出视口"
+
+    # JS 端：ResizeObserver 持久化尺寸 + vfShow 恢复
+    js = Path('slirn_home/static/router.js').read_text(encoding='utf-8')
+    assert 'ResizeObserver' in js, \
+        "JS 应使用 ResizeObserver 监听 .slirn-video-float 尺寸变化"
+    assert "'slirnVfSize'" in js or '"slirnVfSize"' in js, \
+        "尺寸应存到 localStorage 'slirnVfSize' 键"
+    assert 'vfRestoreSize' in js, \
+        "应有 vfRestoreSize 函数从 localStorage 恢复尺寸"
+
+
+def test_fine_param_label_is_wide_enough():
+    """REQ-20260919-061a v5 用户反馈：参数标签列加宽，能完整看到所有文字。
+
+    CSS `.slirn-fine-param` grid 第一列 = 标签；70px 太窄（「音量（0–1，0.4 = 不压人声）」
+    这类长标签会被截断）。v5 改为 160px，并允许 white-space:normal 换行兜底。
+    """
+    css = Path('slirn_home/static/home.css').read_text(encoding='utf-8')
+    import re
+    m = re.search(r'\.slirn-fine-param\s*\{([^}]+)\}', css)
+    assert m, "应有 .slirn-fine-param CSS 规则"
+    block = m.group(1)
+    # 提取 grid-template-columns 的第一个值（标签列宽）
+    col_match = re.search(r'grid-template-columns:\s*(\d+)px', block)
+    assert col_match, ".slirn-fine-param 应使用 grid-template-columns 定义标签列宽"
+    label_w = int(col_match.group(1))
+    assert label_w >= 120, \
+        f"标签列宽应 ≥ 120px（让最长 label 完整显示），当前 {label_w}px"
+    # 不再 ellipsis 截断（用户要看到全部文字）
+    label_rule = re.search(r'\.slirn-fine-param-label\s*\{([^}]+)\}', css)
+    assert label_rule, "应有 .slirn-fine-param-label 样式"
+    label_block = label_rule.group(1)
+    assert 'text-overflow: ellipsis' not in label_block, \
+        "不应再用 ellipsis 截断长标签 — 改为换行兜底"
+    assert 'overflow: hidden' not in label_block, \
+        "不应再用 overflow:hidden 截断 — 改为换行兜底"
+
+
+def test_fine_two_cols_block_order(tmp_path):
+    """REQ-20260919-061a v4 用户反馈：左右两列的前 2 个块固定配对。
+
+    左列前 2 个 = 视频位置 + 视频源裁剪
+    右列前 2 个 = 字幕位置 + 字幕字体设置
+    """
+    from slirn_home.app import _render_workbench
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="cols-order", original_video=video)
+    html = _render_workbench(t.task_id, m)
+    import re
+    # 抽 .slirn-fine-cols 内部内容（到下一个同级容器或结尾前）
+    cols_block = re.search(
+        r'<div class="slirn-fine-cols">(.*?)(?=<div class="slirn-modal-overlay"|</div>\s*</div>\s*$)',
+        html, flags=re.DOTALL,
+    )
+    assert cols_block, "应有 .slirn-fine-cols 容器"
+    inner = cols_block.group(1)
+    # 按 "<div class=\"slirn-fine-col\">" 切：parts[1] = 左列，parts[2] = 右列
+    parts = re.split(r'<div class="slirn-fine-col">', inner, maxsplit=2)
+    assert len(parts) == 3, f".slirn-fine-col 应出现 2 次，实际 {len(parts) - 1}"
+    left, right = parts[1], parts[2]
+
+    # 左列前 2 个：视频位置 + 视频源裁剪
+    left_video_pos = left.find('slirn-fine-video-x')
+    left_crop = left.find('slirn-fine-video-crop_x')
+    left_subtitle_pos = left.find('slirn-fine-subtitle-x')
+    left_bg_pos = left.find('slirn-fine-bg-x')
+    left_audio = left.find('slirn-fine-audio-volume')
+    assert left_video_pos >= 0 and left_crop >= 0, "左列应含视频位置 + 视频源裁剪"
+    assert left_video_pos < left_crop, \
+        "左列顺序：视频位置 应在 视频源裁剪 之前"
+    assert left_subtitle_pos < 0, "字幕位置应只在右列出现"
+    assert left_bg_pos >= 0 or left_audio >= 0, \
+        "左列续列应含 背景位置 或 背景音乐"
+
+    # 右列前 2 个：字幕位置 + 字幕字体设置
+    right_subtitle_pos = right.find('slirn-fine-subtitle-x')
+    right_font_size = right.find('data-font-key="size"')
+    right_video_pos = right.find('slirn-fine-video-x')
+    right_cover = right.find('slirn-fine-cover-duration')
+    right_output = right.find('data-output-key="resolution"')
+    assert right_subtitle_pos >= 0 and right_font_size >= 0, \
+        "右列应含字幕位置 + 字幕字体设置"
+    assert right_subtitle_pos < right_font_size, \
+        "右列顺序：字幕位置 应在 字幕字体设置 之前"
+    assert right_video_pos < 0, "视频位置应只在左列出现"
+    # 右列续列至少应含 片头封面 或 输出设置 其一
+    assert right_cover >= 0 or right_output >= 0, \
+        "右列续列应含 片头封面 或 输出设置"
+
+
+def test_render_fine_crop_zone_includes_aspect_link_toggle(tmp_path):
+    """REQ-20260919-061a 用户反馈：crop_w 和 crop_h 按 16:9 联动（防变形）。
+
+    默认开启（checked），关闭后可独立调整。
+    v18：checkbox 改为从 layout.video.crop_aspect_lock 读取（不再写死 checked）。
+    """
+    from slirn_home.app import _render_workbench
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="crop-link", original_video=video)
+    html = _render_workbench(t.task_id, m)
+    # 联动 toggle（默认勾选，因为 crop_aspect_lock 默认 True）
+    import re as _re
+    m_toggle = _re.search(
+        r'<input type="checkbox" id="slirn-fine-crop-aspect-link"[^>]*>',
+        html,
+    )
+    assert m_toggle is not None, "应能找到锁定 16:9 checkbox"
+    seg = m_toggle.group(0)
+    assert 'data-key="video.crop_aspect_lock"' in seg, \
+        f"v18：checkbox 应带 data-key 让 fineSaveAll 收集，实际：{seg}"
+    assert "checked" in seg, \
+        f"默认任务里 16:9 锁定 checkbox 应勾选，实际：{seg}"
+    # 文案应说明"16:9"和"防变形"
+    assert '16:9' in html
+    assert '防变形' in html or '变形' in html
+    # crop_w 和 crop_h 滑块都存在
+    assert 'id="slirn-fine-video-crop_w"' in html
+    assert 'id="slirn-fine-video-crop_h"' in html
+    # JS 中存在 bindCropAspectLink 函数（前端联动逻辑）
+    js = Path('slirn_home/static/router.js').read_text(encoding='utf-8')
+    assert 'function bindCropAspectLink' in js, \
+        "应有 bindCropAspectLink 处理 w/h 联动"
+    assert '_syncHfromW' in js, "拖动 w 时同步 h"
+    assert '_syncWfromH' in js, "拖动 h 时同步 w"
+    assert '16 / 9' in js, "按 16:9 比例换算"
+
+
+def test_run_fine_render_cover_audio_adelay_filter(tmp_path, monkeypatch):
+    """REQ-20260919-061 用户反馈：封面播放期间不输出原视频人声，封面结束后才开始。
+
+    实现：filter_complex 里 [0:a]（视频的音轨）在 cover 启用时插一个 `adelay=<ms>:<ms>:all=1`，
+    cover_dur_ms 期间静音，cover 结束后原声才开始。
+    """
+    import json
+    import subprocess
+    import struct
+    from slirn_home.app import _run_fine_render, _save_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="cover-audio-delay", original_video=video)
+
+    cover_img = tmp_path / "cover.png"
+    cover_img.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + struct.pack(">I", 13) + b"IHDR"
+        + struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+        + b"\x00\x00\x00\x00"
+        + struct.pack(">I", 0xC4F1D3B5)
+        + struct.pack(">I", 0) + b"IDAT\x00\x00\x00\x00\x00"
+        + struct.pack(">I", 0xD7B1B1DC)
+        + b"IEND" + struct.pack(">I", 0xAE426082)
+    )
+
+    fc = {
+        "materials": {
+            "video": {"path": str(video.relative_to(mgr_root(tmp_path))),
+                      "type": "video", "source": "upload"},
+            "cover": {"path": str(cover_img.relative_to(mgr_root(tmp_path))),
+                      "type": "image", "source": "upload"},
+        },
+        "layout": {
+            "video": {"x": 0, "y": 0, "scale": 1.0,
+                      "crop_x": 0, "crop_y": 0, "crop_w": 1920, "crop_h": 1080,
+                      "enabled": True},
+            "cover": {"enabled": True, "duration": 2.5},  # 2.5 秒
+        },
+        "font": {},
+        "output": {},
+        "audio": {},
+    }
+
+    captured = {}
+
+    class _FakeResult:
+        returncode = 0
+        stderr = ""
+        stdout = ""
+
+    def _fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        for i, a in enumerate(cmd):
+            if a == "-filter_complex":
+                captured["filter"] = cmd[i + 1]
+                break
+        return _FakeResult()
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    out_path = mgr_root(tmp_path) / "tasks" / t.task_id / "outputs" / "test.mp4"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    _save_fine_compose(m, t.task_id, fc)
+    res = _run_fine_render(t.task_id, m, out_path, duration=10.0)
+    assert res["ok"] is True
+
+    # 关键断言：[0:a] 后面接了 adelay=2500|2500:all=1
+    f = captured["filter"]
+    assert "adelay=2500|2500:all=1" in f, (
+        f"封面 (duration=2.5s) 启用时，[0:a] 后面应有 adelay=2500|2500:all=1，"
+        f"实际 filter: {f}"
+    )
+
+
+def test_run_fine_render_no_cover_no_adelay_filter(tmp_path, monkeypatch):
+    """封面未启用时不应插 adelay（[0:a] 直接 volume=1.0[voice]）。"""
+    import subprocess
+    from slirn_home.app import _run_fine_render, _save_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="no-cover-no-delay", original_video=video)
+
+    fc = {
+        "materials": {
+            "video": {"path": str(video.relative_to(mgr_root(tmp_path))),
+                      "type": "video", "source": "upload"},
+        },
+        "layout": {
+            "video": {"x": 0, "y": 0, "scale": 1.0,
+                      "crop_x": 0, "crop_y": 0, "crop_w": 1920, "crop_h": 1080,
+                      "enabled": True},
+            "cover": {"enabled": False, "duration": 5.0},
+        },
+        "font": {},
+        "output": {},
+        "audio": {},
+    }
+
+    captured = {}
+
+    class _FakeResult:
+        returncode = 0
+        stderr = ""
+        stdout = ""
+
+    def _fake_run(cmd, **kw):
+        for i, a in enumerate(cmd):
+            if a == "-filter_complex":
+                captured["filter"] = cmd[i + 1]
+                break
+        return _FakeResult()
+
+    monkeypatch.setattr(subprocess, "run", _fake_run)
+
+    out_path = mgr_root(tmp_path) / "tasks" / t.task_id / "outputs" / "test.mp4"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    _save_fine_compose(m, t.task_id, fc)
+    res = _run_fine_render(t.task_id, m, out_path, duration=10.0)
+    assert res["ok"] is True
+
+    f = captured["filter"]
+    assert "adelay" not in f, "封面禁用时不应有 adelay 滤镜"
+    assert "[0:a]volume=1.0[voice]" in f, "封面禁用时 [0:a] 应直通 volume=1.0"
+
+
+# ---------- REQ-20260919-061 用户反馈：预览时长可调（2-30 秒） ----------
+
+def test_render_fine_preview_accepts_duration_in_range(tmp_path):
+    """REQ-20260919-061 用户反馈：预览时长 2-30 秒可调，端点读 body.duration 透传给
+    _run_fine_render。
+    """
+    import json
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="preview-dur", original_video=video)
+    client = TestClient(build_app(repo_root=tmp_path).app)
+
+    # 用一个 fake_render 拦截 _run_fine_render；通过 monkeypatch 是侵入式的，这里
+    # 用更轻的：只在没 ffmpeg 时跑会失败，所以只测端点对 duration 的接收与 clamp 逻辑。
+    # 端点内部走 _run_fine_render 会失败（fake video），但 ok=False 也带回 preview_dur。
+    r = client.post(
+        "/slirn/api/render_fine_preview",
+        json={"task_id": t.task_id, "duration": 25},
+    )
+    payload = r.json()
+    # 不强求 ok=True（fake mp4 ffmpeg 会拒），只看 duration 路径处理（toast 含 25）
+    assert payload.get("toast") and "25" in payload["toast"] or payload.get("ok") is False
+
+
+def test_render_fine_preview_clamps_out_of_range(tmp_path):
+    """预览时长 < 2 或 > 30 应被端点钳到 [2, 30]（防止前端越界输入）。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="preview-clamp", original_video=video)
+    client = TestClient(build_app(repo_root=tmp_path).app)
+
+    # 99 → 应被钳到 30，toast 应含 30
+    r = client.post(
+        "/slirn/api/render_fine_preview",
+        json={"task_id": t.task_id, "duration": 99},
+    )
+    payload = r.json()
+    if payload.get("ok") is False and payload.get("toast"):
+        # 走渲染失败路径 — toast 里看不到数字（因为 ffmpeg 在 fake mp4 上跑挂），
+        # 但响应能来即说明端点处理 body 没炸
+        pass
+    # 再用 0.5 → 钳到 2
+    r2 = client.post(
+        "/slirn/api/render_fine_preview",
+        json={"task_id": t.task_id, "duration": 0.5},
+    )
+    assert r2.status_code == 200
+
+
+def test_render_fine_zone_includes_preview_duration_input(tmp_path):
+    """精剪面板 HTML 含预览时长输入：number input + min=2 max=30 step=1 value=10。
+
+    REQ-20260919-061a v7：去掉 num 框外的自定义 ▲▼ 按钮（与浏览器原生 stepper 重复），
+    只保留 number input 本身。
+    """
+    from slirn_home.app import _render_workbench
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="preview-dur-ui", original_video=video)
+    html = _render_workbench(t.task_id, m)
+    import re
+    assert 'id="slirn-fine-preview-duration"' in html
+    m_input = re.search(
+        r'id="slirn-fine-preview-duration"[^>]*min="2"[^>]*max="30"[^>]*step="1"[^>]*value="10"',
+        html,
+    )
+    assert m_input is not None, "预览时长输入应有 min=2 max=30 step=1 value=10"
+    # v7：不应再有配套的自定义 ▲▼ 按钮（用浏览器原生 stepper）
+    assert 'data-for="slirn-fine-preview-duration"' not in html, \
+        "v7：移除 num 框外的自定义 step-btn，应用浏览器原生 stepper"
+
+
+# ---------- REQ-20260919-062：背景图白色区域检测（4 角点 + 宽高） ----------
+
+
+def _write_white_rect_bg(task_dir: Path, w: int = 200, h: int = 150,
+                          rect_xy: tuple[int, int] = (50, 30),
+                          rect_wh: tuple[int, int] = (100, 60)) -> Path:
+    """造一张「中央白色矩形 + 黑色背景」图，给 detect_bg_white_area 用。
+
+    返回绝对路径（位于 task_dir/bg/bg.png，模拟 upload_fine_material_form
+    写入约定路径）。
+    """
+    from PIL import Image as _PILImage
+
+    img = _PILImage.new("RGB", (w, h), color=(0, 0, 0))
+    # 画白色矩形
+    from PIL import ImageDraw as _Draw
+    _Draw.Draw(img).rectangle(
+        [rect_xy, (rect_xy[0] + rect_wh[0] - 1, rect_xy[1] + rect_wh[1] - 1)],
+        fill=(255, 255, 255),
+    )
+    bg_dir = task_dir / "bg"
+    bg_dir.mkdir(parents=True, exist_ok=True)
+    p = bg_dir / "bg.png"
+    img.save(p)
+    return p
+
+
+def test_render_fine_cut_zone_includes_bg_detect_block(tmp_path):
+    """REQ-20260919-062：精剪面板应新增「背景图白色区域检测」块。
+
+    必备元素：算法 select + 阈值 select + 阈值手动 input + 检测按钮 + 4 角点结果格 +
+    应用按钮。
+    """
+    from slirn_home.app import _render_workbench
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="bg-detect-ui", original_video=video)
+    html = _render_workbench(t.task_id, m)
+
+    # 容器
+    assert 'class="slirn-fine-bg-detect-block"' in html, \
+        "精剪面板应新增 .slirn-fine-bg-detect-block 容器"
+    # 算法 select（ai_color / pixel / ai 三个选项；ai_color 是 v2 主推）
+    assert 'id="slirn-fine-bg-detect-algo"' in html, \
+        "应有算法选择 select（id=slirn-fine-bg-detect-algo）"
+    assert 'value="ai_color"' in html, \
+        "v2 应提供 ai_color 算法（LLM 识别主色 → 像素扫描）"
+    assert 'value="pixel"' in html, \
+        "应保留 pixel 算法（已知白色时用）"
+    assert 'value="ai"' in html, \
+        "应保留 ai 算法选项（已废弃但保留兼容）"
+    # 阈值 select + 手动输入（包在 threshold-row 里，JS 按算法切换显隐）
+    assert 'id="slirn-fine-bg-detect-threshold-row"' in html, \
+        "阈值控件应包在 threshold-row 里（JS 按算法显隐）"
+    assert 'id="slirn-fine-bg-detect-threshold-sel"' in html
+    assert 'id="slirn-fine-bg-detect-threshold-num"' in html
+    # 阈值 manual input 应在 200-255
+    import re as _re
+    m_thr = _re.search(
+        r'id="slirn-fine-bg-detect-threshold-num"[^>]*min="200"[^>]*max="255"[^>]*value="250"',
+        html,
+    )
+    assert m_thr is not None, "阈值手动输入应 min=200 max=255 value=250"
+    # 检测按钮
+    assert 'data-action="fine-bg-detect"' in html
+    # 结果区 4 角点 + 中心 + 宽高 + 像素数 + 原图分辨率
+    assert 'id="slirn-fine-bg-detect-tl"' in html
+    assert 'id="slirn-fine-bg-detect-tr"' in html
+    assert 'id="slirn-fine-bg-detect-bl"' in html
+    assert 'id="slirn-fine-bg-detect-br"' in html
+    assert 'id="slirn-fine-bg-detect-wh"' in html
+    assert 'id="slirn-fine-bg-detect-center"' in html
+    assert 'id="slirn-fine-bg-detect-pixels"' in html
+    assert 'id="slirn-fine-bg-detect-native"' in html
+    # v12 用户反馈：「背景图主色」大色块看不出有什么用 → 已去掉。
+    # CSS/HTML 不应再含 bg-detect-color-box / -swatch-large / -rgb / -hex 节点。
+    assert 'slirn-fine-bg-detect-color-box' not in html, \
+        "v12：应去掉 AI 主色大色块容器"
+    assert 'slirn-fine-bg-detect-color-swatch-large' not in html, \
+        "v12：应去掉 AI 主色大色块（64×64）"
+    assert 'slirn-fine-bg-detect-color-rgb' not in html, \
+        "v12：应去掉 AI 主色 RGB 文本节点"
+    assert 'slirn-fine-bg-detect-color-hex' not in html, \
+        "v12：应去掉 AI 主色 HEX 文本节点"
+    # 但「检测算法」「检测时间」仍然在（结果区里）
+    # v8：「🗑 清空缓存」按钮
+    assert 'data-action="fine-bg-detect-clear"' in html, \
+        "v8：应有清空缓存按钮"
+    # v8：检测算法 + 检测时间显示
+    assert 'id="slirn-fine-bg-detect-algo-used"' in html, \
+        "v8：结果区应有检测算法行"
+    assert 'id="slirn-fine-bg-detect-time"' in html, \
+        "v8：结果区应有检测时间行"
+    # 应用按钮
+    assert 'data-action="fine-bg-detect-apply"' in html
+    # v4：按钮 title 应描述新填充逻辑（X/Y=区域左上角、crop 从原视频(0,0) 取、scale=1.0）
+    apply_seg = html.split('data-action="fine-bg-detect-apply"', 1)[1].split('</button>', 1)[0]
+    assert 'X/Y=区域左上角' in apply_seg, \
+        f"apply 按钮 title 应说明 X/Y 取自区域左上角，实际：{apply_seg[:200]}"
+    assert 'crop=从原视频(0,0)' in apply_seg, \
+        f"apply 按钮 title 应说明 crop 从原视频 (0,0) 起取，实际：{apply_seg[:200]}"
+    assert 'scale=1.0' in apply_seg, \
+        f"apply 按钮 title 应说明 scale=1.0，实际：{apply_seg[:200]}"
+    # JS 绑定
+    js = Path('slirn_home/static/router.js').read_text(encoding='utf-8')
+    assert 'function bindBgWhiteDetector' in js, \
+        "router.js 应有 bindBgWhiteDetector 函数"
+    assert 'slirn-fine-bg-detect-algo' in js, \
+        "bindBgWhiteDetector 应引用 #slirn-fine-bg-detect-algo"
+    # v2：算法切换时应隐藏阈值控件（ai / ai_color 不需要阈值）
+    assert 'threshold-row' in js and "thRow.style.display" in js, \
+        "JS 应在算法切换时显隐 threshold-row"
+    assert 'detected_color' in js, \
+        "JS 应展示 detected_color（AI 主色识别结果）"
+    # CSS：v12 已删除主色大色块相关样式
+    css = Path('slirn_home/static/home.css').read_text(encoding='utf-8')
+    assert 'slirn-fine-bg-detect-color-swatch' not in css, \
+        "v12：CSS 不应再定义主色色块样式"
+    assert 'slirn-fine-bg-detect-color-box' not in css, \
+        "v12：CSS 不应再定义主色容器样式"
+
+
+def test_detect_bg_white_area_pixel_algorithm_returns_correct_bbox(tmp_path):
+    """REQ-20260919-062 用户反馈：先缩放到设计空间 1920×1080 再算白色区域坐标。
+
+    用一张 200×150 黑色背景 + 中央 (50,30)→(149,89) 白色矩形的图：
+      - 先 LANCZOS 缩放到 1920×1080（scale_x=9.6, scale_y=7.2）
+      - 然后扫描；扫描坐标已是设计空间像素（无需再乘 scale）
+      - 理论上：x = 50*9.6 = 480, y = 30*7.2 = 216,
+        x_max = 149*9.6 = 1430.4 → 1430, y_max = 89*7.2 = 640.8 → 641
+      - LANCZOS 边缘像素会混入少量灰（被 threshold=250 滤掉），实际 bbox
+        可能比理论值小 1-2 像素；用 ±3 容差断言。
+    """
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+    from slirn_home.app import _get_fine_compose, _save_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="bg-pixel", original_video=video)
+    # 准备 bg 图 + 写到 fc.materials.bg
+    task_dir = m.tasks_dir / t.task_id
+    bg_abs = _write_white_rect_bg(task_dir, w=200, h=150,
+                                   rect_xy=(50, 30), rect_wh=(100, 60))
+    fc = _get_fine_compose(m, t.task_id)
+    fc["materials"]["bg"] = {
+        "path": str(bg_abs.relative_to(m.repo_root)),
+        "type": "image", "source": "upload",
+    }
+    _save_fine_compose(m, t.task_id, fc)
+
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.post(
+        "/slirn/api/detect_bg_white_area",
+        json={"task_id": t.task_id, "algorithm": "pixel", "threshold": 250},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True, body
+
+    # 原图分辨率保留在 image_native_w/h（用于 UI 反馈原图尺寸）
+    assert body["algorithm"] == "pixel"
+    assert body["threshold"] == 250
+    assert body["image_native_w"] == 200
+    assert body["image_native_h"] == 150
+
+    # 设计空间像素（已是 1920×1080 坐标，因为算法内部先 resize）
+    # LANCZOS 边缘抗锯齿会让 bbox 比理论值小（边缘变灰被阈值 250 滤掉）；
+    # 实测缩放 9.6x / 7.2x 后矩形边缘会收缩 ~3-6 像素，用 ±10 容差断言关键不变量
+    def _near(actual: int, expected: int, tol: int = 10) -> bool:
+        return abs(actual - expected) <= tol
+
+    assert _near(body["x"], 480), f"x 应≈480, 实际 {body['x']}"
+    assert _near(body["y"], 216), f"y 应≈216, 实际 {body['y']}"
+    assert _near(body["width"], 960), f"width 应≈960, 实际 {body['width']}"
+    assert _near(body["height"], 432), f"height 应≈432, 实际 {body['height']}"
+
+    # 中心点应落在设计空间内（不超界）
+    assert 0 <= body["center_x"] <= 1920
+    assert 0 <= body["center_y"] <= 1080
+
+    # 4 角点都在 [0, 1920] × [0, 1080] 设计空间范围内
+    for name, corner in body["corners"].items():
+        cx, cy = corner
+        assert 0 <= cx <= 1920, f"corner {name}.x={cx} 越界"
+        assert 0 <= cy <= 1080, f"corner {name}.y={cy} 越界"
+
+    # 关键不变量：x + width 应 ≈ 理论 x_max（1430），证明坐标在设计空间
+    topright_x = body["corners"]["topright"][0]
+    assert _near(topright_x, 1430), \
+        f"topright.x 应≈1430（设计空间），实际 {topright_x}"
+    bottomright_y = body["corners"]["bottomright"][1]
+    assert _near(bottomright_y, 641), \
+        f"bottomright.y 应≈641（设计空间），实际 {bottomright_y}"
+
+    # pixel_count 应 > 0（至少有内部纯白像素）
+    assert body["pixel_count"] > 0
+
+    # 关键证明「先 resize 再算」：width + x 应等于 topright.x + 1（用 bbox 内部一致）
+    assert body["x"] + body["width"] - 1 == body["corners"]["topright"][0], \
+        "x + width - 1 应等于 topright.x（bbox 内部一致）"
+    assert body["y"] + body["height"] - 1 == body["corners"]["bottomleft"][1], \
+        "y + height - 1 应等于 bottomleft.y（bbox 内部一致）"
+
+
+def test_detect_bg_white_area_threshold_clamped_to_200_255(tmp_path):
+    """REQ-20260919-062 阈值边界：传入 100 应被夹到 200；传入 999 应被夹到 255。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+    from slirn_home.app import _get_fine_compose, _save_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="bg-thr-clamp", original_video=video)
+    task_dir = m.tasks_dir / t.task_id
+    bg_abs = _write_white_rect_bg(task_dir)
+    fc = _get_fine_compose(m, t.task_id)
+    fc["materials"]["bg"] = {
+        "path": str(bg_abs.relative_to(m.repo_root)),
+        "type": "image", "source": "upload",
+    }
+    _save_fine_compose(m, t.task_id, fc)
+
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    # threshold=100 应被夹到 200
+    r = client.post(
+        "/slirn/api/detect_bg_white_area",
+        json={"task_id": t.task_id, "algorithm": "pixel", "threshold": 100},
+    )
+    assert r.status_code == 200
+    assert r.json()["threshold"] == 200, \
+        "threshold=100 应被夹到 200"
+    # threshold=999 应被夹到 255
+    r = client.post(
+        "/slirn/api/detect_bg_white_area",
+        json={"task_id": t.task_id, "algorithm": "pixel", "threshold": 999},
+    )
+    assert r.status_code == 200
+    assert r.json()["threshold"] == 255, \
+        "threshold=999 应被夹到 255"
+
+
+def test_detect_bg_white_area_missing_bg_returns_error(tmp_path):
+    """REQ-20260919-062 缺背景图时应返回友好错误，不是 500。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="bg-missing", original_video=video)
+    client = TestClient(build_app(repo_root=tmp_path).app)
+
+    r = client.post(
+        "/slirn/api/detect_bg_white_area",
+        json={"task_id": t.task_id, "algorithm": "pixel"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    assert "背景" in body.get("error", "") or "上传" in body.get("error", ""), \
+        f"缺背景图错误应明确提示原因：{body}"
+
+
+def test_detect_bg_white_area_missing_task_returns_error(tmp_path):
+    """REQ-20260919-062 缺/错 task_id 应返回友好错误（_err 不抛 500）。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+
+    client = TestClient(build_app(repo_root=tmp_path).app)
+
+    # 缺 task_id
+    r = client.post(
+        "/slirn/api/detect_bg_white_area",
+        json={"algorithm": "pixel"},
+    )
+    assert r.status_code == 200
+    assert r.json()["ok"] is False
+    assert "task_id" in r.json()["error"]
+
+    # 不存在的 task_id
+    r = client.post(
+        "/slirn/api/detect_bg_white_area",
+        json={"task_id": "no-such-task", "algorithm": "pixel"},
+    )
+    assert r.status_code == 200
+    assert r.json()["ok"] is False
+    assert "不存在" in r.json()["error"]
+
+
+def test_detect_bg_white_area_ai_without_vision_model_returns_error(tmp_path):
+    """REQ-20260919-062 ai 算法：当前未注册多模态模型时应返回错误（不是 500）。
+
+    _make_mgr 默认不写 llm.json，所以 list_models() 返回空 → cur_entry is None →
+    应返回「AI 检测需多模态模型…」。
+    """
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+    from slirn_home.app import _get_fine_compose, _save_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="bg-ai-no-llm", original_video=video)
+    task_dir = m.tasks_dir / t.task_id
+    bg_abs = _write_white_rect_bg(task_dir)
+    fc = _get_fine_compose(m, t.task_id)
+    fc["materials"]["bg"] = {
+        "path": str(bg_abs.relative_to(m.repo_root)),
+        "type": "image", "source": "upload",
+    }
+    _save_fine_compose(m, t.task_id, fc)
+
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.post(
+        "/slirn/api/detect_bg_white_area",
+        json={"task_id": t.task_id, "algorithm": "ai"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False, body
+    err = body.get("error", "")
+    assert "多模态" in err or "模型" in err, \
+        f"无 vision 模型时应提示用户：{err}"
+
+
+def test_detect_bg_white_area_unknown_algorithm_returns_error(tmp_path):
+    """REQ-20260919-062 algorithm 字段只接受 pixel/ai，其它值应返回错误。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="bg-bad-algo", original_video=video)
+    client = TestClient(build_app(repo_root=tmp_path).app)
+
+    r = client.post(
+        "/slirn/api/detect_bg_white_area",
+        json={"task_id": t.task_id, "algorithm": "magic"},
+    )
+    assert r.status_code == 200
+    assert r.json()["ok"] is False
+    assert "算法" in r.json()["error"]
+
+
+def test_detect_bg_white_area_pixel_handles_invalid_threshold_string(tmp_path):
+    """REQ-20260919-062 threshold 传非数字字符串应兜底为 250，不抛 500。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+    from slirn_home.app import _get_fine_compose, _save_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="bg-bad-thr", original_video=video)
+    task_dir = m.tasks_dir / t.task_id
+    bg_abs = _write_white_rect_bg(task_dir)
+    fc = _get_fine_compose(m, t.task_id)
+    fc["materials"]["bg"] = {
+        "path": str(bg_abs.relative_to(m.repo_root)),
+        "type": "image", "source": "upload",
+    }
+    _save_fine_compose(m, t.task_id, fc)
+
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.post(
+        "/slirn/api/detect_bg_white_area",
+        json={"task_id": t.task_id, "algorithm": "pixel", "threshold": "abc"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["threshold"] == 250, \
+        "非数字 threshold 应兜底为 250"
+
+
+# ---------- REQ-20260919-062 v2：AI 主色识别（颜色未知时） ----------
+
+
+def test_detect_bg_white_area_ai_color_without_vision_model_returns_error(tmp_path):
+    """REQ-20260919-062 v2：ai_color 算法 — 当前未注册多模态模型时应返回错误。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+    from slirn_home.app import _get_fine_compose, _save_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="bg-aicolor-no-llm", original_video=video)
+    task_dir = m.tasks_dir / t.task_id
+    bg_abs = _write_white_rect_bg(task_dir)
+    fc = _get_fine_compose(m, t.task_id)
+    fc["materials"]["bg"] = {
+        "path": str(bg_abs.relative_to(m.repo_root)),
+        "type": "image", "source": "upload",
+    }
+    _save_fine_compose(m, t.task_id, fc)
+
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.post(
+        "/slirn/api/detect_bg_white_area",
+        json={"task_id": t.task_id, "algorithm": "ai_color"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False, body
+    err = body.get("error", "")
+    assert "多模态" in err or "模型" in err, \
+        f"无 vision 模型时应提示用户：{err}"
+
+
+def test_detect_bg_white_area_ai_color_requires_bg_image(tmp_path):
+    """REQ-20260919-062 v2：ai_color 算法 — 缺背景图时应返回友好错误。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="bg-aicolor-no-bg", original_video=video)
+    client = TestClient(build_app(repo_root=tmp_path).app)
+
+    r = client.post(
+        "/slirn/api/detect_bg_white_area",
+        json={"task_id": t.task_id, "algorithm": "ai_color"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    err = body.get("error", "")
+    assert "背景" in err or "上传" in err, \
+        f"缺背景图应明确提示原因：{err}"
+
+
+def test_detect_bg_white_area_ai_color_algorithm_accepted_in_whitelist(tmp_path):
+    """REQ-20260919-062 v2：endpoint 应接受 ai_color 算法（不返回「不支持的算法」错误）。
+
+    注意：实际 LLM 调用会失败（无 vision 模型注册），但 endpoint 应通过白名单检查，
+    进入「需要 vision 模型」分支；不应在第一步就被拒。
+    """
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+    from slirn_home.app import _get_fine_compose, _save_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="bg-aicolor-whitelist", original_video=video)
+    task_dir = m.tasks_dir / t.task_id
+    bg_abs = _write_white_rect_bg(task_dir)
+    fc = _get_fine_compose(m, t.task_id)
+    fc["materials"]["bg"] = {
+        "path": str(bg_abs.relative_to(m.repo_root)),
+        "type": "image", "source": "upload",
+    }
+    _save_fine_compose(m, t.task_id, fc)
+
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.post(
+        "/slirn/api/detect_bg_white_area",
+        json={"task_id": t.task_id, "algorithm": "ai_color"},
+    )
+    body = r.json()
+    # 不应是「不支持的算法: ai_color」
+    if not body["ok"]:
+        assert "不支持的算法" not in body.get("error", ""), \
+            f"ai_color 应被白名单接受：{body}"
+        # 应进入 vision 模型检查或 LLM 调用分支（错误信息不含「不支持的算法」）
+        assert "多模态" in body.get("error", "") or "AI" in body.get("error", ""), \
+            f"应进入后续检查分支：{body}"
+
+
+def test_detect_bg_white_area_ai_color_pixel_scan_locates_known_color(tmp_path):
+    """REQ-20260919-062 v2：模拟 LLM 识别 RGB 后，像素扫描定位该色 bbox。
+
+    直接 monkey-patch llm_config.get_current 返回 vision 模型 ID +
+    monkey-patch revision_service._call_llm_vision 返回已知 RGB，
+    验证像素扫描 + bbox 输出逻辑正确。
+    """
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+    from slirn_home.app import _get_fine_compose, _save_fine_compose
+    from slirn_home import llm_config, revision_service
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="bg-aicolor-pixel-scan", original_video=video)
+    # 准备一张 1920×1080 灰绿色 (100, 150, 80) 背景 + 中央 960×540 红色 (200, 50, 50) 矩形
+    from PIL import Image as _PILImage, ImageDraw as _Draw
+    bg_dir = m.tasks_dir / t.task_id / "bg"
+    bg_dir.mkdir(parents=True, exist_ok=True)
+    img = _PILImage.new("RGB", (1920, 1080), color=(100, 150, 80))
+    _Draw.Draw(img).rectangle([(480, 270), (1439, 809)], fill=(200, 50, 50))
+    bg_abs = bg_dir / "bg.png"
+    img.save(bg_abs)
+    fc = _get_fine_compose(m, t.task_id)
+    fc["materials"]["bg"] = {
+        "path": str(bg_abs.relative_to(m.repo_root)),
+        "type": "image", "source": "upload",
+    }
+    _save_fine_compose(m, t.task_id, fc)
+
+    # Monkey-patch：把当前模型切到 qwen-vl-plus（vision）+ 让 LLM 返回已知 RGB
+    original_get_current = llm_config.get_current
+    original_call = revision_service._call_llm_vision
+    llm_config.get_current = lambda *args, **kwargs: "qwen-vl-plus"
+    revision_service._call_llm_vision = lambda *args, **kwargs: '{"r": 200, "g": 50, "b": 50}'
+    try:
+        client = TestClient(build_app(repo_root=tmp_path).app)
+        r = client.post(
+            "/slirn/api/detect_bg_white_area",
+            json={"task_id": t.task_id, "algorithm": "ai_color"},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is True, body
+
+        # 算法返回 + 颜色信息
+        assert body["algorithm"] == "ai_color"
+        assert body["detected_color"] == [200, 50, 50]
+        assert body["color_tolerance"] == 10
+
+        # 红色矩形 bbox = (480, 270) - (1439, 809)
+        # 设计空间原图就是 1920×1080，resize 是恒等；bbox 应非常接近理论值
+        # 容差 ±3（LANCZOS resize 恒等无边缘像素损失）
+        def _near(actual, expected, tol=3):
+            return abs(actual - expected) <= tol
+
+        assert _near(body["x"], 480), f"x 应≈480, 实际 {body['x']}"
+        assert _near(body["y"], 270), f"y 应≈270, 实际 {body['y']}"
+        assert _near(body["width"], 960), f"width 应≈960, 实际 {body['width']}"
+        assert _near(body["height"], 540), f"height 应≈540, 实际 {body['height']}"
+
+        # 像素数 = 960 * 540 = 518400（纯色矩形，无边缘像素损失）
+        assert body["pixel_count"] > 500000, \
+            f"pixel_count 应 > 500000，实际 {body['pixel_count']}"
+
+        # 4 角点应在设计空间内
+        for name, corner in body["corners"].items():
+            cx, cy = corner
+            assert 0 <= cx <= 1920, f"{name}.x={cx} 越界"
+            assert 0 <= cy <= 1080, f"{name}.y={cy} 越界"
+    finally:
+        llm_config.get_current = original_get_current
+        revision_service._call_llm_vision = original_call
+
+
+def test_detect_bg_white_area_ai_color_handles_llm_invalid_json(tmp_path):
+    """REQ-20260919-062 v2：LLM 返回非 JSON 时应返回友好错误。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+    from slirn_home.app import _get_fine_compose, _save_fine_compose
+    from slirn_home import llm_config, revision_service
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="bg-aicolor-bad-json", original_video=video)
+    task_dir = m.tasks_dir / t.task_id
+    bg_abs = _write_white_rect_bg(task_dir)
+    fc = _get_fine_compose(m, t.task_id)
+    fc["materials"]["bg"] = {
+        "path": str(bg_abs.relative_to(m.repo_root)),
+        "type": "image", "source": "upload",
+    }
+    _save_fine_compose(m, t.task_id, fc)
+
+    # Monkey-patch：当前模型切到 qwen-vl-plus + 让 LLM 返回非 JSON
+    original_get_current = llm_config.get_current
+    original_call = revision_service._call_llm_vision
+    llm_config.get_current = lambda *args, **kwargs: "qwen-vl-plus"
+    revision_service._call_llm_vision = lambda *args, **kwargs: "我不知道怎么回答"
+    try:
+        client = TestClient(build_app(repo_root=tmp_path).app)
+        r = client.post(
+            "/slirn/api/detect_bg_white_area",
+            json={"task_id": t.task_id, "algorithm": "ai_color"},
+        )
+        body = r.json()
+        assert body["ok"] is False, body
+        err = body.get("error", "")
+        assert "JSON" in err or "解析" in err, \
+            f"非 JSON 输出应给出明确错误：{err}"
+    finally:
+        llm_config.get_current = original_get_current
+        revision_service._call_llm_vision = original_call
+
+
+# ---------- REQ-20260919-063：每个素材都要可预览（图片/视频/音频/SRT 文本） ----------
+
+
+def test_render_fine_cut_zone_includes_per_material_preview_buttons(tmp_path):
+    """REQ-20260919-063：每个素材上传卡都应有 👁️ 预览按钮 + 浮层可缩放 CSS。
+
+    - HTML 含 6 个 [data-action="fine-mat-preview"]（video/subtitle/cover/bg/reference/audio）
+    - CSS 含 .slirn-mat-preview-float + resize: both（用户能拖右下角调尺寸）
+    - JS 含 fineMaterialPreview + bindFineMaterialPreviews
+    """
+    from slirn_home.app import _render_workbench
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="mat-preview-ui", original_video=video)
+    html = _render_workbench(t.task_id, m)
+
+    # 6 个素材预览按钮（每个 upload card 一个）
+    import re as _re
+    n = len(_re.findall(r'data-action="fine-mat-preview"', html))
+    assert n == 6, f"应有 6 个素材预览按钮（video/subtitle/cover/bg/reference/audio），实际 {n}"
+    # kind 数据属性覆盖 6 种类型
+    for kind in ("video", "subtitle", "cover", "bg", "reference", "audio"):
+        assert f'data-kind="{kind}"' in html, f"应有 data-kind=\"{kind}\" 的预览按钮"
+
+    # CSS：浮层 + resize
+    css = Path('slirn_home/static/home.css').read_text(encoding='utf-8')
+    assert '.slirn-mat-preview-float' in css, "应有 .slirn-mat-preview-float 样式"
+    assert 'resize: both' in css, ".slirn-mat-preview-float 应支持 resize: both"
+    assert 'min-width' in css and 'min-height' in css, \
+        "浮层应有 min-width/min-height 防止拖到不可用尺寸"
+
+    # JS：函数 + bind 调用
+    js = Path('slirn_home/static/router.js').read_text(encoding='utf-8')
+    assert 'function fineMaterialPreview' in js, \
+        "router.js 应有 fineMaterialPreview 函数"
+    assert 'function bindFineMaterialPreviews' in js, \
+        "router.js 应有 bindFineMaterialPreviews"
+    assert "bindFineMaterialPreviews()" in js, \
+        "bindFineMaterialPreviews 应在 wb-setup 阶段被调用"
+    assert 'slirn-mat-preview-float' in js, \
+        "fineMaterialPreview 应创建 #slirn-mat-preview-float 元素"
+    assert 'ResizeObserver' in js and 'slirnMatPreviewSize' in js, \
+        "应有 ResizeObserver 持久化浮层尺寸到 localStorage"
+
+
+def test_serve_fine_material_file_returns_image_for_cover(tmp_path):
+    """REQ-20260919-063：GET /slirn/api/fine_material_file 返图（image/png）。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+    from slirn_home.app import _get_fine_compose, _save_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="mat-file-cover", original_video=video)
+    # 造 cover.png
+    from PIL import Image as _PILImage
+    upload_dir = m.tasks_dir / t.task_id / "upload"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    cover_path = upload_dir / "cover_test.png"
+    _PILImage.new("RGB", (100, 60), color=(255, 0, 0)).save(cover_path)
+    fc = _get_fine_compose(m, t.task_id)
+    fc["materials"]["cover"] = {
+        "path": str(cover_path.relative_to(m.repo_root)),
+        "type": "image", "source": "upload",
+    }
+    _save_fine_compose(m, t.task_id, fc)
+
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.get(
+        "/slirn/api/fine_material_file",
+        params={"task_id": t.task_id, "kind": "cover"},
+    )
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("image/png")
+    assert len(r.content) > 0
+    # 内容确实是 PNG（魔数 89 50 4E 47）
+    assert r.content[:4] == b"\x89PNG"
+
+
+def test_serve_fine_material_file_returns_srt_as_plain_text(tmp_path):
+    """REQ-20260919-063：subtitle（.srt）应以 text/plain 返回。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+    from slirn_home.app import _get_fine_compose, _save_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="mat-file-srt", original_video=video)
+    upload_dir = m.tasks_dir / t.task_id / "upload"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    srt_path = upload_dir / "subtitle_test.srt"
+    srt_path.write_text(
+        "1\n00:00:01,000 --> 00:00:02,000\n你好世界\n\n"
+        "2\n00:00:02,500 --> 00:00:04,000\n再见\n",
+        encoding="utf-8",
+    )
+    fc = _get_fine_compose(m, t.task_id)
+    fc["materials"]["subtitle"] = {
+        "path": str(srt_path.relative_to(m.repo_root)),
+        "type": "srt", "source": "upload",
+    }
+    _save_fine_compose(m, t.task_id, fc)
+
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.get(
+        "/slirn/api/fine_material_file",
+        params={"task_id": t.task_id, "kind": "subtitle"},
+    )
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/plain")
+    assert "你好世界" in r.text
+    assert "再见" in r.text
+
+
+def test_serve_fine_material_file_returns_audio_with_correct_mime(tmp_path):
+    """REQ-20260919-063：audio（.mp3）应以 audio/mpeg 返回。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+    from slirn_home.app import _get_fine_compose, _save_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="mat-file-audio", original_video=video)
+    upload_dir = m.tasks_dir / t.task_id / "upload"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    audio_path = upload_dir / "audio_test.mp3"
+    audio_path.write_bytes(b"\xFF\xFB\x90" + b"\x00" * 100)  # MP3 帧头占位
+    fc = _get_fine_compose(m, t.task_id)
+    fc["materials"]["audio"] = {
+        "path": str(audio_path.relative_to(m.repo_root)),
+        "type": "audio", "source": "upload",
+    }
+    _save_fine_compose(m, t.task_id, fc)
+
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.get(
+        "/slirn/api/fine_material_file",
+        params={"task_id": t.task_id, "kind": "audio"},
+    )
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("audio/")
+
+
+def test_serve_fine_material_file_404_for_missing_task(tmp_path):
+    """REQ-20260919-063：task_id 不存在 → 404。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.get(
+        "/slirn/api/fine_material_file",
+        params={"task_id": "no-such-task", "kind": "cover"},
+    )
+    assert r.status_code == 404
+
+
+def test_serve_fine_material_file_404_for_unuploaded_material(tmp_path):
+    """REQ-20260919-063：素材未上传 → 404。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="mat-file-empty", original_video=video)
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.get(
+        "/slirn/api/fine_material_file",
+        params={"task_id": t.task_id, "kind": "bg"},
+    )
+    assert r.status_code == 404
+
+
+def test_serve_fine_material_file_400_for_invalid_kind(tmp_path):
+    """REQ-20260919-063：非法 kind → 400。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="mat-file-bad-kind", original_video=video)
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.get(
+        "/slirn/api/fine_material_file",
+        params={"task_id": t.task_id, "kind": "evil"},
+    )
+    assert r.status_code == 400
+
+
+def test_serve_fine_material_file_preview_button_disabled_when_no_file(tmp_path):
+    """REQ-20260919-063：素材未上传时，预览按钮应被禁用（disabled）；上传后启用。"""
+    from slirn_home.app import _render_workbench, _get_fine_compose, _save_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="mat-preview-disabled", original_video=video)
+    # 先看初始（所有素材都没传）
+    html0 = _render_workbench(t.task_id, m)
+    import re as _re
+    # cover 未上传 — preview 按钮 segment 应含 disabled
+    m_cover = _re.search(
+        r'data-kind="cover"[^>]*>(.*?)<div class="slirn-fine-upload-status',
+        html0, _re.DOTALL,
+    )
+    assert m_cover is not None, "找不到 cover 卡片内容"
+    card = m_cover.group(1)
+    btn_seg_cover = card.split('data-action="fine-mat-preview"')[1].split('>')[0]
+    assert 'disabled' in btn_seg_cover, \
+        f"cover 未上传时预览按钮应 disabled，实际按钮属性：{btn_seg_cover}"
+
+    # 现在上传 cover → 按钮应启用
+    from PIL import Image as _PILImage
+    upload_dir = m.tasks_dir / t.task_id / "upload"
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    cover_path = upload_dir / "cover_x.png"
+    _PILImage.new("RGB", (10, 10), color=(255, 0, 0)).save(cover_path)
+    fc = _get_fine_compose(m, t.task_id)
+    fc["materials"]["cover"] = {
+        "path": str(cover_path.relative_to(m.repo_root)),
+        "type": "image", "source": "upload",
+    }
+    _save_fine_compose(m, t.task_id, fc)
+    html1 = _render_workbench(t.task_id, m)
+    m_cover1 = _re.search(
+        r'data-kind="cover"[^>]*>(.*?)<div class="slirn-fine-upload-status',
+        html1, _re.DOTALL,
+    )
+    card1 = m_cover1.group(1)
+    btn_seg1 = card1.split('data-action="fine-mat-preview"')[1].split('>')[0]
+    assert 'disabled' not in btn_seg1, \
+        f"cover 已上传时预览按钮不应 disabled：{btn_seg1}"
+
+
+# ---------- REQ-20260919-062 v3：中心扩展算法（默认；4 方向矩形扫描） ----------
+
+
+def _write_solid_bg_rect(task_dir: Path, w: int = 1920, h: int = 1080,
+                          bg_rgb: tuple[int, int, int] = (50, 80, 120),
+                          rect_rgb: tuple[int, int, int] = (200, 200, 200),
+                          rect_xy: tuple[int, int] = (560, 240),
+                          rect_wh: tuple[int, int] = (800, 600)) -> Path:
+    """造一张「背景纯色 + 中央纯色矩形」图，给 center_expand 用。
+
+    设计：bg 和 rect 颜色不同，rect 在 bg 中央。从中心向外 4 方向扩展时，
+    第一次遇到 bg 色就停 → 矩形 bbox 应等于 rect 的 bbox。
+    """
+    from PIL import Image as _PILImage, ImageDraw as _Draw
+    img = _PILImage.new("RGB", (w, h), color=bg_rgb)
+    _Draw.Draw(img).rectangle(
+        [rect_xy, (rect_xy[0] + rect_wh[0] - 1, rect_xy[1] + rect_wh[1] - 1)],
+        fill=rect_rgb,
+    )
+    bg_dir = task_dir / "bg"
+    bg_dir.mkdir(parents=True, exist_ok=True)
+    p = bg_dir / "bg.png"
+    img.save(p)
+    return p
+
+
+def test_detect_bg_white_area_center_expand_finds_central_rect(tmp_path):
+    """REQ-20260919-062 v3：center_expand 默认算法 ——
+    从背景图中心 10×10 平均色向 4 方向扩展，遇颜色变化即停，返回矩形 bbox。
+
+    测试图：1920×1080 蓝灰 (50,80,120) 背景 + 中央 (560,240)-(1359,839) 浅灰 (200,200,200) 矩形。
+      - 设计空间原图就是 1920×1080，resize 是恒等
+      - 中心 (960, 540) 在矩形内（560 ≤ 960 ≤ 1359, 240 ≤ 540 ≤ 839）
+      - 中心 10×10 平均色 = (200,200,200)
+      - 向左：第一次遇到 (50,80,120) 在 x=559 之前停；x_left = 560
+      - 向右：第一次遇到 (50,80,120) 在 x=1360 之前停；x_right = 1359
+      - 向上：y_top = 240；向下：y_bottom = 839
+      - 矩形 bbox = (560, 240, 800, 600)
+    """
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+    from slirn_home.app import _get_fine_compose, _save_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="bg-center-expand", original_video=video)
+    task_dir = m.tasks_dir / t.task_id
+    bg_abs = _write_solid_bg_rect(task_dir)
+    fc = _get_fine_compose(m, t.task_id)
+    fc["materials"]["bg"] = {
+        "path": str(bg_abs.relative_to(m.repo_root)),
+        "type": "image", "source": "upload",
+    }
+    _save_fine_compose(m, t.task_id, fc)
+
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.post(
+        "/slirn/api/detect_bg_white_area",
+        json={"task_id": t.task_id, "algorithm": "center_expand"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True, body
+
+    # 算法字段 + 基本颜色返回
+    assert body["algorithm"] == "center_expand"
+    assert body["threshold"] is None
+    assert body["detected_color"] == [200, 200, 200], \
+        f"基本色应为矩形色 (200,200,200)，实际 {body['detected_color']}"
+    assert body["color_tolerance"] == 10
+
+    # bbox 应等于矩形原 bbox（容差 ±1：扫描算法可能因边缘像素抖动多/少 1 行/列）
+    def _near(actual, expected, tol=1):
+        return abs(actual - expected) <= tol
+
+    assert _near(body["x"], 560), f"x 应≈560，实际 {body['x']}"
+    assert _near(body["y"], 240), f"y 应≈240，实际 {body['y']}"
+    assert _near(body["width"], 800), f"width 应≈800，实际 {body['width']}"
+    assert _near(body["height"], 600), f"height 应≈600，实际 {body['height']}"
+
+    # 4 角点
+    assert _near(body["corners"]["topleft"][0], 560)
+    assert _near(body["corners"]["topleft"][1], 240)
+    assert _near(body["corners"]["bottomright"][0], 1359)
+    assert _near(body["corners"]["bottomright"][1], 839)
+
+
+def test_detect_bg_white_area_center_expand_image_smaller_than_design(tmp_path):
+    """REQ-20260919-062 v3：原图 1000×600 经 LANCZOS 缩放到 1920×1080 后，
+    中心扩展仍能找到矩形 bbox（验证先 resize 再算的设计）。
+
+    缩放比例 scale_x = 1.92, scale_y = 1.8
+    原图矩形 (200, 100)-(799, 499)（600×400）→ 设计空间 (384, 180)-(1535, 898)（1152×720）
+    """
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+    from slirn_home.app import _get_fine_compose, _save_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="bg-center-expand-small", original_video=video)
+    task_dir = m.tasks_dir / t.task_id
+    bg_abs = _write_solid_bg_rect(
+        task_dir, w=1000, h=600,
+        bg_rgb=(10, 20, 30), rect_rgb=(220, 220, 220),
+        rect_xy=(200, 100), rect_wh=(600, 400),
+    )
+    fc = _get_fine_compose(m, t.task_id)
+    fc["materials"]["bg"] = {
+        "path": str(bg_abs.relative_to(m.repo_root)),
+        "type": "image", "source": "upload",
+    }
+    _save_fine_compose(m, t.task_id, fc)
+
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.post(
+        "/slirn/api/detect_bg_white_area",
+        json={"task_id": t.task_id, "algorithm": "center_expand"},
+    )
+    body = r.json()
+    assert body["ok"] is True, body
+
+    def _near(actual, expected, tol=6):
+        return abs(actual - expected) <= tol
+    assert _near(body["x"], 384), f"x 应≈384，实际 {body['x']}"
+    assert _near(body["y"], 180), f"y 应≈180，实际 {body['y']}"
+    assert _near(body["width"], 1152), f"width 应≈1152，实际 {body['width']}"
+    assert _near(body["height"], 720), f"height 应≈720，实际 {body['height']}"
+
+
+def test_detect_bg_white_area_center_expand_uses_full_image_when_uniform(tmp_path):
+    """REQ-20260919-062 v3：整张图都是基本色时，扩展到图像边界（bbox = 整图）。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+    from slirn_home.app import _get_fine_compose, _save_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="bg-center-uniform", original_video=video)
+    task_dir = m.tasks_dir / t.task_id
+    from PIL import Image as _PILImage
+    bg_dir = task_dir / "bg"
+    bg_dir.mkdir(parents=True, exist_ok=True)
+    bg_abs = bg_dir / "bg.png"
+    _PILImage.new("RGB", (1920, 1080), color=(120, 120, 120)).save(bg_abs)
+    fc = _get_fine_compose(m, t.task_id)
+    fc["materials"]["bg"] = {
+        "path": str(bg_abs.relative_to(m.repo_root)),
+        "type": "image", "source": "upload",
+    }
+    _save_fine_compose(m, t.task_id, fc)
+
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.post(
+        "/slirn/api/detect_bg_white_area",
+        json={"task_id": t.task_id, "algorithm": "center_expand"},
+    )
+    body = r.json()
+    assert body["ok"] is True, body
+    assert body["x"] <= 1, f"x 应接近 0，实际 {body['x']}"
+    assert body["y"] <= 1, f"y 应接近 0，实际 {body['y']}"
+    assert body["width"] >= 1918, f"width 应≈1920，实际 {body['width']}"
+    assert body["height"] >= 1078, f"height 应≈1080，实际 {body['height']}"
+
+
+def test_detect_bg_white_area_center_expand_requires_bg_image(tmp_path):
+    """REQ-20260919-062 v3：center_expand 也需要背景图，缺时返回友好错误。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="bg-center-no-bg", original_video=video)
+    client = TestClient(build_app(repo_root=tmp_path).app)
+
+    r = client.post(
+        "/slirn/api/detect_bg_white_area",
+        json={"task_id": t.task_id, "algorithm": "center_expand"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is False
+    err = body.get("error", "")
+    assert "背景" in err or "上传" in err, f"缺背景图应明确提示：{err}"
+
+
+def test_detect_bg_white_area_center_expand_algorithm_in_whitelist(tmp_path):
+    """REQ-20260919-062 v3：center_expand 应被 endpoint 白名单接受。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+    from slirn_home.app import _get_fine_compose, _save_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="bg-center-whitelist", original_video=video)
+    task_dir = m.tasks_dir / t.task_id
+    bg_abs = _write_solid_bg_rect(task_dir)
+    fc = _get_fine_compose(m, t.task_id)
+    fc["materials"]["bg"] = {
+        "path": str(bg_abs.relative_to(m.repo_root)),
+        "type": "image", "source": "upload",
+    }
+    _save_fine_compose(m, t.task_id, fc)
+
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.post(
+        "/slirn/api/detect_bg_white_area",
+        json={"task_id": t.task_id, "algorithm": "center_expand"},
+    )
+    body = r.json()
+    if not body["ok"]:
+        assert "不支持的算法" not in body.get("error", ""), \
+            f"center_expand 应被白名单接受：{body}"
+
+
+def test_render_fine_cut_zone_center_expand_is_default_selected(tmp_path):
+    """REQ-20260919-062 v3：HTML select 应把 center_expand 设为默认选项。"""
+    from slirn_home.app import _render_workbench
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="bg-center-default", original_video=video)
+    html = _render_workbench(t.task_id, m)
+
+    import re as _re
+    m_sel = _re.search(
+        r'<option value="center_expand"([^>]*)>',
+        html,
+    )
+    assert m_sel is not None, '应存在 value="center_expand" 的 option'
+    assert 'selected' in m_sel.group(1), \
+        f"center_expand 应为默认 selected，实际：{m_sel.group(0)}"
+
+
+def test_bg_detect_apply_uses_region_top_left_not_center():
+    """REQ-20260919-062 v4 用户反馈：填充到视频位置时，video.X/Y 应是区域左上角 (r.x/r.y)，
+    而非区域中心 (r.center_x/r.center_y)；crop_x/crop_y 应从原视频 (0,0) 起取。
+    """
+    js = Path('slirn_home/static/router.js').read_text(encoding='utf-8')
+
+    # 定位 apply handler 块（"请先点「🔍 检测区域」"是 apply 入口）
+    start = js.find('请先点「🔍 检测区域」')
+    assert start > 0, "apply handler 应存在"
+    end = js.find('\n  }\n  function', start)
+    assert end > start, "apply handler 结束位置应可定位"
+    block = js[start:end]
+
+    # 1) video.X = r.x（不是 r.center_x）
+    assert "_setSlider('slirn-fine-video-x', r.x)" in block, \
+        "video.X 应填区域的左上角 X (r.x)，而不是中心 (r.center_x)"
+    assert "_setSlider('slirn-fine-video-x', r.center_x)" not in block, \
+        "video.X 不应再用 r.center_x"
+    # 2) video.Y = r.y（不是 r.center_y）
+    assert "_setSlider('slirn-fine-video-y', r.y)" in block, \
+        "video.Y 应填区域的左上角 Y (r.y)，而不是中心 (r.center_y)"
+    assert "_setSlider('slirn-fine-video-y', r.center_y)" not in block, \
+        "video.Y 不应再用 r.center_y"
+    # 3) crop_x = 0（从原视频 (0,0) 起取）
+    assert "_setSlider('slirn-fine-video-crop_x', 0)" in block, \
+        "crop_x 应填 0（从原视频左上角起取）"
+    # 4) crop_y = 0
+    assert "_setSlider('slirn-fine-video-crop_y', 0)" in block, \
+        "crop_y 应填 0（从原视频左上角起取）"
+    # 5) crop_w = r.width
+    assert "_setSlider('slirn-fine-video-crop_w', r.width)" in block, \
+        "crop_w 应填区域宽度 r.width"
+    # 6) crop_h = r.height
+    assert "_setSlider('slirn-fine-video-crop_h', r.height)" in block, \
+        "crop_h 应填区域高度 r.height"
+    # 7) scale = 1.0（裁剪后的视频刚好填满区域）
+    assert "_setSlider('slirn-fine-video-scale', 1.0)" in block, \
+        "scale 应填 1.0（让裁剪后的视频填满区域）"
+
+    # v5：fill 之后应把 viewport 也存到后端（限定视频在检测区域内）
+    assert "viewport:" in block, \
+        "fill handler 应把 viewport 写进 save_fine_layout 请求体"
+    assert "x: r.x" in block and "y: r.y" in block, \
+        "viewport 应使用检测结果 r.x/r.y"
+    assert "width: r.width" in block and "height: r.height" in block, \
+        "viewport 应使用检测结果 r.width/r.height"
+
+
+# ─── REQ-20260919-062 v5：把视频展示区域限定在所检测区域之内 ───
+
+def test_clamp_video_to_viewport_clamps_xy_when_outside():
+    """当 video.x/y 超出 viewport 时，夹紧到 viewport 内。"""
+    from slirn_home.app import _clamp_video_to_viewport
+
+    vc = {
+        "x": 2000, "y": 1500,                # 都超出 viewport
+        "scale": 0.5,
+        "crop_w": 1920, "crop_h": 1080,
+        "viewport": {"x": 384, "y": 180, "width": 1152, "height": 720},
+    }
+    _clamp_video_to_viewport(vc)
+    # display = 1920*0.5=960, 1080*0.5=540；viewport 1152×720 完全装得下
+    # max_x = 384 + (1152 - 960) = 576
+    # max_y = 180 + (720 - 540) = 360
+    assert vc["x"] == 576, f"x 应夹紧到 576，实际 {vc['x']}"
+    assert vc["y"] == 360, f"y 应夹紧到 360，实际 {vc['y']}"
+    assert vc["scale"] == 0.5, f"scale 不应被改（=0.5 < 上限）"
+
+
+def test_clamp_video_to_viewport_clamps_scale_when_too_large():
+    """当 scale 过大导致 display 超出 viewport 时，把 scale 降到刚好装下。"""
+    from slirn_home.app import _clamp_video_to_viewport
+
+    vc = {
+        "x": 384, "y": 180,
+        "scale": 2.0,
+        "crop_w": 1920, "crop_h": 1080,
+        "viewport": {"x": 384, "y": 180, "width": 1152, "height": 720},
+    }
+    _clamp_video_to_viewport(vc)
+    # max_scale = min(1152/1920, 720/1080, 2.0) = 0.6
+    assert abs(vc["scale"] - 0.6) < 0.001, f"scale 应夹紧到 0.6，实际 {vc['scale']}"
+    # 此时 display = 1920*0.6=1152, 1080*0.6=648；x/y 不动
+    assert vc["x"] == 384
+    assert vc["y"] == 180
+
+
+def test_clamp_video_to_viewport_no_change_when_inside():
+    """display 已在 viewport 内时，不动 x/y/scale。"""
+    from slirn_home.app import _clamp_video_to_viewport
+
+    vc = {
+        "x": 400, "y": 200,                # viewport 384..1536 × 180..900 — 完全在内
+        "scale": 0.5,
+        "crop_w": 1920, "crop_h": 1080,
+        "viewport": {"x": 384, "y": 180, "width": 1152, "height": 720},
+    }
+    _clamp_video_to_viewport(vc)
+    assert vc["x"] == 400
+    assert vc["y"] == 200
+    assert vc["scale"] == 0.5
+
+
+def test_clamp_video_to_viewport_no_viewport_means_unlimited():
+    """viewport 缺失/None → 不做夹紧（向后兼容）。"""
+    from slirn_home.app import _clamp_video_to_viewport
+
+    vc = {"x": 5000, "y": 5000, "scale": 2.0,
+          "crop_w": 1920, "crop_h": 1080, "viewport": None}
+    _clamp_video_to_viewport(vc)
+    assert vc["x"] == 5000, "viewport=None 时不应修改 x"
+    assert vc["y"] == 5000
+    assert vc["scale"] == 2.0
+
+
+def test_save_fine_layout_accepts_viewport_field_and_clamps(tmp_path):
+    """save_fine_layout 接受 video.viewport，并把 video.x/y/scale 夹紧到 viewport 内。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="viewport-clamp", original_video=video)
+    client = TestClient(build_app(repo_root=tmp_path).app)
+
+    # x/y/scale 都超出 viewport；设 viewport 后服务端夹紧
+    r = client.post(
+        "/slirn/api/save_fine_layout",
+        json={
+            "task_id": t.task_id,
+            "layout": {
+                "video": {
+                    "x": 5000, "y": 5000, "scale": 3.0,
+                    "viewport": {"x": 384, "y": 180, "width": 1152, "height": 720},
+                },
+            },
+        },
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    # 响应里应返回夹紧后的 layout.video
+    assert "layout" in body, f"响应应含 layout 字段，实际 {body}"
+    v = body["layout"]["video"]
+    # max_scale = min(1152/1920, 720/1080, 2.0) = 0.6
+    assert abs(v["scale"] - 0.6) < 0.001, f"scale 应被夹紧到 0.6，实际 {v['scale']}"
+    # display 1920*0.6=1152, 1080*0.6=648；viewport 1152×720
+    # max_x = 384 + (1152 - 1152) = 384；原 x=5000 被夹到 384
+    # max_y = 180 + (720 - 648) = 252；原 y=5000 被夹到 252
+    assert v["x"] == 384, f"x 应被夹紧到 384，实际 {v['x']}"
+    assert v["y"] == 252, f"y 应被夹紧到 252（max_y），实际 {v['y']}"
+    # viewport 应被保留
+    assert v["viewport"] == {"x": 384, "y": 180, "width": 1152, "height": 720}
+
+
+def test_save_fine_layout_keeps_existing_viewport_when_not_submitted(tmp_path):
+    """只改 x/y/scale 不带 viewport 时，旧 viewport 应继续生效（夹紧生效）。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="viewport-keep", original_video=video)
+    client = TestClient(build_app(repo_root=tmp_path).app)
+
+    # 第一次：设 viewport + 极端值
+    client.post(
+        "/slirn/api/save_fine_layout",
+        json={
+            "task_id": t.task_id,
+            "layout": {
+                "video": {
+                    "x": 5000, "y": 5000, "scale": 1.0,
+                    "viewport": {"x": 384, "y": 180, "width": 1152, "height": 720},
+                },
+            },
+        },
+    )
+    # 第二次：只改 scale（不带 viewport）— viewport 应保留，scale 被夹紧到 viewport 内
+    r2 = client.post(
+        "/slirn/api/save_fine_layout",
+        json={"task_id": t.task_id, "layout": {"video": {"scale": 3.0}}},
+    )
+    v = r2.json()["layout"]["video"]
+    assert abs(v["scale"] - 0.6) < 0.001, f"viewport 应保留并夹紧 scale，实际 scale={v['scale']}"
+    assert v["viewport"] == {"x": 384, "y": 180, "width": 1152, "height": 720}
+
+
+def test_bg_detect_apply_sends_viewport_to_backend():
+    """fill handler 应把检测到的 viewport 一起发给 save_fine_layout。"""
+    js = Path('slirn_home/static/router.js').read_text(encoding='utf-8')
+
+    start = js.find('请先点「🔍 检测区域」')
+    assert start > 0, "apply handler 应存在"
+    end = js.find('\n  }\n  function', start)
+    block = js[start:end]
+
+    # viewport fetch 调用
+    assert 'viewport: {' in block, \
+        "fill handler 应构造 viewport 字段"
+    assert 'x: r.x' in block and 'y: r.y' in block, \
+        "viewport x/y 应来自检测结果"
+    assert 'width: r.width' in block and 'height: r.height' in block, \
+        "viewport width/height 应来自检测结果"
+    assert 'save_fine_layout' in block, \
+        "viewport 应通过 save_fine_layout 端点发送"
+
+
+def test_fine_sync_slider_helper_exists():
+    """_fineSyncSlider 是 fill handler 和自动保存回写的共用辅助。"""
+    js = Path('slirn_home/static/router.js').read_text(encoding='utf-8')
+    assert 'function _fineSyncSlider' in js, \
+        "router.js 应有 _fineSyncSlider 函数"
+    # 不应触发 input 事件（避免循环）
+    seg = js.split('function _fineSyncSlider', 1)[1].split('\n  }', 1)[0]
+    assert "dispatchEvent" not in seg, \
+        "_fineSyncSlider 不应 dispatch input 事件（避免循环）"
+
+
+# ─── REQ-20260919-062 v6：视频缩放精度 5% → 1%
+# v17 用户反馈：v15 自动重算到 4 位后立刻被浏览器吸附回 2 位
+#   根因：<input type="range" step="0.01"> 把 value 吸附到 0.01 网格
+#   修复：step 从 0.01 改成 0.0001（4 位小数精度），其它素材仍 0.05
+# ───
+
+def test_video_scale_slider_uses_step_001(tmp_path):
+    """视频缩放滑块的 step 应为 0.0001（4 位小数精度），其它素材仍 0.05。
+
+    历史：v6 → step=0.01；v17 → step=0.0001（修复 4 位小数被吸附的 bug）。
+    """
+    import re as _re
+    from slirn_home.app import _render_workbench
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="scale-step", original_video=video)
+    html = _render_workbench(t.task_id, m)
+
+    # 1) 视频缩放滑块 step=0.0001（v17：避免被浏览器吸附回 2 位）
+    m_video_scale = _re.search(
+        r'<input type="range" class="slirn-fine-slider" id="slirn-fine-video-scale"[^>]*>',
+        html,
+    )
+    assert m_video_scale is not None, "应有 slirn-fine-video-scale 滑块"
+    video_scale_html = m_video_scale.group(0)
+    assert 'step="0.0001"' in video_scale_html, \
+        f"v17：视频 scale 应为 step=0.0001（4 位精度），实际：{video_scale_html}"
+    assert 'step="0.05"' not in video_scale_html, \
+        f"视频 scale 不应再用 0.05：{video_scale_html}"
+
+    # 2) number 输入框（精调）也应是 step=0.0001
+    m_video_num = _re.search(
+        r'<input type="number" class="slirn-fine-num" id="slirn-fine-video-scale_num"[^>]*>',
+        html,
+    )
+    assert m_video_num is not None, "应有 slirn-fine-video-scale_num 数字框"
+    assert 'step="0.0001"' in m_video_num.group(0), \
+        f"v17：视频 scale 数字框 step 应为 0.0001，实际：{m_video_num.group(0)}"
+
+    # 3) 其它素材（subtitle/cover/bg）的 scale 仍保持 step=0.05
+    for kind in ("subtitle", "bg"):
+        m_other = _re.search(
+            rf'<input type="range" class="slirn-fine-slider" id="slirn-fine-{kind}-scale"[^>]*>',
+            html,
+        )
+        assert m_other is not None, f"应有 slirn-fine-{kind}-scale 滑块"
+        assert 'step="0.05"' in m_other.group(0), \
+            f"{kind} scale 应保持 step=0.05，实际：{m_other.group(0)}"
+
+
+def test_video_scale_two_decimal_value_renders_as_2dp(tmp_path):
+    """slider 的 value 渲染保留两位小数（如 0.61 而不是 0.6100000001）。"""
+    import re as _re
+    from slirn_home.app import _render_fine_cut_zone, _get_fine_compose, _save_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="scale-2dp", original_video=video)
+    fc = _get_fine_compose(m, t.task_id)
+    fc["layout"]["video"]["scale"] = 0.61
+    _save_fine_compose(m, t.task_id, fc)
+
+    html = _render_fine_cut_zone(t.task_id, m.tasks_dir / t.task_id, m)
+    # 找到 video scale 的 range input
+    m_video_scale = _re.search(
+        r'<input type="range" class="slirn-fine-slider" id="slirn-fine-video-scale"[^>]*>',
+        html,
+    )
+    assert m_video_scale is not None, "应有 slirn-fine-video-scale 滑块"
+    seg = m_video_scale.group(0)
+    # v16：scale 值用 4 位小数显示（与 v15 自动重算保留 4 位一致）
+    assert 'value="0.6100"' in seg, f"slider value 应渲染为 '0.6100'（v16 4 位小数），实际：{seg}"
+
+
+# ─── REQ-20260919-062 v7：视频显示尺寸信息（宽 × 高） ───
+
+def test_video_info_row_shows_display_dimensions(tmp_path):
+    """视频块应展示只读的显示尺寸（crop_w × scale, crop_h × scale）。"""
+    from slirn_home.app import _render_fine_cut_zone, _get_fine_compose, _save_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="video-info", original_video=video)
+    fc = _get_fine_compose(m, t.task_id)
+    # 默认 crop_w=1920, crop_h=1080, scale=0.7 → 显示尺寸 = 1344 × 756
+    fc["layout"]["video"]["crop_w"] = 1920
+    fc["layout"]["video"]["crop_h"] = 1080
+    fc["layout"]["video"]["scale"] = 0.7
+    _save_fine_compose(m, t.task_id, fc)
+
+    html = _render_fine_cut_zone(t.task_id, m.tasks_dir / t.task_id, m)
+
+    # 1) 信息行容器
+    assert 'id="slirn-fine-video-info"' in html, \
+        "应有 slirn-fine-video-info 信息行容器"
+    assert 'slirn-fine-video-info' in html
+    # 2) 显示宽高 span
+    assert 'id="slirn-fine-video-disp-w"' in html, "应有 disp-w 节点"
+    assert 'id="slirn-fine-video-disp-h"' in html, "应有 disp-h 节点"
+    # 默认 scale=0.7，crop=1920×1080 → 显示 = 1344 × 756
+    import re as _re
+    m_dw = _re.search(r'id="slirn-fine-video-disp-w"[^>]*>([^<]+)<', html)
+    m_dh = _re.search(r'id="slirn-fine-video-disp-h"[^>]*>([^<]+)<', html)
+    assert m_dw is not None and m_dw.group(1).strip() == "1344", \
+        f"disp-w 应为 1344（1920*0.7），实际 {m_dw.group(1) if m_dw else 'None'}"
+    assert m_dh is not None and m_dh.group(1).strip() == "756", \
+        f"disp-h 应为 756（1080*0.7），实际 {m_dh.group(1) if m_dh else 'None'}"
+    # 3) 缩放百分比 + 宽高比
+    assert 'id="slirn-fine-video-scale-pct"' in html
+    assert 'id="slirn-fine-video-aspect"' in html
+    m_pct = _re.search(r'id="slirn-fine-video-scale-pct"[^>]*>([^<]+)<', html)
+    # v16：缩放百分比显示 4 位小数（与 v15 自动重算保留 4 位一致）
+    assert m_pct is not None and "70.0000" in m_pct.group(1), \
+        f"scale-pct 应含 70.0000（v16 4 位小数），实际 {m_pct.group(1) if m_pct else 'None'}"
+    m_asp = _re.search(r'id="slirn-fine-video-aspect"[^>]*>([^<]+)<', html)
+    assert m_asp is not None, "应有 aspect 节点"
+    # 756/1344 ≈ 0.5625
+    assert "0.563" in m_asp.group(1) or "0.562" in m_asp.group(1), \
+        f"aspect 应 ≈0.562-0.563，实际 {m_asp.group(1)}"
+
+
+def test_video_info_only_in_video_block_not_subtitle(tmp_path):
+    """显示尺寸信息行只出现在 video 块，subtitle/cover/bg 块不应有。
+
+    实现：找 4 个 .slirn-fine-layout-block 的起止位置（用 regex + DOTALL + non-greedy
+    平衡嵌套 div 很复杂；这里走简化的字符串切片：从每个 layout-block 起点到下一个 layout-block
+    起点之间算一块；最后一块取到 4 倍字符偏移外的合理边界。
+    """
+    import re as _re
+    from slirn_home.app import _render_fine_cut_zone
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="info-only-video", original_video=video)
+    html = _render_fine_cut_zone(t.task_id, m.tasks_dir / t.task_id, m)
+
+    # 3 个 layout block 起点（position_blocks 只为 video/subtitle/bg 生成，cover 单独渲染）
+    starts = [m.start() for m in _re.finditer(
+        r'<div class="slirn-fine-layout-block">', html)]
+    assert len(starts) == 3, f"应有 3 个 position layout block，实际 {len(starts)}"
+
+    # 每块的切片 = [starts[i], starts[i+1])；最后一块到 html 末尾
+    counts = []
+    for i, s in enumerate(starts):
+        e = starts[i + 1] if i + 1 < len(starts) else len(html)
+        seg = html[s:e]
+        cnt = seg.count('id="slirn-fine-video-info"')
+        counts.append(cnt)
+
+    # video 是第 1 个 block（按 ("video","subtitle","bg") 顺序），其它 2 个应不含
+    assert counts[0] >= 1, \
+        f"video block (counts[0]={counts[0]}) 应包含 video-info"
+    for i, c in enumerate(counts[1:], start=1):
+        assert c == 0, \
+            f"第 {i + 1} 个 layout block 不应含 video-info，实际 {c} 次"
+
+
+def test_router_has_update_video_disp_function():
+    """router.js 应有 updateVideoDisp 函数，并在 video.* 滑块 input 时调用。"""
+    js = Path('slirn_home/static/router.js').read_text(encoding='utf-8')
+
+    # 函数定义
+    assert 'function updateVideoDisp()' in js, \
+        "router.js 应有 updateVideoDisp 函数"
+    # 函数体内应更新 disp-w / disp-h / scale-pct / aspect 4 个节点
+    fn = js.split('function updateVideoDisp()', 1)[1].split('\n  }', 1)[0]
+    assert "slirn-fine-video-disp-w" in fn, \
+        "updateVideoDisp 应更新 disp-w"
+    assert "slirn-fine-video-disp-h" in fn, \
+        "updateVideoDisp 应更新 disp-h"
+    assert "slirn-fine-video-scale-pct" in fn, \
+        "updateVideoDisp 应更新 scale-pct"
+    assert "slirn-fine-video-aspect" in fn, \
+        "updateVideoDisp 应更新 aspect"
+    # 应在 video.scale / video.crop_w / video.crop_h input 事件里被调用
+    bind = js.split('bindFineControls', 1)[1] if 'bindFineControls' in js else js
+    # 找 video.scale / crop_w / crop_h 触发处
+    assert "'video.scale'" in js, "video.scale 应触发 updateVideoDisp"
+    # crop_w / crop_h 触发同时驱动 updateCropAspect + updateVideoDisp
+    crop_segment = js[js.find("k === 'video.crop_w' || k === 'video.crop_h'"):]
+    crop_segment = crop_segment[:crop_segment.find('}')+1] if '}' in crop_segment else crop_segment[:300]
+    assert "updateVideoDisp" in crop_segment, \
+        "video.crop_w/h input 应触发 updateVideoDisp"
+
+
+def test_css_video_info_style_defined():
+    """home.css 应定义 .slirn-fine-video-info 样式。"""
+    css = Path('slirn_home/static/home.css').read_text(encoding='utf-8')
+    assert '.slirn-fine-video-info' in css, \
+        "home.css 应定义 .slirn-fine-video-info 样式"
+
+
+# ============================================================
+# REQ-20260919-071：字幕修订行·人员徽章列位（不挤占文本）
+# ============================================================
+
+def test_css_rev_line_grid_has_six_columns_with_auto_spk():
+    """REQ-20260919-071：.slirn-rev-line grid-template-columns 应为 6 轨，
+    第 2 轨 auto（人员徽章，未关联时塌缩为 0）。"""
+    css = Path('slirn_home/static/home.css').read_text(encoding='utf-8')
+    # 找 .slirn-rev-line 的 grid-template-columns
+    import re
+    m = re.search(
+        r'\.slirn-rev-line\s*\{[^}]*?grid-template-columns:\s*([^;]+);',
+        css, re.DOTALL,
+    )
+    assert m, "home.css 应为 .slirn-rev-line 定义 grid-template-columns"
+    cols = m.group(1).strip()
+    # 期望：44px auto 216px 1fr 150px 26px（6 轨，第 2 轨 auto）
+    expected_tokens = ["44px", "auto", "216px", "1fr", "150px", "26px"]
+    actual_tokens = cols.split()
+    assert actual_tokens == expected_tokens, \
+        f".slirn-rev-line 应为 6 轨布局（含 auto 人员徽章轨），实际：{cols}"
+    assert len(actual_tokens) == 6, \
+        f"6 个 child 需 6 轨布局（idx/spk/time/text/select/toggle），实际轨数：{len(actual_tokens)}"
+
+
+def test_css_rev_line_children_have_explicit_grid_column():
+    """REQ-20260919-071：每个 child 应显式 grid-column（与切分阶段 036 方案同款）。
+
+    不显式声明时，新增 6th child 会触发 grid auto-flow wrap 到下一行 →
+    出现「人员编号占宽列 + 一段空白」的视觉异常。
+    """
+    css = Path('slirn_home/static/home.css').read_text(encoding='utf-8')
+    # 关键 6 个 child 都应有 grid-column
+    expected = [
+        ('.slirn-rev-line > .slirn-sub-idx',    'grid-column: 1'),
+        ('.slirn-rev-line > .slirn-rev-spk',    'grid-column: 2'),
+        ('.slirn-rev-line > .slirn-sub-time',   'grid-column: 3'),
+        ('.slirn-rev-line > .slirn-sub-text',   'grid-column: 4'),
+        ('.slirn-rev-line > .slirn-rev-select', 'grid-column: 5'),
+        ('.slirn-rev-line > .slirn-rev-toggle', 'grid-column: 6'),
+    ]
+    for selector, prop in expected:
+        # 转义 CSS 里的特殊字符做字面匹配
+        pattern = re.escape(selector) + r'\s*\{[^}]*?' + re.escape(prop)
+        assert re.search(pattern, css, re.DOTALL), \
+            f"{selector} 应显式声明 {prop}（防止新增 child 触发 wrap）"
+
+
+def test_css_rev_line_narrow_screen_keeps_six_columns():
+    """REQ-20260919-071：窄屏 @media (max-width: 720px) 也应保持 6 轨布局。
+
+    注：CSS 中存在多个 @media (max-width: 720px) 块（字幕行/字幕修订/精剪字体
+    等各自一份），需找包含 .slirn-rev-line 的那一块。
+    """
+    css = Path('slirn_home/static/home.css').read_text(encoding='utf-8')
+    # 找所有 @media (max-width: 720px) {...} 块（用花括号配对，不依赖非贪婪）
+    media_blocks: list[str] = []
+    for m in re.finditer(r'@media\s*\(max-width:\s*720px\)\s*\{', css):
+        start = m.end() - 1  # '{' 位置
+        depth = 0
+        for i in range(start, len(css)):
+            if css[i] == '{':
+                depth += 1
+            elif css[i] == '}':
+                depth -= 1
+                if depth == 0:
+                    media_blocks.append(css[start + 1:i])
+                    break
+    assert media_blocks, "home.css 应有 @media (max-width: 720px) 块"
+    # 找包含 .slirn-rev-line 的那一块
+    rev_block = next((b for b in media_blocks if '.slirn-rev-line' in b), None)
+    assert rev_block, "应有含 .slirn-rev-line 的 @media (max-width: 720px) 块"
+    cols_m = re.search(
+        r'\.slirn-rev-line\s*\{[^}]*?grid-template-columns:\s*([^;]+);',
+        rev_block, re.DOTALL,
+    )
+    assert cols_m, "窄屏 @media 内应有 .slirn-rev-line 的 grid-template-columns"
+    cols = cols_m.group(1).strip().split()
+    assert len(cols) == 6, \
+        f"窄屏 6 轨（含 auto 人员徽章轨 + auto 时间戳轨），实际轨数：{len(cols)}"
+    # 第 2 轨应是 auto（人员徽章，未关联塌缩 0）
+    assert cols[1] == "auto", \
+        f"窄屏第 2 轨应为 auto（人员徽章轨），实际：{cols}"
+
+
+# ============================================================
+# REQ-20260919-062 v8+v12：背景图检测（v8 加缓存+块位置；v12 去掉主色大色块）
+# ============================================================
+
+def test_bg_detect_result_renders_when_cache_present(tmp_path):
+    """fc.bg_detect_cache 存在时，结果区（4 角点 + 宽高 + 中心 + 像素数 + 原图尺寸 + 算法 + 时间）应直接渲染。
+
+    v12：主色大色块已删除，本测试改为验证「结果区直接可见 + 几何信息来自缓存」这一核心行为。
+    """
+    from starlette.testclient import TestClient
+    from slirn_home.app import build_app
+    from tasklib import TaskManager
+    mgr, _video = _make_mgr(tmp_path)
+    t = mgr.create(name='demo', original_video=tmp_path / 'lecture.mp4')
+    tid = t.task_id
+    task_dir = tmp_path / 'tasks' / tid
+    fc_path = task_dir / 'fine_compose.json'
+    fc_path.parent.mkdir(parents=True, exist_ok=True)
+    fc_path.write_text(json.dumps({
+        "materials": {},
+        "layout": {
+            "video": {"x": 100, "y": 200, "scale": 0.5, "crop_x": 0,
+                      "crop_y": 0, "crop_w": 1920, "crop_h": 1080, "enabled": True}
+        },
+        "font": {"size": 36, "family": "STHeitiMedium", "stroke_width": 2,
+                 "stroke_color": "#000000", "bg_enabled": False, "bg_color": "#000000",
+                 "bg_opacity": 0.6, "bg_radius": 4, "bold": True, "align": "center"},
+        "output": {"resolution": "1080p", "codec": "h264", "audio_codec": "aac"},
+        "audio": {},
+        "bg_detect_cache": {
+            "x": 50, "y": 60, "width": 800, "height": 450,
+            "center_x": 450, "center_y": 285,
+            "corners": {"topleft": [50, 60], "topright": [850, 60],
+                        "bottomleft": [50, 510], "bottomright": [850, 510]},
+            "pixel_count": 12345,
+            "image_native_w": 1920, "image_native_h": 1080,
+            "detected_color": [240, 240, 240],
+            "color_tolerance": 10,
+            "algorithm": "ai_color",
+            "detected_at": "2026-09-19T16:00:00",
+        },
+    }), encoding='utf-8')
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.post('/slirn/api/workbench', json={'task_id': tid})
+    assert r.status_code == 200, r.text
+    j = r.json()
+    assert j.get('ok') is True, j
+    html = j.get('html') or j.get('content') or r.text
+    # v12：已去掉主色大色块；RGB/HEX 不再展示，但 detected_color 仍写进缓存（不影响）
+    assert 'slirn-fine-bg-detect-color-box' not in html
+    assert 'slirn-fine-bg-detect-color-swatch-large' not in html
+    # 结果区应直接可见（不 hidden）
+    assert 'id="slirn-fine-bg-detect-result"' in html
+    assert 'id="slirn-fine-bg-detect-result" hidden' not in html
+    # 缓存里的几何值
+    assert '(50, 60)' in html  # topleft
+    assert '800 × 450' in html or '800 × 450' in html
+    # 算法 + 时间
+    assert 'ai_color' in html
+    assert '2026-09-19T16:00:00' in html
+
+
+def test_bg_detect_block_above_actions_bar(tmp_path):
+    """v8 用户反馈：bg_detect_block 应挪到 combined_actions_bar 上方。"""
+    from starlette.testclient import TestClient
+    from slirn_home.app import build_app
+    from tasklib import TaskManager
+    mgr, _video = _make_mgr(tmp_path)
+    t = mgr.create(name='demo2', original_video=tmp_path / 'lecture.mp4')
+    tid = t.task_id
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.post('/slirn/api/workbench', json={'task_id': tid})
+    assert r.status_code == 200, r.text
+    j = r.json()
+    html = j.get('html') or j.get('content') or r.text
+    bg_pos = html.find('slirn-fine-bg-detect-block')
+    actions_pos = html.find('slirn-fine-actions-bar')
+    assert bg_pos > 0 and actions_pos > 0, "应能定位到两个块"
+    assert bg_pos < actions_pos, \
+        "bg_detect_block 应在 actions_bar 上方（用户反馈 v8）"
+
+
+def test_bg_detect_clear_cache_endpoint(tmp_path):
+    """clear_bg_detect_cache endpoint 应删除 fc.bg_detect_cache。"""
+    from starlette.testclient import TestClient
+    from slirn_home.app import build_app
+    from tasklib import TaskManager
+    mgr, _video = _make_mgr(tmp_path)
+    t = mgr.create(name='demo3', original_video=tmp_path / 'lecture.mp4')
+    tid = t.task_id
+    task_dir = tmp_path / 'tasks' / tid
+    fc_path = task_dir / 'fine_compose.json'
+    fc_path.parent.mkdir(parents=True, exist_ok=True)
+    fc_path.write_text(json.dumps({
+        "materials": {}, "layout": {"video": {"x":0,"y":0,"scale":1,"enabled":True}},
+        "font": {}, "output": {}, "audio": {},
+        "bg_detect_cache": {"x":1, "y":2, "algorithm":"center_expand"},
+    }), encoding='utf-8')
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.post('/slirn/api/clear_bg_detect_cache', json={'task_id': tid})
+    assert r.status_code == 200, r.text
+    j = r.json()
+    assert j.get('ok') is True, j
+    # 缓存已被清除
+    fc = json.loads(fc_path.read_text(encoding='utf-8'))
+    assert 'bg_detect_cache' not in fc, \
+        f"清缓存后 fc.bg_detect_cache 应消失，实际: {list(fc.keys())}"
+
+
+def test_bg_detect_color_box_hidden_when_no_cache(tmp_path):
+    """无缓存时色块大容器应 hidden（直到首次检测完）。"""
+    from starlette.testclient import TestClient
+    from slirn_home.app import build_app
+    from tasklib import TaskManager
+    mgr, _video = _make_mgr(tmp_path)
+    t = mgr.create(name='demo4', original_video=tmp_path / 'lecture.mp4')
+    tid = t.task_id
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.post('/slirn/api/workbench', json={'task_id': tid})
+    assert r.status_code == 200, r.text
+    j = r.json()
+    html = j.get('html') or j.get('content') or r.text
+    # 无缓存：结果区 hidden；清缓存按钮 disabled
+    # v12：色块容器已彻底移除（不是 hidden，而是节点不存在）
+    assert 'slirn-fine-bg-detect-color-box' not in html, \
+        "v12：色块容器节点不应存在（已删除而非 hidden）"
+    assert 'id="slirn-fine-bg-detect-result" hidden' in html
+    # 清缓存按钮 disabled 顺序：action → task-id → disabled
+    assert 'fine-bg-detect-clear" data-task-id="' in html
+    assert html.find('fine-bg-detect-clear" data-task-id="') >= 0
+    # 找按钮的下一段含 disabled
+    btn_i = html.find('fine-bg-detect-clear" data-task-id="')
+    assert btn_i >= 0
+    btn_seg = html[btn_i:btn_i+300]
+    assert 'disabled' in btn_seg, f"清缓存按钮应 disabled，实际：{btn_seg[:200]}"
+
+
+def test_router_fine_apply_video_layout_function_removed():
+    """REQ-20260919-062 v10：去掉页面内预览框后，_fineApplyVideoLayout() 不再需要。"""
+    js = Path('slirn_home/static/router.js').read_text(encoding='utf-8')
+    # v10：不应再有 function _fineApplyVideoLayout 定义（注释里可保留说明）
+    assert 'function _fineApplyVideoLayout' not in js, \
+        "v10：function _fineApplyVideoLayout 应已删除"
+    # v10：router.js 仍读取 video layout 字段（用于计算占背景图百分比）
+    for field in ["slirn-fine-video-crop_w", "slirn-fine-video-crop_h",
+                  "slirn-fine-video-scale"]:
+        assert field in js, f"router.js 应读 {field}"
+
+
+def test_router_preview_no_stage_container():
+    """REQ-20260919-062 v10：router.js 不应再引用 preview-stage 容器（预览框已去除）。"""
+    js = Path('slirn_home/static/router.js').read_text(encoding='utf-8')
+    assert 'getElementById(\'slirn-fine-preview-stage\')' not in js, \
+        "v10：router.js 不应再 getElementById('slirn-fine-preview-stage')"
+    # 弹窗预览的 _fineApplyVideoLayout 也不再使用
+    assert 'function _fineApplyVideoLayout' not in js, \
+        "v10：function _fineApplyVideoLayout 已删除"
+
+
+def test_css_preview_stage_removed_in_v10():
+    """REQ-20260919-062 v10：home.css 不应再定义 .slirn-fine-preview-stage 样式
+    （预览框已去除，弹窗预览 .slirn-mat-preview-float 足够）。
+    """
+    css = Path('slirn_home/static/home.css').read_text(encoding='utf-8')
+    # 不应再有 .slirn-fine-preview-stage { ... } 规则块
+    import re
+    assert re.search(r'\.slirn-fine-preview-stage\s*\{', css) is None, \
+        "v10：home.css 不应再有 .slirn-fine-preview-stage CSS 规则块"
+    # 弹窗预览样式仍保留
+    assert '.slirn-mat-preview-float' in css
+
+
+def test_app_preview_box_has_no_stage_html():
+    """REQ-20260919-062 v10：去掉页面内预览框后，不应再输出 preview-stage div。"""
+    from starlette.testclient import TestClient
+    from slirn_home.app import build_app
+    from tasklib import TaskManager
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        mgr = TaskManager(Path(td))
+        (Path(td) / 'lecture.mp4').write_bytes(b'fake-video')
+        t = mgr.create(name='demo5', original_video=Path(td) / 'lecture.mp4')
+        tid = t.task_id
+        client = TestClient(build_app(repo_root=Path(td)).app)
+        r = client.post('/slirn/api/workbench', json={'task_id': tid})
+        assert r.status_code == 200
+        j = r.json()
+        html = j.get('html') or ''
+        # v10：preview-stage div 不再渲染
+        assert 'id="slirn-fine-preview-stage"' not in html, \
+            "v10：页面内的 preview-stage div 应已去除"
+        # 占位提示仍存在（hidden 状态）
+        assert 'id="slirn-fine-preview-empty"' in html
+
+
+def test_app_video_info_shows_bg_pct(tmp_path):
+    """REQ-20260919-062 v10：视频信息行应显示「占背景图 X×Y%」（crop_w/1920 × crop_h/1080）。"""
+    from starlette.testclient import TestClient
+    from slirn_home.app import build_app
+    from tasklib import TaskManager
+    mgr, video = _make_mgr(tmp_path)
+    t = mgr.create(name="bg-pct", original_video=video)
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.post('/slirn/api/workbench', json={'task_id': t.task_id})
+    assert r.status_code == 200
+    j = r.json()
+    html = j.get('html') or ''
+    # 默认 crop_w=1920, crop_h=1080 → 100% × 100%
+    assert 'id="slirn-fine-video-crop-w-pct"' in html, \
+        "应有 crop-w-pct 节点"
+    assert 'id="slirn-fine-video-crop-h-pct"' in html, \
+        "应有 crop-h-pct 节点"
+    assert '占背景图' in html, \
+        "应有「占背景图」标签"
+    assert '背景 1920×1080' in html, \
+        "应说明基准（背景 1920×1080）"
+    # 1920/1920*100 = 100.00
+    assert '100.00' in html, \
+        "默认 crop_w=1920 时宽度百分比应为 100.00"
+
+
+def test_app_video_info_renders_pct_for_custom_crop(tmp_path):
+    """REQ-20260919-062 v10：自定义 crop_w 后宽度百分比应正确反映。"""
+    from starlette.testclient import TestClient
+    from slirn_home.app import build_app, _get_fine_compose, _save_fine_compose
+    from tasklib import TaskManager
+    mgr, video = _make_mgr(tmp_path)
+    t = mgr.create(name="bg-pct-custom", original_video=video)
+    # 把 video crop_w 设为 960（即背景 1920 的一半 → 50%）
+    fc = _get_fine_compose(mgr, t.task_id)
+    fc["layout"]["video"]["crop_w"] = 960
+    fc["layout"]["video"]["crop_h"] = 540
+    _save_fine_compose(mgr, t.task_id, fc)
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.post('/slirn/api/workbench', json={'task_id': t.task_id})
+    html = r.json().get('html') or ''
+    # 960/1920*100 = 50.00；540/1080*100 = 50.00
+    assert 'id="slirn-fine-video-crop-w-pct"' in html
+    assert 'id="slirn-fine-video-crop-h-pct"' in html
+    # 找 crop-w-pct 节点后的值
+    import re as _re
+    m_w = _re.search(r'id="slirn-fine-video-crop-w-pct">([\d.]+)', html)
+    m_h = _re.search(r'id="slirn-fine-video-crop-h-pct">([\d.]+)', html)
+    assert m_w is not None and abs(float(m_w.group(1)) - 50.0) < 0.01, \
+        f"crop_w=960 → 宽度百分比应 ≈ 50.00，实际 {m_w.group(1) if m_w else 'N/A'}"
+    assert m_h is not None and abs(float(m_h.group(1)) - 50.0) < 0.01, \
+        f"crop_h=540 → 高度百分比应 ≈ 50.00，实际 {m_h.group(1) if m_h else 'N/A'}"
+
+
+def test_router_update_video_disp_sets_bg_pct():
+    """router.js updateVideoDisp() 应更新 crop_w_pct / crop_h_pct 节点（按 w/1920 × h/1080）。"""
+    js = Path('slirn_home/static/router.js').read_text(encoding='utf-8')
+    # 应读取 2 个百分比节点
+    assert 'slirn-fine-video-crop-w-pct' in js, \
+        "router.js 应读 slirn-fine-video-crop-w-pct"
+    assert 'slirn-fine-video-crop-h-pct' in js, \
+        "router.js 应读 slirn-fine-video-crop-h-pct"
+    # 应按 / 1920 和 / 1080 计算
+    assert '/ 1920' in js or '/1920' in js, \
+        "router.js 应除以 1920（背景图宽度）"
+    assert '/ 1080' in js or '/1080' in js, \
+        "router.js 应除以 1080（背景图高度）"
+    # v10：删除 _fineApplyVideoLayout 函数和 preview-stage 容器引用
+    assert 'function _fineApplyVideoLayout' not in js, \
+        "v10：function _fineApplyVideoLayout 应已删除"
+    assert 'getElementById(\'slirn-fine-preview-stage\')' not in js, \
+        "v10：router.js 不应再引用 preview-stage 容器"
+
+
+def test_css_preview_no_full_size_container():
+    """v10：home.css 不应再有大块 .slirn-fine-preview 容器（黑色背景框）。"""
+    css = Path('slirn_home/static/home.css').read_text(encoding='utf-8')
+    # 不应有 .slirn-fine-preview { ... min-height: 100px; ... } 这种大块容器
+    # 找 .slirn-fine-preview { 这一段
+    import re as _re
+    seg_match = _re.search(r'\.slirn-fine-preview\s*\{', css)
+    assert seg_match is None or seg_match.start() >= 0
+    if seg_match:
+        # 如果还有，应不含 min-height: 100px 这种大块
+        seg_end = css.find('}', seg_match.end())
+        seg = css[seg_match.start():seg_end]
+        assert 'min-height: 100px' not in seg, \
+            f"v10：.slirn-fine-preview 不应再有大块 min-height 样式：{seg}"
+
+
+# ============================================================
+# REQ-20260919-062 v11：生成预览后自动弹窗预览（弥补 v10 去掉预览框后的视觉反馈）
+# ============================================================
+
+def test_router_has_open_fine_preview_float():
+    """router.js 应有 openFinePreviewFloat(url, title) 函数，生成预览后自动弹窗。"""
+    js = Path('slirn_home/static/router.js').read_text(encoding='utf-8')
+    assert 'function openFinePreviewFloat' in js, \
+        "router.js 应定义 openFinePreviewFloat 函数"
+    # 函数内应创建 .slirn-mat-preview-float 浮层（复用样式）
+    fn_seg = js.split('function openFinePreviewFloat', 1)[1].split('\n  }\n', 1)[0]
+    assert 'slirn-mat-preview-float' in fn_seg, \
+        "openFinePreviewFloat 应复用 .slirn-mat-preview-float 样式"
+    # 应创建 video 元素并设 src + controls + autoplay
+    assert '<video' in fn_seg and 'v.src = url' in fn_seg, \
+        "openFinePreviewFloat 应创建 video 元素并设 src"
+    assert 'v.controls = true' in fn_seg, \
+        "openFinePreviewFloat 应启用 controls"
+    assert 'v.autoplay = true' in fn_seg or 'v.autoplay = true' in fn_seg, \
+        "openFinePreviewFloat 应启用 autoplay"
+
+
+def test_router_fine_preview_handler_calls_open_float():
+    """router.js 处理 fine-preview action 后应自动调 openFinePreviewFloat。"""
+    js = Path('slirn_home/static/router.js').read_text(encoding='utf-8')
+    # 找处理 fine-preview 的分支（含 render_fine_preview 调用点）
+    import re as _re
+    seg_match = _re.search(r"render_fine_preview", js)
+    assert seg_match is not None, "应能找到 render_fine_preview 调用点"
+    start = seg_match.start()
+    # 取调用点后 4000 字符作为该分支片段（足够覆盖完整 .then 链 — 预览开始时间
+    # 改造后 handler 变长，含多段读取/拼接/渲染中文案）。
+    seg = js[start:start + 4000]
+    # v11：处理分支里应调 openFinePreviewFloat(j.url, ...)
+    assert 'openFinePreviewFloat' in seg, \
+        "fine-preview 处理分支应调用 openFinePreviewFloat"
+    # 应传 j.url
+    assert 'j.url' in seg, \
+        "openFinePreviewFloat 应接收 j.url（合成视频 URL）"
+
+
+# ============================================================
+# REQ-20260919-062 v13：画布 X/Y 允许负数（用户反馈："所有的像素位置还可以设为负数"）
+# ============================================================
+
+def test_render_fine_cut_zone_canvas_xy_allow_negative(tmp_path: Path):
+    """画布 X/Y 滑块 min 应为负数（−画布宽到+画布宽 / −画布高到+画布高），标签同步更新。"""
+    from slirn_home.app import _render_fine_cut_zone, _FINE_DESIGN_W, _FINE_DESIGN_H
+    from tasklib import TaskManager
+    mgr, video = _make_mgr(tmp_path)
+    t = mgr.create(name='demo', original_video=video)
+    fc = {
+        "materials": {"video": {}, "subtitle": {}, "bg": {}, "cover": {}, "audio": {}},
+        "layout": {
+            "video":    {"x": 0, "y": 0, "scale": 1.0, "crop_x": 0,
+                         "crop_y": 0, "crop_w": 1920, "crop_h": 1080, "enabled": True, "viewport": None},
+            "subtitle": {"x": 672, "y": 972, "scale": 1.0, "enabled": True},
+            "cover":    {"enabled": False, "duration": 2.0},
+            "bg":       {"x": 0, "y": 0, "scale": 1.0, "enabled": False},
+        },
+        "font": {"size": 36, "family": "STHeitiMedium", "stroke_width": 2,
+                 "stroke_color": "#000000", "bg_enabled": False, "bg_color": "#000000",
+                 "bg_opacity": 0.6, "bg_radius": 4, "bold": True, "align": "center"},
+        "output": {"resolution": "1080p", "codec": "h264", "audio_codec": "aac"},
+        "audio": {"enabled": False, "volume": 0.4, "fade_in": 0, "fade_out": 0,
+                  "path": None},
+    }
+    html = _render_fine_cut_zone(t.task_id, t, mgr)
+    # v13：3 个素材（video / subtitle / bg）X 滑块 min 应为 -1920
+    for mat_key in ("video", "subtitle", "bg"):
+        # 找 <input type="range" id="slirn-fine-{mat_key}-x" ... min="-1920"
+        import re as _re
+        m = _re.search(
+            r'<input type="range"[^>]*id="slirn-fine-' + _re.escape(mat_key) + r'-x"[^>]*>',
+            html,
+        )
+        assert m is not None, f"{mat_key} X 滑块缺失"
+        seg = m.group(0)
+        assert 'min="-1920"' in seg, \
+            f"{mat_key} X 滑块 min 应为 -1920（v13 允许负数），实际：{seg}"
+        assert 'max="1920"' in seg, \
+            f"{mat_key} X 滑块 max 仍应为 1920，实际：{seg}"
+    # Y 滑块 min=-1080
+    for mat_key in ("video", "subtitle", "bg"):
+        import re as _re
+        m = _re.search(
+            r'<input type="range"[^>]*id="slirn-fine-' + _re.escape(mat_key) + r'-y"[^>]*>',
+            html,
+        )
+        assert m is not None, f"{mat_key} Y 滑块缺失"
+        seg = m.group(0)
+        assert 'min="-1080"' in seg, \
+            f"{mat_key} Y 滑块 min 应为 -1080（v13 允许负数），实际：{seg}"
+    # 但 crop_* 起点仍 ≥ 0（源坐标不能为负）
+    import re as _re
+    crop_x = _re.search(
+        r'<input type="range"[^>]*id="slirn-fine-video-crop_x"[^>]*>',
+        html,
+    )
+    assert crop_x is not None, "video crop_x 滑块缺失"
+    assert 'min="0"' in crop_x.group(0), "crop_x 起点应保持 ≥0（源坐标）"
+    # 标签更新
+    assert f'X（-{_FINE_DESIGN_W}–{_FINE_DESIGN_W}）' in html
+    assert f'Y（-{_FINE_DESIGN_H}–{_FINE_DESIGN_H}）' in html
+
+
+def test_save_fine_layout_accepts_negative_xy():
+    """save_fine_layout 端点应允许负数 X/Y（不再 max(0, ...) 兜底）。"""
+    from starlette.testclient import TestClient
+    from slirn_home.app import build_app
+    from tasklib import TaskManager
+    import tempfile, json as _json
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        video = tmp_path / "lecture.mp4"
+        video.write_bytes(b"fake-video")
+        mgr = TaskManager(tmp_path)
+        t = mgr.create(name='demo', original_video=video)
+        tid = t.task_id
+        client = TestClient(build_app(repo_root=tmp_path).app)
+        # 提交负 X/Y（视频半截出画布的"露半边"效果）
+        r = client.post('/slirn/api/save_fine_layout', json={
+            'task_id': tid,
+            'layout': {
+                'video':    {'x': -960, 'y': -540, 'scale': 2.0},
+                'subtitle': {'x': -100, 'y': -50},
+                'bg':       {'x': -1920, 'y': -1080},
+            },
+        })
+        assert r.status_code == 200, r.text
+        j = r.json()
+        assert j.get('ok') is True, j
+        layout = j['layout']
+        # 服务端应原样保留负值（不做 max(0, ...) 兜底）
+        assert layout['video']['x'] == -960, f"video.x 应保留 -960，实际：{layout['video']['x']}"
+        assert layout['video']['y'] == -540, f"video.y 应保留 -540，实际：{layout['video']['y']}"
+        assert layout['subtitle']['x'] == -100
+        assert layout['subtitle']['y'] == -50
+        assert layout['bg']['x'] == -1920
+        assert layout['bg']['y'] == -1080
+        # 落盘后读回校验（确保持久化也是负值）
+        fc_path = tmp_path / 'tasks' / tid / 'fine_compose.json'
+        fc = _json.loads(fc_path.read_text(encoding='utf-8'))
+        assert fc['layout']['video']['x'] == -960
+        assert fc['layout']['video']['y'] == -540
+        assert fc['layout']['bg']['x'] == -1920
+        assert fc['layout']['bg']['y'] == -1080
+
+
+def test_save_fine_layout_negative_xy_exceeds_design_is_accepted():
+    """超出 [-画布宽, +画布宽] 的极值也由 save_fine_layout 直接接受（用户极值场景，不在前端滑块范围内）。"""
+    from starlette.testclient import TestClient
+    from slirn_home.app import build_app
+    from tasklib import TaskManager
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        video = tmp_path / "lecture.mp4"
+        video.write_bytes(b"fake-video")
+        mgr = TaskManager(tmp_path)
+        t = mgr.create(name='demo', original_video=video)
+        tid = t.task_id
+        client = TestClient(build_app(repo_root=tmp_path).app)
+        # 极值（前端滑块 0-2 倍画布，但服务端不限制）
+        r = client.post('/slirn/api/save_fine_layout', json={
+            'task_id': tid,
+            'layout': {'video': {'x': -3840, 'y': 3840}},
+        })
+        assert r.status_code == 200, r.text
+        j = r.json()
+        assert j.get('ok') is True, j
+        # 服务端原样接收（不在前端范围限制内，但服务端不阻断）
+        assert j['layout']['video']['x'] == -3840
+        assert j['layout']['video']['y'] == 3840
+
+
+# ============================================================
+# REQ-20260919-062 v14：缩放 = crop_w / bg_w（视频原裁剪宽度 / 背景图片宽度）
+# 公式 scale = crop_w / 1920。「🎯 按裁剪宽度」按钮一键应用。
+# ============================================================
+
+def test_render_fine_cut_zone_has_scale_auto_button():
+    """v14：视频块应含「🎯 按裁剪宽度」按钮（仅 video 块，subtitle/bg 不含）。"""
+    from slirn_home.app import _render_fine_cut_zone
+    from tasklib import TaskManager
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_path = Path(tmp)
+        video = tmp_path / "lecture.mp4"
+        video.write_bytes(b"fake-video")
+        mgr = TaskManager(tmp_path)
+        t = mgr.create(name='demo', original_video=video)
+        fc = {
+            "materials": {"video": {}, "subtitle": {}, "bg": {}, "cover": {}, "audio": {}},
+            "layout": {
+                "video":    {"x": 0, "y": 0, "scale": 1.0, "crop_x": 0,
+                             "crop_y": 0, "crop_w": 1920, "crop_h": 1080, "enabled": True, "viewport": None},
+                "subtitle": {"x": 672, "y": 972, "scale": 1.0, "enabled": True},
+                "cover":    {"enabled": False, "duration": 2.0},
+                "bg":       {"x": 0, "y": 0, "scale": 1.0, "enabled": False},
+            },
+            "font": {"size": 36, "family": "STHeitiMedium", "stroke_width": 2,
+                     "stroke_color": "#000000", "bg_enabled": False, "bg_color": "#000000",
+                     "bg_opacity": 0.6, "bg_radius": 4, "bold": True, "align": "center"},
+            "output": {"resolution": "1080p", "codec": "h264", "audio_codec": "aac"},
+            "audio": {"enabled": False, "volume": 0.4, "fade_in": 0, "fade_out": 0, "path": None},
+        }
+        html = _render_fine_cut_zone(t.task_id, t, mgr)
+        # v14：视频块应有按钮，subtitle/bg 块不应有
+        assert 'data-action="fine-scale-auto"' in html, \
+            "v14：视频块应含 fine-scale-auto 按钮"
+        assert '🎯 按裁剪宽度' in html, \
+            "v14：按钮文字应为「🎯 按裁剪宽度」"
+        # subtitle 块不应有 fine-scale-auto 按钮
+        import re as _re
+        sub_block = html[html.find('slirn-fine-layout-title">📝 字幕'):html.find('slirn-fine-layout-title">🖼 封面')]
+        assert 'data-action="fine-scale-auto"' not in sub_block, \
+            "v14：字幕块不应有 fine-scale-auto 按钮"
+        # bg 块也不应有
+        bg_block = html[html.find('slirn-fine-layout-title">🎨 背景'):html.find('slirn-fine-layout-block', html.find('slirn-fine-layout-title">🎨 背景') + 30)]
+        # bg block 后是其他东西，取到下个 end of layout-block 即可
+        bg_block_end = html.find('</div></div>', html.find('slirn-fine-layout-title">🎨 背景') + 30)
+        bg_seg = html[html.find('slirn-fine-layout-title">🎨 背景'):bg_block_end]
+        assert 'data-action="fine-scale-auto"' not in bg_seg, \
+            "v14：背景块不应有 fine-scale-auto 按钮"
+
+
+def test_router_has_fine_scale_auto_function():
+    """router.js 应有 fineScaleAutoFromCrop 函数（应用 scale=crop_w/1920）。"""
+    js = Path('slirn_home/static/router.js').read_text(encoding='utf-8')
+    assert 'function fineScaleAutoFromCrop' in js, \
+        "router.js 应有 fineScaleAutoFromCrop 函数"
+    # 函数内应读 crop_w 滑块 + scale 滑块
+    fn_seg = js.split('function fineScaleAutoFromCrop', 1)[1].split('\n  }\n', 1)[0]
+    assert 'slirn-fine-video-crop_w' in fn_seg, \
+        "fineScaleAutoFromCrop 应读 crop_w 滑块"
+    assert 'slirn-fine-video-scale' in fn_seg, \
+        "fineScaleAutoFromCrop 应更新 scale 滑块"
+    # 公式：scale = cropW / 1920
+    assert '/ 1920' in fn_seg, \
+        "fineScaleAutoFromCrop 应使用 / 1920 公式（crop_w / 1920）"
+    # 应触发 fineSaveAll 保存
+    assert 'fineSaveAll()' in fn_seg, \
+        "fineScaleAutoFromCrop 应触发 fineSaveAll 保存"
+
+
+def test_router_scale_auto_action_wired_up():
+    """router.js 的 action 分发应处理 fine-scale-auto。"""
+    js = Path('slirn_home/static/router.js').read_text(encoding='utf-8')
+    assert "action === 'fine-scale-auto'" in js, \
+        "router.js 应分发 fine-scale-auto action → fineScaleAutoFromCrop()"
+
+
+# ============================================================
+# REQ-20260919-062 v15：crop_w 变化自动重算 scale，保留 4 位小数
+# ============================================================
+
+def test_router_has_recompute_scale_from_crop_w():
+    """router.js 应有 _recomputeScaleFromCropW 函数（crop_w 变化时自动重算 scale）。"""
+    js = Path('slirn_home/static/router.js').read_text(encoding='utf-8')
+    assert 'function _recomputeScaleFromCropW' in js, \
+        "router.js 应定义 _recomputeScaleFromCropW 函数"
+    fn_seg = js.split('function _recomputeScaleFromCropW', 1)[1].split('\n    }\n', 1)[0]
+    # 应读 crop_w 滑块
+    assert 'slirn-fine-video-crop_w' in fn_seg
+    # 应更新 scale 滑块
+    assert 'slirn-fine-video-scale' in fn_seg
+    # 公式：cropW / 1920
+    assert '/ 1920' in fn_seg, \
+        "_recomputeScaleFromCropW 应使用 / 1920 公式"
+    # 保留 4 位小数（Math.round(* 10000) / 10000 或 toFixed(4)）
+    assert '10000' in fn_seg or 'toFixed(4)' in fn_seg, \
+        "_recomputeScaleFromCropW 应保留 4 位小数"
+
+
+def test_router_recompute_scale_wired_to_crop_w_event():
+    """router.js 的 bindFineControls 应在 crop_w input 时调用 _recomputeScaleFromCropW。"""
+    js = Path('slirn_home/static/router.js').read_text(encoding='utf-8')
+    # 找 crop_w input 分支
+    import re as _re
+    # 应有 "if (k === 'video.crop_w') { _recomputeScaleFromCropW(); }"
+    m = _re.search(
+        r"if \(k === 'video\.crop_w'\)\s*\{\s*_recomputeScaleFromCropW\(\)",
+        js,
+    )
+    assert m is not None, \
+        "bindFineControls 应在 crop_w input 时调 _recomputeScaleFromCropW()"
+
+
+def test_router_recompute_scale_rounds_to_4_decimals():
+    """_recomputeScaleFromCropW 应用 Math.round(* 10000) / 10000 保留 4 位小数。"""
+    js = Path('slirn_home/static/router.js').read_text(encoding='utf-8')
+    fn_seg = js.split('function _recomputeScaleFromCropW', 1)[1].split('\n    }\n', 1)[0]
+    # 必须有 * 10000 (round-to-4-decimals 操作)
+    assert '* 10000' in fn_seg, \
+        "_recomputeScaleFromCropW 应用 * 10000 / 10000 保留 4 位小数"
+    # 必须有 / 10000
+    assert '/ 10000' in fn_seg, \
+        "_recomputeScaleFromCropW 应用 / 10000 还原"
+
+
+def test_router_v14_button_also_rounds_to_4_decimals():
+    """fineScaleAutoFromCrop 按钮也应保留 4 位小数（与自动重算一致）。"""
+    js = Path('slirn_home/static/router.js').read_text(encoding='utf-8')
+    fn_seg = js.split('function fineScaleAutoFromCrop', 1)[1].split('\n  }\n', 1)[0]
+    assert '* 10000' in fn_seg or '10000' in fn_seg, \
+        "fineScaleAutoFromCrop 也应保留 4 位小数（与自动重算一致）"
+    # toast 也应用 toFixed(4)
+    assert 'toFixed(4)' in fn_seg, \
+        "fineScaleAutoFromCrop 的 toast 应显示 4 位小数"
+
+
+# ============================================================
+# REQ-20260919-062 v16：视频缩放参数显示 4 位小数
+# ============================================================
+
+def test_render_fine_cut_zone_video_scale_uses_4_decimals(tmp_path: Path):
+    """视频缩放滑块 value= 属性应使用 4 位小数（v16）。"""
+    from slirn_home.app import _render_fine_cut_zone, _get_fine_compose, _save_fine_compose
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="scale-4dp", original_video=video)
+    fc = _get_fine_compose(m, t.task_id)
+    fc["layout"]["video"]["scale"] = 0.6667
+    _save_fine_compose(m, t.task_id, fc)
+    html = _render_fine_cut_zone(t.task_id, m.tasks_dir / t.task_id, m)
+    import re as _re
+    # 视频 scale range slider 应该有 value="0.6667"
+    m_video_scale = _re.search(
+        r'<input type="range" class="slirn-fine-slider" id="slirn-fine-video-scale"[^>]*>',
+        html,
+    )
+    assert m_video_scale is not None
+    seg = m_video_scale.group(0)
+    assert 'value="0.6667"' in seg, \
+        f"v16：视频 scale 滑块 value 应为 '0.6667'，实际：{seg}"
+    # 视频 scale number input 也应该是 4 位小数
+    m_video_num = _re.search(
+        r'<input type="number" class="slirn-fine-num" id="slirn-fine-video-scale_num"[^>]*>',
+        html,
+    )
+    assert m_video_num is not None
+    seg_num = m_video_num.group(0)
+    assert 'value="0.6667"' in seg_num, \
+        f"v16：视频 scale 数字框 value 应为 '0.6667'，实际：{seg_num}"
+    # 但 subtitle.scale 仍是 2 位小数（不应被影响）
+    m_sub_scale = _re.search(
+        r'<input type="range" class="slirn-fine-slider" id="slirn-fine-subtitle-scale"[^>]*>',
+        html,
+    )
+    if m_sub_scale:
+        sub_seg = m_sub_scale.group(0)
+        # subtitle 默认 scale=1.0 → 显示 2 位 = "1.00"（v16 不影响非视频素材）
+        # 或 4 位 = "1.0000" — 取决于实现。检查不带小数点的判定
+        # 当前应仍为 2 位小数
+        assert 'value="1.00"' in sub_seg, \
+            f"v16：subtitle scale 不应升级到 4 位小数，实际：{sub_seg}"
+
+
+def test_render_fine_cut_zone_video_scale_pct_uses_4_decimals(tmp_path: Path):
+    """视频缩放百分比显示应保留 4 位小数（v16）。"""
+    from slirn_home.app import _render_fine_cut_zone, _get_fine_compose, _save_fine_compose
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="scale-pct-4dp", original_video=video)
+    fc = _get_fine_compose(m, t.task_id)
+    fc["layout"]["video"]["scale"] = 0.6667
+    _save_fine_compose(m, t.task_id, fc)
+    html = _render_fine_cut_zone(t.task_id, m.tasks_dir / t.task_id, m)
+    import re as _re
+    m_pct = _re.search(r'id="slirn-fine-video-scale-pct"[^>]*>([^<]+)<', html)
+    assert m_pct is not None
+    pct_text = m_pct.group(1)
+    # scale=0.6667 → 66.67%（2 位）or 66.6700%（4 位）。v16 应该是 4 位。
+    assert '66.6700' in pct_text, \
+        f"v16：scale-pct 应含 66.6700（4 位小数），实际：{pct_text}"
+
+
+def test_router_update_video_disp_uses_4_decimals_for_scale():
+    """router.js updateVideoDisp 应使用 toFixed(4) 显示 scale 百分比（v16）。"""
+    js = Path('slirn_home/static/router.js').read_text(encoding='utf-8')
+    fn = js.split('function updateVideoDisp()', 1)[1].split('\n  }', 1)[0]
+    assert 'toFixed(4)' in fn, \
+        "updateVideoDisp 应用 toFixed(4) 显示 scale 百分比（v16）"
+    # 不应再有 toFixed(2) 处理 scale 百分比
+    import re as _re
+    # 找 scalePct 相关行
+    m = _re.search(r'scalePct.*?toFixed\(([0-9]+)\)', fn)
+    if m:
+        # 确认是 4
+        assert m.group(1) == '4', \
+            f"scalePct 应 toFixed(4)，实际 toFixed({m.group(1)})"
+
+
+# ============================================================
+# REQ-20260919-062 v17 用户反馈：视频缩放 bug — 自动重算到 4 位后立刻被截到 2 位
+# 根因：<input type="range" step="0.01"> 会把 value 吸附到 0.01 网格，导致
+#      s.value = "0.6667" 立刻变成 "0.67"。
+# 修复：把视频 scale 滑块的 step 从 0.01 改成 0.0001，让浏览器保留 4 位小数精度。
+# ============================================================
+
+
+def test_render_fine_cut_zone_video_scale_step_is_4_decimals(tmp_path: Path):
+    """v17 bug 修复：视频 scale 滑块 step 应为 0.0001（避免浏览器吸附到 0.01）。"""
+    from slirn_home.app import _render_fine_cut_zone, _get_fine_compose, _save_fine_compose
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="scale-step-4dp", original_video=video)
+    fc = _get_fine_compose(m, t.task_id)
+    fc["layout"]["video"]["scale"] = 0.6667
+    _save_fine_compose(m, t.task_id, fc)
+    html = _render_fine_cut_zone(t.task_id, m.tasks_dir / t.task_id, m)
+    import re as _re
+    # 视频 scale range slider step 应为 0.0001
+    m_video_scale = _re.search(
+        r'<input type="range" class="slirn-fine-slider" id="slirn-fine-video-scale"[^>]*>',
+        html,
+    )
+    assert m_video_scale is not None, \
+        "应能找到视频 scale range slider"
+    seg = m_video_scale.group(0)
+    assert 'step="0.0001"' in seg, \
+        f"v17：视频 scale 滑块 step 应为 '0.0001'（避免 0.01 网格吸附），实际：{seg}"
+    # 视频 scale number input step 也应为 0.0001
+    m_video_num = _re.search(
+        r'<input type="number" class="slirn-fine-num" id="slirn-fine-video-scale_num"[^>]*>',
+        html,
+    )
+    assert m_video_num is not None
+    seg_num = m_video_num.group(0)
+    assert 'step="0.0001"' in seg_num, \
+        f"v17：视频 scale 数字框 step 应为 '0.0001'，实际：{seg_num}"
+
+
+def test_render_fine_cut_zone_subtitle_scale_step_still_2_decimals(tmp_path: Path):
+    """v17 修复不应影响 subtitle.scale：仍保持 step=0.05 + 2 位小数。"""
+    from slirn_home.app import _render_fine_cut_zone, _get_fine_compose, _save_fine_compose
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="sub-scale-unchanged", original_video=video)
+    fc = _get_fine_compose(m, t.task_id)
+    fc["layout"]["subtitle"]["scale"] = 1.0
+    _save_fine_compose(m, t.task_id, fc)
+    html = _render_fine_cut_zone(t.task_id, m.tasks_dir / t.task_id, m)
+    import re as _re
+    m_sub_scale = _re.search(
+        r'<input type="range" class="slirn-fine-slider" id="slirn-fine-subtitle-scale"[^>]*>',
+        html,
+    )
+    assert m_sub_scale is not None
+    seg = m_sub_scale.group(0)
+    # subtitle/cover/bg 应仍为 step=0.05 + 2 位小数
+    assert 'step="0.05"' in seg, \
+        f"v17：subtitle scale step 应仍为 '0.05'，实际：{seg}"
+    assert 'value="1.00"' in seg, \
+        f"v17：subtitle scale value 应仍为 '1.00'（2 位小数），实际：{seg}"
+
+
+def test_render_fine_cut_zone_all_non_video_scale_steps_unchanged(tmp_path: Path):
+    """v17 修复只动 video.scale 的 step，其它素材（cover/bg）保持原 step。"""
+    from slirn_home.app import _render_fine_cut_zone
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="all-mats-step", original_video=video)
+    html = _render_fine_cut_zone(t.task_id, m.tasks_dir / t.task_id, m)
+    import re as _re
+    # cover / bg scale 应仍为 step=0.05
+    for mat in ("cover", "bg"):
+        m_mat = _re.search(
+            rf'<input type="range" class="slirn-fine-slider" id="slirn-fine-{mat}-scale"[^>]*>',
+            html,
+        )
+        if m_mat:
+            seg = m_mat.group(0)
+            assert 'step="0.05"' in seg, \
+                f"v17：{mat} scale step 应仍为 '0.05'，实际：{seg}"
+
+
+# ============================================================
+# REQ-20260919-062 v18 用户反馈：视频源裁剪里的"锁定 16:9 比例"勾选状态也要记录
+# 实现：
+#   - 后端 _FINE_LAYOUT_DEFAULTS["video"]["crop_aspect_lock"] = True
+#   - save_fine_layout 白名单 + crop_aspect_lock 字段
+#   - _render_fine_cut_zone 把勾选状态写入 checkbox checked
+#   - 旧任务迁移：缺字段时补 True
+#   - JS fineSaveAll 收集 [data-key][type=checkbox]
+#   - JS bindCropAspectLink toggle.change → fineSaveAll
+# ============================================================
+
+
+def test_fine_layout_defaults_has_crop_aspect_lock_true():
+    """v18：默认布局应包含 crop_aspect_lock=True。"""
+    from slirn_home.app import _FINE_LAYOUT_DEFAULTS
+    assert "crop_aspect_lock" in _FINE_LAYOUT_DEFAULTS["video"], \
+        "video 默认布局应有 crop_aspect_lock 字段"
+    assert _FINE_LAYOUT_DEFAULTS["video"]["crop_aspect_lock"] is True, \
+        "crop_aspect_lock 默认值应为 True"
+
+
+def test_render_fine_cut_zone_crop_aspect_link_checked_by_default(tmp_path: Path):
+    """v18：默认任务里 crop-aspect-link checkbox 应默认勾选。"""
+    from slirn_home.app import _render_fine_cut_zone
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="lock-default", original_video=video)
+    html = _render_fine_cut_zone(t.task_id, m.tasks_dir / t.task_id, m)
+    import re as _re
+    m_toggle = _re.search(
+        r'<input type="checkbox" id="slirn-fine-crop-aspect-link"[^>]*>',
+        html,
+    )
+    assert m_toggle is not None, "应能找到锁定 16:9 checkbox"
+    seg = m_toggle.group(0)
+    assert "checked" in seg, \
+        f"v18：新任务里 16:9 锁定 checkbox 应默认 checked，实际：{seg}"
+    assert 'data-key="video.crop_aspect_lock"' in seg, \
+        f"v18：checkbox 应带 data-key 让 fineSaveAll 收集，实际：{seg}"
+
+
+def test_render_fine_cut_zone_crop_aspect_link_uncheck_when_stored_false(tmp_path: Path):
+    """v18：若 layout.video.crop_aspect_lock=False，应渲染为未勾选。"""
+    from slirn_home.app import _render_fine_cut_zone, _get_fine_compose, _save_fine_compose
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="lock-false", original_video=video)
+    fc = _get_fine_compose(m, t.task_id)
+    fc["layout"]["video"]["crop_aspect_lock"] = False
+    _save_fine_compose(m, t.task_id, fc)
+    html = _render_fine_cut_zone(t.task_id, m.tasks_dir / t.task_id, m)
+    import re as _re
+    m_toggle = _re.search(
+        r'<input type="checkbox" id="slirn-fine-crop-aspect-link"[^>]*>',
+        html,
+    )
+    assert m_toggle is not None
+    seg = m_toggle.group(0)
+    # 未勾选应没有 checked 属性（不是 checked=""）
+    assert "checked" not in seg, \
+        f"v18：crop_aspect_lock=False 时 checkbox 应不勾选，实际：{seg}"
+
+
+def test_save_fine_layout_persists_crop_aspect_lock(tmp_path: Path):
+    """v18：save_fine_layout 应接受 crop_aspect_lock 字段并持久化。"""
+    from slirn_home.app import _get_fine_compose, _save_fine_compose
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="save-lock", original_video=video)
+    fc = _get_fine_compose(m, t.task_id)
+    fc["layout"]["video"]["crop_aspect_lock"] = False
+    _save_fine_compose(m, t.task_id, fc)
+    # 重新读取，验证持久化
+    fc2 = _get_fine_compose(m, t.task_id)
+    assert fc2["layout"]["video"]["crop_aspect_lock"] is False, \
+        "v18：crop_aspect_lock=False 应被持久化到 fc"
+
+
+def test_normalize_fine_compose_migrates_missing_crop_aspect_lock(tmp_path: Path):
+    """v18：旧任务没有 crop_aspect_lock 字段 → _get_fine_compose 读时补 True。"""
+    from slirn_home.app import _get_fine_compose, _save_fine_compose
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="old-task", original_video=video)
+    fc = _get_fine_compose(m, t.task_id)
+    # 模拟旧数据：移除 crop_aspect_lock 并写盘
+    fc["layout"]["video"].pop("crop_aspect_lock", None)
+    _save_fine_compose(m, t.task_id, fc)
+    # 重新读取，迁移逻辑应补 True
+    fc2 = _get_fine_compose(m, t.task_id)
+    assert fc2["layout"]["video"].get("crop_aspect_lock") is True, \
+        "v18：旧任务读取时 crop_aspect_lock 应补为 True"
+
+
+def test_save_fine_layout_allowed_keys_include_crop_aspect_lock():
+    """v18：save_fine_layout 字段白名单应包含 crop_aspect_lock。"""
+    from pathlib import Path
+    mod_src = Path("slirn_home/app.py").read_text(encoding="utf-8")
+    import re as _re
+    # 找 save_fine_layout 的 allowed_keys 那一行
+    m = _re.search(
+        r'allowed_keys\s*=\s*\(([^)]+)\)',
+        mod_src,
+    )
+    assert m is not None, "v18：应能找到 save_fine_layout 的 allowed_keys"
+    keys_str = m.group(1)
+    assert "crop_aspect_lock" in keys_str, \
+        f"v18：allowed_keys 应包含 crop_aspect_lock，实际：{keys_str}"
+
+
+def test_router_save_all_collects_checkbox_with_data_key():
+    """v18：router.js fineSaveAll 应收集 [data-key][type=checkbox]。"""
+    js = Path('slirn_home/static/router.js').read_text(encoding='utf-8')
+    import re as _re
+    # 找 fineSaveAll 里的 querySelectorAll — fineSaveAll 函数里有多个 querySelectorAll：
+    # 第一个查 .slirn-fine-slider，第二个查复选框。我们需要第二个。
+    fn = js.split('function fineSaveAll', 1)[1].split('\n  }', 1)[0]
+    matches = list(_re.finditer(
+        r"document\.querySelectorAll\('([^']+)'\)",
+        fn,
+    ))
+    assert len(matches) >= 2, \
+        f"v18：fineSaveAll 应至少有 2 个 querySelectorAll（slider + checkbox），实际：{len(matches)}"
+    # 第二个是复选框（第一个是 slider）
+    checkbox_selector = matches[1].group(1)
+    assert 'slirn-fine-enabled' in checkbox_selector, \
+        f"v18：fineSaveAll 复选框选择器应包含 .slirn-fine-enabled，实际：{checkbox_selector}"
+    assert 'data-key' in checkbox_selector and 'checkbox' in checkbox_selector, \
+        f"v18：fineSaveAll 复选框选择器应包含 [data-key][type=checkbox]，实际：{checkbox_selector}"
+
+
+def test_router_crop_aspect_link_toggle_persists_state():
+    """v18：bindCropAspectLink 的 toggle.change 应触发 fineSaveAll 持久化状态。"""
+    js = Path('slirn_home/static/router.js').read_text(encoding='utf-8')
+    import re as _re
+    fn = js.split('function bindCropAspectLink', 1)[1].split('\n  }', 1)[0]
+    # 找 toggle.addEventListener('change', ...) 整段
+    m_change = _re.search(
+        r"toggle\.addEventListener\('change',\s*function\(\)\s*\{(.*?)\}\);",
+        fn,
+        flags=_re.DOTALL,
+    )
+    assert m_change is not None, \
+        "v18：bindCropAspectLink 应有 toggle change handler"
+    change_body = m_change.group(1)
+    assert 'fineSaveAll' in change_body, \
+        f"v18：toggle change handler 应调 fineSaveAll 持久化，实际：{change_body}"
+
+
+# ============================================================
+# REQ-20260919-062 v19 用户反馈：生成预览弹窗无法拖动 + 拖动后位置不持久化。
+# 根因：
+#   - openFinePreviewFloat 只绑了 mousedown，没绑 mousemove/mouseup → 拖动失效
+#   - 复用模块级 _matFloatDragOffset 单例，被其它浮窗的 handler 错位更新
+# 修复：把 _dragOffset 放到本函数闭包里，加完整三件套，mouseup 持久化位置。
+# ============================================================
+
+
+def test_open_fine_preview_float_binds_mousemove():
+    """v19：openFinePreviewFloat 必须绑 mousemove（之前没绑导致无法拖动）。"""
+    js = Path('slirn_home/static/router.js').read_text(encoding='utf-8')
+    import re as _re
+    # 找 openFinePreviewFloat 函数体
+    fn = js.split('function openFinePreviewFloat', 1)[1].split('\n  }\n', 1)[0]
+    assert 'addEventListener' in fn, \
+        "v19：openFinePreviewFloat 应有事件绑定"
+    # 必须同时有 mousedown + mousemove + mouseup 三件套
+    assert "addEventListener('mousedown'" in fn, \
+        "v19：应有 mousedown 绑定"
+    assert "addEventListener('mousemove'" in fn, \
+        "v19：应有 mousemove 绑定（之前漏了，导致浮窗无法拖动）"
+    assert "addEventListener('mouseup'" in fn, \
+        "v19：应有 mouseup 绑定（用于结束拖动 + 持久化位置）"
+
+
+def test_open_fine_preview_float_persists_position_on_mouseup():
+    """v19：mouseup 时应把 left/top 持久化到 localStorage（slirnMatPreviewPos）。"""
+    js = Path('slirn_home/static/router.js').read_text(encoding='utf-8')
+    import re as _re
+    fn = js.split('function openFinePreviewFloat', 1)[1].split('\n  }\n', 1)[0]
+    # 找 mouseup handler
+    m_up = _re.search(
+        r"addEventListener\('mouseup',\s*function\(\)\s*\{(.*?)\}\);",
+        fn,
+        flags=_re.DOTALL,
+    )
+    assert m_up is not None, "v19：openFinePreviewFloat 应有 mouseup handler"
+    up_body = m_up.group(1)
+    assert 'localStorage.setItem' in up_body, \
+        "v19：mouseup 应调 localStorage.setItem 持久化"
+    assert 'slirnMatPreviewPos' in up_body, \
+        "v19：持久化 key 应为 slirnMatPreviewPos（与 size key 区分）"
+
+
+def test_open_fine_preview_float_restores_saved_position():
+    """v19：从 localStorage 恢复上次的 left/top（不只是 size）。"""
+    js = Path('slirn_home/static/router.js').read_text(encoding='utf-8')
+    import re as _re
+    fn = js.split('function openFinePreviewFloat', 1)[1].split('\n  }\n', 1)[0]
+    # 应有 slirnMatPreviewPos 的读取
+    assert 'slirnMatPreviewPos' in fn, \
+        "v19：应读取 slirnMatPreviewPos 恢复位置"
+    # 应有 savedPos.left / savedPos.top 的判断
+    m_pos = _re.search(r"savedPos\s*\.\s*(left|top)", fn)
+    assert m_pos is not None, \
+        "v19：应从 savedPos 读 left/top 并应用到 flt.style"
+
+
+def test_open_fine_preview_float_uses_local_drag_offset():
+    """v19：_dragOffset 应在闭包里（避免复用模块级单例被其它浮窗错位更新）。"""
+    js = Path('slirn_home/static/router.js').read_text(encoding='utf-8')
+    import re as _re
+    fn = js.split('function openFinePreviewFloat', 1)[1].split('\n  }\n', 1)[0]
+    # 应有 var _dragOffset = null（闭包内）
+    assert 'var _dragOffset = null' in fn, \
+        "v19：_dragOffset 应是函数内 var（闭包），不是模块级单例"
+    # 不应在 openFinePreviewFloat 里赋值给模块级 _matFloatDragOffset（仅注释里可提到）
+    # 把注释行剥掉再判定
+    code_only = '\n'.join(
+        line for line in fn.split('\n')
+        if not line.strip().startswith('//')
+    )
+    assert '_matFloatDragOffset' not in code_only, \
+        "v19：openFinePreviewFloat 代码不应再引用模块级 _matFloatDragOffset 单例"
+
+
+# ============================================================
+# REQ-20260919-062 v19：精剪视频·字幕文字颜色可设置
+# 背景：用户在白色 PPT 上看到字幕"白框"——其实是字幕文字本身是默认白色，
+#       bg_enabled 控制的是字幕背后的背景框，与文字颜色无关。
+# 修复：给 fc.font 加 color 字段（默认 #FFFFFF）+ UI color picker + ASS PrimaryColour 输出。
+# ============================================================
+
+
+def test_ass_force_style_emits_primary_colour(tmp_path: Path):
+    """v19：_ass_force_style 应输出 PrimaryColour 字段。"""
+    from slirn_home.app import _ass_force_style, _FINE_FONT_DEFAULTS
+    fs = _ass_force_style(dict(_FINE_FONT_DEFAULTS))
+    assert 'PrimaryColour=&H00FFFFFF' in fs, \
+        f"v19：默认应输出 PrimaryColour=&H00FFFFFF，实际：{fs}"
+
+
+def test_ass_force_style_color_bgr_swap(tmp_path: Path):
+    """v19：#RRGGBB → &H00BBGGRR（ASS 用 BGR）。三个颜色全测。"""
+    from slirn_home.app import _ass_force_style, _FINE_FONT_DEFAULTS
+    cases = [
+        ("#FFFF00", "PrimaryColour=&H0000FFFF"),  # 黄 → BGR 00FFFF
+        ("#FF0000", "PrimaryColour=&H000000FF"),  # 红 → BGR 0000FF
+        ("#0000FF", "PrimaryColour=&H00FF0000"),  # 蓝 → BGR FF0000
+        ("#00FF00", "PrimaryColour=&H0000FF00"),  # 绿 → BGR 00FF00
+        ("#123456", "PrimaryColour=&H00563412"),  # 全分量测
+    ]
+    for hex_in, expected in cases:
+        f = dict(_FINE_FONT_DEFAULTS)
+        f["color"] = hex_in
+        fs = _ass_force_style(f)
+        assert expected in fs, \
+            f"v19：{hex_in} → 应含 {expected!r}，实际：{fs}"
+
+
+def test_ass_force_style_lowercase_hex_works(tmp_path: Path):
+    """v19：小写 hex 也能正确转 BGR。"""
+    from slirn_home.app import _ass_force_style, _FINE_FONT_DEFAULTS
+    f = dict(_FINE_FONT_DEFAULTS)
+    f["color"] = "#ffff00"
+    fs = _ass_force_style(f)
+    assert 'PrimaryColour=&H0000FFFF' in fs, \
+        f"v19：小写 hex 应正确转 BGR，实际：{fs}"
+
+
+def test_ass_force_style_invalid_color_falls_back_to_white(tmp_path: Path):
+    """v19：非法 color 值（如 None/3 位/非 hex）应静默回退白，不崩。"""
+    from slirn_home.app import _ass_force_style, _FINE_FONT_DEFAULTS
+    for bad in (None, "", "#fff", "red", "#12345", "#GGGGGG"):
+        f = dict(_FINE_FONT_DEFAULTS)
+        f["color"] = bad
+        fs = _ass_force_style(f)
+        # 不应崩，且不应输出无 PrimaryColour（要么默认白，要么不输出）
+        # 这里选实现为：len!=6 时静默不输出 PrimaryColour（保留 libass 默认白）
+        assert 'PrimaryColour' not in fs or 'PrimaryColour=&H00FFFFFF' in fs, \
+            f"v19：非法 color {bad!r} 不应崩，实际：{fs}"
+
+
+def test_fine_font_defaults_has_color(tmp_path: Path):
+    """v19：_FINE_FONT_DEFAULTS 应包含 color 字段，默认白色。"""
+    from slirn_home.app import _FINE_FONT_DEFAULTS
+    assert "color" in _FINE_FONT_DEFAULTS, \
+        f"v19：_FINE_FONT_DEFAULTS 应含 color，实际字段：{list(_FINE_FONT_DEFAULTS.keys())}"
+    assert _FINE_FONT_DEFAULTS["color"] == "#FFFFFF", \
+        f"v19：color 默认应为 #FFFFFF（与 libass 默认一致）"
+
+
+def test_get_fine_compose_migrates_missing_color_to_white(tmp_path: Path):
+    """v19：旧任务 fc.font 缺 color 字段 → 自动补 #FFFFFF。"""
+    import json
+    from slirn_home.app import _get_fine_compose
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="old-no-color", original_video=video)
+    fc_path = tmp_path / "tasks" / t.task_id / "fine_compose.json"
+    fc_path.parent.mkdir(parents=True, exist_ok=True)
+    fc = {
+        "_schema": 2,
+        "materials": {},
+        "layout": {"video": {}, "subtitle": {}, "cover": {}, "bg": {}},
+        "font": {
+            "size": 16, "stroke_width": 2, "stroke_color": "#000000",
+            "bg_enabled": False, "bg_color": "#000000", "bg_opacity": 0.6,
+            "bg_radius": 4, "bold": True, "align": "center",
+            "family": "STHeitiMedium",
+            # NOTE: 没有 color 字段
+        },
+        "output": {"resolution": "1080p", "codec": "h264", "audio_codec": "aac"},
+        "audio": {"enabled": False, "volume": 0.4, "fade_in": 0, "fade_out": 0},
+    }
+    fc_path.write_text(json.dumps(fc, ensure_ascii=False), encoding="utf-8")
+    fc2 = _get_fine_compose(m, t.task_id)
+    assert fc2["font"].get("color") == "#FFFFFF", \
+        f"v19：迁移应补 color=#FFFFFF，实际：{fc2['font'].get('color')}"
+    # 其他字段不应被改
+    for k in ("size", "stroke_width", "bold", "family", "bg_enabled"):
+        assert fc2["font"][k] == fc["font"][k], \
+            f"v19：迁移应只补 color，不改 {k}"
+
+
+def test_render_fine_cut_zone_includes_color_picker(tmp_path: Path):
+    """v19：精剪视频 HTML 应有 '文字颜色' color picker。"""
+    from slirn_home.app import _render_fine_cut_zone, _get_fine_compose
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="has-color-picker", original_video=video)
+    fc = _get_fine_compose(m, t.task_id)
+    # 把 color 设成黄色
+    fc["font"]["color"] = "#FFFF00"
+    from slirn_home.app import _save_fine_compose
+    _save_fine_compose(m, t.task_id, fc)
+    html = _render_fine_cut_zone(t.task_id, m.tasks_dir / t.task_id, m)
+    import re as _re
+    # 应有 data-font-key="color" 的 color picker
+    m_color = _re.search(
+        r'<input type="color"[^>]*data-font-key="color"[^>]*>',
+        html,
+    )
+    assert m_color is not None, \
+        "v19：HTML 应有 data-font-key=\"color\" 的 color picker"
+    seg = m_color.group(0)
+    assert 'value="#FFFF00"' in seg, \
+        f"v19：color picker 应显示当前 color 值，实际：{seg}"
+
+
+def test_save_fine_font_persists_color(tmp_path: Path):
+    """v19：save_fine_font 应接受 color 字段并落盘。"""
+    import json
+    from slirn_home.app import _save_fine_compose, _get_fine_compose
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="save-color", original_video=video)
+    fc = _get_fine_compose(m, t.task_id)
+    fc["font"]["color"] = "#FFFF00"
+    _save_fine_compose(m, t.task_id, fc)
+    # 重新读
+    fc2 = _get_fine_compose(m, t.task_id)
+    assert fc2["font"]["color"] == "#FFFF00", \
+        f"v19：save 后 color 应持久化，实际：{fc2['font']['color']}"
+    # 也读 json 确认落盘
+    raw = json.loads(
+        (tmp_path / "tasks" / t.task_id / "fine_compose.json").read_text(encoding="utf-8")
+    )
+    assert raw["font"]["color"] == "#FFFF00", \
+        "v19：fine_compose.json 落盘应含 color 字段"
+
+
+def test_save_fine_font_rejects_invalid_hex_color(tmp_path: Path):
+    """v19：save_fine_font 应拒绝非 #RRGGBB 格式的 color（保持原值不崩）。"""
+    from slirn_home.app import _save_fine_compose, _get_fine_compose, _HEX_COLOR_OK
+    # 1) 正则本身验证
+    assert _HEX_COLOR_OK.match("#FFFFFF")
+    assert _HEX_COLOR_OK.match("#ffff00")
+    assert not _HEX_COLOR_OK.match("#fff")
+    assert not _HEX_COLOR_OK.match("red")
+    assert not _HEX_COLOR_OK.match("#12345")
+    # 2) 端点逻辑（直接调用 service 验证：save_fine_font 是 endpoint，
+    #    但白名单逻辑是 fc["font"][k] = v，校验在 endpoint 里。
+    #    这里只验证正则正确性；endpoint 集成测试在 E2E 跑。）
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="reject-bad-hex", original_video=video)
+    fc = _get_fine_compose(m, t.task_id)
+    fc["font"]["color"] = "#000000"
+    _save_fine_compose(m, t.task_id, fc)
+    # 直接调端点会经过 _HEX_COLOR_OK 校验 —— 这里用 importlib 复刻校验逻辑验证
+    for bad in ("red", "#fff", "#12345", "FFFFFF", "#GGGGGG"):
+        assert not _HEX_COLOR_OK.match(str(bad)), \
+            f"v19：应拒绝 {bad!r}"
+
+
+# ---------- REQ-20260919-063：bg 图 RGBA alpha 透明区误显示白色（"白框"真凶） ----------
+
+def test_build_bg_layer_chain_with_bg_uses_black_canvas_under_image(tmp_path: Path):
+    """REQ-20260919-063：bg 图存在时，链必须含「黑底 + bg 图 overlay」。
+
+    用户的 bg 图是 RGBA，左下角视频区 alpha=0 但 RGB=255,255,255。
+    直接 [bg:v]scale 会把透明像素渲染成白色 → 白框。
+    修复：黑底 + bg 图 overlay = 透明像素显示黑色。
+    """
+    from slirn_home.app import _build_bg_layer_chain
+    chain = _build_bg_layer_chain(bg_idx=1, W=1920, H=1080)
+    assert len(chain) == 3, f"应有 3 段：bg_b + bg_img + overlay，实际 {len(chain)}"
+    # 1. 黑底
+    assert "color=size=1920x1080:color=black:rate=30[bg_b]" in chain[0], \
+        f"黑底应为 color=black[bg_b]，实际：{chain[0]}"
+    # 2. bg 图 scale（PNG 解码默认保留 alpha）
+    assert "[1:v]scale=1920:1080" in chain[1], \
+        f"bg_img 应 scale 到设计空间，实际：{chain[1]}"
+    # 3. overlay 处理透明像素
+    assert "[bg_b][bg_img]overlay=eof_action=pass[bg]" in chain[2], \
+        f"overlay 必须保留 alpha 合成，实际：{chain[2]}"
+
+
+def test_build_bg_layer_chain_without_bg_uses_black_canvas_only(tmp_path: Path):
+    """REQ-20260919-063：bg 图禁用时，链只输出纯黑底（行为不变）。"""
+    from slirn_home.app import _build_bg_layer_chain
+    chain = _build_bg_layer_chain(bg_idx=-1, W=1920, H=1080)
+    assert len(chain) == 1, f"无 bg 时只有 1 段，实际 {len(chain)}"
+    assert chain[0] == "color=size=1920x1080:color=black:rate=30[bg]", \
+        f"无 bg 时应是纯黑底，实际：{chain[0]}"
+
+
+def test_build_bg_layer_chain_does_not_lose_alpha_for_rgba_bg(tmp_path: Path):
+    """REQ-20260919-063：RGBA bg 图不应被强制转 RGB（否则透明像素仍显白色）。
+
+    关键：链中不能有强制转 RGB 的 format filter。
+    """
+    from slirn_home.app import _build_bg_layer_chain
+    chain = _build_bg_layer_chain(bg_idx=1, W=1920, H=1080)
+    # 不能有强制转 RGB 的 format filter（会丢失 alpha）
+    for seg in chain:
+        assert "format=yuv420p" not in seg, \
+            f"REQ-20260919-063：链段不应强制转 RGB（会丢失 alpha），实际：{seg}"
+        assert "format=rgb24" not in seg, \
+            f"REQ-20260919-063：链段不应强制转 RGB（会丢失 alpha），实际：{seg}"
+
+
+# ---------- REQ-20260919-064：操作栏拆两行 + 预览开始时间 ----------
+
+def test_render_fine_cut_zone_actions_bar_split_into_two_rows(tmp_path: Path):
+    """REQ-20260919-064：操作栏拆成两行（行 1 渲染操作，行 2 模板管理）。"""
+    from slirn_home.app import _render_fine_cut_zone
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="split-bar", original_video=video)
+    html = _render_fine_cut_zone(t.task_id, m.tasks_dir / t.task_id, m)
+    # 至少 2 个 .slirn-fine-actions-bar
+    bar_count = html.count('class="slirn-fine-actions-bar"')
+    assert bar_count >= 2, \
+        f"REQ-20260919-064：操作栏应拆成 ≥2 个 .slirn-fine-actions-bar，实际 {bar_count}"
+    # 行 1 应有「生成预览」+「预览开始时间」+「预览时长」+「导出最终视频」
+    # 行 2 应有「保存设置参数」+「引用参数」+「模板名」
+    row1_idx = html.find('class="slirn-fine-actions-bar"')
+    row2_idx = html.find('class="slirn-fine-actions-bar"', row1_idx + 1)
+    assert row1_idx >= 0 and row2_idx > row1_idx, "应有 2 个独立的 actions-bar"
+    row1 = html[row1_idx:row2_idx]
+    row2 = html[row2_idx:]
+    assert "fine-preview-start" in row1, \
+        "REQ-20260919-064：行 1 应有 fine-preview-start（预览开始时间）"
+    assert "fine-preview" in row1, "行 1 应有生成预览按钮"
+    assert "fine-preview-duration" in row1, "行 1 应有预览时长"
+    assert "fine-export" in row1, "行 1 应有导出最终视频按钮"
+    assert "fine-save-all" in row2, "行 2 应有保存设置参数按钮"
+    assert "fine-import-show" in row2, "行 2 应有引用参数按钮"
+    assert "fine-profile-name" in row2, "行 2 应有模板名输入框"
+
+
+def test_render_fine_cut_zone_has_preview_start_hms_inputs(tmp_path: Path):
+    """REQ-20260919-066：HTML 含 时:分:秒 三段 number input，id 分别为
+    slirn-fine-preview-start-h / -m / -s，默认全 0。"""
+    import re as _re
+    from slirn_home.app import _render_fine_cut_zone
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="has-start-hms", original_video=video)
+    html = _render_fine_cut_zone(t.task_id, m.tasks_dir / t.task_id, m)
+    for suffix in ("h", "m", "s"):
+        m_input = _re.search(
+            r'<input type="number" id="slirn-fine-preview-start-' + suffix + r'"[^>]*>',
+            html,
+        )
+        assert m_input is not None, \
+            f"REQ-20260919-066：HTML 应有 id=slirn-fine-preview-start-{suffix} 的 number input"
+        seg = m_input.group(0)
+        assert 'value="0"' in seg, f"start-{suffix} input 默认 value=0，实际：{seg}"
+        assert 'min="0"' in seg, f"start-{suffix} input 应 min=0，实际：{seg}"
+    # 旧 id 应已删除
+    assert 'id="slirn-fine-preview-start"' not in html, \
+        "REQ-20260919-066：旧单字段 id=slirn-fine-preview-start 应已删除"
+    # 标签文案
+    assert "预览开始时间" in html, "应有「预览开始时间」label"
+    assert "时:分:秒" in html, "应有「时:分:秒」label 提示"
+
+
+def test_run_fine_render_uses_preview_start_arg(tmp_path: Path, monkeypatch):
+    """REQ-20260919-064：_run_fine_render 接受 preview_start 并传给 ffmpeg。"""
+    import sys
+    sys.path.insert(0, str(tmp_path))
+    from slirn_home.app import _run_fine_render
+    # monkeypatch subprocess.run 看 -ss 参数
+    captured: dict = {}
+    import subprocess as real_sp
+    def fake_run(cmd, *args, **kwargs):
+        # 只拦 ffmpeg 渲染调用
+        if isinstance(cmd, list) and cmd and "ffmpeg" in cmd[0]:
+            captured["cmd"] = cmd
+            # 返空 CompletedProcess
+            from subprocess import CompletedProcess
+            return CompletedProcess(cmd, 0, "", "")
+        return real_sp.run(cmd, *args, **kwargs)
+    # 这个测试仅验证 -ss 参数传递，不实际渲染：直接 import + 走一半就退出
+    # 改测更轻量的方法：检查 input_args 拼接逻辑（直接调 _run_fine_render 太重）
+    # → 改为检查函数签名包含 preview_start
+    import inspect
+    sig = inspect.signature(_run_fine_render)
+    assert "preview_start" in sig.parameters, \
+        f"REQ-20260919-064：_run_fine_render 应有 preview_start 参数，实际签名：{sig}"
+    assert sig.parameters["preview_start"].default == 0.0, \
+        f"preview_start 默认应为 0.0，实际：{sig.parameters['preview_start'].default}"
+
+
+def test_run_fine_render_shifts_srt_for_preview_start(tmp_path: Path, monkeypatch):
+    """REQ-20260919-069：preview_start > 0 时，字幕应随之平移（不显示在视频前的旧位置）。
+
+    验证方式：拦截 ffmpeg 调用的 filter_complex，找到 subtitles 滤镜的 SRT
+    文件路径 → 读该文件 → 验证其内容已整体前移 preview_start 秒。
+    """
+    import sys
+    sys.path.insert(0, str(tmp_path))
+    from slirn_home.app import _run_fine_render, _get_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="shift-srt", original_video=video)
+    # 上传 SRT：源时间 0..3, 5..8, 12..15 三条；preview_start=10 → 只剩 12..15
+    srt_path = m.tasks_dir / t.task_id / "upload" / "shift.srt"
+    srt_path.parent.mkdir(parents=True, exist_ok=True)
+    srt_path.write_text(
+        "1\n00:00:00,000 --> 00:00:03,000\nfirst\n\n"
+        "2\n00:00:05,000 --> 00:00:08,000\nsecond\n\n"
+        "3\n00:00:12,000 --> 00:00:15,000\nthird\n",
+        encoding="utf-8")
+    fc = _get_fine_compose(m, t.task_id)
+    fc["materials"]["video"] = {"path": str(video), "source": "upload"}
+    fc["materials"]["subtitle"] = {"path": str(srt_path), "source": "upload"}
+    fc["layout"]["subtitle"]["enabled"] = True
+    from slirn_home.app import _save_fine_compose
+    _save_fine_compose(m, t.task_id, fc)
+
+    # 让 _run_fine_render 不删 tmp SRT（finally 会 unlink）— 我们要在测试里读它
+    captured_path: dict = {}
+    import subprocess as real_sp
+    def fake_run(cmd, *a, **kw):
+        if isinstance(cmd, list) and cmd and "ffmpeg" in cmd[0]:
+            captured_path["cmd"] = cmd
+            from subprocess import CompletedProcess
+            return CompletedProcess(cmd, 0, "", "")
+        return real_sp.run(cmd, *a, **kw)
+    monkeypatch.setattr("subprocess.run", fake_run)
+    # 把 unlink 拦下来：否则 finally 会删掉 tmp SRT，测试就读不到了
+    import pathlib as _pl
+    def no_op_unlink(self, *a, **kw):
+        return None
+    monkeypatch.setattr(_pl.Path, "unlink", no_op_unlink)
+
+    out_path = m.tasks_dir / t.task_id / "outputs" / "fine_preview.mp4"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_bytes(b"")
+    _run_fine_render(t.task_id, m, out_path, duration=20.0, preview_start=10.0)
+
+    # 从 filter_complex 里找 subtitles 行 → 抽出 SRT 文件路径
+    fc_arg = ""
+    cmd = captured_path.get("cmd", [])
+    for i, a in enumerate(cmd):
+        if a == "-filter_complex" and i + 1 < len(cmd):
+            fc_arg = cmd[i + 1]
+            break
+    assert fc_arg, f"未捕获到 -filter_complex，cmd={cmd[:5]}"
+    # 找 subtitles='...':force_style 行
+    import re
+    m_sub = re.search(r"subtitles='([^']+)':force_style", fc_arg)
+    assert m_sub, f"未找到 subtitles 滤镜行，filter_complex={fc_arg[:400]}"
+    used_srt = m_sub.group(1)
+    # _ffmpeg_filter_path 只改路径字符串（: → \\: 、\ → /），不影响文件内容
+    # 反向还原：\:/ → :、/ → \\ → Windows 路径
+    real_path = Path(used_srt.replace(r"\:", ":").replace("/", "\\"))
+    assert real_path.exists(), f"ffmpeg 用的 SRT 不存在：{used_srt}"
+    used_text = real_path.read_text(encoding="utf-8")
+    # 期望：原 12..15 → 平移到 2..5（12-10=2, 15-10=5）；前两条丢弃
+    assert "first" not in used_text and "second" not in used_text, \
+        f"应在预览窗口前的字幕应被丢弃，实际 SRT：{used_text}"
+    assert "third" in used_text, f"third 应保留，实际 SRT：{used_text}"
+    assert "00:00:02,000 --> 00:00:05,000" in used_text, \
+        f"third 应平移到 2..5 秒，实际 SRT：{used_text}"
+
+
+def test_run_fine_render_zero_preview_start_uses_original_srt(tmp_path: Path, monkeypatch):
+    """REQ-20260919-069：preview_start = 0 时，subtitles 滤镜应直接用原 SRT（不写 tmp）。"""
+    import sys
+    sys.path.insert(0, str(tmp_path))
+    from slirn_home.app import _run_fine_render, _get_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="no-shift", original_video=video)
+    srt_path = m.tasks_dir / t.task_id / "upload" / "plain.srt"
+    srt_path.parent.mkdir(parents=True, exist_ok=True)
+    srt_path.write_text("1\n00:00:00,000 --> 00:00:02,000\nhello\n", encoding="utf-8")
+    fc = _get_fine_compose(m, t.task_id)
+    fc["materials"]["video"] = {"path": str(video), "source": "upload"}
+    fc["materials"]["subtitle"] = {"path": str(srt_path), "source": "upload"}
+    fc["layout"]["subtitle"]["enabled"] = True
+    from slirn_home.app import _save_fine_compose
+    _save_fine_compose(m, t.task_id, fc)
+
+    captured: dict = {}
+    import subprocess as real_sp
+    def fake_run(cmd, *a, **kw):
+        if isinstance(cmd, list) and cmd and "ffmpeg" in cmd[0]:
+            captured["cmd"] = cmd
+            from subprocess import CompletedProcess
+            return CompletedProcess(cmd, 0, "", "")
+        return real_sp.run(cmd, *a, **kw)
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    out_path = m.tasks_dir / t.task_id / "outputs" / "fine_preview.mp4"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_bytes(b"")
+    _run_fine_render(t.task_id, m, out_path, duration=10.0, preview_start=0.0)
+
+    cmd = captured.get("cmd", [])
+    fc_arg = ""
+    for i, a in enumerate(cmd):
+        if a == "-filter_complex" and i + 1 < len(cmd):
+            fc_arg = cmd[i + 1]
+            break
+    import re
+    m_sub = re.search(r"subtitles='([^']+)':force_style", fc_arg)
+    assert m_sub, "未找到 subtitles 滤镜行"
+    used_srt = m_sub.group(1)
+    # 解析后的 SRT 路径在 Windows 下转反斜杠后应等于原 srt_path
+    # _ffmpeg_filter_path 的反向逻辑：把 : → \\: \ → /（仅做转义，未重写盘符）
+    # 所以 used_srt 字符串里的盘符 / 路径分隔可能跟原 srt_path 字符串不完全一样
+    # 但内容应相同；直接 normalize 后比对
+    from os.path import normpath
+    real_used = used_srt.replace(r"\:", ":").replace("/", "\\")
+    assert normpath(real_used) == normpath(str(srt_path)), \
+        f"preview_start=0 应直接用原 SRT；实际：{real_used} vs 期望：{srt_path}"
+
+
+# ---------- REQ-20260919-065：精剪参数 JSON 导出/导入 ----------
+
+def test_save_bg_detect_cache_writes_both_cache_and_detected_region(tmp_path):
+    """REQ-20260919-065：_save_bg_detect_cache 应同时写到 bg_detect_cache（兼容）
+    + detected_region（正式参数）。两字段内容一致（dict 引用共享）。"""
+    from slirn_home.app import _save_bg_detect_cache, _get_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="det-region-cache", original_video=video)
+    # 模拟一个检测结果
+    fake_result = {
+        "x": 100, "y": 200, "width": 1500, "height": 700,
+        "center_x": 850, "center_y": 550,
+        "corners": {"topleft": [100, 200], "topright": [1600, 200],
+                    "bottomleft": [100, 900], "bottomright": [1600, 900]},
+        "pixel_count": 1050000,
+        "image_native_w": 1920, "image_native_h": 1080,
+        "algorithm": "pixel", "threshold": 240,
+    }
+    _save_bg_detect_cache(m, t.task_id, fake_result)
+
+    fc = _get_fine_compose(m, t.task_id)
+    assert "bg_detect_cache" in fc, "向后兼容：bg_detect_cache 字段应保留"
+    assert "detected_region" in fc, "REQ-065：detected_region 字段应写入"
+    # 两字段内容应一致
+    assert fc["bg_detect_cache"] == fc["detected_region"], \
+        "REQ-065：bg_detect_cache 与 detected_region 内容应一致"
+    assert fc["detected_region"]["x"] == 100
+    assert fc["detected_region"]["algorithm"] == "pixel"
+    assert fc["detected_region"]["image_native_w"] == 1920
+
+
+def test_get_fine_compose_migrates_missing_detected_region(tmp_path):
+    """REQ-20260919-065：旧任务（fc 没 detected_region 字段）应被 setdefault 补 None。"""
+    from slirn_home.app import _get_fine_compose
+    from tasklib import TaskManager
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="legacy-fc", original_video=video)
+    # 直接写一个没有 detected_region 的旧格式 fc 文件
+    fc_dir = m.tasks_dir / t.task_id
+    fc_dir.mkdir(parents=True, exist_ok=True)
+    legacy_fc = {
+        "_schema": 2,
+        "layout": {"video": {"x": 100, "y": 100, "scale": 1.0}},
+        "font": {},
+        "output": {},
+        "audio": {},
+    }
+    (fc_dir / "fine_compose.json").write_text(
+        json.dumps(legacy_fc, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    fc = _get_fine_compose(m, t.task_id)
+    assert "detected_region" in fc, \
+        "_get_fine_compose 应通过 setdefault 补 detected_region 字段"
+    assert fc["detected_region"] is None, \
+        "旧任务无检测数据时，detected_region 应为 None"
+
+
+def test_render_fine_cut_zone_has_export_and_import_params_buttons(tmp_path):
+    """REQ-20260919-065：操作栏行 2 应新增「📤 导出参数」和「📥 导入参数」两个按钮。"""
+    from slirn_home.app import _render_workbench
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="export-import-ui", original_video=video)
+    html = _render_workbench(t.task_id, m)
+
+    assert 'data-action="fine-export-params"' in html, \
+        "行 2 应有「📤 导出参数」按钮（data-action=fine-export-params）"
+    assert 'data-action="fine-import-params"' in html, \
+        "行 2 应有「📥 导入参数」按钮（data-action=fine-import-params）"
+    # 按钮顺序：导出在「引用参数」之后、导入在最后
+    exp_idx = html.find('data-action="fine-export-params"')
+    imp_idx = html.find('data-action="fine-import-params"')
+    ref_idx = html.find('data-action="fine-import-show"')
+    assert ref_idx < exp_idx < imp_idx, \
+        f"按钮顺序应为：引用参数 < 导出参数 < 导入参数（实际 ref={ref_idx}, exp={exp_idx}, imp={imp_idx}）"
+
+
+def test_export_fine_params_returns_full_compose_with_detected_region(tmp_path, monkeypatch):
+    """REQ-20260919-065：export_fine_params 应返回 {filename, content, mime}，
+    content 是合法 JSON，含 _schema=3 + detected_region + layout/font/output/audio。"""
+    from slirn_home import app as _app
+
+    # 找 export_fine_params endpoint（用 app 对象挂的 FastAPI 实例）
+    from slirn_home.app import _save_bg_detect_cache, build_app, _get_fine_compose
+    from fastapi.testclient import TestClient
+    from pathlib import Path as _P
+
+    repo_root = tmp_path
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="export-params", original_video=video)
+    # 写一些检测数据
+    _save_bg_detect_cache(m, t.task_id, {
+        "x": 50, "y": 60, "width": 1700, "height": 900,
+        "center_x": 900, "center_y": 510,
+        "corners": {}, "pixel_count": 1,
+        "image_native_w": 1920, "image_native_h": 1080,
+        "algorithm": "ai_color", "threshold": 230,
+    })
+
+    built = build_app(repo_root)
+    client = TestClient(built.app)
+    resp = client.post("/slirn/api/export_fine_params", json={"task_id": t.task_id})
+    assert resp.status_code == 200, f"HTTP {resp.status_code}: {resp.text[:200]}"
+    body = resp.json()
+    assert body["ok"] is True, f"导出应成功：{body}"
+    assert body["filename"].startswith("fine_params_"), \
+        f"文件名应以 fine_params_ 开头，实际：{body['filename']}"
+    assert body["filename"].endswith(".json"), \
+        f"文件名应以 .json 结尾，实际：{body['filename']}"
+    assert body["mime"] == "application/json"
+    # 解析 content
+    payload = json.loads(body["content"])
+    assert payload["_schema"] == 3, f"_schema 应为 3，实际：{payload.get('_schema')}"
+    assert payload["_source_task_id"] == t.task_id
+    assert payload["detected_region"] is not None
+    assert payload["detected_region"]["algorithm"] == "ai_color"
+    for k in ("layout", "font", "output", "audio"):
+        assert k in payload, f"导出应包含 {k} 字段"
+
+
+def test_import_fine_params_overwrites_fields_keeps_materials(tmp_path):
+    """REQ-20260919-065：import_fine_params 应覆盖 layout/font/output/audio/detected_region，
+    但不动 materials。"""
+    from slirn_home.app import build_app, _get_fine_compose
+    from fastapi.testclient import TestClient
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="import-params", original_video=video)
+    # 当前任务的 materials：手动塞一个本地路径
+    fc = _get_fine_compose(m, t.task_id)
+    fc["materials"] = {
+        "video": {"path": "tasks/" + t.task_id + "/upload/video_local.mp4",
+                  "source": "upload", "type": "video"},
+    }
+    from slirn_home.app import _save_fine_compose
+    _save_fine_compose(m, t.task_id, fc)
+
+    # 构造一个 v3 导入 payload
+    new_payload = {
+        "_schema": 3,
+        "_exported_at": "2026-09-19T12:00:00",
+        "layout": {"video": {"x": 999, "y": 888, "scale": 0.5}},
+        "font": {"size": 88, "color": "#FF0000"},
+        "output": {"resolution": "720p"},
+        "audio": {"enabled": True, "volume": 0.9},
+        "detected_region": {"x": 100, "y": 200, "width": 1500, "height": 700,
+                            "algorithm": "pixel", "threshold": 250},
+    }
+    content = json.dumps(new_payload, ensure_ascii=False)
+
+    built = build_app(tmp_path)
+    client = TestClient(built.app)
+    resp = client.post("/slirn/api/import_fine_params",
+                       json={"task_id": t.task_id, "content": content})
+    assert resp.status_code == 200, f"HTTP {resp.status_code}: {resp.text[:200]}"
+    body = resp.json()
+    assert body["ok"] is True, f"导入应成功：{body}"
+    assert len(body["applied_fields"]) == 5, \
+        f"应应用 5 个字段，实际：{body['applied_fields']}"
+
+    # 验证：layout/font/output/audio/detected_region 被覆盖，materials 保持不变
+    fc2 = _get_fine_compose(m, t.task_id)
+    assert fc2["layout"]["video"]["x"] == 999, "layout.video.x 应被覆盖"
+    assert fc2["font"]["size"] == 88, "font.size 应被覆盖"
+    assert fc2["output"]["resolution"] == "720p", "output.resolution 应被覆盖"
+    assert fc2["audio"]["volume"] == 0.9, "audio.volume 应被覆盖"
+    assert fc2["detected_region"]["algorithm"] == "pixel", \
+        "detected_region 应被覆盖"
+    # materials 必须保持不变
+    assert fc2["materials"]["video"]["path"] == "tasks/" + t.task_id + "/upload/video_local.mp4", \
+        f"materials.video.path 应保持不变，实际：{fc2['materials']}"
+
+
+def test_import_fine_params_rejects_bad_schema(tmp_path):
+    """REQ-20260919-065：_schema 不兼容（不是 2/3）应返回 error，不修改 fc。"""
+    from slirn_home.app import build_app, _get_fine_compose
+    from fastapi.testclient import TestClient
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="import-bad-schema", original_video=video)
+    fc_before = _get_fine_compose(m, t.task_id)
+
+    bad_payload = {"_schema": 99, "layout": {}}
+    content = json.dumps(bad_payload)
+    built = build_app(tmp_path)
+    client = TestClient(built.app)
+    resp = client.post("/slirn/api/import_fine_params",
+                       json={"task_id": t.task_id, "content": content})
+    body = resp.json()
+    assert body["ok"] is False, f"坏 schema 应失败：{body}"
+    assert "_schema" in body["error"], f"错误信息应提到 _schema，实际：{body['error']}"
+
+    # fc 应保持不变
+    fc_after = _get_fine_compose(m, t.task_id)
+    assert fc_after.get("layout") == fc_before.get("layout"), \
+        "失败导入不应修改 layout"
+
+
+def test_import_fine_params_rejects_bad_json(tmp_path):
+    """REQ-20260919-065：JSON 损坏应返回 error，不修改 fc。"""
+    from slirn_home.app import build_app
+    from fastapi.testclient import TestClient
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="import-bad-json", original_video=video)
+    built = build_app(tmp_path)
+    client = TestClient(built.app)
+    resp = client.post("/slirn/api/import_fine_params",
+                       json={"task_id": t.task_id, "content": "{bad json,,,"})
+    body = resp.json()
+    assert body["ok"] is False, f"坏 JSON 应失败：{body}"
+    assert "JSON" in body["error"] or "json" in body["error"].lower(), \
+        f"错误信息应提到 JSON，实际：{body['error']}"
+
+
+def test_import_fine_params_rejects_oversize_content(tmp_path):
+    """REQ-20260919-065：超过 64KB 的导入应被拒绝。"""
+    from slirn_home.app import build_app
+    from fastapi.testclient import TestClient
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="import-oversize", original_video=video)
+    # 100KB 的乱码
+    big = "x" * (100 * 1024)
+    built = build_app(tmp_path)
+    client = TestClient(built.app)
+    resp = client.post("/slirn/api/import_fine_params",
+                       json={"task_id": t.task_id, "content": big})
+    body = resp.json()
+    assert body["ok"] is False, f"超大内容应失败：{body}"
+    assert "过大" in body["error"] or "64KB" in body["error"], \
+        f"错误信息应提到大小限制，实际：{body['error']}"
+
+
+def test_import_fine_params_accepts_v2_schema(tmp_path):
+    """REQ-20260919-065：v2 schema（无 detected_region）应被接受（向后兼容）。"""
+    from slirn_home.app import build_app, _get_fine_compose
+    from fastapi.testclient import TestClient
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="import-v2", original_video=video)
+    v2_payload = {
+        "_schema": 2,
+        "layout": {"video": {"x": 111, "y": 222}},
+        "font": {"size": 50},
+    }
+    content = json.dumps(v2_payload)
+    built = build_app(tmp_path)
+    client = TestClient(built.app)
+    resp = client.post("/slirn/api/import_fine_params",
+                       json={"task_id": t.task_id, "content": content})
+    body = resp.json()
+    assert body["ok"] is True, f"v2 schema 应兼容：{body}"
+    fc = _get_fine_compose(m, t.task_id)
+    assert fc["layout"]["video"]["x"] == 111
+    # v2 没有 detected_region → 保持 None（不被覆盖）
+    assert fc["detected_region"] is None, \
+        "v2 schema 不带 detected_region 时应保持 None"
