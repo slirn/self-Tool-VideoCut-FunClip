@@ -3687,3 +3687,11 @@ input[type="checkbox"]:focus-visible {
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* REQ-20260920-082：BGM 下拉嵌进 audio 上传卡 — 确保占整宽 */
+.slirn-fine-upload-card .slirn-fine-default-bgm-row {
+  flex-wrap: wrap;
+  border-top: 1px dashed var(--border, rgba(128,128,128,0.25));
+  padding-top: 8px;
+  margin-top: 8px;
+}

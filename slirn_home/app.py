@@ -2843,6 +2843,20 @@ def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
                 f'data-kind="{kind}" title="从上游阶段产物自动获取：{_esc(upstream_name)}">'
                 f'📥 自动获取（{_esc(upstream_name)}）</button>'
             )
+        # REQ-20260920-082：把「系统默认 BGM」下拉嵌进 audio 上传卡（从参数区迁移）。
+        # 只在 audio 卡片里追加；其他 kind 不显示。
+        # class 名复用 REQ-20260920-078 的 .slirn-fine-default-bgm-row，
+        # 避免 router.js / CSS 改动。data-task-id 用于 router.js 的 change 委托拿 tid。
+        default_bgm_html = ""
+        if kind == "audio":
+            default_bgm_html = (
+                f'<div class="slirn-fine-default-bgm-row" data-task-id="{_esc(task_id)}">'
+                f'<span class="slirn-fine-actions-label">📦 系统默认 BGM</span>'
+                f'<select id="slirn-fine-default-bgm" class="slirn-fine-default-bgm-select">'
+                f'<option value="">— 不选（清空选择）—</option>'
+                f'</select>'
+                f'</div>'
+            )
         upload_cards.append(
             f'<div class="slirn-fine-upload-card{has}" data-kind="{kind}" data-source="{source or "none"}">'
             f'<div class="slirn-fine-upload-label">{icon} {label}{source_badge}</div>'
@@ -2859,6 +2873,7 @@ def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
             f'👁️ 预览</button>'
             f'{auto_btn_html}'
             f'<div class="slirn-fine-upload-status" data-status-kind="{kind}">{status_text}</div>'
+            f'{default_bgm_html}'
             f'</div>'
         )
     upload_html = '<div class="slirn-fine-uploads">' + "".join(upload_cards) + '</div>'
@@ -3033,14 +3048,10 @@ def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
         f'{_fine_param("淡出（0–5 秒）", "slirn-fine-audio-fade_out", "fade_out", float(audio_cfg["fade_out"]), 0, 5, 0.5, "{:.1f}", data_attr="data-audio-key")}'
         f'</div>'
         f'<div class="slirn-form-hint">上传 mp3/wav/m4a 文件 → 原说话人语音 + BGM 同时播放；'
-        f'短 BGM 自动循环填充。</div>'
-        # REQ-20260920-078：系统默认 BGM 下拉（一键选 5 个 lo-fi mp3 之一）
-        f'<div class="slirn-fine-default-bgm-row">'
-        f'<span class="slirn-fine-actions-label">📦 系统默认 BGM</span>'
-        f'<select id="slirn-fine-default-bgm" class="slirn-fine-default-bgm-select">'
-        f'<option value="">— 不选（清空选择）—</option>'
-        f'</select>'
-        f'</div>'
+        f'短 BGM 自动循环填充。'
+        # REQ-20260920-082：系统默认 BGM 下拉已从参数区迁移到「🎵 背景音乐」素材上传卡内
+        # （贴在 audio upload card status 行下方）。下方留 hint 引导用户去上传区选 BGM。
+        f'或在上方「🎵 背景音乐」上传卡内点「📦 系统默认 BGM」选内置 lo-fi mp3。</div>'
         f'</div>'
     )
 
