@@ -1566,6 +1566,7 @@ _FINE_FONT_DEFAULTS = {
     "bg_radius":    4,
     "bold":         True,
     "align":        "center",
+    "left_offset":  0,  # REQ-20260920-097：align=center_offset 时向左偏移的像素数（默认由 UI 按 1920 - bg_detect_cache.width 计算）
     "family":       "STHeitiMedium",
 }
 # REQ-20260919-061 扩展：背景音乐 4 项（启用 + 音量 + 淡入/淡出）
@@ -1720,8 +1721,18 @@ def _ass_force_style(font: dict) -> str:
             parts.append(f"PrimaryColour=&H00{tc_bgr.upper()}")
     if font.get("bold"):
         parts.append("Bold=1")
-    align_map = {"left": 1, "center": 2, "right": 3}
-    parts.append(f"Alignment={align_map.get(font['align'], 2)}")
+    align_map = {"left": 1, "center": 2, "right": 3, "center_offset": 2}
+    align_val = font.get("align", "center")
+    parts.append(f"Alignment={align_map.get(align_val, 2)}")
+    # REQ-20260920-097：居中+左偏移 → Alignment=2 配合 MarginR=2*N 把居中文字左移 N 像素
+    # （ASS 居中 x = (MarginL + W - MarginR) / 2，MarginR 加大会把居中点往左拉）。
+    if align_val == "center_offset":
+        try:
+            offset_px = int(font.get("left_offset", 0) or 0)
+        except (TypeError, ValueError):
+            offset_px = 0
+        if offset_px > 0:
+            parts.append(f"MarginR={offset_px * 2}")
     sw = int(font.get("stroke_width") or 0)
     if sw > 0:
         # ASS stroke_color #RRGGBB → &H00BBGGRR
@@ -3062,6 +3073,15 @@ def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
     layout = fc["layout"]
     font = fc["font"]
     output = fc["output"]
+    # REQ-20260920-097：居中+左偏移 默认值 = 1920 - bg_detect_cache.width
+    # 旧任务（无 left_offset）第一次渲染时按 bg_detect_cache 算出，不写回 fc（保留手动值）。
+    _bg_cache = (fc.get("detected_region") or fc.get("bg_detect_cache") or {}) if isinstance(fc, dict) else {}
+    _cache_w = _bg_cache.get("width")
+    if "left_offset" not in font:
+        try:
+            font["left_offset"] = max(0, _FINE_DESIGN_W - int(_cache_w)) if _cache_w else 0
+        except (TypeError, ValueError):
+            font["left_offset"] = 0
 
     # 1. 5 个素材上传卡
     upload_cards = []
@@ -3357,7 +3377,16 @@ def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
         f'<option value="left" {"selected" if font["align"] == "left" else ""}>左对齐</option>'
         f'<option value="center" {"selected" if font["align"] == "center" else ""}>居中</option>'
         f'<option value="right" {"selected" if font["align"] == "right" else ""}>右对齐</option>'
+        # REQ-20260920-097：居中+左偏移（按 left_offset 把居中文字向左挪）
+        f'<option value="center_offset" {"selected" if font["align"] == "center_offset" else ""}>居中+左偏移</option>'
         f'</select>'
+        f'</div>'
+        # REQ-20260920-097：左偏移量（px）— 默认 = 1920 - bg_detect_cache.width
+        f'<div class="slirn-fine-font-row">'
+        f'<span class="slirn-fine-font-label">左偏移量（px）</span>'
+        f'<input type="number" class="slirn-fine-font-num" data-font-key="left_offset" '
+        f'min="0" max="1920" step="1" value="{int(font.get("left_offset", 0) or 0)}" '
+        f'title="默认 = 1920 - bg_detect_cache.width（背景区域检测出的宽度）">'
         f'</div>'
         f'<div class="slirn-fine-font-row">'
         f'<span class="slirn-fine-font-label">描边宽度（px）</span>'

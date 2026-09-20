@@ -4486,6 +4486,84 @@ def test_fine_font_defaults_has_color(tmp_path: Path):
         f"v19：color 默认应为 #FFFFFF（与 libass 默认一致）"
 
 
+def test_ass_force_style_center_offset_shifts_left(tmp_path: Path):
+    """REQ-097：align=center_offset + left_offset=N 必须用 Alignment=2 + MarginR=2*N
+    把居中文字左移 N 像素（ASS 居中 x = (MarginL + W - MarginR) / 2）。"""
+    from slirn_home.app import _ass_force_style
+    f = {"family": "STHeitiMedium", "size": 16, "color": "#FFFFFF",
+         "stroke_width": 2, "stroke_color": "#000000", "bold": True,
+         "align": "center_offset", "left_offset": 334}
+    fs = _ass_force_style(f)
+    assert "Alignment=2" in fs, f"居中+左偏移应保留 Alignment=2：{fs}"
+    assert "MarginR=668" in fs, (
+        f"左偏移 334px 应转换为 MarginR=668（ASS 公式：左移 N = MarginR=2N），"
+        f"实际：{fs}"
+    )
+
+
+def test_ass_force_style_center_no_marginr(tmp_path: Path):
+    """REQ-097：align=center 不应出现 MarginR（保持原行为）。"""
+    from slirn_home.app import _ass_force_style, _FINE_FONT_DEFAULTS
+    fs = _ass_force_style(dict(_FINE_FONT_DEFAULTS))  # 默认 align=center, left_offset=0
+    assert "Alignment=2" in fs
+    assert "MarginR" not in fs, f"align=center 不应插 MarginR：{fs}"
+
+
+def test_fine_font_defaults_has_left_offset(tmp_path: Path):
+    """REQ-097：_FINE_FONT_DEFAULTS 必须含 left_offset 字段（默认 0，UI 按 bg_detect_cache 覆盖）。"""
+    from slirn_home.app import _FINE_FONT_DEFAULTS
+    assert "left_offset" in _FINE_FONT_DEFAULTS, (
+        f"REQ-097：_FINE_FONT_DEFAULTS 应含 left_offset，"
+        f"实际字段：{list(_FINE_FONT_DEFAULTS.keys())}"
+    )
+    assert _FINE_FONT_DEFAULTS["left_offset"] == 0
+
+
+def test_render_fine_cut_zone_left_offset_default_from_bg_cache(tmp_path):
+    """REQ-097：渲染 UI 时若 fc.font.left_offset 缺失，按 1920 - bg_detect_cache.width 计算默认。"""
+    from slirn_home.app import _render_fine_cut_zone, _get_fine_compose, _save_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="center-offset-default", original_video=video)
+
+    fc = _get_fine_compose(m, t.task_id)
+    # 写入 detected_region.width = 1586 → 默认 left_offset = 1920 - 1586 = 334
+    fc["detected_region"] = {"x": 0, "y": 85, "width": 1586, "height": 995,
+                             "center_x": 792, "center_y": 582}
+    fc["font"].pop("left_offset", None)  # 模拟旧任务没这个字段
+    fc["font"]["align"] = "center_offset"
+    _save_fine_compose(m, t.task_id, fc)
+
+    html = _render_fine_cut_zone(t.task_id, t, m)
+    # 检查 input value="334"
+    assert 'value="334"' in html, (
+        f"REQ-097：bg_detect_cache.width=1586 → 默认 left_offset = 1920-1586 = 334，"
+        f"实际 HTML 中未找到 value=\"334\""
+    )
+    # 检查下拉列表里有居中+左偏移选项且被选中
+    assert 'value="center_offset"' in html
+    assert '居中+左偏移' in html
+
+
+def test_render_fine_cut_zone_left_offset_uses_saved_when_present(tmp_path):
+    """REQ-097：fc.font.left_offset 已存在（用户改过）→ 保留手动值，不被 bg_cache 覆盖。"""
+    from slirn_home.app import _render_fine_cut_zone, _get_fine_compose, _save_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="left-offset-pinned", original_video=video)
+
+    fc = _get_fine_compose(m, t.task_id)
+    fc["detected_region"] = {"x": 0, "y": 85, "width": 1586, "height": 995,
+                             "center_x": 792, "center_y": 582}
+    fc["font"]["left_offset"] = 120  # 用户手动改过
+    _save_fine_compose(m, t.task_id, fc)
+
+    html = _render_fine_cut_zone(t.task_id, t, m)
+    assert 'value="120"' in html, (
+        f"REQ-097：用户手动 left_offset=120 应被保留，不被 334 覆盖"
+    )
+
+
 def test_get_fine_compose_migrates_missing_color_to_white(tmp_path: Path):
     """v19：旧任务 fc.font 缺 color 字段 → 自动补 #FFFFFF。"""
     import json
