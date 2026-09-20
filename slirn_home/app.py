@@ -3663,12 +3663,13 @@ def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
         f'{bg_detect_block}'
         f'</details>'
         f'{combined_actions_bar}'
-        # REQ-20260920-090：合成元素组合测试面板（debug）—— 5-checkbox 调试入口
+        # REQ-20260920-090：合成元素组合面板 —— 5-checkbox 一键合成入口
         # REQ-20260920-091：加开始时间 + 时长（避免跑完整 1-3 小时视频）
+        # REQ-20260920-092 v2：按钮重命名「一键合成」（不是测试）—— 直接弹视频播放窗口
         f'<details class="slirn-fine-section slirn-combo-test-details" id="slirn-combo-test-details" open>'
-        f'<summary class="slirn-fine-section-summary">🧪 合成元素组合测试 <span class="slirn-fine-section-status">5 项可勾选 + 时间参数</span></summary>'
+        f'<summary class="slirn-fine-section-summary">🎬 一键合成 <span class="slirn-fine-section-status">勾选要合成的元素 + 时间参数</span></summary>'
         f'<div class="slirn-combo-test-block">'
-        f'<div class="slirn-form-hint">⚠️ 这会修改 fc 当前勾选状态；测试后会提示还原</div>'
+        f'<div class="slirn-form-hint">💡 勾选要合成的元素 → 点「🚀 一键合成」→ 自动弹视频播放窗口查看。可点「↩️ 还原」回到上次配置。</div>'
         f'<div class="slirn-combo-test-row">'
         f'<label><input type="checkbox" data-combo-kind="video" checked> 🎬 视频</label>'
         f'<label><input type="checkbox" data-combo-kind="subtitle"> 📝 字幕</label>'
@@ -3695,8 +3696,8 @@ def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
         f'</div>'
         f'<div class="slirn-combo-test-actions">'
         f'<button class="slirn-btn" data-action="combo-apply" data-task-id="{_esc(task_id)}">📝 应用勾选（写 fc）</button>'
-        f'<button class="slirn-btn slirn-btn-primary" data-action="combo-test" data-task-id="{_esc(task_id)}">🚀 一键测试合成</button>'
-        f'<button class="slirn-btn slirn-btn-xs" data-action="combo-diagnose" data-task-id="{_esc(task_id)}">🔍 仅诊断</button>'
+        f'<button class="slirn-btn slirn-btn-primary" data-action="combo-test" data-task-id="{_esc(task_id)}">🚀 一键合成</button>'
+        f'<button class="slirn-btn slirn-btn-xs" data-action="combo-diagnose" data-task-id="{_esc(task_id)}">🔍 仅诊断（不合成）</button>'
         f'<button class="slirn-btn slirn-btn-xs" data-action="combo-restore" data-task-id="{_esc(task_id)}" hidden>↩️ 还原上次配置</button>'
         f'</div>'
         f'<div class="slirn-combo-test-output" id="slirn-combo-test-output-{_esc(task_id)}"></div>'

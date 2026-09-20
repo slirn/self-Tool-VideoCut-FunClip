@@ -3686,11 +3686,11 @@
     if (action === 'combo-test') {
       var testBtn = detailsEl.querySelector('[data-action="combo-test"]');
       _setBusy(true);
-      if (testBtn) { testBtn.textContent = '⏳ 测试中…'; testBtn.disabled = true; }
+      if (testBtn) { testBtn.textContent = '⏳ 合成中…'; testBtn.disabled = true; }
       var tp = _readTimeParams();
       var outPath = _computeOutputPath(tp);
       _appendOutput('🚀 正在应用勾选并启动合成（start=' + tp.preview_start + 's, dur=' + (tp.duration || 'full') + 's）...');
-      toast('🚀 一键测试合成已启动（' + (tp.duration || '完整') + '）');
+      toast('🚀 一键合成已启动（' + (tp.duration || '完整') + '）');
       _applyComboToFC(tid, state).then(function() {
         // REQ-20260920-091：combo-test 传 time 参数给 export_fine_video（不导完整视频）
         var exportBody = { task_id: tid, preview_start: tp.preview_start };
@@ -3705,7 +3705,7 @@
           if (!j.ok || !j.job_id) {
             _appendOutput('<span class="err">❌ 启动失败: ' + (j.error || '未知错误') + '</span>');
             toast('❌ 启动失败: ' + (j.error || '未知错误'));
-            if (testBtn) { testBtn.textContent = '🚀 一键测试合成'; testBtn.disabled = false; }
+            if (testBtn) { testBtn.textContent = '🚀 一键合成'; testBtn.disabled = false; }
             _setBusy(false);
             return;
           }
@@ -3721,8 +3721,8 @@
                   if (pollCount < 600) setTimeout(poll, 1500);
                   else {
                     _appendOutput('<span class="warn">⚠ 轮询超时（15 分钟）</span>');
-                    toast('⚠ 测试超时');
-                    if (testBtn) { testBtn.textContent = '🚀 一键测试合成'; testBtn.disabled = false; }
+                    toast('⚠ 合成超时');
+                    if (testBtn) { testBtn.textContent = '🚀 一键合成'; testBtn.disabled = false; }
                     _setBusy(false);
                   }
                   return null;
@@ -3742,17 +3742,17 @@
             return;
           }
           // REQ-20260920-091：probe 探测**对应**的 output 文件（不是默认 final.mp4）
-          _appendOutput('✅ 渲染完成（' + (finalState.elapsed_sec || '?') + ' 秒）\n🔍 探测 output 音频（' + outPath + '）...');
+          _appendOutput('✅ 合成完成（' + (finalState.elapsed_sec || '?') + ' 秒）\n🔍 探测 output 音频（' + outPath + '）...');
           return fetch('/slirn/api/probe_output_audio', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ task_id: tid, output_path: outPath })
           }).then(function(r) { return r.json(); }).then(function(p) {
-            var html = '✅ 渲染完成（' + (finalState.elapsed_sec || '?') + ' 秒）\n\n[BGM 检测报告]\n';
+            var html = '✅ 合成完成（' + (finalState.elapsed_sec || '?') + ' 秒）\n\n[BGM 检测报告]\n';
             if (!p.ok) {
               html += '<span class="err">❌ probe 失败: ' + p.error + '</span>';
               _appendOutput(html);
-              toast('✅ 测试完成（' + (finalState.elapsed_sec || '?') + ' 秒）· probe 失败');
-              if (testBtn) { testBtn.textContent = '🚀 一键测试合成'; testBtn.disabled = false; }
+              toast('✅ 合成完成（' + (finalState.elapsed_sec || '?') + ' 秒）· probe 失败');
+              if (testBtn) { testBtn.textContent = '🚀 一键合成'; testBtn.disabled = false; }
               _setBusy(false);
               return;
             }
@@ -3772,25 +3772,20 @@
               else html += '  <span class="warn">⚠ 未对比 BGM 源（未提供 bgm_path）</span>\n';
             }
             _appendOutput(html);
-            // REQ-20260920-091 v2：done 时按钮变「✅ 完成」+ 可见反馈
+            // REQ-20260920-092 v2：done 时按钮变「✅ 完成 · 查看视频」+ **自动弹播放窗口**
+            // 用户原话：「弹窗播放视频，不要下载」
             // 注意：/slirn/api/video 端点只支持 src=original/rough_compose/fine_preview/fine_export
             // （见 app.py:6584 src_q in ("fine_preview", "fine_export")）
             // 所以 time-suffix 文件（如 fine_export_t30_d20.mp4）无法走 video 端点
-            // 只有 default（fine_export.mp4）能弹出视频
-            if (testBtn) {
-              testBtn.textContent = '✅ 完成 · 重测';
-              testBtn.disabled = false;
-              testBtn.onclick = null;  // 让普通 handler 接管（再次点测试）
-            }
-            toast('✅ 测试完成（' + (finalState.elapsed_sec || '?') + ' 秒）');
-            // 自动打开视频：仅当 output_path 是 fine_export.mp4 时（video 端点支持）
-            // time-suffix 文件路径只显示在 output 文本里，复制到 Gradio 预览面板即可查看
+            // → 只有 default（fine_export.mp4）能弹播放窗口；time-suffix 给本地路径提示
+            toast('✅ 合成完成（' + (finalState.elapsed_sec || '?') + ' 秒）');
             var isDefaultOutput = outPath === 'outputs/fine_export.mp4';
             if (isDefaultOutput) {
               var autoUrl = '/slirn/api/video/' + tid + '?src=fine_export&t=' + Date.now();
+              // 自动弹播放窗口（用户明确要求：直接看，不下载）
               try { window.open(autoUrl, '_blank'); } catch (e) { /* 弹窗被浏览器拦截 */ }
               if (testBtn) {
-                testBtn.textContent = '✅ 完成 · 查看视频';
+                testBtn.textContent = '✅ 完成 · 重新合成';
                 testBtn.onclick = function(ev) {
                   ev.preventDefault(); ev.stopPropagation();
                   window.open(autoUrl, '_blank');
@@ -3798,10 +3793,14 @@
                 };
               }
             } else {
-              // time-suffix 测试：在 output 区域给用户一个「💡 提示：去 Gradio 预览查看」
-              var tipHtml = html + '<div class="hint" style="margin-top:6px;">💡 提示：time-suffix 文件（' + outPath + '）无法通过 video 端点下载，'
-                + '要查看请去 Gradio 上方预览面板或本地 outputs 目录</div>';
+              // time-suffix 合成：video 端点不支持，给本地绝对路径提示
+              var tipHtml = html + '<div class="hint" style="margin-top:6px;">'
+                + '💡 提示：time-suffix 文件（' + outPath + '）无法走 video 端点播放<br>'
+                + '📂 本地路径：tasks/<code>' + tid + '</code>/' + outPath + '<br>'
+                + '→ 可直接拖到浏览器播放，或在 Gradio 上方「预览」面板选该文件查看'
+                + '</div>';
               _appendOutput(tipHtml);
+              if (testBtn) { testBtn.textContent = '✅ 完成 · 重新合成'; testBtn.disabled = false; }
             }
             _setBusy(false);
           });
@@ -3818,7 +3817,7 @@
     if (action === 'combo-apply') {
       _appendOutput('📝 正在应用勾选...');
       _applyComboToFC(tid, state).then(function() {
-        _appendOutput('✅ 勾选已写入 fc（layout.video/subtitle/cover/bg + audio）\n💡 点「🚀 一键测试合成」跑 ffmpeg');
+        _appendOutput('✅ 勾选已写入 fc（layout.video/subtitle/cover/bg + audio）\n💡 点「🚀 一键合成」跑 ffmpeg，自动弹视频播放窗口');
       }).catch(function(e) { _appendOutput('<span class="err">❌ 写 fc 失败: ' + e.message + '</span>'); });
       return;
     }
