@@ -3978,6 +3978,104 @@
     });
   }
 
+  // REQ-20260920-088：素材路径详情弹窗（完整路径 + 来源色块 + 文件元数据）
+  function fineMatDetail(tid, kind) {
+    if (!tid || !kind) {
+      toast('⚠️ 缺少任务 ID 或素材类型', 'warning');
+      return;
+    }
+    postJSON(SLIRN_API + '/material_info', {task_id: tid, kind: kind})
+      .then(function(r) {
+        if (!r || !r.ok) {
+          toast('❌ 查询失败: ' + ((r && r.error) || '未知错误'), 'error');
+          return;
+        }
+        _renderMatDetailModal(r);
+        var modal = document.getElementById('slirn-mat-detail-modal');
+        if (modal) modal.hidden = false;
+      })
+      .catch(function(e) {
+        toast('❌ 网络错误: ' + (e && e.message ? e.message : e), 'error');
+      });
+  }
+
+  function _renderMatDetailModal(info) {
+    var body = document.getElementById('slirn-mat-detail-body');
+    if (!body) return;
+    var kindLabel = ({
+      video: '🎬 视频',
+      subtitle: '📝 字幕',
+      cover: '🖼 封面',
+      bg: '🎨 背景',
+      reference: '🤖 参考',
+      audio: '🎵 音频'
+    })[info.kind] || info.kind;
+    var sourceClass = info.source === 'auto' ? 'mat-source-auto'
+      : info.source === 'upload' ? 'mat-source-upload'
+      : info.source === 'default_bgm' ? 'mat-source-default'
+      : 'mat-source-none';
+    var sourceLabel = info.source_label || '未配置';
+    var sizeStr;
+    if (info.exists) {
+      var mb = info.size_bytes / 1024 / 1024;
+      if (mb >= 1) {
+        sizeStr = mb.toFixed(2) + ' MB';
+      } else {
+        sizeStr = (info.size_bytes / 1024).toFixed(1) + ' KB';
+      }
+    } else {
+      sizeStr = '—';
+    }
+    var html = '';
+    // 顶部：类型 + 来源色块
+    html += '<div class="slirn-mat-detail-header">';
+    html += '<span class="slirn-mat-detail-kind">' + escapeHtml(kindLabel) + '</span>';
+    html += '<span class="slirn-mat-detail-source ' + sourceClass + '">' + escapeHtml(sourceLabel) + '</span>';
+    html += '</div>';
+    // 表格
+    html += '<table class="slirn-mat-detail-table">';
+    html += '<tr><th>📁 物理路径</th><td>' +
+      (info.exists
+        ? escapeHtml(info.abs_path || '')
+        : '<span class="slirn-warn">⚠️ 文件不存在</span>') +
+      '</td></tr>';
+    html += '<tr><th>🔗 fc.materials.path</th><td>' + escapeHtml(info.fc_path || '—') + '</td></tr>';
+    html += '<tr><th>📊 文件大小</th><td>' + escapeHtml(sizeStr) + '</td></tr>';
+    html += '<tr><th>🕒 最后修改</th><td>' + escapeHtml(info.mtime || '—') + '</td></tr>';
+    html += '<tr><th>🔖 source 字段</th><td>' + escapeHtml(info.source || 'none') + '</td></tr>';
+    html += '<tr><th>🎬 类型</th><td>' + escapeHtml(info.type || '—') + '</td></tr>';
+    if (info.source === 'auto') {
+      var upLabel = info.upstream_name || '—';
+      var upExistsHtml = info.upstream_exists
+        ? '<span class="slirn-ok">✅ 存在</span>'
+        : '<span class="slirn-warn">⚠️ 已不存在</span>';
+      html += '<tr><th>📥 上游产物</th><td>' + escapeHtml(upLabel) + ' ' + upExistsHtml + '</td></tr>';
+    }
+    html += '</table>';
+    // 上游产物已删除时给个「重新自动获取」按钮
+    if (info.source === 'auto' && !info.upstream_exists) {
+      html += '<div class="slirn-mat-detail-actions">';
+      html += '<button class="slirn-btn slirn-btn-primary" data-action="fine-source-auto" data-kind="' +
+        escapeAttr(info.kind) + '">📥 重新自动获取</button>';
+      html += '</div>';
+    }
+    body.innerHTML = html;
+  }
+
+  // REQ-20260920-088：模态框点击遮罩关闭 + ESC 关闭（独立绑定，避免与其它 modal 冲突）
+  document.addEventListener('click', function(e) {
+    var overlay = e.target;
+    if (overlay && overlay.id === 'slirn-mat-detail-modal') {
+      overlay.hidden = true;
+    }
+  });
+  document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') {
+      var m = document.getElementById('slirn-mat-detail-modal');
+      if (m && !m.hidden) m.hidden = true;
+    }
+  });
+
   function fineSourceAuto(btn, kind) {
     // REQ-20260919-061：把素材来源切到「自动获取上游产物」。
     // 设计：两个按钮常驻（手动上传 / 自动获取），点哪个就用哪个，无需切换按钮组。
@@ -5543,6 +5641,19 @@
       var _kind = target.getAttribute('data-kind') || '';
       var _tid = target.getAttribute('data-task-id') || _fineTid();
       if (typeof fineMaterialPreview === 'function') fineMaterialPreview(_tid, _kind);
+    }
+    else if (action === 'fine-mat-detail') {
+      // REQ-20260920-088：素材路径详情按钮（弹窗显示完整路径 + 来源色块 + 文件元数据）
+      var _mdKind = target.getAttribute('data-kind') || '';
+      var _mdTid = target.getAttribute('data-task-id') || _fineTid();
+      if (_mdKind && _mdTid && typeof fineMatDetail === 'function') {
+        fineMatDetail(_mdTid, _mdKind);
+      }
+    }
+    else if (action === 'mat-detail-close') {
+      // REQ-20260920-088：关闭素材路径详情模态框
+      var _mdModal = document.getElementById('slirn-mat-detail-modal');
+      if (_mdModal) _mdModal.hidden = true;
     }
     else if (action === 'fine-crop-preset') {
       // REQ-20260919-061：视频源裁剪预设（全幅/16:9/1:1）

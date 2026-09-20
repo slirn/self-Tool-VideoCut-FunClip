@@ -7120,3 +7120,208 @@ def test_router_js_syntax_valid():
         f"node --check exit={r.returncode}\n"
         f"stderr={r.stderr[:1000]}"
     )
+
+
+# ============================================================
+# REQ-20260920-088：精剪素材路径详情（来源区分 + 完整路径展示）
+# ============================================================
+
+def test_mat_info_endpoint_defined_in_app_py():
+    """REQ-088 AC-5：后端必须定义 /slirn/api/material_info 端点。"""
+    FUNCLIP_ROOT = Path(__file__).resolve().parent.parent
+    app_path = FUNCLIP_ROOT / "slirn_home" / "app.py"
+    src = app_path.read_text(encoding="utf-8")
+    assert '"/slirn/api/material_info"' in src, (
+        "REQ-088 AC-5：app.py 必须注册 /slirn/api/material_info 端点"
+    )
+    assert "async def material_info" in src, (
+        "REQ-088 AC-5：app.py 必须定义 material_info 函数"
+    )
+
+
+def test_mat_info_endpoint_returns_required_fields():
+    """REQ-088 AC-5：端点返回字段必须含 ok / kind / source / source_label / fc_path / abs_path / exists / size_bytes / mtime / type。"""
+    FUNCLIP_ROOT = Path(__file__).resolve().parent.parent
+    app_path = FUNCLIP_ROOT / "slirn_home" / "app.py"
+    src = app_path.read_text(encoding="utf-8")
+    # 定位 material_info 函数体
+    idx = src.find("async def material_info")
+    assert idx >= 0
+    # 取往后 3500 字符作为函数体范围（足够覆盖）
+    body = src[idx: idx + 3500]
+    for field in ["kind", "source", "source_label", "fc_path", "abs_path",
+                  "exists", "size_bytes", "mtime", "type"]:
+        assert field in body, (
+            f"REQ-088 AC-5：material_info 函数体必须返回字段 {field!r}"
+        )
+
+
+def test_mat_info_distinguishes_three_sources():
+    """REQ-088 AC-3：material_info 必须根据 source 字段推 source_label（auto/upload/default_bgm）。"""
+    FUNCLIP_ROOT = Path(__file__).resolve().parent.parent
+    app_path = FUNCLIP_ROOT / "slirn_home" / "app.py"
+    src = app_path.read_text(encoding="utf-8")
+    idx = src.find("async def material_info")
+    assert idx >= 0
+    body = src[idx: idx + 3500]
+    # 3 个 source_label 推导分支
+    assert 'source_label = "上游产物"' in body, "REQ-088 AC-3：auto → 上游产物"
+    assert 'source_label = "用户上传"' in body, "REQ-088 AC-3：upload → 用户上传"
+    assert 'source_label = "系统默认 BGM"' in body, "REQ-088 AC-3：default_bgm → 系统默认 BGM"
+
+
+def test_upload_card_has_detail_button():
+    """REQ-088 AC-1：每个素材卡片底部必须有「🔍 详情」按钮（data-action=fine-mat-detail）。"""
+    FUNCLIP_ROOT = Path(__file__).resolve().parent.parent
+    app_path = FUNCLIP_ROOT / "slirn_home" / "app.py"
+    src = app_path.read_text(encoding="utf-8")
+    # 必须在素材卡 HTML 模板里
+    assert 'data-action="fine-mat-detail"' in src, (
+        "REQ-088 AC-1：素材卡片必须含 data-action=\"fine-mat-detail\" 按钮"
+    )
+    assert "🔍 详情" in src, "REQ-088 AC-1：按钮文本必须为「🔍 详情」"
+
+
+def test_upload_card_detail_button_disabled_when_no_path():
+    """REQ-088 AC-1：未上传时详情按钮 disabled（path 为空时 disabled 属性存在）。"""
+    FUNCLIP_ROOT = Path(__file__).resolve().parent.parent
+    app_path = FUNCLIP_ROOT / "slirn_home" / "app.py"
+    src = app_path.read_text(encoding="utf-8")
+    # 找 detail 按钮 HTML 块
+    idx = src.find('data-action="fine-mat-detail"')
+    assert idx >= 0
+    chunk = src[max(0, idx - 400): idx + 200]
+    # 必须用条件 disabled
+    assert 'disabled' in chunk, (
+        "REQ-088 AC-1：详情按钮 HTML 必须含 disabled 条件（path 为空时禁用）"
+    )
+    # tooltip 也要有
+    assert "请先上传或自动获取素材" in chunk or "title=" in chunk, (
+        "REQ-088 AC-1：禁用态必须有 tooltip 提示"
+    )
+
+
+def test_mat_detail_modal_dom_in_app_py():
+    """REQ-088 AC-2/AC-6：素材详情模态框 DOM 必须在 _render_fine_cut_zone 内。"""
+    FUNCLIP_ROOT = Path(__file__).resolve().parent.parent
+    app_path = FUNCLIP_ROOT / "slirn_home" / "slirn_home" / "app.py" if False else FUNCLIP_ROOT / "slirn_home" / "app.py"
+    src = app_path.read_text(encoding="utf-8")
+    # 模态框根容器
+    assert 'id="slirn-mat-detail-modal"' in src, (
+        "REQ-088 AC-2：模态框根容器必须含 id=slirn-mat-detail-modal"
+    )
+    # 详情 body
+    assert 'id="slirn-mat-detail-body"' in src, (
+        "REQ-088 AC-2：模态框 body 必须含 id=slirn-mat-detail-body"
+    )
+    # 关闭按钮
+    assert 'data-action="mat-detail-close"' in src, (
+        "REQ-088 AC-6：模态框必须有 data-action=mat-detail-close 关闭按钮"
+    )
+
+
+def test_router_js_mat_detail_handler():
+    """REQ-088 AC-2：router.js 必须有 fineMatDetail 函数 + click 代理。"""
+    FUNCLIP_ROOT = Path(__file__).resolve().parent.parent
+    router_js_path = FUNCLIP_ROOT / "slirn_home" / "static" / "router.js"
+    src = router_js_path.read_text(encoding="utf-8")
+    assert "function fineMatDetail" in src, (
+        "REQ-088 AC-2：router.js 必须定义 fineMatDetail 函数"
+    )
+    assert "function _renderMatDetailModal" in src, (
+        "REQ-088 AC-2：router.js 必须定义 _renderMatDetailModal 渲染函数"
+    )
+    # 调用 /material_info 端点
+    assert "/material_info" in src, (
+        "REQ-088 AC-2：router.js 必须调 /slirn/api/material_info 端点"
+    )
+    # action dispatch
+    assert "fine-mat-detail" in src, (
+        "REQ-088 AC-2：router.js 必须有 fine-mat-detail action 分支"
+    )
+    assert "mat-detail-close" in src, (
+        "REQ-088 AC-6：router.js 必须有 mat-detail-close action 分支"
+    )
+
+
+def test_router_js_esc_and_overlay_close():
+    """REQ-088 AC-6：ESC 键 + 点击遮罩关闭模态框。"""
+    FUNCLIP_ROOT = Path(__file__).resolve().parent.parent
+    router_js_path = FUNCLIP_ROOT / "slirn_home" / "static" / "router.js"
+    src = router_js_path.read_text(encoding="utf-8")
+    # ESC 关闭
+    assert "Escape" in src, "REQ-088 AC-6：router.js 必须监听 Escape 键"
+    # 点击遮罩关闭（modal id 引用）
+    assert "slirn-mat-detail-modal" in src, (
+        "REQ-088 AC-6：router.js 必须引用 slirn-mat-detail-modal 模态框"
+    )
+
+
+def test_router_js_renders_source_color_blocks():
+    """REQ-088 AC-3：_renderMatDetailModal 必须根据 source 给 4 种色块 class。"""
+    FUNCLIP_ROOT = Path(__file__).resolve().parent.parent
+    router_js_path = FUNCLIP_ROOT / "slirn_home" / "static" / "router.js"
+    src = router_js_path.read_text(encoding="utf-8")
+    idx = src.find("function _renderMatDetailModal")
+    assert idx >= 0
+    body = src[idx: idx + 3500]
+    for cls in ["mat-source-auto", "mat-source-upload", "mat-source-default", "mat-source-none"]:
+        assert cls in body, f"REQ-088 AC-3：_renderMatDetailModal 必须使用 {cls} 色块 class"
+
+
+def test_router_js_xss_safe_rendering():
+    """REQ-088 AC-2：所有用户/文件路径插入 DOM 前必须 HTML escape。"""
+    FUNCLIP_ROOT = Path(__file__).resolve().parent.parent
+    router_js_path = FUNCLIP_ROOT / "slirn_home" / "static" / "router.js"
+    src = router_js_path.read_text(encoding="utf-8")
+    idx = src.find("function _renderMatDetailModal")
+    assert idx >= 0
+    body = src[idx: idx + 3500]
+    # 至少 4 个字段走 escapeHtml / escapeAttr（kind / source_label / fc_path / abs_path / type / mtime / sizeStr / upstream_name）
+    esc_count = body.count("escapeHtml(") + body.count("escapeAttr(")
+    assert esc_count >= 6, (
+        f"REQ-088 AC-2：_renderMatDetailModal 至少 6 个字段用 escapeHtml/escapeAttr，实际 {esc_count} 个"
+    )
+
+
+def test_home_css_mat_detail_modal_styles():
+    """REQ-088 AC-3：home.css 必须含 4 种 mat-source-* 色块 + 模态框样式。"""
+    FUNCLIP_ROOT = Path(__file__).resolve().parent.parent
+    home_css_path = FUNCLIP_ROOT / "slirn_home" / "static" / "home.css"
+    src = home_css_path.read_text(encoding="utf-8")
+    # 4 种色块 class
+    for cls in ["mat-source-auto", "mat-source-upload", "mat-source-default", "mat-source-none"]:
+        assert f".{cls}" in src, f"REQ-088 AC-3：home.css 必须定义 .{cls} 色块"
+    # 模态框容器 + 表格样式
+    assert ".slirn-mat-detail-modal" in src, "REQ-088 AC-2：home.css 必须定义模态框容器样式"
+    assert ".slirn-mat-detail-table" in src, "REQ-088 AC-2：home.css 必须定义详情表格样式"
+    assert ".slirn-mat-detail-source" in src, "REQ-088 AC-3：home.css 必须定义色块样式"
+
+
+def test_router_js_mat_detail_xss_safe():
+    """REQ-088 回归（防 REQ-087 同类 BUG）：router.js 必须 node --check 通过。"""
+    import subprocess
+    FUNCLIP_ROOT = Path(__file__).resolve().parent.parent
+    router_js_path = FUNCLIP_ROOT / "slirn_home" / "static" / "router.js"
+    r = subprocess.run(
+        ["node", "--check", str(router_js_path)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert r.returncode == 0, (
+        f"REQ-088 回归：router.js 语法错误\n"
+        f"node --check exit={r.returncode}\n"
+        f"stderr={r.stderr[:1000]}"
+    )
+
+
+def test_mat_detail_modal_close_action_in_router_js():
+    """REQ-088 AC-6：router.js 必须实现 mat-detail-close action（关闭按钮 + 遮罩 + ESC）。"""
+    FUNCLIP_ROOT = Path(__file__).resolve().parent.parent
+    router_js_path = FUNCLIP_ROOT / "slirn_home" / "static" / "router.js"
+    src = router_js_path.read_text(encoding="utf-8")
+    # 至少 3 处关闭逻辑：close 按钮 / overlay click / ESC
+    close_uses = src.count("mat-detail-modal")
+    assert close_uses >= 3, (
+        f"REQ-088 AC-6：router.js 必须至少 3 处引用 mat-detail-modal（close btn + overlay + ESC），实际 {close_uses} 处"
+    )
+

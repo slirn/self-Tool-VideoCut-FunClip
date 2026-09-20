@@ -2943,6 +2943,12 @@ def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
             f'{"disabled" if not has else ""} '
             f'title="{_esc("请先上传或自动获取素材") if not has else _esc("打开预览窗口（可缩放）")}">'
             f'👁️ 预览</button>'
+            # REQ-20260920-088：素材路径详情按钮（弹窗显示完整路径 + 来源色块 + 文件元数据）
+            f'<button class="slirn-btn slirn-btn-xs" data-action="fine-mat-detail" '
+            f'data-kind="{kind}" data-task-id="{_esc(task_id)}" '
+            f'{"disabled" if not path else ""} '
+            f'title="{_esc("请先上传或自动获取素材") if not path else _esc("查看完整路径 + 文件元数据")}">'
+            f'🔍 详情</button>'
             f'{auto_btn_html}'
             f'<div class="slirn-fine-upload-status" data-status-kind="{kind}">{status_text}</div>'
             f'{default_bgm_html}'
@@ -3314,6 +3320,21 @@ def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
         f'</div>'
     )
 
+    # REQ-20260920-088：素材路径详情模态框（弹窗显示完整路径 + 来源色块 + 文件元数据）
+    mat_detail_modal = (
+        f'<div class="slirn-modal-overlay" id="slirn-mat-detail-modal" hidden>'
+        f'<div class="slirn-modal-card slirn-mat-detail-modal">'
+        f'<div class="slirn-modal-title">🔍 素材路径详情</div>'
+        f'<div class="slirn-mat-detail-body" id="slirn-mat-detail-body">'
+        f'<div class="slirn-fine-profile-empty">加载中…</div>'
+        f'</div>'
+        f'<div style="display:flex; gap:10px; justify-content:center; margin-top:12px;">'
+        f'<button class="slirn-btn" data-action="mat-detail-close">关闭</button>'
+        f'</div>'
+        f'</div>'
+        f'</div>'
+    )
+
     # REQ-20260919-061a 用户反馈 v4：左右两列的前 2 个块固定为视频/视频源裁剪（左）、
     # 字幕/字幕字体设置（右）。剩余 4 块按主题续列：
     #   左列（视频主层相关）：视频位置 → 视频源裁剪 → 背景位置 → 背景音乐
@@ -3528,6 +3549,7 @@ def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
         f'{preview_box}'
         f'{fine_cols_html}'
         f'{import_modal}'
+        f'{mat_detail_modal}'
         f'</div>'
     )
 
@@ -5573,6 +5595,81 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         文件缺失则灰显，避免运行时崩溃。
         """
         return _ok(bgms=_get_default_bgms())
+
+    # ---------- REQ-20260920-088：素材路径详情 ----------
+    @app.app.post("/slirn/api/material_info")
+    async def material_info(body: dict = Body(default_factory=dict)):
+        """查指定素材的物理路径 + 文件元数据（用于「🔍 详情」模态框）。
+
+        Body: {task_id: str, kind: str}
+        Return: {ok, kind, source, source_label, fc_path, abs_path, exists,
+                 size_bytes, mtime, type, upstream_name, upstream_exists}
+        """
+        from datetime import datetime
+
+        task_id = (body.get("task_id") or "").strip()
+        kind = (body.get("kind") or "").strip()
+        if not task_id:
+            return _err("缺少 task_id")
+        if kind not in _FINE_MATERIAL_KINDS:
+            return _err(f"非法素材类型: {kind!r}")
+        try:
+            mgr.get(task_id)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+        fc = _get_fine_compose(mgr, task_id)
+        mat = (fc.get("materials") or {}).get(kind) or {}
+        fc_path = mat.get("path") or ""
+        # 推 source
+        source = mat.get("source") or ""
+        if not source and fc_path:
+            source = "upload"  # 兜底：旧数据没 source 字段
+        # audio 来自 materials/audio/<id>.mp3 → 系统默认 BGM 复制品
+        source_label = ""
+        if kind == "audio" and fc_path.startswith(f"tasks/{task_id}/materials/audio/"):
+            source = "default_bgm"
+            source_label = "系统默认 BGM"
+        elif source == "auto":
+            source_label = "上游产物"
+        elif source == "upload":
+            source_label = "用户上传"
+        # 解析物理路径（复用 _resolve_mat_abs 3 候选兜底）
+        abs_path = None
+        if fc_path:
+            abs_path = _resolve_mat_abs(mgr, task_id, fc.get("materials", {}), kind)
+        # stat
+        size_bytes = 0
+        mtime = ""
+        exists = False
+        if abs_path is not None and abs_path.exists():
+            exists = True
+            try:
+                st = abs_path.stat()
+                size_bytes = st.st_size
+                mtime = datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+            except OSError:
+                pass
+        # 上游产物信息（仅 auto kind）
+        upstream_name = ""
+        upstream_exists = None
+        if kind in _FINE_AUTO_KINDS:
+            upstream_name = _fine_upstream_label(task_id, kind, mgr)
+            upstream_exists = bool(_fine_upstream_path(task_id, kind, mgr))
+        # type 字段
+        type_str = {"video": "video", "subtitle": "subtitle", "audio": "audio"}.get(kind, "image")
+        return _ok(
+            kind=kind,
+            source=source,
+            source_label=source_label,
+            fc_path=fc_path,
+            abs_path=str(abs_path) if abs_path else "",
+            exists=exists,
+            size_bytes=size_bytes,
+            mtime=mtime,
+            type=type_str,
+            upstream_name=upstream_name,
+            upstream_exists=upstream_exists,
+        )
 
     @app.app.post("/slirn/api/select_default_bgm")
     async def select_default_bgm(body: dict = Body(default_factory=dict)):
