@@ -1702,8 +1702,26 @@ def _ffmpeg_filter_path(p: Path) -> str:
     return s
 
 
-def _ass_force_style(font: dict) -> str:
-    """REQ-20260919-061 Phase B：把 font 设置转成 ASS force_style（libass 字幕滤镜用）。"""
+def _ass_force_style(font: dict, layout: dict | None = None) -> str:
+    """REQ-20260919-061 Phase B：把 font 设置转成 ASS force_style（libass 字幕滤镜用）。
+
+    REQ-20260920-099：新增可选 ``layout`` 参数（来自 ``fc.layout`` dict）。
+    传入时按 ``layout.subtitle.x`` / ``layout.subtitle.y`` 推导字幕在画布上的位置：
+    - subtitle.y > 0 → ``MarginV = H - subtitle.y``
+      （Alignment=2 bottom → baseline 到画布底的距离，字幕基线画在 y 处）
+    - subtitle.x > 0 → 按 Alignment 计算水平偏移：
+        * left  (Alignment=1) → MarginL = subtitle.x
+        * right (Alignment=3) → MarginR = W - subtitle.x
+        * center / center_offset (Alignment=2) →
+          center_x = subtitle.x - left_offset，
+          MarginR = W - 2*center_x
+          （center_offset 时再向左偏 font.left_offset，复用 REQ-097 语义）
+    ``layout=None`` 或 subtitle.x/y == 0 → 退回到纯 font 旧逻辑。
+
+    REQ-20260920-099 Phase C：本函数保留 force_style 字符串生成，但
+    ``_assemble_fine_filter`` 现在改用 ``ass=`` 滤镜（直接喂 ASS 文件），
+    因此该字符串仅用于「快速参照 / 测试断言」，运行时不再下发到 ffmpeg。
+    """
     family_map = {
         "STHeitiMedium": "STHeiti Medium",
         "Noto Sans CJK SC": "Noto Sans CJK SC",
@@ -1723,16 +1741,51 @@ def _ass_force_style(font: dict) -> str:
         parts.append("Bold=1")
     align_map = {"left": 1, "center": 2, "right": 3, "center_offset": 2}
     align_val = font.get("align", "center")
-    parts.append(f"Alignment={align_map.get(align_val, 2)}")
-    # REQ-20260920-097：居中+左偏移 → Alignment=2 配合 MarginR=2*N 把居中文字左移 N 像素
-    # （ASS 居中 x = (MarginL + W - MarginR) / 2，MarginR 加大会把居中点往左拉）。
+    align = align_map.get(align_val, 2)
+    parts.append(f"Alignment={align}")
+
+    # REQ-20260920-099：从 layout.subtitle 读水平 / 垂直坐标
+    sub_x, sub_y = 0, 0
+    if isinstance(layout, dict):
+        _sub_d = layout.get("subtitle") or {}
+        if isinstance(_sub_d, dict):
+            try:
+                sub_x = int(_sub_d.get("x", 0) or 0)
+            except (TypeError, ValueError):
+                sub_x = 0
+            try:
+                sub_y = int(_sub_d.get("y", 0) or 0)
+            except (TypeError, ValueError):
+                sub_y = 0
+
+    # 垂直：subtitle.y > 0 → MarginV = H - subtitle.y（baseline 到画布底的距离）
+    if sub_y > 0:
+        margin_v = max(0, _FINE_DESIGN_H - sub_y)
+        parts.append(f"MarginV={margin_v}")
+
+    # 水平：center_offset 时读 font.left_offset；与 subtitle.x 复合（center/center_offset）
     if align_val == "center_offset":
         try:
             offset_px = int(font.get("left_offset", 0) or 0)
         except (TypeError, ValueError):
             offset_px = 0
-        if offset_px > 0:
-            parts.append(f"MarginR={offset_px * 2}")
+    else:
+        offset_px = 0
+
+    if sub_x > 0:
+        if align == 1:  # left
+            margin_l = max(0, sub_x)
+            parts.append(f"MarginL={margin_l}")
+        elif align == 3:  # right
+            margin_r = max(0, _FINE_DESIGN_W - sub_x)
+            parts.append(f"MarginR={margin_r}")
+        else:  # center / center_offset (Alignment=2)
+            center_x = sub_x - offset_px
+            margin_r = max(0, _FINE_DESIGN_W - 2 * center_x)
+            parts.append(f"MarginR={margin_r}")
+    elif offset_px > 0:
+        # subtitle.x = 0 但 align=center_offset + left_offset > 0 → REQ-097 旧逻辑
+        parts.append(f"MarginR={offset_px * 2}")
     sw = int(font.get("stroke_width") or 0)
     if sw > 0:
         # ASS stroke_color #RRGGBB → &H00BBGGRR
@@ -1750,6 +1803,215 @@ def _ass_force_style(font: dict) -> str:
         parts.append("BorderStyle=4")  # 背景框
         parts.append(f"BackColour=&H{alpha_hex}{bc.upper()}")
     return ",".join(parts)
+
+
+def _ass_style_line(font: dict, layout: dict | None, W: int, H: int) -> dict:
+    """REQ-20260920-099 Phase C：把 ``_ass_force_style`` 的力扣串「解构」成 dict，
+    供 ``_srt_to_ass`` 写 ASS Style 行。
+
+    返回 dict（含 22 列，与 ASS V4+ Style Format 一一对应）：
+        ``name, fontname, fontsize, primary_colour, secondary_colour,
+        outline_colour, back_colour, bold, italic, underline, strike_out,
+        scale_x, scale_y, spacing, angle, border_style, outline, shadow,
+        alignment, margin_l, margin_r, margin_v, encoding``
+
+    注：ASS Style 写「绝对值」，不能复用 force_style 串（force_style 是
+    libass 的 overlay 机制，只对单 Style 行覆盖；ASS 文件必须写到底层 Style）。
+    """
+    family_map = {
+        "STHeitiMedium": "STHeiti Medium",
+        "Noto Sans CJK SC": "Noto Sans CJK SC",
+    }
+    family = family_map.get(font["family"], font["family"])
+    fs = int(font["size"])
+    # PrimaryColour = &H00BBGGRR
+    tc_raw = font.get("color", "#FFFFFF")
+    primary = "&H00FFFFFF"
+    if isinstance(tc_raw, str):
+        tc = tc_raw.lstrip("#")
+        if len(tc) == 6 and all(c in "0123456789abcdefABCDEF" for c in tc):
+            tc_bgr = tc[4:6] + tc[2:4] + tc[0:2]
+            primary = f"&H00{tc_bgr.upper()}"
+    # OutlineColour
+    sc_raw = font.get("stroke_color", "#000000")
+    outline_colour = "&H00000000"
+    sw = int(font.get("stroke_width") or 0)
+    if isinstance(sc_raw, str):
+        sc = sc_raw.lstrip("#")
+        if len(sc) == 6:
+            sc = sc[4:6] + sc[2:4] + sc[0:2]
+            outline_colour = f"&H00{sc.upper()}"
+    # BackColour（含背景框 alpha）
+    back_colour = "&H00000000"
+    border_style = 1  # 1=stroke+shadow；4=opaque box
+    if font.get("bg_enabled"):
+        border_style = 4
+        bc_raw = font.get("bg_color", "#000000")
+        if isinstance(bc_raw, str):
+            bc = bc_raw.lstrip("#")
+            if len(bc) == 6:
+                bc = bc[4:6] + bc[2:4] + bc[0:2]
+                op = float(font.get("bg_opacity", 0.6))
+                alpha_hex = format(int((1.0 - op) * 255), "02X")
+                back_colour = f"&H{alpha_hex}{bc.upper()}"
+
+    bold = -1 if font.get("bold") else 0  # -1 = True (libass)；ASS 用 1=否 0
+    # ASS Bold: 1=Bold on, 0=off；force_style 用 -1 表示粗体。统一为 1。
+    bold = 1 if font.get("bold") else 0
+    italic = 0
+    underline = 0
+    strike_out = 0
+    scale_x = 100
+    scale_y = 100
+    spacing = 0
+    angle = 0
+    shadow = 0  # 0=无 shadow（stroke 已经够用）
+    if sw == 0:
+        outline = 0
+    else:
+        outline = sw
+
+    align_map = {"left": 1, "center": 2, "right": 3, "center_offset": 2}
+    align_val = font.get("align", "center")
+    alignment = align_map.get(align_val, 2)
+
+    # 水平/垂直 margin 推导（与 _ass_force_style 同步）
+    sub_x, sub_y = 0, 0
+    if isinstance(layout, dict):
+        _sub_d = layout.get("subtitle") or {}
+        if isinstance(_sub_d, dict):
+            try:
+                sub_x = int(_sub_d.get("x", 0) or 0)
+            except (TypeError, ValueError):
+                sub_x = 0
+            try:
+                sub_y = int(_sub_d.get("y", 0) or 0)
+            except (TypeError, ValueError):
+                sub_y = 0
+
+    margin_v = 0
+    if sub_y > 0:
+        margin_v = max(0, H - sub_y)
+
+    if align_val == "center_offset":
+        try:
+            offset_px = int(font.get("left_offset", 0) or 0)
+        except (TypeError, ValueError):
+            offset_px = 0
+    else:
+        offset_px = 0
+
+    margin_l = 0
+    margin_r = 0
+    if sub_x > 0:
+        if alignment == 1:
+            margin_l = max(0, sub_x)
+        elif alignment == 3:
+            margin_r = max(0, W - sub_x)
+        else:
+            center_x = sub_x - offset_px
+            margin_r = max(0, W - 2 * center_x)
+    elif offset_px > 0:
+        margin_r = max(0, offset_px * 2)
+
+    return {
+        "name": "Default",
+        "fontname": family,
+        "fontsize": fs,
+        "primary_colour": primary,
+        "secondary_colour": "&H000000FF",
+        "outline_colour": outline_colour,
+        "back_colour": back_colour,
+        "bold": bold,
+        "italic": italic,
+        "underline": underline,
+        "strike_out": strike_out,
+        "scale_x": scale_x,
+        "scale_y": scale_y,
+        "spacing": spacing,
+        "angle": angle,
+        "border_style": border_style,
+        "outline": outline,
+        "shadow": shadow,
+        "alignment": alignment,
+        "margin_l": margin_l,
+        "margin_r": margin_r,
+        "margin_v": margin_v,
+        "encoding": 1,  # 1 = Default (English/Western)；中文字体仍能 fallback
+    }
+
+
+def _srt_to_ass(srt_entries: list[dict], font: dict, layout: dict | None,
+                W: int, H: int) -> str:
+    """REQ-20260920-099 Phase C：把 SRT entries + font/layout 生成 ASS 字符串。
+
+    关键差异（vs 用 ``subtitles=`` 滤镜让 ffmpeg 自动转 SRT→ASS）：
+    - ``subtitles=`` 会用默认 PlayResX=384 / PlayResY=288 转 ASS，导致 font size 与
+      MarginL/R/V 都在 384×288 坐标里计算，与视频 1920×1080 像素不一致 → 文字会
+      被自动放大 5 倍 + MarginL/R 缩放不对，结果就是 19 字中文被 libass 强行 wrap
+      成每行一字（看上去「字幕消失了」）。
+    - 这里显式写 PlayResX=W / PlayResY=H，使 force_style 的字号、margin 都在
+      实际视频像素坐标系计算，文字大小 / 位置与编辑器参数一致。
+
+    返回完整 ASS v4.00+ 文本（含 [Script Info] / [V4+ Styles] / [Events]）。
+    每个 Dialogue 的 MarginL/R/V 设为 0（事件级 override），让 Style 行的值生效。
+    """
+    style = _ass_style_line(font, layout, W, H)
+    style_line = ",".join(str(style[k]) for k in [
+        "name", "fontname", "fontsize", "primary_colour", "secondary_colour",
+        "outline_colour", "back_colour", "bold", "italic", "underline",
+        "strike_out", "scale_x", "scale_y", "spacing", "angle", "border_style",
+        "outline", "shadow", "alignment", "margin_l", "margin_r", "margin_v",
+        "encoding",
+    ])
+
+    def _ms_to_ass_time(ms: int) -> str:
+        """整数毫秒 → ASS 时间 H:MM:SS.cc（厘秒 = 1/100 秒；ASS 默认单位）。"""
+        if ms < 0:
+            ms = 0
+        h = ms // 3_600_000
+        m = (ms % 3_600_000) // 60_000
+        s = (ms % 60_000) // 1_000
+        cs = (ms % 1_000) // 10  # 厘秒（centisecond）
+        return f"{h:d}:{m:02d}:{s:02d}.{cs:02d}"
+
+    # ASS \n 是硬换行；SRT 文本里的换行要转成 \N 才能在 ASS 里真换行
+    events = []
+    for ent in srt_entries:
+        text = str(ent.get("text", "")).replace("\r\n", "\n").replace("\n", r"\N")
+        start_ms = int(ent["start_ms"])
+        end_ms = int(ent["end_ms"])
+        if end_ms <= start_ms:
+            continue
+        start = _ms_to_ass_time(start_ms)
+        end = _ms_to_ass_time(end_ms)
+        # MarginL/R/V 在 Dialogue 设为 0 → 强制使用 Style 行的值
+        events.append(
+            f"Dialogue: 0,{start},{end},Default,,0,0,0,,{text}"
+        )
+
+    return (
+        "[Script Info]\n"
+        "; Generated by slirn (REQ-20260920-099 Phase C)\n"
+        "ScriptType: v4.00+\n"
+        f"PlayResX: {W}\n"
+        f"PlayResY: {H}\n"
+        "ScaledBorderAndShadow: yes\n"
+        "YCbCr Matrix: None\n"
+        "\n"
+        "[V4+ Styles]\n"
+        "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
+        "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, "
+        "ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, "
+        "Alignment, MarginL, MarginR, MarginV, Encoding\n"
+        f"Style: {style_line}\n"
+        "\n"
+        "[Events]\n"
+        "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, "
+        "Effect, Text\n"
+        + "\n".join(events)
+        + ("\n" if events else "")
+    )
 
 
 # REQ-20260920-079：bg/cover/reference 超大图自动缩放（防 ffmpeg OOM 卡死）
@@ -1887,7 +2149,7 @@ def _build_fine_filter(fc: dict, W: int, H: int) -> tuple[list[str], list[str], 
     # 4. 字幕 burn-in（force_style 用 font 设置）
     sub_mat = materials.get("subtitle") or {}
     if layout["subtitle"]["enabled"] and sub_mat.get("path"):
-        fs = _ass_force_style(font)
+        fs = _ass_force_style(font, layout)
         # force_style 含逗号，filter graph 用逗号分隔参数，所以 force_style 内不能用逗号
         # 我们已经把逗号作为参数分隔，所以单字符串内不能含逗号；上面已用 , 作分隔
         # 但 force_style 子串里有逗号时会被解析错 — 用 \\, 转义不靠谱，改用半角 ;?
@@ -1912,8 +2174,15 @@ def _assemble_fine_filter(
     mgr,
     duration: float | None,
     preview_start: float = 0.0,
+    *,
+    combo: dict | None = None,
 ) -> dict:
     """REQ-20260919-074：从 fc 组装 ffmpeg 输入参数 + filter_complex（同步/异步共用）。
+
+    REQ-20260920-098：新增 keyword-only 参数 ``combo``，用于按需覆盖 fc.json 里的
+    5 个元素 enabled 状态（``{video, subtitle, cover, bg, audio}`` 各 True/False）。
+    覆盖只作用在内存中的 ``fc`` 对象，**不会写回 fc.json**；调用方负责传入正确
+    状态。``combo=None``（默认）→ 行为与旧版完全一致，仅依赖 fc.json。
 
     返回 dict（成功）：
         {
@@ -1931,6 +2200,14 @@ def _assemble_fine_filter(
     from slirn_home.compose_service import parse_srt, format_srt
 
     fc = _get_fine_compose(mgr, task_id)
+    # REQ-20260920-098：combo 瞬时覆盖（不改写 fc.json，不落盘）
+    if combo:
+        layout_obj = fc.setdefault("layout", {})
+        for _k in ("video", "subtitle", "cover", "bg"):
+            if _k in combo:
+                layout_obj.setdefault(_k, {})["enabled"] = bool(combo[_k])
+        if "audio" in combo:
+            fc.setdefault("audio", {})["enabled"] = bool(combo["audio"])
     layout = fc["layout"]
     materials = fc["materials"]
     output_cfg = fc["output"]
@@ -2084,36 +2361,57 @@ def _assemble_fine_filter(
     if layout["subtitle"]["enabled"] and sub_mat.get("path"):
         sub_path = _resolve_mat_abs(mgr, task_id, materials, "subtitle")
         if sub_path and sub_path.exists():
-            fs = _ass_force_style(fc["font"])
-            sub_filter_path = sub_path
-            if preview_offset_ms > 0:
-                try:
-                    src_text = sub_path.read_text(encoding="utf-8-sig")
-                    src_entries = parse_srt(src_text)
+            # REQ-20260920-099 Phase C：直接生成 ASS 字符串 + 写临时文件，
+            # 用 ``ass=`` 滤镜而非 ``subtitles=`` 滤镜。理由：
+            # 1. ``subtitles=`` 会用默认 PlayResX=384 / PlayResY=288 转 SRT→ASS，
+            #    导致 font size 与 margin 都在 384×288 坐标里算，与实际视频像素
+            #    不一致 → 中文被放大 5 倍、margin 错位 → wrap 后字符消失。
+            # 2. 改用 ``ass=`` + 显式 PlayResX=W / PlayResY=H 后，所有坐标都在
+            #    视频像素系，与参数卡的 x/y/font_size 完全对应。
+            try:
+                src_text = sub_path.read_text(encoding="utf-8-sig")
+                src_entries = parse_srt(src_text)
+                if preview_offset_ms > 0:
                     shifted: list[dict] = []
                     for ent in src_entries:
                         s = max(0, int(ent["start_ms"]) - preview_offset_ms)
                         e = max(0, int(ent["end_ms"]) - preview_offset_ms)
                         if e <= s:
                             continue
-                        shifted.append({"id": len(shifted) + 1, "start_ms": s,
-                                        "end_ms": e, "text": ent.get("text", "")})
-                    if shifted:
-                        _tfh = _tf.NamedTemporaryFile(
-                            mode="w", suffix=".srt", encoding="utf-8",
-                            delete=False, prefix="slirn_fine_srt_")
-                        _tfh.write(format_srt(shifted))
-                        _tfh.close()
-                        sub_filter_path = Path(_tfh.name)
-                        sub_input_tmp = sub_filter_path
-                except Exception as e:  # noqa: BLE001
-                    log.warning("preview_start 字幕偏移失败，回退原 SRT: %s", e)
-                    sub_filter_path = sub_path
-            sub_safe = _ffmpeg_filter_path(sub_filter_path)
-            chain.append(
-                f"{cur}subtitles='{sub_safe}':force_style='{fs}':si=0[vsub]"
-            )
-            cur = "[vsub]"
+                        shifted.append({
+                            "start_ms": s, "end_ms": e,
+                            "text": ent.get("text", ""),
+                        })
+                    src_entries = shifted
+                if not src_entries:
+                    raise ValueError("SRT 解析为空（offset 后无有效条目）")
+                ass_text = _srt_to_ass(src_entries, fc["font"], fc["layout"], W, H)
+                _tfh = _tf.NamedTemporaryFile(
+                    mode="w", suffix=".ass", encoding="utf-8",
+                    delete=False, prefix="slirn_fine_ass_")
+                _tfh.write(ass_text)
+                _tfh.close()
+                sub_filter_path = Path(_tfh.name)
+                sub_input_tmp = sub_filter_path
+            except Exception as e:  # noqa: BLE001
+                log.warning("生成 ASS 临时文件失败，回退 subtitles= 滤镜: %s", e)
+                sub_filter_path = sub_path
+                fs = _ass_force_style(fc["font"], fc["layout"])
+                sub_safe = _ffmpeg_filter_path(sub_filter_path)
+                chain.append(
+                    f"{cur}subtitles='{sub_safe}':force_style='{fs}':si=0[vsub]"
+                )
+                cur = "[vsub]"
+                # 跳过下面的 ass 分支
+                sub_path = None  # 触发下面的 else 分支（仅做 copy）
+            if sub_path is not None and sub_input_tmp is not None:
+                sub_safe = _ffmpeg_filter_path(sub_input_tmp)
+                # ``ass=`` 滤镜不支持 ``si=``（只有 ``subtitles=`` 支持）。
+                # 字幕偏移已在生成 ASS 文本时通过 ``start_ms/end_ms`` 减 preview_offset 生效。
+                chain.append(
+                    f"{cur}ass='{sub_safe}'[vsub]"
+                )
+                cur = "[vsub]"
         else:
             chain.append(f"{cur}copy[vsub]")
             cur = "[vsub]"
@@ -2339,16 +2637,21 @@ def _run_fine_render(
     output_path: Path,
     duration: float | None,
     preview_start: float = 0.0,
+    *,
+    combo: dict | None = None,
 ) -> dict:
     """REQ-20260919-061 Phase B：调 ffmpeg 渲染精剪视频（同步版本，预览/短任务用）。
 
     REQ-20260919-074：filter_complex 组装抽到 `_assemble_fine_filter`，本函数
     只负责 ffmpeg subprocess.run + 错误处理。timeout=120（预览 ≤30 秒足够）。
     1-3 小时的导出任务请走 `export_fine_video` → 后台线程 + 进度轮询。
+
+    REQ-20260920-098：新增 keyword-only 参数 ``combo``（dict | None），透传到
+    ``_assemble_fine_filter``。``None`` 时仅依赖 fc.json（向后兼容）。
     """
     import subprocess
 
-    asm = _assemble_fine_filter(task_id, mgr, duration, preview_start)
+    asm = _assemble_fine_filter(task_id, mgr, duration, preview_start, combo=combo)
     if not asm.get("ok"):
         return asm
     sub_input_tmp = asm["sub_input_tmp"]
@@ -2548,7 +2851,8 @@ def _probe_video_duration_ms(mgr, tid: str) -> int:
 
 def _run_fine_render_async(job: _RenderJob, tid: str, mgr, out_path: Path,
                           exec_id: str = "", outputs_dir: Path | None = None,
-                          preview_start: float = 0.0, duration: float | None = None) -> None:
+                          preview_start: float = 0.0, duration: float | None = None,
+                          *, combo: dict | None = None) -> None:
     """REQ-20260919-074：后台 daemon 线程跑 ffmpeg（1-3 小时不再超时）。
 
     写入 job.state/progress_pct/elapsed_sec/speed_x/eta_sec/progress_time_ms/
@@ -2558,15 +2862,20 @@ def _run_fine_render_async(job: _RenderJob, tid: str, mgr, out_path: Path,
     用于在多出口（assemble 失败 / FileNotFound / cancelled / returncode 非 0 /
     returncode 0）都补 record_finish。失败也写（status="failed"）。
 
-    REQ-20260920-091：combo-test 调试面板可指定开始时间 + 时长（不导完整视频）。
+    REQ-20260920-091：开始时间 + 时长（不导完整视频）。
     缺省 preview_start=0.0 / duration=None → 等价于跑完整视频。
+
+    REQ-20260920-098：新增 keyword-only 参数 ``combo``（dict | None），透传到
+    ``_assemble_fine_filter``。``None`` 时仅依赖 fc.json（向后兼容）。
     """
     job.state = "running"
     job.started_at = time.monotonic()
     job.wall_started_at = time.time()
 
     # REQ-20260920-091：用调用方传入的 time 参数（无值则导出完整视频，保持向后兼容）
-    asm = _assemble_fine_filter(tid, mgr, duration=duration, preview_start=preview_start)
+    # REQ-20260920-098：combo 也透传
+    asm = _assemble_fine_filter(tid, mgr, duration=duration, preview_start=preview_start,
+                                combo=combo)
     if not asm.get("ok"):
         job.state = "failed"
         job.error = asm.get("error", "filter 组装失败")
@@ -3761,46 +4070,8 @@ def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
         f'{bg_detect_block}'
         f'</details>'
         f'{combined_actions_bar}'
-        # REQ-20260920-090：合成元素组合面板 —— 5-checkbox 一键合成入口
-        # REQ-20260920-091：加开始时间 + 时长（避免跑完整 1-3 小时视频）
-        # REQ-20260920-092 v2：按钮重命名「一键合成」（不是测试）—— 直接弹视频播放窗口
-        f'<details class="slirn-fine-section slirn-combo-test-details" id="slirn-combo-test-details" open>'
-        f'<summary class="slirn-fine-section-summary">🎬 一键合成 <span class="slirn-fine-section-status">勾选要合成的元素 + 时间参数</span></summary>'
-        f'<div class="slirn-combo-test-block">'
-        f'<div class="slirn-form-hint">💡 勾选要合成的元素 → 点「🚀 一键合成」→ 自动弹视频播放窗口查看。可点「↩️ 还原」回到上次配置。</div>'
-        f'<div class="slirn-combo-test-row">'
-        f'<label><input type="checkbox" data-combo-kind="video" checked> 🎬 视频</label>'
-        f'<label><input type="checkbox" data-combo-kind="subtitle"> 📝 字幕</label>'
-        f'<label><input type="checkbox" data-combo-kind="cover"> 🖼 封面</label>'
-        f'<label><input type="checkbox" data-combo-kind="bg"> 🎨 背景图片</label>'
-        f'<label><input type="checkbox" data-combo-kind="audio" checked> 🎵 BGM</label>'
-        f'</div>'
-        # REQ-20260920-091：开始时间（时:分:秒）+ 时长（秒，2-30）
-        f'<div class="slirn-combo-test-time-row">'
-        f'<span class="slirn-fine-actions-label">⏱ 开始时间</span>'
-        f'<input type="number" id="slirn-combo-test-start-h" class="slirn-fine-num slirn-fine-preview-time" '
-        f'aria-label="开始时间（小时）" min="0" step="1" value="0" maxlength="2">'
-        f'<span class="slirn-fine-time-sep">:</span>'
-        f'<input type="number" id="slirn-combo-test-start-m" class="slirn-fine-num slirn-fine-preview-time" '
-        f'aria-label="开始时间（分钟）" min="0" max="59" step="1" value="0" maxlength="2">'
-        f'<span class="slirn-fine-time-sep">:</span>'
-        f'<input type="number" id="slirn-combo-test-start-s" class="slirn-fine-num slirn-fine-preview-time" '
-        f'aria-label="开始时间（秒）" min="0" max="59" step="1" value="0" maxlength="2">'
-        f'<span class="slirn-fine-actions-label">（时:分:秒）</span>'
-        f'<span class="slirn-fine-actions-label" style="margin-left:14px;">⏳ 时长</span>'
-        f'<input type="number" id="slirn-combo-test-duration" class="slirn-fine-num" '
-        f'aria-label="时长（秒，2-30）" min="2" max="30" step="1" value="10">'
-        f'<span class="slirn-fine-actions-label">秒（2–30）</span>'
-        f'</div>'
-        f'<div class="slirn-combo-test-actions">'
-        f'<button class="slirn-btn" data-action="combo-apply" data-task-id="{_esc(task_id)}">📝 应用勾选（写 fc）</button>'
-        f'<button class="slirn-btn slirn-btn-primary" data-action="combo-test" data-task-id="{_esc(task_id)}">🚀 一键合成</button>'
-        f'<button class="slirn-btn slirn-btn-xs" data-action="combo-diagnose" data-task-id="{_esc(task_id)}">🔍 仅诊断（不合成）</button>'
-        f'<button class="slirn-btn slirn-btn-xs" data-action="combo-restore" data-task-id="{_esc(task_id)}" hidden>↩️ 还原上次配置</button>'
-        f'</div>'
-        f'<div class="slirn-combo-test-output" id="slirn-combo-test-output-{_esc(task_id)}"></div>'
-        f'</div>'
-        f'</details>'
+        # REQ-20260920-098：「一键合成」两步流程已废弃 —— 删除组合测试面板
+        # 现在「生成预览」「导出最终视频」直接读参数卡的 .slirn-fine-enabled checkbox
         f'<div class="slirn-form-hint">💡 上传 5 个素材后调滑块调位置/缩放/字体；改动后 300ms 自动保存到当前任务。'
         f'点「💾 保存设置参数」会同时把当前参数另存为全局模板（未填模板名则弹窗要求填）。</div>'
         f'{preview_box}'
@@ -6212,8 +6483,13 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         except Exception:
             pass  # ffprobe 失败 → 不钳，让 ffmpeg 自己处理（最多产生 0-frame 报错）
         out_path = mgr.tasks_dir / tid / "outputs" / "fine_preview.mp4"
+        # REQ-20260920-098：combo 透传（None 时仅依赖 fc.json，向后兼容）
+        combo = body.get("combo")
+        if not isinstance(combo, dict):
+            combo = None
         result = _run_fine_render(tid, mgr, out_path,
-                                   duration=preview_dur, preview_start=preview_start)
+                                   duration=preview_dur, preview_start=preview_start,
+                                   combo=combo)
         # REQ-20260920-081：执行历史 — 同步渲染完成回填 finish
         if _exec_id:
             try:
@@ -6278,7 +6554,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         # 创建 job + 启线程
         job_id = f"job_{int(time.time() * 1000)}_{os.getpid()}"
         outputs_dir = mgr.tasks_dir / tid / "outputs"
-        # REQ-20260920-091：combo-test 调试面板可指定开始时间 + 时长（不导完整视频）
+        # REQ-20260920-091：开始时间 + 时长（不导完整视频）
         _start = float(body.get("preview_start") or 0.0)
         _dur = body.get("duration")
         _dur_f: float | None = float(_dur) if _dur is not None else None
@@ -6293,6 +6569,11 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             _JOB_REGISTRY[job_id] = job
         # REQ-20260920-084：写 .export_job.json 落盘文件，供页面刷新后回查
         _write_active_export_job(mgr, tid, job_id, "queued")
+
+        # REQ-20260920-098：combo 透传（None 时仅依赖 fc.json，向后兼容）
+        combo = body.get("combo")
+        if not isinstance(combo, dict):
+            combo = None
 
         # REQ-20260920-081：执行历史埋点（立即记 running；后台线程 4 个出口都补 finish）
         fc_for_extra = _get_fine_compose(mgr, tid)
@@ -6311,6 +6592,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         t = threading.Thread(
             target=_run_fine_render_async,
             args=(job, tid, mgr, out_path, _ext_exec, outputs_dir, _start, _dur_f),
+            kwargs={"combo": combo},
             daemon=True,
             name=f"fine-render-{job_id}",
         )

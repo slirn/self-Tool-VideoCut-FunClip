@@ -819,14 +819,14 @@ def test_run_fine_render_subtitle_before_cover_concat(tmp_path, monkeypatch):
     assert res["ok"] is True
 
     f = captured["filter"]
-    # 字幕 filter 必须存在
-    assert "subtitles=" in f, "应有 subtitle filter 烧录"
-    # 关键顺序：subtitle filter 的索引位置必须在 cover concat 之前
-    sub_pos = f.find("subtitles=")
+    # 字幕 filter 必须存在（REQ-099 Phase C 改用 ass= 滤镜替代 subtitles=）
+    assert "ass='" in f, "应有 ass= filter 烧录（Phase C：SRT→ASS 临时文件）"
+    # 关键顺序：字幕 filter 的索引位置必须在 cover concat 之前
+    sub_pos = f.find("ass='")
     concat_pos = f.find("concat=n=2:v=1:a=0")
     assert sub_pos >= 0 and concat_pos >= 0
     assert sub_pos < concat_pos, (
-        f"subtitle filter (pos={sub_pos}) 必须在 cover concat (pos={concat_pos}) 之前，"
+        f"字幕 filter (pos={sub_pos}) 必须在 cover concat (pos={concat_pos}) 之前，"
         f"否则字幕会显示在封面上且 SRT 时间从 0 起算"
     )
     # 封面 input + concat 都还在
@@ -1462,7 +1462,8 @@ def test_render_fine_cut_zone_renders_number_input_and_stepper_per_slider(tmp_pa
     # REQ-20260919-066 预览开始时间改 时:分:秒 三段 → 23（class 多值 `slirn-fine-num slirn-fine-preview-time`）
     #   上面正则要宽松：要么 class 字符串里就以 slirn-fine-num 开头并紧跟 " 或空格
     # REQ-091：+4（start-h/m/s + duration）= 27
-    assert len(re.findall(r'class="slirn-fine-num(?:\s|")', html)) == 27
+    # REQ-20260920-098：-4（一键合成面板删除，移除 4 个 combo-test 输入）= 23
+    assert len(re.findall(r'class="slirn-fine-num(?:\s|")', html)) == 23
     # 不再有自定义 step-btn（与浏览器原生 stepper 重复，已移除）
     assert len(re.findall(r'slirn-fine-step-btn', html)) == 0
     # 也不再需要 num-group / step-stack 包装容器
@@ -4509,6 +4510,230 @@ def test_ass_force_style_center_no_marginr(tmp_path: Path):
     assert "MarginR" not in fs, f"align=center 不应插 MarginR：{fs}"
 
 
+def test_ass_force_style_subtitle_y_sets_marginv(tmp_path: Path):
+    """REQ-099：layout.subtitle.y > 0 应转为 MarginV = H - subtitle.y（baseline 位置）。"""
+    from slirn_home.app import _ass_force_style, _FINE_DESIGN_H
+    f = {"family": "STHeitiMedium", "size": 20, "color": "#FFFFFF",
+         "stroke_width": 2, "stroke_color": "#000000", "bold": True,
+         "align": "center_offset", "left_offset": 434}
+    # y=1050 → MarginV = 1080 - 1050 = 30
+    fs = _ass_force_style(f, {"subtitle": {"x": 672, "y": 1050, "enabled": True}})
+    assert f"MarginV={_FINE_DESIGN_H - 1050}" in fs, (
+        f"subtitle.y=1050 应输出 MarginV=30，force_style={fs}"
+    )
+
+
+def test_ass_force_style_subtitle_y_zero_keeps_default(tmp_path: Path):
+    """REQ-099：subtitle.y=0 视为「未设置」 → 不输出 MarginV，保留 ASS 默认（最底端）。"""
+    from slirn_home.app import _ass_force_style, _FINE_FONT_DEFAULTS
+    f = dict(_FINE_FONT_DEFAULTS)
+    f["align"] = "center_offset"
+    f["left_offset"] = 0
+    fs = _ass_force_style(f, {"subtitle": {"x": 0, "y": 0, "enabled": True}})
+    assert "MarginV" not in fs, f"subtitle.y=0 不应输出 MarginV：{fs}"
+
+
+def test_ass_force_style_subtitle_x_center_offset_composes(tmp_path: Path):
+    """REQ-099：center_offset + subtitle.x → center_x = subtitle.x - left_offset，
+    MarginR = W - 2*center_x。"""
+    from slirn_home.app import _ass_force_style, _FINE_DESIGN_W
+    f = {"family": "STHeitiMedium", "size": 20, "color": "#FFFFFF",
+         "stroke_width": 2, "stroke_color": "#000000", "bold": True,
+         "align": "center_offset", "left_offset": 434}
+    # x=672, left_offset=434 → center_x=238, MarginR = 1920 - 476 = 1444
+    fs = _ass_force_style(f, {"subtitle": {"x": 672, "y": 0, "enabled": True}})
+    expected_marginr = _FINE_DESIGN_W - 2 * (672 - 434)  # = 1444
+    assert f"MarginR={expected_marginr}" in fs, (
+        f"subtitle.x=672 + left_offset=434 应输出 MarginR={expected_marginr}，"
+        f"force_style={fs}"
+    )
+    # 同时不应有重复 MarginR
+    assert fs.count("MarginR=") == 1, f"不应输出多个 MarginR：{fs}"
+
+
+def test_ass_force_style_subtitle_x_left_align(tmp_path: Path):
+    """REQ-099：align=left + subtitle.x → MarginL = subtitle.x（左边缘 = sub_x）。"""
+    from slirn_home.app import _ass_force_style
+    f = {"family": "STHeitiMedium", "size": 20, "color": "#FFFFFF",
+         "stroke_width": 2, "stroke_color": "#000000", "bold": True,
+         "align": "left", "left_offset": 0}
+    fs = _ass_force_style(f, {"subtitle": {"x": 200, "y": 800, "enabled": True}})
+    assert "Alignment=1" in fs
+    assert "MarginL=200" in fs, f"align=left + sub_x=200 应输出 MarginL=200：{fs}"
+    assert "MarginR" not in fs, f"align=left 不应输出 MarginR：{fs}"
+
+
+def test_ass_force_style_subtitle_x_right_align(tmp_path: Path):
+    """REQ-099：align=right + subtitle.x → MarginR = W - subtitle.x（右边缘 = sub_x）。"""
+    from slirn_home.app import _ass_force_style, _FINE_DESIGN_W
+    f = {"family": "STHeitiMedium", "size": 20, "color": "#FFFFFF",
+         "stroke_width": 2, "stroke_color": "#000000", "bold": True,
+         "align": "right", "left_offset": 0}
+    fs = _ass_force_style(f, {"subtitle": {"x": 1700, "y": 800, "enabled": True}})
+    assert "Alignment=3" in fs
+    assert f"MarginR={_FINE_DESIGN_W - 1700}" in fs, (
+        f"align=right + sub_x=1700 应输出 MarginR={_FINE_DESIGN_W - 1700}：{fs}"
+    )
+
+
+def test_ass_force_style_layout_none_preserves_legacy(tmp_path: Path):
+    """REQ-099：layout=None → 与旧版完全一致（仅依赖 font 字段）。"""
+    from slirn_home.app import _ass_force_style
+    f = {"family": "STHeitiMedium", "size": 16, "color": "#FFFFFF",
+         "stroke_width": 2, "stroke_color": "#000000", "bold": True,
+         "align": "center_offset", "left_offset": 334}
+    fs_legacy = _ass_force_style(f)
+    fs_with_layout_none = _ass_force_style(f, None)
+    assert fs_legacy == fs_with_layout_none, (
+        f"layout=None 应与旧版完全一致：legacy={fs_legacy!r}, none={fs_with_layout_none!r}"
+    )
+
+
+def test_assemble_fine_filter_subtitle_position(tmp_path: Path):
+    """REQ-099：_assemble_fine_filter 必须把 layout.subtitle.y 注入字幕样式里的 MarginV，
+    确保字幕出现在用户设定的 y 位置（而不是贴底边）。
+
+    REQ-099 Phase C：实现路径从「filter_complex 里的 force_style」改为
+    「写临时 ASS 文件 + ass= 滤镜」，所以验证点改为「ASS 文件内容含 MarginV=30
+    且 filter_complex 含 ass='...':」。
+    """
+    import sys
+    SLIRN_STANDALONE = Path("d:/Slirn/WorkSpaces/WaytoAGI/ALI/slirn-standalone")
+    if str(SLIRN_STANDALONE) not in sys.path:
+        sys.path.insert(0, str(SLIRN_STANDALONE))
+    from tasklib import TaskManager
+    from slirn_home.app import (
+        _assemble_fine_filter, _FINE_DESIGN_W, _FINE_DESIGN_H,
+        _get_fine_compose, _save_fine_compose,
+    )
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="sub-pos", original_video=video)
+    # 准备一个最小 SRT 字幕文件（路径相对 repo_root，与 _resolve_mat_abs 一致）
+    srt_path = (m.tasks_dir / t.task_id / "tmp" / "subs.srt")
+    srt_path.parent.mkdir(parents=True, exist_ok=True)
+    srt_path.write_text(
+        "1\n00:00:00,000 --> 00:00:05,000\nHello World\n",
+        encoding="utf-8",
+    )
+
+    # 写一个 fc.json：subtitle.y=1050 → MarginV=30
+    fc = _get_fine_compose(m, t.task_id)
+    fc["materials"]["video"] = {
+        "path": str(video.relative_to(m.repo_root)),
+        "type": "video",
+        "source": "upload",
+    }
+    fc["materials"]["subtitle"] = {
+        "path": str(srt_path.relative_to(m.repo_root)),
+        "type": "srt",
+        "source": "auto",
+    }
+    fc["layout"]["subtitle"]["x"] = 672
+    fc["layout"]["subtitle"]["y"] = 1050
+    fc["layout"]["subtitle"]["enabled"] = True
+    fc["font"]["align"] = "center_offset"
+    fc["font"]["left_offset"] = 434
+    _save_fine_compose(m, t.task_id, fc)
+
+    asm = _assemble_fine_filter(t.task_id, m, duration=3.0)
+    assert asm["ok"], asm
+    fc_str = asm["filter_complex"]
+
+    # Phase C：filter_complex 含 ass='...'，ASS 临时文件存在且含 MarginV=30
+    assert "ass='" in fc_str, (
+        f"组装后 filter_complex 应使用 ass= 滤镜（Phase C），"
+        f"实际 filter_complex:\n{fc_str}"
+    )
+    sub_tmp = asm.get("sub_input_tmp")
+    assert sub_tmp is not None and sub_tmp.exists(), (
+        f"应写出 ASS 临时文件供 ass= 滤镜使用，实际：{sub_tmp}"
+    )
+    ass_text = sub_tmp.read_text(encoding="utf-8")
+    assert f"PlayResX: {_FINE_DESIGN_W}" in ass_text, (
+        f"ASS 临时文件应含 PlayResX={_FINE_DESIGN_W}（避免 subtitles= 默认 384 缩放问题），"
+        f"实际 ASS：\n{ass_text[:400]}"
+    )
+    assert f",{_FINE_DESIGN_H - 1050},1" in ass_text, (
+        f"ASS Style 行应含 MarginV={_FINE_DESIGN_H - 1050}（来自 subtitle.y=1050），"
+        f"实际 ASS Style 行：\n"
+        + "\n".join(
+            ln for ln in ass_text.splitlines() if ln.startswith("Style:")
+        )
+    )
+
+
+def test_srt_to_ass_playresx_matches_frame_width():
+    """REQ-099 Phase C：_srt_to_ass 写出的 PlayResX/Y 必须等于视频像素 W×H。
+
+    旧版 subtitles= 滤镜默认 PlayResX=384 / PlayResY=288，会让 font size / margin
+    与视频像素系错位（5× 缩放） → 字幕被强行 wrap 成每行一字，看上去消失。
+    """
+    from slirn_home.app import _srt_to_ass, _FINE_DESIGN_W, _FINE_DESIGN_H
+    entries = [{"start_ms": 0, "end_ms": 1000, "text": "Hello"}]
+    font = {"family": "Noto Sans SC", "size": 20, "color": "#FFFFFF",
+            "bold": False, "align": "center"}
+    layout = {"subtitle": {"x": 0, "y": 0}}
+    ass = _srt_to_ass(entries, font, layout, _FINE_DESIGN_W, _FINE_DESIGN_H)
+    assert f"PlayResX: {_FINE_DESIGN_W}" in ass
+    assert f"PlayResY: {_FINE_DESIGN_H}" in ass
+
+
+def test_srt_to_ass_marginv_y_set():
+    """REQ-099 Phase C：subtitle.y > 0 → ASS Style 行 MarginV = H - y。"""
+    from slirn_home.app import _srt_to_ass, _ass_style_line, _FINE_DESIGN_W, _FINE_DESIGN_H
+    font = {"family": "X", "size": 20, "color": "#FFFFFF", "bold": False,
+            "align": "center"}
+    layout = {"subtitle": {"x": 0, "y": 1050}}
+    style = _ass_style_line(font, layout, _FINE_DESIGN_W, _FINE_DESIGN_H)
+    assert style["margin_v"] == _FINE_DESIGN_H - 1050, (
+        f"subtitle.y=1050 → MarginV={_FINE_DESIGN_H - 1050}，实际={style['margin_v']}"
+    )
+
+
+def test_srt_to_ass_center_x_offset_math():
+    """REQ-099 Phase C：center_offset 时 center_x = subtitle.x - left_offset → MarginR = W - 2*center_x。"""
+    from slirn_home.app import _ass_style_line, _FINE_DESIGN_W, _FINE_DESIGN_H
+    font = {"family": "X", "size": 20, "color": "#FFFFFF", "bold": False,
+            "align": "center_offset", "left_offset": 434}
+    layout = {"subtitle": {"x": 672, "y": 0}}
+    style = _ass_style_line(font, layout, _FINE_DESIGN_W, _FINE_DESIGN_H)
+    expected_center_x = 672 - 434  # = 238
+    expected_margin_r = _FINE_DESIGN_W - 2 * expected_center_x  # = 1444
+    assert style["margin_r"] == expected_margin_r, (
+        f"center_offset + x=672 + left_offset=434 → MarginR={expected_margin_r}，"
+        f"实际={style['margin_r']}"
+    )
+    assert style["alignment"] == 2  # Alignment=2 (center)
+
+
+def test_srt_to_ass_text_newlines_escaped():
+    """REQ-099 Phase C：SRT 多行文本的换行 → ASS 的 \\N（硬换行）。"""
+    from slirn_home.app import _srt_to_ass, _FINE_DESIGN_W, _FINE_DESIGN_H
+    entries = [{"start_ms": 0, "end_ms": 1000, "text": "第一行\n第二行"}]
+    font = {"family": "X", "size": 20, "color": "#FFFFFF", "bold": False,
+            "align": "center"}
+    layout = {"subtitle": {"x": 0, "y": 0}}
+    ass = _srt_to_ass(entries, font, layout, _FINE_DESIGN_W, _FINE_DESIGN_H)
+    assert r"\N" in ass, f"多行 SRT 文本应转成 \\N，实际 ASS：\n{ass}"
+    assert "第一行" in ass and "第二行" in ass
+
+
+def test_ass_style_line_bg_enabled_uses_borderstyle_4():
+    """REQ-099 Phase C：font.bg_enabled=True → BorderStyle=4（opaque box）+ BackColour 含 alpha。"""
+    from slirn_home.app import _ass_style_line, _FINE_DESIGN_W, _FINE_DESIGN_H
+    font = {"family": "X", "size": 20, "color": "#FFFFFF", "bold": False,
+            "align": "center", "bg_enabled": True, "bg_color": "#000000",
+            "bg_opacity": 0.6}
+    layout = {"subtitle": {"x": 0, "y": 0}}
+    style = _ass_style_line(font, layout, _FINE_DESIGN_W, _FINE_DESIGN_H)
+    assert style["border_style"] == 4
+    # opacity 0.6 → alpha = (1-0.6)*255 = 102 = 0x66 → BackColour 头两位是 66
+    assert style["back_colour"].startswith("&H66"), (
+        f"bg_opacity=0.6 → alpha=0x66，实际 BackColour={style['back_colour']}"
+    )
+
+
 def test_fine_font_defaults_has_left_offset(tmp_path: Path):
     """REQ-097：_FINE_FONT_DEFAULTS 必须含 left_offset 字段（默认 0，UI 按 bg_detect_cache 覆盖）。"""
     from slirn_home.app import _FINE_FONT_DEFAULTS
@@ -4849,22 +5074,25 @@ def test_run_fine_render_shifts_srt_for_preview_start(tmp_path: Path, monkeypatc
             fc_arg = cmd[i + 1]
             break
     assert fc_arg, f"未捕获到 -filter_complex，cmd={cmd[:5]}"
-    # 找 subtitles='...':force_style 行
+    # 找 ass='...': 行（REQ-099 Phase C 改用 ass= 滤镜；临时文件是 .ass）
     import re
-    m_sub = re.search(r"subtitles='([^']+)':force_style", fc_arg)
-    assert m_sub, f"未找到 subtitles 滤镜行，filter_complex={fc_arg[:400]}"
-    used_srt = m_sub.group(1)
+    m_sub = re.search(r"ass='([^']+)'", fc_arg)
+    assert m_sub, f"未找到 ass= 滤镜行，filter_complex={fc_arg[:400]}"
+    used_ass = m_sub.group(1)
     # _ffmpeg_filter_path 只改路径字符串（: → \\: 、\ → /），不影响文件内容
     # 反向还原：\:/ → :、/ → \\ → Windows 路径
-    real_path = Path(used_srt.replace(r"\:", ":").replace("/", "\\"))
-    assert real_path.exists(), f"ffmpeg 用的 SRT 不存在：{used_srt}"
+    real_path = Path(used_ass.replace(r"\:", ":").replace("/", "\\"))
+    assert real_path.exists(), f"ffmpeg 用的 ASS 不存在：{used_ass}"
     used_text = real_path.read_text(encoding="utf-8")
     # 期望：原 12..15 → 平移到 2..5（12-10=2, 15-10=5）；前两条丢弃
+    # Phase C：SRT 写进 ASS Dialogue 事件；text 内容保留，时间戳已按 preview_start 减
     assert "first" not in used_text and "second" not in used_text, \
-        f"应在预览窗口前的字幕应被丢弃，实际 SRT：{used_text}"
-    assert "third" in used_text, f"third 应保留，实际 SRT：{used_text}"
-    assert "00:00:02,000 --> 00:00:05,000" in used_text, \
-        f"third 应平移到 2..5 秒，实际 SRT：{used_text}"
+        f"应在预览窗口前的字幕应被丢弃，实际 ASS：{used_text}"
+    assert "third" in used_text, f"third 应保留，实际 ASS：{used_text}"
+    # ASS 时间格式 H:MM:SS.cc：2..5 秒 → 0:00:02.00 --> 0:00:05.00
+    assert "0:00:02.00,0:00:05.00" in used_text or \
+           "0:00:02.00,Default,,0,0,0,,third" in used_text, \
+        f"third 应平移到 2..5 秒（ASS 格式 H:MM:SS.cc），实际 ASS：{used_text}"
 
 
 def test_run_fine_render_zero_preview_start_uses_original_srt(tmp_path: Path, monkeypatch):
@@ -4894,6 +5122,11 @@ def test_run_fine_render_zero_preview_start_uses_original_srt(tmp_path: Path, mo
             return CompletedProcess(cmd, 0, "", "")
         return real_sp.run(cmd, *a, **kw)
     monkeypatch.setattr("subprocess.run", fake_run)
+    # 把 unlink 拦下来：否则 finally 会删掉临时 ASS 文件，测试就读不到了
+    import pathlib as _pl
+    def no_op_unlink(self, *a, **kw):
+        return None
+    monkeypatch.setattr(_pl.Path, "unlink", no_op_unlink)
 
     out_path = m.tasks_dir / t.task_id / "outputs" / "fine_preview.mp4"
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -4907,17 +5140,20 @@ def test_run_fine_render_zero_preview_start_uses_original_srt(tmp_path: Path, mo
             fc_arg = cmd[i + 1]
             break
     import re
-    m_sub = re.search(r"subtitles='([^']+)':force_style", fc_arg)
-    assert m_sub, "未找到 subtitles 滤镜行"
-    used_srt = m_sub.group(1)
-    # 解析后的 SRT 路径在 Windows 下转反斜杠后应等于原 srt_path
-    # _ffmpeg_filter_path 的反向逻辑：把 : → \\: \ → /（仅做转义，未重写盘符）
-    # 所以 used_srt 字符串里的盘符 / 路径分隔可能跟原 srt_path 字符串不完全一样
-    # 但内容应相同；直接 normalize 后比对
-    from os.path import normpath
-    real_used = used_srt.replace(r"\:", ":").replace("/", "\\")
-    assert normpath(real_used) == normpath(str(srt_path)), \
-        f"preview_start=0 应直接用原 SRT；实际：{real_used} vs 期望：{srt_path}"
+    m_sub = re.search(r"ass='([^']+)'", fc_arg)
+    assert m_sub, "未找到 ass= 滤镜行"
+    used_ass = m_sub.group(1)
+    # REQ-099 Phase C：即使 preview_start=0 也会写 ASS 临时文件（不再走 subtitles=
+    # 默认 SRT→ASS 转码，避免 PlayResX=384 缩放问题）。
+    # 所以这里只验证：ASS 临时文件存在，且 ASS 内容含原 SRT 条目（0..2 秒 hello）
+    real_used = used_ass.replace(r"\:", ":").replace("/", "\\")
+    assert Path(real_used).exists(), \
+        f"preview_start=0 也应写出 ASS 临时文件；实际：{real_used}"
+    used_text = Path(real_used).read_text(encoding="utf-8")
+    assert "hello" in used_text, \
+        f"ASS 内容应保留原 SRT 条目，实际 ASS：{used_text}"
+    assert "0:00:00.00" in used_text and "0:00:02.00" in used_text, \
+        f"ASS 时间戳 0..2 秒应原样保留，实际 ASS：{used_text}"
 
 
 # ---------- REQ-20260919-065：精剪参数 JSON 导出/导入 ----------
@@ -6267,7 +6503,8 @@ def test_render_fine_preview_writes_history(tmp_path: Path, monkeypatch):
     outputs_dir = m.tasks_dir / t.task_id / "outputs"
     outputs_dir.mkdir(parents=True, exist_ok=True)
     # 让 _run_fine_render 不实际跑 ffmpeg（避免缺 ffmpeg）
-    def fake_run(task_id, mgr, out_path, duration, preview_start=0.0):
+    # REQ-20260920-098：_run_fine_render 新增 combo 关键字参数，fake_run 必须接受
+    def fake_run(task_id, mgr, out_path, duration, preview_start=0.0, *, combo=None):
         return {"ok": True, "path": "fake.mp4"}
     monkeypatch.setattr("slirn_home.app._run_fine_render", fake_run)
     built = build_app(tmp_path)
@@ -7812,58 +8049,10 @@ def test_render_async_local_execution_history_import():
 
 
 # ====================================================================
-# REQ-20260920-090：合成元素组合测试面板（debug）
+# REQ-20260920-098：合成元素组合测试面板（debug）已废弃
+# 「一键合成」面板 + 4 个 combo-* action 全部删除；
+# 现在「生成预览」「导出最终视频」直接读 .slirn-fine-enabled checkbox 状态。
 # ====================================================================
-
-
-def test_combo_test_zone_in_workbench_html():
-    """REQ-092 AC-1/AC-2/AC-3/AC-4：_render_fine_cut_zone 输出含 🎬 一键合成面板 + 5 checkbox + 4 按钮 + 友好提示。"""
-    app_path = FUNCLIP_ROOT / "slirn_home" / "app.py"
-    src = app_path.read_text(encoding="utf-8")
-
-    # 1. 含「🎬 一键合成」title（REQ-092 重命名：去掉「测试」字样）
-    assert "🎬 一键合成" in src, (
-        "REQ-092 AC-1：workbench HTML 必须含『🎬 一键合成』（不是『🧪 合成元素组合测试』）"
-    )
-
-    # 2. 含 5 个 data-combo-kind checkbox
-    for kind in ["video", "subtitle", "cover", "bg", "audio"]:
-        assert f'data-combo-kind="{kind}"' in src, (
-            f"REQ-090 AC-2：workbench HTML 必须含 data-combo-kind={kind} checkbox"
-        )
-
-    # 3. 4 个按钮（apply / test / diagnose / restore）
-    for action in ["combo-apply", "combo-test", "combo-diagnose", "combo-restore"]:
-        assert f'data-action="{action}"' in src, (
-            f"REQ-090 AC-4：workbench HTML 必须含 data-action={action} 按钮"
-        )
-
-    # 4. REQ-092：按钮文字改为「🚀 一键合成」（不是「🚀 一键测试合成」）
-    assert "🚀 一键合成" in src, (
-        "REQ-092 AC-1：combo-test 按钮文字必须为『🚀 一键合成』"
-    )
-    assert "🚀 一键测试合成" not in src, (
-        "REQ-092 AC-1：旧按钮文字『🚀 一键测试合成』必须删除"
-    )
-
-    # 5. REQ-092：友好提示（不再是「⚠️ 这会修改 fc」红色警告）
-    assert "💡 勾选要合成的元素" in src, (
-        "REQ-092：面板必须有友好提示（不再是红色警告）"
-    )
-
-    # 5. 默认勾选状态：video ✅ / subtitle ❌ / cover ❌ / bg ❌ / audio ✅
-    # video/audio 行带 checked，其他不带
-    video_line_re = re.search(r'<input type="checkbox" data-combo-kind="video"[^>]*checked', src)
-    audio_line_re = re.search(r'<input type="checkbox" data-combo-kind="audio"[^>]*checked', src)
-    assert video_line_re is not None, "REQ-090 AC-12：video checkbox 必须默认 checked"
-    assert audio_line_re is not None, "REQ-090 AC-12：audio checkbox 必须默认 checked"
-    # subtitle/cover/bg 不带 checked（直接 grep 整行）
-    for kind in ["subtitle", "cover", "bg"]:
-        line_re = re.search(rf'<input type="checkbox" data-combo-kind="{kind}"[^>]*>', src)
-        assert line_re is not None
-        assert "checked" not in line_re.group(0), (
-            f"REQ-090 AC-12：{kind} checkbox 默认 unchecked"
-        )
 
 
 def test_diagnose_bgm_endpoint_exists():
@@ -7928,91 +8117,8 @@ def test_diagnose_bgm_endpoint_exists():
     assert r3["audio_idx"] == -1
 
 
-def test_router_js_combo_actions():
-    """REQ-090 AC-11：router.js 包含 3 个新 action dispatch 分支（combo-apply/test/diagnose/restore）。"""
-    js_path = FUNCLIP_ROOT / "slirn_home" / "static" / "router.js"
-    src = js_path.read_text(encoding="utf-8")
-
-    # 1. 4 个 action 在 dispatch 里被识别
-    dispatch_anchor = "combo-apply' || action === 'combo-test'"
-    assert dispatch_anchor in src, (
-        "REQ-090 AC-11：router.js dispatch 须含 combo-apply/test/diagnose/restore 分支"
-    )
-
-    # 2. comboTestAction 函数定义
-    assert "function comboTestAction" in src, (
-        "REQ-090 AC-11：router.js 必须定义 comboTestAction 函数"
-    )
-
-    # 3. _applyComboToFC helper
-    assert "function _applyComboToFC" in src, (
-        "REQ-090：router.js 必须定义 _applyComboToFC helper（写 fc）"
-    )
-
-    # 4. diagnose 调用 /slirn/api/diagnose_bgm
-    assert "/slirn/api/diagnose_bgm" in src, (
-        "REQ-090 AC-6：router.js 必须 fetch /slirn/api/diagnose_bgm"
-    )
-
-    # 5. test 调用 /slirn/api/export_fine_video + /slirn/api/render_status + /slirn/api/probe_output_audio
-    assert "/slirn/api/export_fine_video" in src
-    assert "/slirn/api/render_status" in src
-    assert "/slirn/api/probe_output_audio" in src, (
-        "REQ-090 AC-9：combo-test 完成后必须 probe_output_audio"
-    )
 
 
-def test_combo_test_saves_fc_layout_audio():
-    """REQ-090 AC-7/AC-15：combo-apply handler 调 /save_fine_layout（4 elements）+ /save_fine_audio。"""
-    js_path = FUNCLIP_ROOT / "slirn_home" / "static" / "router.js"
-    src = js_path.read_text(encoding="utf-8")
-
-    # 1. _applyComboToFC 函数体内必须 fetch /save_fine_layout + /save_fine_audio
-    assert "/slirn/api/save_fine_layout" in src
-    assert "/slirn/api/save_fine_audio" in src
-
-    # 2. payload 包含 4 个 layout elements 的 enabled
-    for kind in ["video", "subtitle", "cover", "bg"]:
-        # 在 _applyComboToFC 函数体内
-        assert f"{kind}: {{ enabled:" in src, (
-            f"REQ-090 AC-7：_applyComboToFC payload 必须含 {kind}.enabled"
-        )
-
-    # 3. payload 包含 audio.enabled
-    assert "audio: { enabled:" in src, (
-        "REQ-090 AC-7：_applyComboToFC payload 必须含 audio.enabled"
-    )
-
-
-# ====================================================================
-# REQ-20260920-091：合成元素组合测试面板 — 加时间参数
-# ====================================================================
-
-
-def test_combo_test_time_inputs_in_html():
-    """REQ-091 AC-1/AC-2/AC-3：workbench HTML 含「⏱ 开始时间」+「⏳ 时长」2 个 input。"""
-    app_path = FUNCLIP_ROOT / "slirn_home" / "app.py"
-    src = app_path.read_text(encoding="utf-8")
-
-    # 1. 开始时间 input（H:M:S 三段，复用 REQ-066 slirn-fine-preview-time class）
-    assert 'id="slirn-combo-test-start-h"' in src, "REQ-091 AC-1：缺开始时间（时）input"
-    assert 'id="slirn-combo-test-start-m"' in src, "REQ-091 AC-1：缺开始时间（分）input"
-    assert 'id="slirn-combo-test-start-s"' in src, "REQ-091 AC-1：缺开始时间（秒）input"
-    # REQ-091 AC-3：复用 slirn-fine-preview-time class
-    assert "slirn-fine-preview-time" in src
-
-    # 2. 时长 input（2-30 秒）
-    assert 'id="slirn-combo-test-duration"' in src, "REQ-091 AC-1：缺时长 input"
-    # min="2" max="30" 范围
-    duration_re = re.search(r'id="slirn-combo-test-duration"[^>]*min="2"[^>]*max="30"', src)
-    assert duration_re is not None, "REQ-091：时长 input 必须 min=2 max=30"
-
-    # 3. AC-2：默认值 start=00:00:00（value="0"）+ duration=10 秒
-    assert re.search(r'id="slirn-combo-test-start-h"[^>]*value="0"', src) is not None
-    assert re.search(r'id="slirn-combo-test-start-m"[^>]*value="0"', src) is not None
-    assert re.search(r'id="slirn-combo-test-start-s"[^>]*value="0"', src) is not None
-    duration_default_re = re.search(r'id="slirn-combo-test-duration"[^>]*value="10"', src)
-    assert duration_default_re is not None, "REQ-091 AC-2：duration 默认 10 秒"
 
 
 def test_export_fine_video_accepts_time_params():
@@ -8054,8 +8160,9 @@ def test_export_fine_video_accepts_time_params():
 
     # 5. _run_fine_render_async 函数体内把参数透传给 _assemble_fine_filter
     # 函数体内必须有 _assemble_fine_filter(tid, mgr, duration=duration, preview_start=preview_start)
+    # REQ-20260920-098：combo 也可能透传，允许调用跨多行
     body_re = re.search(
-        r"_assemble_fine_filter\(tid, mgr, duration=duration, preview_start=preview_start\)",
+        r"_assemble_fine_filter\(\s*tid,\s*mgr,\s*duration=duration,\s*preview_start=preview_start\b",
         src,
     )
     assert body_re is not None, (
@@ -8081,177 +8188,14 @@ def test_export_fine_video_output_path_has_time_suffix():
     )
 
 
-def test_combo_test_passes_time_params_to_export():
-    """REQ-091 AC-8/AC-9：combo-test 把 time 参数传给 /export_fine_video + probe 对应 output。"""
-    js_path = FUNCLIP_ROOT / "slirn_home" / "static" / "router.js"
-    src = js_path.read_text(encoding="utf-8")
-
-    # 1. combo-test 必须 fetch /export_fine_video 时带 preview_start + duration
-    assert "_readTimeParams" in src, "REQ-091 AC-8：combo-test 必须读 time 参数"
-    assert "preview_start: tp.preview_start" in src, (
-        "REQ-091 AC-8：combo-test 必须把 preview_start 传给 export_fine_video body"
-    )
-    assert "exportBody.duration = tp.duration" in src, (
-        "REQ-091 AC-8：combo-test 必须把 duration 传给 export_fine_video body"
-    )
-
-    # 2. _computeOutputPath 函数（与后端命名规则一致）
-    assert "_computeOutputPath" in src, "REQ-091 AC-9：combo-test 必须算 output_path"
-    assert "fine_export_t" in src, "REQ-091 AC-9：前端 _computeOutputPath 必须生成 _t 后缀"
-
-    # 3. probe_output_audio 用算出的 output_path（不是硬编码 outputs/final.mp4）
-    assert "output_path: outPath" in src, (
-        "REQ-091 AC-9：probe_output_audio 必须用算出的 outPath（不是硬编码 final.mp4）"
-    )
 
 
-def test_combo_snapshot_not_overwritten_by_combo_test():
-    """REQ-092 BUG 修复：连续点 combo-apply + combo-test 时 snapshot 不被覆盖。
-
-    原 BUG：combo-apply 调 _snapshot() 后 combo-test 入口又调一次 _snapshot()，
-    导致 window._comboSnapshot[tid] 被覆盖为「测试状态」（不是原始 fc）。
-    用户点「↩️ 还原」按钮还原不到原始 fc。
-
-    修复：_snapshot() 加 early-return——只在「还没 snapshot 过」时记录。
-    """
-    js_path = FUNCLIP_ROOT / "slirn_home" / "static" / "router.js"
-    src = js_path.read_text(encoding="utf-8")
-
-    # _snapshot 函数体里必须有 early-return 防止覆盖
-    # 抓 _snapshot 函数体（到下一个 function/var function 之前）
-    snap_match = re.search(
-        r"function _snapshot\(\)\s*\{(.*?)\n\s{4}\}", src, re.DOTALL,
-    )
-    assert snap_match is not None, "REQ-092：必须能找到 _snapshot 函数体"
-    snap_body = snap_match.group(1)
-    # early-return 形式：`if (... !== undefined) return;`
-    assert "if (" in snap_body and "!== undefined" in snap_body and "return" in snap_body, (
-        "REQ-092 修复：_snapshot 必须有 early-return 防止 snapshot 被覆盖"
-    )
 
 
-def test_combo_test_button_state_changes():
-    """REQ-20260920-092 v2：combo-test 点击必须有可见反馈（按钮文字变化 + toast + 自动弹视频）。
-
-    原 BUG：combo-test 只往 #slirn-combo-test-output 写文本，但该元素在折叠的 <details> 内，
-    用户看不到。_setBusy 也只是 disable 按钮，没改文字 → 用户点完按钮变灰但什么都没发生。
-
-    修复（参考 REQ-074 setExportBtnState）：
-    1. 点完立刻 toast 通知「🚀 一键合成已启动」
-    2. testBtn.textContent 立即变 '⏳ 合成中…'
-    3. done 时变 '✅ 完成 · 重新合成' + window.open 弹播放窗口（用户原话：直接看，不下载）
-    4. failed 时变 '❌ 失败 · 重试'
-    """
-    js_path = FUNCLIP_ROOT / "slirn_home" / "static" / "router.js"
-    src = js_path.read_text(encoding="utf-8")
-
-    # combo-test action 分支开始位置（抓 combo-test 分支 + 抽离出的 _onRenderDone 函数体）
-    # v3：combo-test 内部嵌套了 _onRenderDone 子函数，所以用 _onRenderDone 锚点更稳
-    on_done = re.search(
-        r"function _onRenderDone\([^)]*\)\s*\{(.*?)\n\s{4}\}",
-        src, re.DOTALL,
-    )
-    test_branch = re.search(
-        r"if \(action === 'combo-test'\)\s*\{(.*?)\n\s{4}\}\s*\n\s+if \(action === 'combo-apply'\)",
-        src, re.DOTALL,
-    )
-    assert test_branch is not None, "REQ-092：必须能找到 combo-test action 分支"
-    assert on_done is not None, "REQ-093：必须能找到 _onRenderDone 抽离函数"
-    body = test_branch.group(1)
-    on_done_body = on_done.group(1)
-
-    # AC-1：进入时立刻 toast
-    assert "toast('🚀 一键合成已启动" in body, (
-        "REQ-092：combo-test 进入时必须立刻 toast 通知用户（按钮重命名为「一键合成」）"
-    )
-    # AC-2：进入时 testBtn.textContent 变 '⏳ 合成中…'
-    assert "⏳ 合成中…" in body, (
-        "REQ-092：combo-test 进入时按钮文字必须变 ⏳ 合成中…"
-    )
-    # AC-3：done 时 testBtn.textContent 变 '✅ 完成 · 重新合成'（在 _onRenderDone 里）
-    assert "✅ 完成 · 重新合成" in on_done_body, (
-        "REQ-092：combo-test done 时按钮文字必须变 ✅ 完成 · 重新合成"
-    )
-    # AC-4：done 时有 window.open(autoUrl) 自动打开视频（在 _onRenderDone 里）
-    assert "window.open(" in on_done_body and "autoUrl" in on_done_body, (
-        "REQ-092：combo-test done 时必须 window.open 视频（新窗口反馈）"
-    )
-    # AC-5：fail 分支有按钮文字变 ❌
-    assert "❌ 失败 · 重试" in body, (
-        "REQ-092：combo-test 失败时按钮文字必须变 ❌ 失败 · 重试"
-    )
-    # AC-6：REQ-093 新增——必须用 setInterval（不是 setTimeout 链）
-    assert "setInterval" in body and "setInterval(_comboPoll" in body, (
-        "REQ-093：combo-test 轮询必须改用 setInterval（不是脆弱的 setTimeout 链）"
-    )
 
 
-def test_combo_test_only_autoopens_for_default_output():
-    """REQ-20260920-092：自动 window.open 视频只在 output_path 是默认 fine_export.mp4 时执行。
-
-    /slirn/api/video 端点（app.py:6584）只接受 src=original/rough_compose/fine_preview/fine_export，
-    对 time-suffix 文件（如 fine_export_t30_d20.mp4）会 404。
-    所以 JS 必须判断 outPath === 'outputs/fine_export.mp4' 才自动打开，
-    time-suffix 文件只在 output 文本里提示用户去本地查看（用户原话：直接看，不下载）。
-    """
-    js_path = FUNCLIP_ROOT / "slirn_home" / "static" / "router.js"
-    src = js_path.read_text(encoding="utf-8")
-
-    # v3：从 _onRenderDone 函数体里找
-    on_done = re.search(
-        r"function _onRenderDone\([^)]*\)\s*\{(.*?)\n\s{4}\}",
-        src, re.DOTALL,
-    )
-    assert on_done is not None, "REQ-093：必须能找到 _onRenderDone 抽离函数"
-    body = on_done.group(1)
-
-    # AC-1：必须有 isDefaultOutput 判断
-    assert "isDefaultOutput" in body, (
-        "REQ-092：必须判断 outPath === 'outputs/fine_export.mp4' 才自动打开视频"
-    )
-    # AC-2：判断分支里 window.open 走 src=fine_export（video 端点支持）
-    assert "src=fine_export" in body, (
-        "REQ-092：自动 window.open 必须用 src=fine_export（video 端点唯一支持的精剪文件）"
-    )
-    # AC-3：time-suffix 时提示用户本地绝对路径 + Gradio 预览
-    assert ("Gradio" in body) or ("preview" in body.lower()) or ("本地路径" in body) or ("绝对路径" in body), (
-        "REQ-092/094：time-suffix 文件必须给用户提示（去哪查看，含本地路径或 Gradio 预览）"
-    )
-    # REQ-094：必须用 p.output_abs_path（后端返回的绝对路径），不是前端拼的相对路径
-    assert "p.output_abs_path" in body or "output_abs_path" in body, (
-        "REQ-094：time-suffix 必须用后端返回的 output_abs_path（绝对路径），不是前端拼的相对路径"
-    )
 
 
-def test_combo_test_poll_handles_missing_job():
-    """REQ-20260920-093：job 不存在（server 重启 GC）时轮询应优雅恢复。
-
-    原 BUG：用 setTimeout 链时 job 不存在会进 error 分支，UI 卡住；
-    现在 setInterval 也要明确处理 s.ok=false（job GC 掉了），恢复按钮文字 + 停止轮询。
-    """
-    js_path = FUNCLIP_ROOT / "slirn_home" / "static" / "router.js"
-    src = js_path.read_text(encoding="utf-8")
-
-    # combo-test 分支
-    test_branch = re.search(
-        r"if \(action === 'combo-test'\)\s*\{(.*?)\n\s{4}\}\s*\n\s+if \(action === 'combo-apply'\)",
-        src, re.DOTALL,
-    )
-    assert test_branch is not None, "REQ-093：必须能找到 combo-test action 分支"
-    body = test_branch.group(1)
-
-    # AC-1：s.ok=false 分支必须显式处理（不再依赖 catch）
-    assert "if (!s.ok)" in body, (
-        "REQ-093：轮询内必须显式 if (!s.ok) 分支处理 job 不存在（server GC）"
-    )
-    # AC-2：必须 clearInterval 停止轮询
-    assert "clearInterval(_comboTimer)" in body, (
-        "REQ-093：job 不存在时必须 clearInterval 停止轮询"
-    )
-    # AC-3：恢复按钮文字为「🚀 一键合成」
-    assert "🚀 一键合成'; testBtn.disabled = false" in body, (
-        "REQ-093：job 不存在时必须恢复按钮文字为「🚀 一键合成」+ 可点击"
-    )
 
 
 def test_probe_output_audio_returns_absolute_path():
@@ -8368,5 +8312,230 @@ def test_assemble_fine_filter_voice_silence_concat_no_adelay(tmp_path):
     assert "anullsrc" not in fc_text2, (
         f"无 cover 路径不应注入 anullsrc 静音前缀，实际: {fc_text2}"
     )
+
+
+# ====================================================================
+# REQ-20260920-098：_assemble_fine_filter 新增 combo 关键字参数
+#   - combo 是瞬时覆盖（不写回 fc.json）
+#   - 覆盖 5 个元素 enabled：video / subtitle / cover / bg / audio
+# ====================================================================
+
+
+def test_assemble_fine_filter_combo_override_cover_bg_audio(tmp_path):
+    """REQ-098 AC-1：combo dict 覆盖 fc.json 的 5 个 enabled，不落盘。
+
+    准备 task + 5 素材；fc.json 写 cover/bg/audio 都 enabled=False；
+    调 _assemble_fine_filter(combo={cover:True, bg:True, audio:True})；
+    断言 input_args 含 cover/bg 路径 + filter_complex 含 bg layer chain +
+    fc.json 在函数返回后**未写回**（磁盘 cover.enabled 仍为 False）。
+    """
+    from slirn_home.app import (
+        _assemble_fine_filter, _get_fine_compose, _save_fine_compose,
+    )
+
+    mgr, video = _make_mgr(tmp_path)
+    t = mgr.create(name="combo-override", original_video=video)
+    upload = tmp_path / "tasks" / t.task_id / "upload"
+    upload.mkdir(parents=True, exist_ok=True)
+    (upload / "cover.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
+    (upload / "bg.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
+    (upload / "bgm.mp3").write_bytes(b"ID3" + b"\x00" * 100)
+
+    fc = _get_fine_compose(mgr, t.task_id)
+    fc["materials"]["video"] = {"path": str(video.relative_to(tmp_path)),
+                                "type": "video", "source": "upload"}
+    fc["materials"]["cover"] = {"path": f"tasks/{t.task_id}/upload/cover.png",
+                                "type": "image", "source": "upload"}
+    fc["materials"]["bg"] = {"path": f"tasks/{t.task_id}/upload/bg.png",
+                             "type": "image", "source": "upload"}
+    fc["materials"]["audio"] = {"path": f"tasks/{t.task_id}/upload/bgm.mp3",
+                                "type": "audio", "source": "upload"}
+    # fc.json 故意写 cover/bg/audio 都 False —— 模拟用户在 fc 落盘的状态
+    fc["layout"]["cover"]["enabled"] = False
+    fc["layout"]["cover"]["duration"] = 2.0
+    fc["layout"]["bg"]["enabled"] = False
+    fc["audio"]["enabled"] = False
+    _save_fine_compose(mgr, t.task_id, fc)
+
+    # combo 覆盖：让 cover/bg/audio 临时启用
+    asm = _assemble_fine_filter(
+        t.task_id, mgr, duration=10.0, preview_start=0.0,
+        combo={"cover": True, "bg": True, "audio": True},
+    )
+    assert asm.get("ok") is True, asm
+
+    # 1. input_args 出现 cover + bg 路径（说明 combo override 生效）
+    cmd = asm["input_args"]
+    assert any("cover.png" in a for a in cmd), f"combo 覆盖 cover 未生效：{cmd}"
+    assert any("bg.png" in a for a in cmd), f"combo 覆盖 bg 未生效：{cmd}"
+    assert any("bgm.mp3" in a for a in cmd), f"combo 覆盖 audio 未生效：{cmd}"
+
+    # 2. filter_complex 出现 BGM 链（bg 启用 → bg layer chain + bgm 启用 → amix 链）
+    fc_text = asm["filter_complex"].replace("\n", "")
+    assert "amix" in fc_text, f"combo 覆盖 audio 未启用 amix：{fc_text}"
+
+    # 3. fc.json 在函数返回后**未写回**（磁盘 cover.enabled 仍为 False）
+    fc_after = _get_fine_compose(mgr, t.task_id)
+    assert fc_after["layout"]["cover"]["enabled"] is False, (
+        "REQ-098：combo 覆盖不能写回 fc.json（cover 应仍为 False）"
+    )
+    assert fc_after["layout"]["bg"]["enabled"] is False, (
+        "REQ-098：combo 覆盖不能写回 fc.json（bg 应仍为 False）"
+    )
+    assert fc_after["audio"]["enabled"] is False, (
+        "REQ-098：combo 覆盖不能写回 fc.json（audio 应仍为 False）"
+    )
+
+
+def test_assemble_fine_filter_combo_none_uses_fc_json(tmp_path):
+    """REQ-098 AC-2：combo=None 时完全依赖 fc.json（向后兼容）。"""
+    from slirn_home.app import (
+        _assemble_fine_filter, _get_fine_compose, _save_fine_compose,
+    )
+
+    mgr, video = _make_mgr(tmp_path)
+    t = mgr.create(name="combo-none", original_video=video)
+    upload = tmp_path / "tasks" / t.task_id / "upload"
+    upload.mkdir(parents=True, exist_ok=True)
+    (upload / "cover.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
+
+    fc = _get_fine_compose(mgr, t.task_id)
+    fc["materials"]["video"] = {"path": str(video.relative_to(tmp_path)),
+                                "type": "video", "source": "upload"}
+    fc["materials"]["cover"] = {"path": f"tasks/{t.task_id}/upload/cover.png",
+                                "type": "image", "source": "upload"}
+    fc["layout"]["cover"]["enabled"] = True
+    fc["layout"]["cover"]["duration"] = 2.0
+    _save_fine_compose(mgr, t.task_id, fc)
+
+    # combo=None → 完全依赖 fc.json（cover enabled=True）
+    asm = _assemble_fine_filter(t.task_id, mgr, duration=10.0, preview_start=0.0, combo=None)
+    assert asm.get("ok") is True, asm
+    cmd = asm["input_args"]
+    assert any("cover.png" in a for a in cmd), f"combo=None 时 fc.json cover=True 必须生效：{cmd}"
+
+
+def test_assemble_fine_filter_combo_can_disable_fc_enabled(tmp_path):
+    """REQ-098 AC-3：combo 也可以关闭 fc.json 里已启用的元素（覆盖是双向的）。"""
+    from slirn_home.app import (
+        _assemble_fine_filter, _get_fine_compose, _save_fine_compose,
+    )
+
+    mgr, video = _make_mgr(tmp_path)
+    t = mgr.create(name="combo-disable", original_video=video)
+    upload = tmp_path / "tasks" / t.task_id / "upload"
+    upload.mkdir(parents=True, exist_ok=True)
+    (upload / "bg.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
+
+    fc = _get_fine_compose(mgr, t.task_id)
+    fc["materials"]["video"] = {"path": str(video.relative_to(tmp_path)),
+                                "type": "video", "source": "upload"}
+    fc["materials"]["bg"] = {"path": f"tasks/{t.task_id}/upload/bg.png",
+                             "type": "image", "source": "upload"}
+    fc["layout"]["bg"]["enabled"] = True  # fc.json 里 bg 启用
+    _save_fine_compose(mgr, t.task_id, fc)
+
+    # combo 强制关闭 bg
+    asm = _assemble_fine_filter(
+        t.task_id, mgr, duration=10.0, preview_start=0.0, combo={"bg": False},
+    )
+    assert asm.get("ok") is True, asm
+    cmd = asm["input_args"]
+    assert not any("bg.png" in a for a in cmd), (
+        f"combo={{bg:False}} 必须关掉 bg 输入，实际: {cmd}"
+    )
+
+
+def test_render_fine_preview_endpoint_accepts_combo_in_body(tmp_path, monkeypatch):
+    """REQ-098 AC-4：POST /render_fine_preview 接受 body.combo，透传到 _run_fine_render。"""
+    from slirn_home.app import build_app
+    from fastapi.testclient import TestClient
+
+    m, _ = _make_mgr(tmp_path)
+    t = m.create(name="preview-combo", original_video=tmp_path / "lecture.mp4")
+    captured = {}
+    def fake_run(task_id, mgr, out_path, duration, preview_start=0.0, *, combo=None):
+        captured["combo"] = combo
+        return {"ok": True, "path": "fake.mp4"}
+    monkeypatch.setattr("slirn_home.app._run_fine_render", fake_run)
+
+    built = build_app(tmp_path)
+    client = TestClient(built.app)
+    resp = client.post(
+        "/slirn/api/render_fine_preview",
+        json={"task_id": t.task_id, "duration": 5,
+              "combo": {"cover": True, "bg": False, "audio": True}},
+    )
+    assert resp.json()["ok"] is True
+    assert captured["combo"] == {"cover": True, "bg": False, "audio": True}, (
+        f"body.combo 必须透传到 _run_fine_render；实际：{captured.get('combo')}"
+    )
+
+
+def test_router_js_preview_handler_reads_fine_enabled_checkboxes():
+    """REQ-098 AC-5：router.js preview/export handler 必须读 .slirn-fine-enabled 并带 combo。"""
+    js_path = FUNCLIP_ROOT / "slirn_home" / "static" / "router.js"
+    src = js_path.read_text(encoding="utf-8")
+
+    # 1. 必须定义 _readPerElementCombo helper
+    assert "_readPerElementCombo" in src, (
+        "REQ-098：router.js 必须定义 _readPerElementCombo helper（读 .slirn-fine-enabled）"
+    )
+    # 2. helper 内部必须 query .slirn-fine-enabled[data-key]
+    assert re.search(r"querySelectorAll\(['\"]\.slirn-fine-enabled\[data-key\]", src), (
+        "REQ-098：_readPerElementCombo 必须 query .slirn-fine-enabled[data-key]"
+    )
+    # 3. preview 分支把 combo 加进 payload
+    assert re.search(r"_payload\.combo\s*=\s*_readPerElementCombo\(\)", src), (
+        "REQ-098：preview 分支必须 _payload.combo = _readPerElementCombo()"
+    )
+    # 4. export 分支把 combo 加进 body
+    assert re.search(r"combo:\s*_readPerElementCombo\(\)", src), (
+        "REQ-098：export 分支必须把 combo 加进 body"
+    )
+
+
+def test_router_js_combo_handler_removed():
+    """REQ-098 AC-6：router.js 不再有 comboTestAction / _applyComboToFC 等组合面板代码。"""
+    js_path = FUNCLIP_ROOT / "slirn_home" / "static" / "router.js"
+    src = js_path.read_text(encoding="utf-8")
+
+    # 1. comboTestAction 必须删除
+    assert "function comboTestAction" not in src, (
+        "REQ-098：必须删除 comboTestAction 函数（两步流程已废弃）"
+    )
+    # 2. _applyComboToFC 必须删除
+    assert "function _applyComboToFC" not in src, (
+        "REQ-098：必须删除 _applyComboToFC helper（两步流程已废弃）"
+    )
+    # 3. data-combo-kind 必须删除
+    assert "data-combo-kind" not in src, (
+        "REQ-098：必须删除所有 data-combo-kind 引用"
+    )
+    # 4. combo-test / combo-apply 等 dispatch 必须删除
+    assert "combo-apply' || action === 'combo-test'" not in src, (
+        "REQ-098：必须删除 combo-* action dispatch 分支"
+    )
+
+
+def test_app_py_one_key_compose_zone_removed():
+    """REQ-098 AC-7：app.py 不再渲染「🎬 一键合成」面板 + 5 个 data-combo-kind checkbox。"""
+    app_path = FUNCLIP_ROOT / "slirn_home" / "app.py"
+    src = app_path.read_text(encoding="utf-8")
+
+    # 1. data-combo-kind 必须删除
+    assert "data-combo-kind" not in src, (
+        "REQ-098：app.py 必须删除 data-combo-kind checkbox 渲染"
+    )
+    # 2. 🎬 一键合成 面板标题必须删除
+    assert "🎬 一键合成" not in src, (
+        "REQ-098：app.py 必须删除『🎬 一键合成』面板"
+    )
+    # 3. combo-* 按钮必须删除
+    for action in ('data-action="combo-apply"', 'data-action="combo-test"',
+                   'data-action="combo-diagnose"', 'data-action="combo-restore"'):
+        assert action not in src, (
+            f"REQ-098：app.py 必须删除 {action} 按钮"
+        )
 
 
