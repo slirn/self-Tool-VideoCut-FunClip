@@ -7051,3 +7051,72 @@ def test_router_js_filter_xss_escape_in_empty_message():
     assert has_escape, (
         "REQ-087 AC-5：搜索关键词插入空态文案前必须 HTML escape（防 XSS）"
     )
+
+
+def test_router_js_showtab_function_is_complete():
+    """REQ-087 回归：REQ-087 改动曾误删 showTab 函数体，导致 router.js 解析失败、
+    所有 data-action 按钮失效（任务列表 / 热词库 / 新建任务全部不可用）。
+
+    本测试防止以后任何 router.js 改动再次破坏 showTab 的完整性：
+    - showTab 必须含 ALL_TABS forEach 循环（核心 tab 切换逻辑）
+    - showTab 必须含 detail 隐藏（清空 detail tab 状态）
+    - showTab 必须含 slirn-tab-create 特殊处理（热词选择器初始化）
+    - showTab 必须含 window.scrollTo（顶部滚动）
+    """
+    FUNCLIP_ROOT = Path(__file__).resolve().parent.parent
+    router_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "router.js").read_text(
+        encoding="utf-8"
+    )
+    # 用大括号平衡法抓取 showTab 函数体
+    idx = router_js.find("function showTab(")
+    assert idx >= 0, "router.js 找不到 showTab 函数"
+    brace_start = router_js.find("{", idx)
+    depth = 0
+    i = brace_start
+    while i < len(router_js):
+        c = router_js[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    body = router_js[brace_start:i + 1]
+    # showTab 必须有的关键代码（任一缺失 → REQ-087 那种回归 BUG）
+    assert "ALL_TABS.forEach" in body, (
+        "REQ-087 回归：showTab 必须含 ALL_TABS.forEach tab 切换循环"
+    )
+    assert "slirn-tab-detail" in body, (
+        "REQ-087 回归：showTab 必须清空 slirn-tab-detail 的 display"
+    )
+    assert "slirn-tab-create" in body, (
+        "REQ-087 回归：showTab 必须含 slirn-tab-create 特殊处理（热词选择器初始化）"
+    )
+    assert "window.scrollTo" in body, (
+        "REQ-087 回归：showTab 必须含 window.scrollTo 顶部滚动"
+    )
+
+
+def test_router_js_syntax_valid():
+    """REQ-087 回归：router.js 必须能被 node --check 通过。
+
+    REQ-087 改动曾误把 showTab 函数体切断，导致：
+    1. router.js 解析失败（语法错）
+    2. 整个 IIFE 不执行 → 所有 document.addEventListener 不注册
+    3. 任务列表 / 热词库 / 新建任务按钮全部失效（用户感知为「按钮都没反应」）
+
+    本测试用 node --check 静态校验 JS 语法，提前发现这类回归。
+    """
+    import subprocess
+    FUNCLIP_ROOT = Path(__file__).resolve().parent.parent
+    router_js_path = FUNCLIP_ROOT / "slirn_home" / "static" / "router.js"
+    r = subprocess.run(
+        ["node", "--check", str(router_js_path)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert r.returncode == 0, (
+        f"REQ-087 回归：router.js 语法错误\n"
+        f"node --check exit={r.returncode}\n"
+        f"stderr={r.stderr[:1000]}"
+    )

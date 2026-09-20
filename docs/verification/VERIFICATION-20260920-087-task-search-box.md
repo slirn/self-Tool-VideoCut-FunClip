@@ -10,6 +10,7 @@
 - 无匹配时显示「🔍 没有匹配「xxx」的任务」空态
 - 关键词插入 HTML 前 escape（防 XSS）
 - 搜索不破坏现有 task 卡片其他功能
+- **回归防护**：第一次提交误删 showTab 函数体导致任务列表 / 热词库 / 新建任务按钮全部失效，已修复 + 加 2 个回归测试
 
 ## 验收逐条对照（8 条 AC）
 
@@ -51,31 +52,31 @@
 |---|---|---|
 | 1. 需求 | [REQ-20260920-087](../REQM/REQ-20260920-087-task-search-box.md)（8 条 AC）| ✅ |
 | 2. 设计 | [DESIGN-20260920-087](../design/DESIGN-20260920-087-task-search-box.md)（8 个决策）| ✅ |
-| 3. 实现 | 代码 + 5 个新测试 | ✅ |
-| 4. 评审 | 边界检查：XSS escape / 事件代理避免重复绑定 / 不破坏现有交互 | ✅ |
-| 5. 验证 | 本文档（8 条 AC 全过） | ✅ |
+| 3. 实现 | 代码 + 7 个新测试（含 2 个回归测试） | ✅ |
+| 4. 评审 | 边界检查：XSS escape / 事件代理避免重复绑定 / 不破坏现有交互 + **showTab 完整性 / node --check 静态校验** | ✅ |
+| 5. 验证 | 本文档（8 条 AC 全过 + 回归 BUG 已修复） | ✅ |
 
 ## 改动文件汇总
 
 | 文件 | 改动 | 行数 |
 |---|---|---|
-| [slirn_home/static/router.js](slirn_home/static/router.js) | `_filterTaskCards` 函数 + `addEventListener('input', ...)` 事件代理 | +50 / -0 |
+| [slirn_home/static/router.js](slirn_home/static/router.js) | `_filterTaskCards` 函数 + `addEventListener('input', ...)` 事件代理 | +55 / -0 |
 | [slirn_home/static/home.css](slirn_home/static/home.css) | `.slirn-search-empty` 样式 | +5 / -0 |
-| [tests/test_workbench.py](tests/test_workbench.py) | 5 个新测试 | +85 / -0 |
+| [tests/test_workbench.py](tests/test_workbench.py) | 7 个新测试（含 2 个回归测试） | +160 / -0 |
 | [docs/REQM/REQ-20260920-087](../REQM/REQ-20260920-087-task-search-box.md) | 新建 | +50 |
 | [docs/design/DESIGN-20260920-087](../design/DESIGN-20260920-087-task-search-box.md) | 新建 | +120 |
-| [docs/verification/VERIFICATION-20260920-087](VERIFICATION-20260920-087-task-search-box.md) | 本文档 | +110 |
+| [docs/verification/VERIFICATION-20260920-087](VERIFICATION-20260920-087-task-search-box.md) | 本文档 | +130 |
 
-净代码：**+55 行**（核心 50 + CSS 5）。
+净代码：**+60 行**（核心 55 + CSS 5）。
 
 ## 测试结果
 
 ```
 $ pytest tests/ -q
-====================== 599 passed, 5 warnings in 52.15s =======================
+====================== 601 passed, 4 warnings in 37.43s =======================
 ```
 
-新增 5 个测试：
+新增 7 个测试：
 | 测试 | 覆盖点 |
 |---|---|
 | `test_task_list_has_search_input` | HTML 含 `#slirn-task-search` |
@@ -83,6 +84,34 @@ $ pytest tests/ -q
 | `test_router_js_filter_function_clears_display` | 空查询 reset + 非空 hide |
 | `test_router_js_filter_matches_name_id_video` | 匹配三类字段 |
 | `test_router_js_filter_xss_escape_in_empty_message` | XSS escape |
+| **`test_router_js_showtab_function_is_complete`** | **回归：showTab 必含 4 个关键代码**（ALL_TABS forEach / detail 隐藏 / create 特殊处理 / scrollTo）|
+| **`test_router_js_syntax_valid`** | **回归：node --check 静态校验 router.js 语法**|
+
+## 关键回归 BUG（已修复）
+
+### 第一次提交的破坏
+
+REQ-087 第一次提交（commit `7fed149`）的 Edit 操作**误删了 `showTab` 函数体 11 行代码**（line 295-313：detail hide + create 特殊处理 + window.scrollTo），同时把 REQ-087 代码插在 `function showTab() { ... }` 内部，破坏了 IIFE 闭合。
+
+**用户反馈**：「现在首页上的任务列表、热词库、新建任务按钮都失效了」
+
+**根因**：router.js 解析失败 → 整个 IIFE 不执行 → 所有 `document.addEventListener('click', ...)` 都不注册 → 所有 `data-action` 按钮失效。
+
+**为什么测试没发现**：之前所有 router.js 测试都是「文本包含」类断言（grep 关键词），没检查 JS 语法是否合法、没检查关键函数（showTab）完整性。
+
+**修复**：
+1. 恢复 showTab 完整函数体
+2. REQ-087 代码插在 showTab **之后**（IIFE 内、showTab 外）
+3. **加 2 个回归测试**（`test_router_js_showtab_function_is_complete` + `test_router_js_syntax_valid`）
+
+### 回归测试的设计
+
+| 测试 | 防护什么 |
+|---|---|
+| `test_router_js_showtab_function_is_complete` | 任何 router.js 改动**再误删 showTab 函数体**，测试立刻失败 |
+| `test_router_js_syntax_valid` | 任何 router.js 改动**语法错**（漏 `}` / 多 `}` / 字符串未闭合），测试立刻失败 |
+
+这两个测试组合起来，**永久防止类似的「改动 JS 引发静默回归」**。
 
 ## Why
 
@@ -91,12 +120,19 @@ UI 渲染 vs 交互逻辑是两条链，渲染完没接通交互是常见 BUG。
 - listener → filter 函数
 - filter 函数 → DOM 显隐
 
+**额外教训**：JS 改动不仅要功能正确，**语法完整 + 关键函数完整**必须用自动化测试守住。
+
 ## How to apply
 
 未来加任何「输入控件 + 数据列表」场景：
 1. **renderer 输出 input** 时，**必须同时写 listener**（不能只渲染占位）
 2. **listener 实现可观察行为**（DOM 显隐 / 网络请求 / toast），不能用 `console.log` 凑数
 3. **验收测试要覆盖「输入后列表变化」**（不能只看 input 渲染存在）
+
+未来任何 router.js / pipeline.js / 关键 JS 改动：
+1. **改前后跑 `node --check` 静态校验**
+2. **测试套件必须有「关键函数完整性」断言**（showTab / initTaskEdit / loadPanel 等）
+3. **改动大块代码前先 git diff 看上下文**，避免误删
 
 ## 关联
 

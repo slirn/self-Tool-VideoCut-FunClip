@@ -292,6 +292,24 @@
       var el = document.getElementById(id);
       if (el) el.style.display = (id === targetCell) ? '' : 'none';
     });
+    var detail = document.getElementById('slirn-tab-detail');
+    if (detail) detail.style.display = 'none';
+    // 切到「新建任务」时初始化热词选择器（刷新 chip 显示）；
+    // 若上次是「编辑任务」占用了本页 → 重新拉取全新建页
+    if (targetCell === 'slirn-tab-create') {
+      try { window.slirnInitHotwordPicker && window.slirnInitHotwordPicker(); } catch (e) {}
+      if (window.slirnEditTaskId) {
+        window.slirnEditTaskId = null;
+        postJSON(SLIRN_API + '/create_page', {}).then(function(r) {
+          if (r && r.ok && r.html) {
+            var c = document.getElementById('slirn-tab-create');
+            if (c) c.innerHTML = r.html;
+            initTaskEdit();  // 无 edit-state 时仅清状态
+          }
+        });
+      }
+    }
+    window.scrollTo({top: 0, behavior: 'smooth'});
   }
 
   // REQ-20260920-087：任务列表搜索框过滤（client-side）
@@ -340,25 +358,6 @@
       _filterTaskCards(e.target.value);
     }
   });
-    var detail = document.getElementById('slirn-tab-detail');
-    if (detail) detail.style.display = 'none';
-    // 切到「新建任务」时初始化热词选择器（刷新 chip 显示）；
-    // 若上次是「编辑任务」占用了本页 → 重新拉取全新建页
-    if (targetCell === 'slirn-tab-create') {
-      try { window.slirnInitHotwordPicker && window.slirnInitHotwordPicker(); } catch (e) {}
-      if (window.slirnEditTaskId) {
-        window.slirnEditTaskId = null;
-        postJSON(SLIRN_API + '/create_page', {}).then(function(r) {
-          if (r && r.ok && r.html) {
-            var c = document.getElementById('slirn-tab-create');
-            if (c) c.innerHTML = r.html;
-            initTaskEdit();  // 无 edit-state 时仅清状态
-          }
-        });
-      }
-    }
-    window.scrollTo({top: 0, behavior: 'smooth'});
-  }
 
   function refreshCell(cellId, html) {
     var cell = document.getElementById(cellId);
