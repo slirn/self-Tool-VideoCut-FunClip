@@ -29,6 +29,8 @@ slirn/.temp/
 # Slirn home runtime temp (moviepy cuts, gradio api info dump)
 /.temp/
 /_info.json
+# CDP smoke dump of the slirn home page (when nav/click fails mid-test)
+/slirn_home.html
 
 # REQ 验证工作区（本机留存的测试脚本 + 产物，见 work/REQ-*/README.md）
 /work/
