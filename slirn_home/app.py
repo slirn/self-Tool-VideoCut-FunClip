@@ -2386,9 +2386,11 @@ def _run_fine_render_async(job: _RenderJob, tid: str, mgr, out_path: Path,
         job.finished_at = time.monotonic()
         job.wall_finished_at = time.time()
         # REQ-20260920-081：assemble 失败也写历史
+        # REQ-20260920-089：本地 import（daemon 线程无模块级 execution_history）
+        from slirn_home import execution_history as _eh_async_asm
         if exec_id and outputs_dir is not None:
             try:
-                execution_history.record_finish(
+                _eh_async_asm.record_finish(
                     outputs_dir, exec_id, success=False,
                     error=str(asm.get("error") or "filter 组装失败")[:500],
                 )
@@ -2431,8 +2433,14 @@ def _run_fine_render_async(job: _RenderJob, tid: str, mgr, out_path: Path,
     # BufferedReader），再手动重包为 `TextIOWrapper(line_buffering=True)`
     # 保证每行立即 flush。
     try:
+        # REQ-20260920-089：stderr → DEVNULL 解决死锁
+        # 原因：原 stderr=PIPE 但主循环只读 stdout；ffmpeg stderr 写满 OS pipe buffer
+        # (~64KB Windows) 后阻塞等 stderr 排空 → 主循环永远不退出 → 永久死锁。
+        # 砍 stderr 消费 = 砍死锁。ffmpeg stderr 内容（[Parsed_xxx] 诊断信息）本来
+        # 也不用实时展示给用户，只在失败时用 stderr_tail 末尾 500 字符（DEVNULL 也
+        # 不会让这里报错）。
         proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             bufsize=0,
         )
     except FileNotFoundError:
@@ -2448,9 +2456,11 @@ def _run_fine_render_async(job: _RenderJob, tid: str, mgr, out_path: Path,
             try: _p.unlink(missing_ok=True)
             except Exception: pass
         # REQ-20260920-081：ffmpeg 不存在也写历史
+        # REQ-20260920-089：本地 import（daemon 线程无模块级 execution_history）
+        from slirn_home import execution_history as _eh_async_ff
         if exec_id and outputs_dir is not None:
             try:
-                execution_history.record_finish(
+                _eh_async_ff.record_finish(
                     outputs_dir, exec_id, success=False,
                     error="系统未安装 ffmpeg，请先安装并加入 PATH",
                 )
@@ -2463,19 +2473,15 @@ def _run_fine_render_async(job: _RenderJob, tid: str, mgr, out_path: Path,
 
     job.proc = proc
 
-    # REQ-20260920-077：重包 stdout/stderr 为 line-buffered TextIOWrapper。
+    # REQ-20260920-077：重包 stdout 为 line-buffered TextIOWrapper。
     # 原 `text=True` 在 Windows 上的 8KB 默认缓冲会让 `out_time_ms` 行被积压，
     # 导致进度看似卡死。改为手动重包并显式 `line_buffering=True`，每行立即 flush。
+    # REQ-20260920-089：stderr 已重定向到 DEVNULL，不需要再重包。
     import io as _io
     proc.stdout = _io.TextIOWrapper(
         proc.stdout, encoding="utf-8", newline="\n",
         line_buffering=True,
     )
-    if proc.stderr:
-        proc.stderr = _io.TextIOWrapper(
-            proc.stderr, encoding="utf-8", newline="\n",
-            line_buffering=True,
-        )
 
     # 主循环：读 stdout（progress key=value），算 elapsed + ETA
     last_update = 0.0
@@ -2527,75 +2533,76 @@ def _run_fine_render_async(job: _RenderJob, tid: str, mgr, out_path: Path,
                     # speed_x = 源时长 / 墙钟时长 → 剩余墙钟 = 剩余源时长 / speed
                     job.eta_sec = remaining_ms / 1000.0 / job.speed_x
     finally:
-        # 兜底：用户中途取消时确保 proc 死掉
+        # REQ-20260920-089：finally 块统一处理所有终态（cancel / done / failed /
+        # 外部 kill / 异常），保证 record_finish 一定被调用，不再漏写。
+        # 1) 兜底 kill 未退出的 ffmpeg（cancel / 外部 kill）
         if proc.poll() is None:
             _kill_proc_with_grace(proc)
 
-    proc.wait()
-    job.finished_at = time.monotonic()
-    job.wall_finished_at = time.time()
-    job.elapsed_sec = job.finished_at - job.started_at
-
-    # 清理临时 SRT
-    if sub_input_tmp:
-        try: sub_input_tmp.unlink(missing_ok=True)
-        except Exception: pass
-
-    # REQ-20260920-079：清理预缩临时文件（bg/cover/reference）
-    for _p in image_tmp_paths:
-        try: _p.unlink(missing_ok=True)
-        except Exception: pass
-
-    if job.state == "cancelled":
-        # REQ-20260920-081：用户取消也写历史（status 标为 failed，error 带 cancelled）
-        if exec_id and outputs_dir is not None:
-            try:
-                execution_history.record_finish(
-                    outputs_dir, exec_id, success=False,
-                    error="用户取消渲染",
-                )
-            except Exception:
-                pass
-        # REQ-20260920-084：用户取消删 .export_job.json
-        try: _delete_active_export_job(mgr, tid)
-        except Exception: pass
-        return  # 取消路径不判断 returncode
-    if proc.returncode == 0:
-        job.state = "done"
-        job.progress_pct = 100.0
-        job.output_url = (
-            f"/slirn/api/video/{tid}?src=fine_export&t={int(time.time())}"
-        )
-        # REQ-20260920-081：成功落盘历史
-        if exec_id and outputs_dir is not None:
-            try:
-                execution_history.patch_extra(
-                    outputs_dir, exec_id,
-                    {"output_path": str(out_path),
-                     "duration_sec": round((job.finished_at - job.started_at), 1),
-                     "resolution": (asm.get("output_resolution") or "1080p")},
-                )
-                execution_history.record_finish(
-                    outputs_dir, exec_id, success=True, error="",
-                )
-            except Exception:
-                pass
-    else:
-        job.state = "failed"
+        # 2) 等 ffmpeg 真正退出 + 算 elapsed（如果还没设）
         try:
-            stderr_tail = proc.stderr.read() if proc.stderr else ""
+            proc.wait(timeout=10)
         except Exception:
-            stderr_tail = ""
-        job.error = (stderr_tail or "未知错误")[-500:]
-        # REQ-20260920-081：渲染失败落盘历史
+            pass
+        if not job.finished_at:
+            job.finished_at = time.monotonic()
+            job.wall_finished_at = time.time()
+        job.elapsed_sec = job.finished_at - job.started_at
+
+        # 3) 清理临时文件（SRT + 预缩图片）
+        if sub_input_tmp:
+            try: sub_input_tmp.unlink(missing_ok=True)
+            except Exception: pass
+        for _p in image_tmp_paths:
+            try: _p.unlink(missing_ok=True)
+            except Exception: pass
+
+        # 4) 推算最终 state（如果主循环因 readline 返回空自然退出但 state 还是 running）
+        if job.state == "running":
+            if proc.returncode == 0:
+                job.state = "done"
+                job.progress_pct = 100.0
+                job.output_url = (
+                    f"/slirn/api/video/{tid}?src=fine_export&t={int(time.time())}"
+                )
+            else:
+                job.state = "failed"
+                if not job.error:
+                    job.error = f"ffmpeg 进程异常终止（exit code {proc.returncode}）"
+
+        # 5) 统一 record_finish（所有路径都走这里）
+        # REQ-20260920-089：本地 import execution_history（修复 REQ-081 同根 NameError BUG：
+        # daemon 线程里没有模块级 execution_history 变量，原 success 分支的
+        # execution_history.record_finish 永远抛 NameError 被 except 静默吞掉 → execution_history 永远 running）
+        from slirn_home import execution_history as _eh
         if exec_id and outputs_dir is not None:
             try:
-                execution_history.record_finish(
-                    outputs_dir, exec_id, success=False, error=str(job.error)[:500],
-                )
+                if job.state == "done":
+                    _eh.patch_extra(
+                        outputs_dir, exec_id,
+                        {"output_path": str(out_path),
+                         "duration_sec": round((job.finished_at - job.started_at), 1),
+                         "resolution": (asm.get("output_resolution") or "1080p")},
+                    )
+                    _eh.record_finish(
+                        outputs_dir, exec_id, success=True, error="",
+                    )
+                elif job.state == "cancelled":
+                    _eh.record_finish(
+                        outputs_dir, exec_id, success=False,
+                        error="用户取消渲染",
+                    )
+                else:
+                    # failed / 外部 kill / 异常
+                    err_msg = job.error or "ffmpeg 进程异常终止（可能被外部 kill）"
+                    _eh.record_finish(
+                        outputs_dir, exec_id, success=False,
+                        error=str(err_msg)[:500],
+                    )
             except Exception:
                 pass
-        # REQ-20260920-084：渲染失败删 .export_job.json
+
+        # 6) 清理落盘文件（无论哪种终态都删）
         try: _delete_active_export_job(mgr, tid)
         except Exception: pass
 
@@ -3282,6 +3289,11 @@ def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
         f'💾 导出最终视频</button>'
         f'<span class="slirn-fine-export-status" id="slirn-fine-export-status" '
         f'data-state="idle" hidden></span>'
+        # REQ-20260920-089：独立可见的取消按钮（不依赖 status 元素的 hidden 态）
+        f'<button class="slirn-btn slirn-btn-xs slirn-fine-export-cancel" '
+        f'id="slirn-fine-export-cancel-btn" data-action="fine-export-cancel" '
+        f'data-state="idle" style="display:none;" '
+        f'title="取消当前渲染">⏹ 取消</button>'
         f'</span>'
     )
     preview_box = (
