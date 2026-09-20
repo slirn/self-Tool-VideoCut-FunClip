@@ -3574,7 +3574,193 @@
     }
   }
 
-  // REQ-20260920-077：导出精剪视频 · inline 进度状态机（替代 REQ-074 的模态框）
+  // REQ-20260920-090：合成元素组合测试面板（debug）
+  // 5 checkbox + 一键测试 + 诊断 BGM 路径
+  function comboTestAction(action, target) {
+    var tid = target.getAttribute('data-task-id');
+    if (!tid) { toast('❌ 缺少 task_id'); return; }
+    var outputEl = document.getElementById('slirn-combo-test-output-' + tid);
+    var detailsEl = document.getElementById('slirn-combo-test-details');
+    if (!detailsEl) return;
+    var checkboxes = detailsEl.querySelectorAll('input[type="checkbox"][data-combo-kind]');
+    function _readComboState() {
+      var state = {};
+      checkboxes.forEach(function(cb) {
+        state[cb.getAttribute('data-combo-kind')] = cb.checked;
+      });
+      return state;
+    }
+    function _appendOutput(html) {
+      if (outputEl) {
+        outputEl.style.display = 'block';
+        outputEl.innerHTML = html;
+      }
+    }
+    function _snapshot() {
+      // 保存到全局 state，刷新后失效
+      window._comboSnapshot = window._comboSnapshot || {};
+      window._comboSnapshot[tid] = _readComboState();
+      var restoreBtn = detailsEl.querySelector('[data-action="combo-restore"]');
+      if (restoreBtn) restoreBtn.hidden = false;
+    }
+    function _setBusy(busy) {
+      detailsEl.querySelectorAll('button[data-action^="combo-"]').forEach(function(b) {
+        if (b.getAttribute('data-action') !== 'combo-restore') b.disabled = busy;
+      });
+    }
+
+    if (action === 'combo-diagnose') {
+      _appendOutput('🔍 正在诊断...');
+      fetch('/slirn/api/diagnose_bgm', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ task_id: tid })
+      })
+        .then(function(r) { return r.json(); })
+        .then(function(j) {
+          if (!j.ok) { _appendOutput('<span class="err">❌ ' + (j.error || '诊断失败') + '</span>'); return; }
+          var html = '[预测诊断]\n';
+          html += '  inputs_count = ' + j.inputs_count + '\n';
+          html += '  audio_idx = ' + j.audio_idx + '\n';
+          html += '  predicted_has_bgm = ' + (j.predicted_has_bgm ? '<span class="ok">✅ true</span>' : '<span class="warn">⚠ false</span>') + '\n';
+          if (j.why_no_bgm) html += '  why_no_bgm: ' + j.why_no_bgm + '\n';
+          html += '\n[元素状态]\n';
+          var kinds = ['video', 'subtitle', 'cover', 'bg', 'audio'];
+          kinds.forEach(function(k) {
+            var e = j.elements[k];
+            var mark = e.will_render ? '<span class="ok">✅</span>' : '<span class="warn">⚠</span>';
+            html += '  ' + mark + ' ' + k + ': layout=' + e.layout_enabled + ', material=' + (e.material_path ? '✓' : '✗') + ', will_render=' + e.will_render + '\n';
+          });
+          if (j.predicted_audio_filters) {
+            html += '\n[预测 audio filter]\n  ' + j.predicted_audio_filters.replace(/;/g, ';\n  ') + '\n';
+          } else {
+            html += '\n[预测 audio filter]\n  <span class="warn">⚠ 无（未启用 BGM 或素材缺失）</span>\n';
+          }
+          _appendOutput(html);
+        })
+        .catch(function(e) { _appendOutput('<span class="err">❌ 网络错误: ' + e.message + '</span>'); });
+      return;
+    }
+
+    if (action === 'combo-restore') {
+      var snap = (window._comboSnapshot || {})[tid];
+      if (!snap) { toast('⚠ 没有可还原的快照'); return; }
+      // 把 snapshot 写回 checkboxes → 调 combo-apply 写 fc
+      checkboxes.forEach(function(cb) {
+        var k = cb.getAttribute('data-combo-kind');
+        if (k in snap) cb.checked = snap[k];
+      });
+      _applyComboToFC(tid, _readComboState()).then(function() {
+        toast('↩️ 已还原 snapshot');
+        var restoreBtn = detailsEl.querySelector('[data-action="combo-restore"]');
+        if (restoreBtn) restoreBtn.hidden = true;
+        window._comboSnapshot[tid] = null;
+      }).catch(function(e) { toast('❌ 还原失败: ' + e.message); });
+      return;
+    }
+
+    // combo-apply / combo-test 共用：先 snapshot 原状态，再 apply 当前勾选
+    _snapshot();
+    var state = _readComboState();
+    if (action === 'combo-test') {
+      _setBusy(true);
+      _appendOutput('🚀 正在应用勾选并启动合成...');
+      _applyComboToFC(tid, state).then(function() {
+        return fetch('/slirn/api/export_fine_video', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ task_id: tid })
+        });
+      })
+        .then(function(r) { return r.json(); })
+        .then(function(j) {
+          if (!j.ok || !j.job_id) { _appendOutput('<span class="err">❌ 启动失败: ' + (j.error || '未知错误') + '</span>'); _setBusy(false); return; }
+          var jobId = j.job_id;
+          _appendOutput('🚀 已启动 job_id=' + jobId + '\n⏳ 轮询渲染状态...');
+          var pollCount = 0;
+          function poll() {
+            pollCount++;
+            return fetch('/slirn/api/render_status?job_id=' + jobId).then(function(r) { return r.json(); })
+              .then(function(s) {
+                if (s.state === 'running') {
+                  _appendOutput('🚀 job_id=' + jobId + ' | progress=' + (s.progress_pct || 0) + '% | 已轮询 ' + pollCount + ' 次');
+                  if (pollCount < 600) setTimeout(poll, 1500);
+                  else { _appendOutput('<span class="warn">⚠ 轮询超时（15 分钟）</span>'); _setBusy(false); }
+                  return null;
+                }
+                return s;
+              });
+          }
+          return poll();
+        })
+        .then(function(finalState) {
+          if (!finalState) return;
+          if (finalState.state !== 'done') {
+            _appendOutput('<span class="err">❌ 渲染 ' + finalState.state + ' | ' + (finalState.error || '') + '</span>');
+            _setBusy(false); return;
+          }
+          // 完成后 ffprobe 探测 output
+          _appendOutput('✅ 渲染完成（' + (finalState.elapsed_sec || '?') + ' 秒）\n🔍 探测 output 音频...');
+          return fetch('/slirn/api/probe_output_audio', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ task_id: tid, output_path: 'outputs/final.mp4' })
+          }).then(function(r) { return r.json(); }).then(function(p) {
+            var html = '✅ 渲染完成（' + (finalState.elapsed_sec || '?') + ' 秒）\n\n[BGM 检测报告]\n';
+            if (!p.ok) { html += '<span class="err">❌ probe 失败: ' + p.error + '</span>'; _appendOutput(html); _setBusy(false); return; }
+            html += '  audio stream 数: ' + p.audio_stream_count + '\n';
+            html += '  duration: ' + (p.duration ? p.duration.toFixed(1) + 's' : '?') + '\n';
+            html += '  mean_volume: ' + (p.mean_volume_db != null ? p.mean_volume_db.toFixed(1) + ' dB' : '?') + '\n';
+            html += '  max_volume: ' + (p.max_volume_db != null ? p.max_volume_db.toFixed(1) + ' dB' : '?') + '\n';
+            if (p.bgm_mean_volume_db != null) {
+              html += '  BGM 源 mean_volume: ' + p.bgm_mean_volume_db.toFixed(1) + ' dB\n';
+              var diff = Math.abs((p.mean_volume_db || 0) - p.bgm_mean_volume_db);
+              html += '  差距: ' + diff.toFixed(1) + ' dB\n';
+              if (diff < 3) html += '  <span class="ok">✅ 高度一致（BGM 正常合成）</span>\n';
+              else if (diff < 10) html += '  <span class="warn">⚠ 部分匹配（差距较大）</span>\n';
+              else html += '  <span class="err">❌ 差距过大（BGM 可能缺失或异常）</span>\n';
+            } else {
+              if (p.audio_stream_count === 0) html += '  <span class="err">❌ output 无 audio stream（BGM 缺失）</span>\n';
+              else html += '  <span class="warn">⚠ 未对比 BGM 源（未提供 bgm_path）</span>\n';
+            }
+            _appendOutput(html);
+            _setBusy(false);
+          });
+        })
+        .catch(function(e) { _appendOutput('<span class="err">❌ 异常: ' + e.message + '</span>'); _setBusy(false); });
+      return;
+    }
+
+    if (action === 'combo-apply') {
+      _appendOutput('📝 正在应用勾选...');
+      _applyComboToFC(tid, state).then(function() {
+        _appendOutput('✅ 勾选已写入 fc（layout.video/subtitle/cover/bg + audio）\n💡 点「🚀 一键测试合成」跑 ffmpeg');
+      }).catch(function(e) { _appendOutput('<span class="err">❌ 写 fc 失败: ' + e.message + '</span>'); });
+      return;
+    }
+  }
+
+  // REQ-20260920-090：把 5 个勾选状态写入 fc（save_fine_layout + save_fine_audio）
+  function _applyComboToFC(tid, state) {
+    // /save_fine_layout 接受 body.layout = {element: {enabled, ...}}（一次写 4 个 elements）
+    var layoutUpdate = {
+      video: { enabled: !!state.video },
+      subtitle: { enabled: !!state.subtitle },
+      cover: { enabled: !!state.cover },
+      bg: { enabled: !!state.bg },
+    };
+    return fetch('/slirn/api/save_fine_layout', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task_id: tid, layout: layoutUpdate })
+    })
+      .then(function(r) { return r.json(); })
+      .then(function() {
+        // /save_fine_audio 接受 body.audio = {enabled: true}
+        return fetch('/slirn/api/save_fine_audio', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ task_id: tid, audio: { enabled: !!state.audio } })
+        });
+      })
+      .then(function(r) { return r.json(); });
+  }
+
   // 由 export_fine_video 端点启动后台线程后，前端调 startFineExportInline：
   //   1. 把按钮变为「⏳ 导出中…」disabled
   //   2. 按钮右侧 #slirn-fine-export-status 显示状态文字 + 迷你进度条
@@ -6019,6 +6205,11 @@
           toast('❌ 网络错误: ' + e.message);
           if (_ceBtn) { _ceBtn.disabled = false; _ceBtn.setAttribute('data-state', 'running'); }
         });
+    }
+    else if (action === 'combo-apply' || action === 'combo-test' || action === 'combo-diagnose' || action === 'combo-restore') {
+      // REQ-20260920-090：合成元素组合测试面板（debug）—— 5 checkbox 调试入口
+      comboTestAction(action, target);
+      return;
     }
     else if (action === 'opt-page-prev' || action === 'opt-page-next') {
       // REQ-20260918-050：词频列表翻页

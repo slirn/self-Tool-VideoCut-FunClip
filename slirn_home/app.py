@@ -2151,6 +2151,108 @@ def _assemble_fine_filter(
     }
 
 
+def _predict_audio_path(fc: dict) -> dict:
+    """REQ-20260920-090：根据 fc 状态预测合成路径里 BGM 的处理分支（不跑 ffmpeg、不创建临时文件）。
+
+    复刻 _assemble_fine_filter 中 inputs_count + audio_idx + BGM filter 链的计算逻辑
+    —— 但不调用 ffmpeg、不创建临时字幕/预缩文件。供 /slirn/api/diagnose_bgm 同步调用。
+    """
+    layout = fc.get("layout") or {}
+    materials = fc.get("materials") or {}
+    audio_cfg = fc.get("audio") or {}
+
+    # 1. 算 inputs_count（video 始终 1；bg/cover/audio 各可选）
+    inputs_count = 1  # video
+    if layout.get("bg", {}).get("enabled") and (materials.get("bg") or {}).get("path"):
+        inputs_count += 1
+    cover_input_enabled = (
+        layout.get("cover", {}).get("enabled")
+        and float(layout.get("cover", {}).get("duration", 0)) > 0
+        and (materials.get("cover") or {}).get("path")
+    )
+    if cover_input_enabled:
+        inputs_count += 1
+    audio_input_enabled = bool(
+        audio_cfg.get("enabled") and (materials.get("audio") or {}).get("path")
+    )
+    if audio_input_enabled:
+        inputs_count += 1
+
+    # 2. audio_idx = inputs_count - 1（audio 始终最后）
+    audio_idx = inputs_count - 1 if audio_input_enabled else -1
+
+    # 3. 5 个元素的 will_render 状态
+    elements = {
+        "video": {
+            "layout_enabled": bool(layout.get("video", {}).get("enabled", False)),
+            "material_path": (materials.get("video") or {}).get("path", ""),
+            "will_render": bool(
+                layout.get("video", {}).get("enabled", False)
+                and (materials.get("video") or {}).get("path")
+            ),
+        },
+        "subtitle": {
+            "layout_enabled": bool(layout.get("subtitle", {}).get("enabled", False)),
+            "material_path": (materials.get("subtitle") or {}).get("path", ""),
+            "will_render": bool(
+                layout.get("subtitle", {}).get("enabled", False)
+                and (materials.get("subtitle") or {}).get("path")
+            ),
+        },
+        "cover": {
+            "layout_enabled": bool(layout.get("cover", {}).get("enabled", False)),
+            "material_path": (materials.get("cover") or {}).get("path", ""),
+            "will_render": cover_input_enabled,
+        },
+        "bg": {
+            "layout_enabled": bool(layout.get("bg", {}).get("enabled", False)),
+            "material_path": (materials.get("bg") or {}).get("path", ""),
+            "will_render": bool(
+                layout.get("bg", {}).get("enabled", False)
+                and (materials.get("bg") or {}).get("path")
+            ),
+        },
+        "audio": {
+            "layout_enabled": bool(audio_cfg.get("enabled", False)),
+            "material_path": (materials.get("audio") or {}).get("path", ""),
+            "will_render": audio_input_enabled,
+            "volume": float(audio_cfg.get("volume", 0.4)),
+        },
+    }
+
+    # 4. 预测 audio filter（与 _assemble_fine_filter 行 2122-2139 一致）
+    predicted_audio_filters = ""
+    if audio_input_enabled and audio_idx >= 0:
+        vol = float(audio_cfg.get("volume", 0.4))
+        fade_in = float(audio_cfg.get("fade_in", 0.0))
+        fade_out = float(audio_cfg.get("fade_out", 0.0))
+        # REQ-20260920-080：label [bgm] 必须紧接过滤器链尾部，不能 ",[bgm]"
+        bgm_chain = f"[{audio_idx}:a]aloop=loop=-1:size=2e9,volume={vol:.2f}"
+        if fade_in > 0:
+            bgm_chain += f",afade=t=in:st=0:d={fade_in:.2f}"
+        if fade_out > 0:
+            bgm_chain += f",afade=t=out:st=0:d={fade_out:.2f}"
+        bgm_chain += "[bgm]; [voice][bgm]amix=inputs=2:duration=first:normalize=0[aout]"
+        predicted_audio_filters = bgm_chain
+
+    # 5. 诊断 why_no_bgm
+    why_no_bgm = ""
+    if not audio_cfg.get("enabled"):
+        why_no_bgm = "fc.audio.enabled = False（未勾选 BGM）"
+    elif not (materials.get("audio") or {}).get("path"):
+        why_no_bgm = "materials.audio.path 缺失（未上传音频素材）"
+
+    return {
+        "ok": True,
+        "elements": elements,
+        "inputs_count": inputs_count,
+        "audio_idx": audio_idx,
+        "predicted_has_bgm": bool(audio_input_enabled and audio_idx >= 0),
+        "predicted_audio_filters": predicted_audio_filters,
+        "why_no_bgm": why_no_bgm,
+    }
+
+
 def _run_fine_render(
     task_id: str,
     mgr,
@@ -3556,6 +3658,27 @@ def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
         f'{bg_detect_block}'
         f'</details>'
         f'{combined_actions_bar}'
+        # REQ-20260920-090：合成元素组合测试面板（debug）—— 5-checkbox 调试入口
+        f'<details class="slirn-fine-section slirn-combo-test-details" id="slirn-combo-test-details" open>'
+        f'<summary class="slirn-fine-section-summary">🧪 合成元素组合测试 <span class="slirn-fine-section-status">5 项可勾选</span></summary>'
+        f'<div class="slirn-combo-test-block">'
+        f'<div class="slirn-form-hint">⚠️ 这会修改 fc 当前勾选状态；测试后会提示还原</div>'
+        f'<div class="slirn-combo-test-row">'
+        f'<label><input type="checkbox" data-combo-kind="video" checked> 🎬 视频</label>'
+        f'<label><input type="checkbox" data-combo-kind="subtitle"> 📝 字幕</label>'
+        f'<label><input type="checkbox" data-combo-kind="cover"> 🖼 封面</label>'
+        f'<label><input type="checkbox" data-combo-kind="bg"> 🎨 背景图片</label>'
+        f'<label><input type="checkbox" data-combo-kind="audio" checked> 🎵 BGM</label>'
+        f'</div>'
+        f'<div class="slirn-combo-test-actions">'
+        f'<button class="slirn-btn" data-action="combo-apply" data-task-id="{_esc(task_id)}">📝 应用勾选（写 fc）</button>'
+        f'<button class="slirn-btn slirn-btn-primary" data-action="combo-test" data-task-id="{_esc(task_id)}">🚀 一键测试合成</button>'
+        f'<button class="slirn-btn slirn-btn-xs" data-action="combo-diagnose" data-task-id="{_esc(task_id)}">🔍 仅诊断</button>'
+        f'<button class="slirn-btn slirn-btn-xs" data-action="combo-restore" data-task-id="{_esc(task_id)}" hidden>↩️ 还原上次配置</button>'
+        f'</div>'
+        f'<div class="slirn-combo-test-output" id="slirn-combo-test-output-{_esc(task_id)}"></div>'
+        f'</div>'
+        f'</details>'
         f'<div class="slirn-form-hint">💡 上传 5 个素材后调滑块调位置/缩放/字体；改动后 300ms 自动保存到当前任务。'
         f'点「💾 保存设置参数」会同时把当前参数另存为全局模板（未填模板名则弹窗要求填）。</div>'
         f'{preview_box}'
@@ -7806,6 +7929,131 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             except Exception:
                 pass
         return _ok(_render_task_list(mgr), toast="✅ 任务已创建", task_id=task.task_id)
+
+    # REQ-20260920-090：诊断 BGM 合成路径（不跑 ffmpeg、不创建临时文件）
+    @app.app.post("/slirn/api/diagnose_bgm")
+    async def diagnose_bgm(body: dict = Body(default_factory=dict)):
+        """根据 fc 状态预测 BGM 合成路径。
+
+        同步探测「如果按当前 fc 状态合成，是否会产生 BGM」——不调用 ffmpeg。
+        返回：elements（5 元素 will_render 状态）+ inputs_count + audio_idx
+              + predicted_has_bgm + predicted_audio_filters + why_no_bgm
+        """
+        tid = body.get("task_id")
+        if not tid:
+            return {"ok": False, "error": "missing task_id"}
+        try:
+            fc = _get_fine_compose(mgr, tid)
+        except FileNotFoundError:
+            return {"ok": False, "error": "fc not found"}
+        except Exception as exc:
+            return {"ok": False, "error": f"读取 fc 失败: {exc}"}
+        return _predict_audio_path(fc)
+
+    # REQ-20260920-090：ffprobe volumedetect 探测 output 文件音频信息
+    @app.app.post("/slirn/api/probe_output_audio")
+    async def probe_output_audio(body: dict = Body(default_factory=dict)):
+        """ffprobe 探测 output 视频的音频流 + volumedetect。
+
+        Body:
+          task_id: str (必需)
+          output_path: str (可选, 相对 tasks/<tid>/; 默认 outputs/final.mp4)
+          bgm_path: str (可选, 相对 tasks/<tid>/; 提供则对比 BGM 源 mean_volume)
+
+        Returns:
+          ok, audio_streams (list), duration, mean_volume_db (output),
+          max_volume_db (output), bgm_mean_volume_db (if bgm_path),
+          bgm_max_volume_db (if bgm_path), match_score (0..1)
+        """
+        import subprocess as _sp
+        import json as _json
+
+        tid = body.get("task_id")
+        if not tid:
+            return {"ok": False, "error": "missing task_id"}
+        output_rel = body.get("output_path") or "outputs/final.mp4"
+        bgm_rel = body.get("bgm_path")
+
+        task_root = mgr.tasks_dir / tid
+        output_abs = (task_root / output_rel).resolve()
+        if not output_abs.exists():
+            return {"ok": False, "error": f"output 不存在: {output_abs}"}
+
+        def _run_probe(args: list[str]) -> tuple[int, str, str]:
+            proc = _sp.Popen(args, stdout=_sp.PIPE, stderr=_sp.PIPE, encoding="utf-8", errors="replace")
+            out, err = proc.communicate(timeout=30)
+            return proc.returncode, out, err
+
+        # 1. 探测 audio stream 数 + duration
+        rc, out, err = _run_probe([
+            "ffprobe", "-v", "error", "-select_streams", "a",
+            "-show_entries", "stream=index,codec_name,duration:format=duration",
+            "-of", "json", str(output_abs),
+        ])
+        audio_streams: list[dict] = []
+        duration: float | None = None
+        if rc == 0 and out.strip():
+            try:
+                probe_json = _json.loads(out)
+                audio_streams = probe_json.get("streams") or []
+                fmt = probe_json.get("format") or {}
+                if fmt.get("duration"):
+                    duration = float(fmt["duration"])
+            except Exception:
+                pass
+
+        # 2. volumedetect 探测 output mean_volume
+        rc, out, err = _run_probe([
+            "ffprobe", "-v", "error", "-af", "volumedetect",
+            "-of", "json", str(output_abs),
+        ])
+        mean_volume_db: float | None = None
+        max_volume_db: float | None = None
+        if rc == 0 and out.strip():
+            try:
+                probe_json = _json.loads(out)
+                streams = probe_json.get("streams") or []
+                if streams:
+                    mean_volume_db = float(streams[0].get("mean_volume", "0").replace("dB", "").strip()) if "mean_volume" in streams[0] else None
+                    max_volume_db = float(streams[0].get("max_volume", "0").replace("dB", "").strip()) if "max_volume" in streams[0] else None
+            except Exception:
+                pass
+
+        # 3. （可选）对比 BGM 源
+        bgm_mean_volume_db: float | None = None
+        bgm_max_volume_db: float | None = None
+        match_score: float | None = None
+        if bgm_rel:
+            bgm_abs = (task_root / bgm_rel).resolve()
+            if bgm_abs.exists():
+                rc, out, err = _run_probe([
+                    "ffprobe", "-v", "error", "-af", "volumedetect",
+                    "-of", "json", str(bgm_abs),
+                ])
+                if rc == 0 and out.strip():
+                    try:
+                        probe_json = _json.loads(out)
+                        streams = probe_json.get("streams") or []
+                        if streams:
+                            bgm_mean_volume_db = float(streams[0].get("mean_volume", "0").replace("dB", "").strip()) if "mean_volume" in streams[0] else None
+                            bgm_max_volume_db = float(streams[0].get("max_volume", "0").replace("dB", "").strip()) if "max_volume" in streams[0] else None
+                    except Exception:
+                        pass
+                # 计算匹配度：mean_volume 差距越小分数越高（0..1）
+                if mean_volume_db is not None and bgm_mean_volume_db is not None:
+                    diff = abs(mean_volume_db - bgm_mean_volume_db)
+                    match_score = max(0.0, 1.0 - diff / 30.0)  # 30dB 差距 = 0 分
+
+        return {
+            "ok": True,
+            "audio_stream_count": len(audio_streams),
+            "duration": duration,
+            "mean_volume_db": mean_volume_db,
+            "max_volume_db": max_volume_db,
+            "bgm_mean_volume_db": bgm_mean_volume_db,
+            "bgm_max_volume_db": bgm_max_volume_db,
+            "match_score": match_score,
+        }
 
     @app.app.post("/slirn/api/cancel_create")
     async def cancel_create():

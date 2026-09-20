@@ -7576,3 +7576,168 @@ def test_render_async_local_execution_history_import():
         "（daemon 线程无模块级 execution_history，必须本地导入）"
     )
 
+
+# ====================================================================
+# REQ-20260920-090：合成元素组合测试面板（debug）
+# ====================================================================
+
+
+def test_combo_test_zone_in_workbench_html():
+    """REQ-090 AC-1/AC-2/AC-3/AC-4：_render_fine_cut_zone 输出含 🧪 测试面板 + 5 checkbox + 4 按钮 + 红色提示。"""
+    app_path = FUNCLIP_ROOT / "slirn_home" / "app.py"
+    src = app_path.read_text(encoding="utf-8")
+
+    # 1. 含「🧪 合成元素组合测试」title
+    assert "🧪 合成元素组合测试" in src, (
+        "REQ-090 AC-1：workbench HTML 必须含『🧪 合成元素组合测试』"
+    )
+
+    # 2. 含 5 个 data-combo-kind checkbox
+    for kind in ["video", "subtitle", "cover", "bg", "audio"]:
+        assert f'data-combo-kind="{kind}"' in src, (
+            f"REQ-090 AC-2：workbench HTML 必须含 data-combo-kind={kind} checkbox"
+        )
+
+    # 3. 4 个按钮（apply / test / diagnose / restore）
+    for action in ["combo-apply", "combo-test", "combo-diagnose", "combo-restore"]:
+        assert f'data-action="{action}"' in src, (
+            f"REQ-090 AC-4：workbench HTML 必须含 data-action={action} 按钮"
+        )
+
+    # 4. 红色提示「⚠️ 这会修改 fc 当前勾选状态」
+    assert "⚠️ 这会修改 fc 当前勾选状态" in src, (
+        "REQ-090 AC-3：workbench HTML 必须含「⚠️ 这会修改 fc 当前勾选状态」红色提示"
+    )
+
+    # 5. 默认勾选状态：video ✅ / subtitle ❌ / cover ❌ / bg ❌ / audio ✅
+    # video/audio 行带 checked，其他不带
+    video_line_re = re.search(r'<input type="checkbox" data-combo-kind="video"[^>]*checked', src)
+    audio_line_re = re.search(r'<input type="checkbox" data-combo-kind="audio"[^>]*checked', src)
+    assert video_line_re is not None, "REQ-090 AC-12：video checkbox 必须默认 checked"
+    assert audio_line_re is not None, "REQ-090 AC-12：audio checkbox 必须默认 checked"
+    # subtitle/cover/bg 不带 checked（直接 grep 整行）
+    for kind in ["subtitle", "cover", "bg"]:
+        line_re = re.search(rf'<input type="checkbox" data-combo-kind="{kind}"[^>]*>', src)
+        assert line_re is not None
+        assert "checked" not in line_re.group(0), (
+            f"REQ-090 AC-12：{kind} checkbox 默认 unchecked"
+        )
+
+
+def test_diagnose_bgm_endpoint_exists():
+    """REQ-090 AC-5/AC-15：/slirn/api/diagnose_bgm 端点存在 + _predict_audio_path 纯函数返回字段完整。"""
+    app_path = FUNCLIP_ROOT / "slirn_home" / "app.py"
+    src = app_path.read_text(encoding="utf-8")
+
+    # 1. 端点定义
+    assert '@app.app.post("/slirn/api/diagnose_bgm")' in src, (
+        "REQ-090 AC-5：必须定义 /slirn/api/diagnose_bgm 端点"
+    )
+    assert "async def diagnose_bgm" in src
+
+    # 2. 纯函数 _predict_audio_path
+    assert "def _predict_audio_path(" in src, (
+        "REQ-090：必须定义 _predict_audio_path 纯函数"
+    )
+
+    # 3. 验证返回字段（直接 import 跑一遍）
+    sys.path.insert(0, str(FUNCLIP_ROOT))
+    from slirn_home.app import _predict_audio_path
+
+    # case 1: 未勾 BGM
+    fc1 = {"layout": {}, "materials": {}, "audio": {"enabled": False}}
+    r1 = _predict_audio_path(fc1)
+    assert r1["ok"] is True
+    assert r1["predicted_has_bgm"] is False
+    assert r1["predicted_audio_filters"] == ""
+    assert "fc.audio.enabled" in r1["why_no_bgm"]
+    assert r1["inputs_count"] == 1
+    assert r1["audio_idx"] == -1
+
+    # case 2: 勾 BGM + 有 audio material
+    fc2 = {
+        "layout": {"video": {"enabled": True}, "audio": {"enabled": True}},
+        "materials": {"video": {"path": "v.mp4"}, "audio": {"path": "a.mp3"}},
+        "audio": {"enabled": True, "volume": 0.5},
+    }
+    r2 = _predict_audio_path(fc2)
+    assert r2["predicted_has_bgm"] is True
+    assert "[1:a]aloop=loop=-1:size=2e9,volume=0.50" in r2["predicted_audio_filters"]
+    assert r2["inputs_count"] == 2  # video + audio
+    assert r2["audio_idx"] == 1
+
+    # case 3: 勾 bg + cover + audio（audio_idx 应是 3）
+    fc3 = {
+        "layout": {
+            "video": {"enabled": True},
+            "bg": {"enabled": True},
+            "cover": {"enabled": True, "duration": 3.0},
+        },
+        "materials": {
+            "video": {"path": "v.mp4"},
+            "bg": {"path": "bg.png"},
+            "cover": {"path": "c.png"},
+            "audio": {"path": "a.mp3"},
+        },
+    }
+    # fc3 缺 audio.enabled → 默认 False
+    r3 = _predict_audio_path(fc3)
+    assert r3["inputs_count"] == 3  # video + bg + cover
+    assert r3["audio_idx"] == -1
+
+
+def test_router_js_combo_actions():
+    """REQ-090 AC-11：router.js 包含 3 个新 action dispatch 分支（combo-apply/test/diagnose/restore）。"""
+    js_path = FUNCLIP_ROOT / "slirn_home" / "static" / "router.js"
+    src = js_path.read_text(encoding="utf-8")
+
+    # 1. 4 个 action 在 dispatch 里被识别
+    dispatch_anchor = "combo-apply' || action === 'combo-test'"
+    assert dispatch_anchor in src, (
+        "REQ-090 AC-11：router.js dispatch 须含 combo-apply/test/diagnose/restore 分支"
+    )
+
+    # 2. comboTestAction 函数定义
+    assert "function comboTestAction" in src, (
+        "REQ-090 AC-11：router.js 必须定义 comboTestAction 函数"
+    )
+
+    # 3. _applyComboToFC helper
+    assert "function _applyComboToFC" in src, (
+        "REQ-090：router.js 必须定义 _applyComboToFC helper（写 fc）"
+    )
+
+    # 4. diagnose 调用 /slirn/api/diagnose_bgm
+    assert "/slirn/api/diagnose_bgm" in src, (
+        "REQ-090 AC-6：router.js 必须 fetch /slirn/api/diagnose_bgm"
+    )
+
+    # 5. test 调用 /slirn/api/export_fine_video + /slirn/api/render_status + /slirn/api/probe_output_audio
+    assert "/slirn/api/export_fine_video" in src
+    assert "/slirn/api/render_status" in src
+    assert "/slirn/api/probe_output_audio" in src, (
+        "REQ-090 AC-9：combo-test 完成后必须 probe_output_audio"
+    )
+
+
+def test_combo_test_saves_fc_layout_audio():
+    """REQ-090 AC-7/AC-15：combo-apply handler 调 /save_fine_layout（4 elements）+ /save_fine_audio。"""
+    js_path = FUNCLIP_ROOT / "slirn_home" / "static" / "router.js"
+    src = js_path.read_text(encoding="utf-8")
+
+    # 1. _applyComboToFC 函数体内必须 fetch /save_fine_layout + /save_fine_audio
+    assert "/slirn/api/save_fine_layout" in src
+    assert "/slirn/api/save_fine_audio" in src
+
+    # 2. payload 包含 4 个 layout elements 的 enabled
+    for kind in ["video", "subtitle", "cover", "bg"]:
+        # 在 _applyComboToFC 函数体内
+        assert f"{kind}: {{ enabled:" in src, (
+            f"REQ-090 AC-7：_applyComboToFC payload 必须含 {kind}.enabled"
+        )
+
+    # 3. payload 包含 audio.enabled
+    assert "audio: { enabled:" in src, (
+        "REQ-090 AC-7：_applyComboToFC payload 必须含 audio.enabled"
+    )
+

@@ -3869,3 +3869,52 @@ input[type="checkbox"]:focus-visible {
 }
 .slirn-warn { color: #f59e0b; font-weight: 500; }
 .slirn-ok { color: #22c55e; font-weight: 500; }
+
+/* REQ-20260920-090：合成元素组合测试面板（debug） */
+.slirn-combo-test-block {
+  padding: 8px 12px;
+  border: 1px dashed rgba(128,128,128,0.5);
+  border-radius: 4px;
+  background: rgba(255, 248, 225, 0.5);
+  margin-bottom: 8px;
+}
+.slirn-combo-test-row {
+  display: flex;
+  gap: 14px;
+  margin: 8px 0;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+.slirn-combo-test-row label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+.slirn-combo-test-row input[type="checkbox"] {
+  margin: 0;
+  cursor: pointer;
+}
+.slirn-combo-test-actions {
+  display: flex;
+  gap: 6px;
+  margin: 6px 0;
+  flex-wrap: wrap;
+}
+.slirn-combo-test-output {
+  margin-top: 6px;
+  padding: 6px 8px;
+  background: #f6f8fa;
+  border-radius: 4px;
+  font-family: ui-monospace, "SF Mono", Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.slirn-combo-test-output:empty { display: none; }
+.slirn-combo-test-output .ok { color: #22c55e; font-weight: 600; }
+.slirn-combo-test-output .warn { color: #f59e0b; font-weight: 600; }
+.slirn-combo-test-output .err { color: #d1242f; font-weight: 600; }
