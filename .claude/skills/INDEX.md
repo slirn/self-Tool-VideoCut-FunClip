@@ -2,6 +2,16 @@
 
 > 本文件仅做**文档索引**。6 个 skill 的真实源在 `slirn/skill/`（git submodule → `../slirn-standalone/`）。
 
+## ⚠️ 任务执行铁律（任何 Agent 必读，2026-09-20 立）
+
+**用户任务必须串行执行**。前一个任务完整闭环（实现 + 自测 + 回复用户）后才能开始下一个。
+
+- 用户发来新任务时**先记下**（写到 `pending-task-execution-log.md` 或当前待办），等当前任务闭环后再开始
+- **不要**中断当前任务去处理新任务（会导致状态丢失、commit 混合）
+- **不要**同时处理多个任务（输出混乱）
+- 每个任务完成后必须**回复用户**（这是任务完成的信号），用户看到「X 完成」才会认为 A 真的结束了
+- 规则全文：[memory/serial-task-execution-rule.md](../../memory/serial-task-execution-rule.md)
+
 ## ⚠️ 重要：Windows Junction 与 git 的冲突
 
 本目录 **不**存放 skill 真实文件。原因：
