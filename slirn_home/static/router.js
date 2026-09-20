@@ -3616,8 +3616,11 @@
       }
     }
     function _snapshot() {
-      // 保存到全局 state，刷新后失效
+      // REQ-20260920-091 v2：snapshot 只在「还没 snapshot 过」时记录
+      // 避免 combo-apply 完后点 combo-test，snapshot 被覆盖为「测试状态」
+      // （导致 ↩️ 还原按钮还原不到原始 fc）
       window._comboSnapshot = window._comboSnapshot || {};
+      if (window._comboSnapshot[tid] !== undefined) return;
       window._comboSnapshot[tid] = _readComboState();
       var restoreBtn = detailsEl.querySelector('[data-action="combo-restore"]');
       if (restoreBtn) restoreBtn.hidden = false;
@@ -3681,10 +3684,13 @@
     _snapshot();
     var state = _readComboState();
     if (action === 'combo-test') {
+      var testBtn = detailsEl.querySelector('[data-action="combo-test"]');
       _setBusy(true);
+      if (testBtn) { testBtn.textContent = '⏳ 测试中…'; testBtn.disabled = true; }
       var tp = _readTimeParams();
       var outPath = _computeOutputPath(tp);
       _appendOutput('🚀 正在应用勾选并启动合成（start=' + tp.preview_start + 's, dur=' + (tp.duration || 'full') + 's）...');
+      toast('🚀 一键测试合成已启动（' + (tp.duration || '完整') + '）');
       _applyComboToFC(tid, state).then(function() {
         // REQ-20260920-091：combo-test 传 time 参数给 export_fine_video（不导完整视频）
         var exportBody = { task_id: tid, preview_start: tp.preview_start };
@@ -3696,7 +3702,13 @@
       })
         .then(function(r) { return r.json(); })
         .then(function(j) {
-          if (!j.ok || !j.job_id) { _appendOutput('<span class="err">❌ 启动失败: ' + (j.error || '未知错误') + '</span>'); _setBusy(false); return; }
+          if (!j.ok || !j.job_id) {
+            _appendOutput('<span class="err">❌ 启动失败: ' + (j.error || '未知错误') + '</span>');
+            toast('❌ 启动失败: ' + (j.error || '未知错误'));
+            if (testBtn) { testBtn.textContent = '🚀 一键测试合成'; testBtn.disabled = false; }
+            _setBusy(false);
+            return;
+          }
           var jobId = j.job_id;
           _appendOutput('🚀 已启动 job_id=' + jobId + '\n⏳ 轮询渲染状态...');
           var pollCount = 0;
@@ -3707,7 +3719,12 @@
                 if (s.state === 'running') {
                   _appendOutput('🚀 job_id=' + jobId + ' | progress=' + (s.progress_pct || 0) + '% | 已轮询 ' + pollCount + ' 次');
                   if (pollCount < 600) setTimeout(poll, 1500);
-                  else { _appendOutput('<span class="warn">⚠ 轮询超时（15 分钟）</span>'); _setBusy(false); }
+                  else {
+                    _appendOutput('<span class="warn">⚠ 轮询超时（15 分钟）</span>');
+                    toast('⚠ 测试超时');
+                    if (testBtn) { testBtn.textContent = '🚀 一键测试合成'; testBtn.disabled = false; }
+                    _setBusy(false);
+                  }
                   return null;
                 }
                 return s;
@@ -3719,7 +3736,10 @@
           if (!finalState) return;
           if (finalState.state !== 'done') {
             _appendOutput('<span class="err">❌ 渲染 ' + finalState.state + ' | ' + (finalState.error || '') + '</span>');
-            _setBusy(false); return;
+            toast('❌ 渲染 ' + finalState.state);
+            if (testBtn) { testBtn.textContent = '❌ 失败 · 重试'; testBtn.disabled = false; }
+            _setBusy(false);
+            return;
           }
           // REQ-20260920-091：probe 探测**对应**的 output 文件（不是默认 final.mp4）
           _appendOutput('✅ 渲染完成（' + (finalState.elapsed_sec || '?') + ' 秒）\n🔍 探测 output 音频（' + outPath + '）...');
@@ -3728,7 +3748,14 @@
             body: JSON.stringify({ task_id: tid, output_path: outPath })
           }).then(function(r) { return r.json(); }).then(function(p) {
             var html = '✅ 渲染完成（' + (finalState.elapsed_sec || '?') + ' 秒）\n\n[BGM 检测报告]\n';
-            if (!p.ok) { html += '<span class="err">❌ probe 失败: ' + p.error + '</span>'; _appendOutput(html); _setBusy(false); return; }
+            if (!p.ok) {
+              html += '<span class="err">❌ probe 失败: ' + p.error + '</span>';
+              _appendOutput(html);
+              toast('✅ 测试完成（' + (finalState.elapsed_sec || '?') + ' 秒）· probe 失败');
+              if (testBtn) { testBtn.textContent = '🚀 一键测试合成'; testBtn.disabled = false; }
+              _setBusy(false);
+              return;
+            }
             html += '  audio stream 数: ' + p.audio_stream_count + '\n';
             html += '  duration: ' + (p.duration ? p.duration.toFixed(1) + 's' : '?') + '\n';
             html += '  mean_volume: ' + (p.mean_volume_db != null ? p.mean_volume_db.toFixed(1) + ' dB' : '?') + '\n';
@@ -3745,10 +3772,46 @@
               else html += '  <span class="warn">⚠ 未对比 BGM 源（未提供 bgm_path）</span>\n';
             }
             _appendOutput(html);
+            // REQ-20260920-091 v2：done 时按钮变「✅ 完成」+ 可见反馈
+            // 注意：/slirn/api/video 端点只支持 src=original/rough_compose/fine_preview/fine_export
+            // （见 app.py:6584 src_q in ("fine_preview", "fine_export")）
+            // 所以 time-suffix 文件（如 fine_export_t30_d20.mp4）无法走 video 端点
+            // 只有 default（fine_export.mp4）能弹出视频
+            if (testBtn) {
+              testBtn.textContent = '✅ 完成 · 重测';
+              testBtn.disabled = false;
+              testBtn.onclick = null;  // 让普通 handler 接管（再次点测试）
+            }
+            toast('✅ 测试完成（' + (finalState.elapsed_sec || '?') + ' 秒）');
+            // 自动打开视频：仅当 output_path 是 fine_export.mp4 时（video 端点支持）
+            // time-suffix 文件路径只显示在 output 文本里，复制到 Gradio 预览面板即可查看
+            var isDefaultOutput = outPath === 'outputs/fine_export.mp4';
+            if (isDefaultOutput) {
+              var autoUrl = '/slirn/api/video/' + tid + '?src=fine_export&t=' + Date.now();
+              try { window.open(autoUrl, '_blank'); } catch (e) { /* 弹窗被浏览器拦截 */ }
+              if (testBtn) {
+                testBtn.textContent = '✅ 完成 · 查看视频';
+                testBtn.onclick = function(ev) {
+                  ev.preventDefault(); ev.stopPropagation();
+                  window.open(autoUrl, '_blank');
+                  return false;
+                };
+              }
+            } else {
+              // time-suffix 测试：在 output 区域给用户一个「💡 提示：去 Gradio 预览查看」
+              var tipHtml = html + '<div class="hint" style="margin-top:6px;">💡 提示：time-suffix 文件（' + outPath + '）无法通过 video 端点下载，'
+                + '要查看请去 Gradio 上方预览面板或本地 outputs 目录</div>';
+              _appendOutput(tipHtml);
+            }
             _setBusy(false);
           });
         })
-        .catch(function(e) { _appendOutput('<span class="err">❌ 异常: ' + e.message + '</span>'); _setBusy(false); });
+        .catch(function(e) {
+          _appendOutput('<span class="err">❌ 异常: ' + e.message + '</span>');
+          toast('❌ 异常: ' + e.message);
+          if (testBtn) { testBtn.textContent = '❌ 失败 · 重试'; testBtn.disabled = false; }
+          _setBusy(false);
+        });
       return;
     }
 

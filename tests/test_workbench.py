@@ -7863,3 +7863,105 @@ def test_combo_test_passes_time_params_to_export():
         "REQ-091 AC-9：probe_output_audio 必须用算出的 outPath（不是硬编码 final.mp4）"
     )
 
+
+def test_combo_snapshot_not_overwritten_by_combo_test():
+    """REQ-091 v2 BUG 修复：连续点 combo-apply + combo-test 时 snapshot 不被覆盖。
+
+    原 BUG：combo-apply 调 _snapshot() 后 combo-test 入口又调一次 _snapshot()，
+    导致 window._comboSnapshot[tid] 被覆盖为「测试状态」（不是原始 fc）。
+    用户点「↩️ 还原」按钮还原不到原始 fc。
+
+    修复：_snapshot() 加 early-return——只在「还没 snapshot 过」时记录。
+    """
+    js_path = FUNCLIP_ROOT / "slirn_home" / "static" / "router.js"
+    src = js_path.read_text(encoding="utf-8")
+
+    # _snapshot 函数体里必须有 early-return 防止覆盖
+    # 抓 _snapshot 函数体（到下一个 function/var function 之前）
+    snap_match = re.search(
+        r"function _snapshot\(\)\s*\{(.*?)\n\s{4}\}", src, re.DOTALL,
+    )
+    assert snap_match is not None, "REQ-091 v2：必须能找到 _snapshot 函数体"
+    snap_body = snap_match.group(1)
+    # early-return 形式：`if (... !== undefined) return;`
+    assert "if (" in snap_body and "!== undefined" in snap_body and "return" in snap_body, (
+        "REQ-091 v2 修复：_snapshot 必须有 early-return 防止 snapshot 被覆盖"
+    )
+
+
+def test_combo_test_button_state_changes():
+    """REQ-20260920-091 v2：combo-test 点击必须有可见反馈（按钮文字变化 + toast）。
+
+    原 BUG：combo-test 只往 #slirn-combo-test-output 写文本，但该元素在折叠的 <details> 内，
+    用户看不到。_setBusy 也只是 disable 按钮，没改文字 → 用户点完按钮变灰但什么都没发生。
+
+    修复（参考 REQ-074 setExportBtnState）：
+    1. 点完立刻 toast 通知「🚀 一键测试合成已启动」
+    2. testBtn.textContent 立即变 '⏳ 测试中…'
+    3. done 时变 '✅ 完成 · 查看视频' + window.open 弹视频
+    4. failed 时变 '❌ 失败 · 重试'
+    """
+    js_path = FUNCLIP_ROOT / "slirn_home" / "static" / "router.js"
+    src = js_path.read_text(encoding="utf-8")
+
+    # combo-test action 分支开始位置
+    test_branch = re.search(
+        r"if \(action === 'combo-test'\)\s*\{(.*?)return;\s*\}\s*if \(action === 'combo-apply'\)",
+        src, re.DOTALL,
+    )
+    assert test_branch is not None, "REQ-091 v2：必须能找到 combo-test action 分支"
+    body = test_branch.group(1)
+
+    # AC-1：进入时立刻 toast
+    assert "toast('🚀 一键测试合成已启动" in body, (
+        "REQ-091 v2：combo-test 进入时必须立刻 toast 通知用户"
+    )
+    # AC-2：进入时 testBtn.textContent 变 '⏳ 测试中…'
+    assert "⏳ 测试中…" in body, (
+        "REQ-091 v2：combo-test 进入时按钮文字必须变 ⏳ 测试中…"
+    )
+    # AC-3：done 时 testBtn.textContent 变 '✅ 完成 · 查看视频' 或 '✅ 完成 · 重测'
+    assert ("✅ 完成 · 查看视频" in body) or ("✅ 完成 · 重测" in body), (
+        "REQ-091 v2：combo-test done 时按钮文字必须变 ✅ 完成"
+    )
+    # AC-4：done 时有 window.open(autoUrl) 自动打开视频
+    assert "window.open(" in body and ("autoUrl" in body or "outUrl" in body), (
+        "REQ-091 v2：combo-test done 时必须 window.open 视频（新窗口反馈）"
+    )
+    # AC-5：fail 分支有按钮文字变 ❌
+    assert "❌ 失败 · 重试" in body, (
+        "REQ-091 v2：combo-test 失败时按钮文字必须变 ❌ 失败 · 重试"
+    )
+
+
+def test_combo_test_only_autoopens_for_default_output():
+    """REQ-20260920-091 v2：自动 window.open 视频只在 output_path 是默认 fine_export.mp4 时执行。
+
+    /slirn/api/video 端点（app.py:6584）只接受 src=original/rough_compose/fine_preview/fine_export，
+    对 time-suffix 文件（如 fine_export_t30_d20.mp4）会 404。
+    所以 JS 必须判断 outPath === 'outputs/fine_export.mp4' 才自动打开，
+    time-suffix 文件只在 output 文本里提示用户去本地查看。
+    """
+    js_path = FUNCLIP_ROOT / "slirn_home" / "static" / "router.js"
+    src = js_path.read_text(encoding="utf-8")
+
+    test_branch = re.search(
+        r"if \(action === 'combo-test'\)\s*\{(.*?)return;\s*\}\s*if \(action === 'combo-apply'\)",
+        src, re.DOTALL,
+    )
+    assert test_branch is not None, "REQ-091 v2：必须能找到 combo-test action 分支"
+    body = test_branch.group(1)
+
+    # AC-1：必须有 isDefaultOutput 判断
+    assert "isDefaultOutput" in body, (
+        "REQ-091 v2：必须判断 outPath === 'outputs/fine_export.mp4' 才自动打开视频"
+    )
+    # AC-2：判断分支里 window.open 走 src=fine_export（video 端点支持）
+    assert "src=fine_export" in body, (
+        "REQ-091 v2：自动 window.open 必须用 src=fine_export（video 端点唯一支持的精剪文件）"
+    )
+    # AC-3：time-suffix 时提示用户去 Gradio 预览
+    assert "Gradio" in body or "preview" in body.lower(), (
+        "REQ-091 v2：time-suffix 文件必须给用户提示（去哪查看）"
+    )
+

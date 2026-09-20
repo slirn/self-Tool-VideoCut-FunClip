@@ -93,3 +93,90 @@ REQ-20260920-090 实现了 5-checkbox 调试面板，让用户逐步验证 BGM �
 1. 复用 `_assemble_fine_filter` 的 `preview_start` + `duration` 参数
 2. 输出文件名带时间后缀（不覆盖完整版本）
 3. probe 类端点接受 `output_path`（不止默认 `outputs/final.mp4`）
+
+---
+
+## v2 修订（2026-09-20 晚）— combo-test UX 反馈修复
+
+### 用户原始反馈（直接引用）
+
+> 刚才我直接点一键测试合成，也没有任何反馈，起码它能生成一个视频，然后弹出窗口啊，这个反馈都没有
+
+### 根因分析
+
+combo-test 完成后只有两个反馈路径：
+1. `_appendOutput(html)` 写文本到 `#slirn-combo-test-output-{tid}`
+2. `_setBusy(false)` 把按钮 `disabled = false`
+
+但 `outputEl` 在 `<details>` 内（折叠时不可见），`_setBusy` 只是把按钮变灰**不改文字** → 用户看不到任何反馈，以为按钮卡死。
+
+后端 E2E 实测**完全正常**（curl 1.8 秒完成 + probe 报告正确）—— **不是 BUG，是 UX 缺失**。
+
+### 用户还问了什么
+
+> 一键测试合成前面还有一个应用勾选写F、C, 这是什么意思？每次我都点了这个按钮
+
+→ 问 combo-apply 的用途。答案是：combo-test 内部**已经**调 `_applyComboToFC`（[router.js:3818](slirn_home/static/router.js#L3818)），combo-apply 是冗余的（用户每次都点两次）。
+
+### 意外发现的 BUG
+
+每次 combo-apply 后再 combo-test，会调两次 `_snapshot()`：
+- combo-apply：snapshot 原状态 → 写入 `window._comboSnapshot[tid]`
+- combo-test：snapshot 入口又调一次 `_snapshot()` → **覆盖**为「测试状态」（不是原始 fc）
+
+→ 用户点「↩️ 还原」按钮还原不到原始 fc，只能还原到「测试状态」。
+
+### 修复（v2）
+
+| 维度 | 决策 |
+|---|---|
+| combo-test 点击反馈 | **toast 立刻通知 + 按钮文字变化**（参考 REQ-077 `setExportBtnState` 模式） |
+| running 状态 | 按钮文字 → `⏳ 测试中…` |
+| done 状态 | 按钮文字 → `✅ 完成 · 查看视频` + onclick → `window.open(outputUrl, '_blank')` 自动弹视频 |
+| failed 状态 | 按钮文字 → `❌ 失败 · 重试` |
+| 超时状态 | 按钮文字 → `🚀 一键测试合成`（恢复原状） |
+| time-suffix 文件 | 提示用户去本地 outputs 目录查看（**不**自动弹 video 端点，因只支持 src=fine_export） |
+| combo-apply | **保留**按钮（不删）—— 部分用户想手动写 fc 但不立即测试 |
+| _snapshot() 早期 return | 加 `if (window._comboSnapshot[tid] !== undefined) return;` 防覆盖 |
+
+### 验收标准（v2 新增）
+
+| AC | 描述 |
+|---|---|
+| AC-11 | combo-test 点击立刻 toast `🚀 一键测试合成已启动（{dur}）` |
+| AC-12 | combo-test 进入时按钮文字变 `⏳ 测试中…` |
+| AC-13 | combo-test done 时按钮文字变 `✅ 完成 · 查看视频` + 自动 `window.open` |
+| AC-14 | combo-test fail 时按钮文字变 `❌ 失败 · 重试` |
+| AC-15 | 自动 `window.open` 仅当 `outPath === 'outputs/fine_export.mp4'`（video 端点支持） |
+| AC-16 | time-suffix 文件不自动弹 video 端点，提示用户去本地查看 |
+| AC-17 | `_snapshot()` 加 early-return——已在 snapshot 时不覆盖 |
+| AC-18 | 2 个新测试（button_state_changes + only_autoopens_for_default_output） |
+
+### v2 测试
+
+```
+tests\test_workbench.py ...                                              [100%]
+3 passed, 260 deselected in 0.57s
+```
+
+- `test_combo_test_button_state_changes` —— AC-11/12/13/14
+- `test_combo_test_only_autoopens_for_default_output` —— AC-15/16
+- `test_combo_snapshot_not_overwritten_by_combo_test` —— AC-17
+
+### 完整测试套件
+
+```
+631 passed, 3 warnings in 46.18s
+```
+（629 from v1 + 2 new from v2）
+
+### v2 commit
+
+- `feat(combo-test): REQ-20260920-091 v2 combo-test UX 反馈修复（toast + 按钮状态 + 自动弹视频）`
+
+### Why v2
+
+**没有反馈 = 用户不知道点成功没有**。即使后端 E2E 跑通，前端看不到任何变化 → 用户以为按钮卡死再点几下 → 重复触发 + 资源浪费。
+
+按钮状态机（idle/running/done/failed）是 Gradio 上「💾 导出最终视频」按钮的标准 UX（参考 REQ-077），调试面板必须复用相同模式，否则用户会困惑「为什么点了没反应」。
+
