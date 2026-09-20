@@ -4344,6 +4344,162 @@ def test_router_crop_aspect_link_toggle_persists_state():
         f"v18：toggle change handler 应调 fineSaveAll 持久化，实际：{change_body}"
 
 
+def test_router_save_all_handles_single_segment_checkbox_keys():
+    """REQ-100：fineSaveAll 必须收集 5 个单段 data-key 的 .slirn-fine-enabled checkbox
+    （cover/bg/audio/video/subtitle）的勾选状态。
+
+    旧实现按 k.indexOf('.')<0 一刀切跳过 → 5 个 enable 复选框的勾选永远不写回 fc.json，
+    刷新页面后回到旧值。修法：.slirn-fine-enabled 单段 key 自动落到 layout[k1].enabled；
+    其它 [data-key] checkbox 仍是 section.field 形式。"""
+    js = Path('slirn_home/static/router.js').read_text(encoding='utf-8')
+    import re as _re
+    fn = js.split('function fineSaveAll', 1)[1].split('\n  }', 1)[0]
+    # 找 .slirn-fine-enabled 复选框的 forEach 整段
+    m_loop = _re.search(
+        r"document\.querySelectorAll\('\.slirn-fine-enabled,\s*\[data-key\]\[type=",
+        fn,
+    )
+    assert m_loop, "REQ-100：应找到 .slirn-fine-enabled + [data-key] checkbox 选择器"
+    # 不能有「k.indexOf('.')<0 跳过」这种一刀切逻辑（应替换为针对非 .slirn-fine-enabled 的判断）
+    assert "indexOf('.')" not in fn or "parts.length" in fn, (
+        "REQ-100：应去除对所有单段 checkbox 的 indexOf('.')<0 跳过逻辑"
+    )
+    # 必须有按 .slirn-fine-enabled 与 [data-key] 分别处理的分支
+    assert "slirn-fine-enabled" in fn and "layout[k1].enabled" in fn, (
+        "REQ-100：应保留 layout[k1].enabled = c.checked 分支"
+    )
+
+
+def test_save_fine_layout_persists_single_segment_checkbox_states(tmp_path: Path):
+    """REQ-100：save_fine_layout 应持久化 5 个 enable checkbox 的勾选状态。
+
+    模拟前端 fineSaveAll 真实发出的 payload：layout 顶层 key 可能是 video/subtitle/
+    cover/bg/audio 之一，val 是个 dict 含 "enabled" 字段。后端 allowed_keys 白名单
+    已含 enabled（v17 起），所以 4 个 layout 类的元素都能正确写回。audio 不在
+    _FINE_LAYOUT_DEFAULTS，所以 audio.enabled 不会被 save_fine_layout 接收 — 它
+    走独立的 save_fine_audio 端点（前端 JS 修复里单独发了 audio 包）。
+    """
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+    from slirn_home.app import _get_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="single-seg-enable", original_video=video)
+    client = TestClient(build_app(repo_root=tmp_path).app)
+
+    # 模拟前端把 4 个 layout 元素的 enabled checkbox 都勾上
+    r = client.post(
+        "/slirn/api/save_fine_layout",
+        json={
+            "task_id": t.task_id,
+            "layout": {
+                "video": {"enabled": True},
+                "subtitle": {"enabled": True},
+                "cover": {"enabled": True},
+                "bg": {"enabled": True},
+            },
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+
+    # 读回 fc：4 个 enable 都应写成功
+    fc = _get_fine_compose(m, t.task_id)
+    assert fc["layout"]["video"]["enabled"] is True
+    assert fc["layout"]["subtitle"]["enabled"] is True
+    assert fc["layout"]["cover"]["enabled"] is True
+    assert fc["layout"]["bg"]["enabled"] is True
+
+
+def test_save_fine_audio_accepts_enabled_field(tmp_path: Path):
+    """REQ-100：save_fine_audio 应接受 enabled 字段（前端 JS 修复后会把 audio
+    enable checkbox 状态放进 audio.enabled）。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+    from slirn_home.app import _get_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="audio-enable", original_video=video)
+    client = TestClient(build_app(repo_root=tmp_path).app)
+
+    r = client.post(
+        "/slirn/api/save_fine_audio",
+        json={
+            "task_id": t.task_id,
+            "audio": {"enabled": True, "volume": 0.4, "fade_in": 1.0, "fade_out": 2.0},
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+
+    fc = _get_fine_compose(m, t.task_id)
+    assert fc["audio"]["enabled"] is True
+    assert fc["audio"]["volume"] == 0.4
+    assert fc["audio"]["fade_in"] == 1.0
+    assert fc["audio"]["fade_out"] == 2.0
+
+
+def test_import_fine_params_restores_all_checkbox_states(tmp_path: Path):
+    """REQ-100：导入参数应能把 5 个 layout 元素的 enabled + audio.enabled 一起还原。
+
+    模拟用户场景：导出参数 → 修改 cover/bg/audio.enabled 为 True → 导入 → 读 fc
+    应与导入内容一致。"""
+    import json
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+    from slirn_home.app import _get_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="import-checkboxes", original_video=video)
+    client = TestClient(build_app(repo_root=tmp_path).test_app if hasattr(build_app(repo_root=tmp_path), "test_app") else build_app(repo_root=tmp_path).app)
+
+    payload = {
+        "_schema": 3,
+        "_exported_at": "2026-09-21T00:00:00",
+        "_source_task_id": t.task_id,
+        "materials": {},
+        "layout": {
+            "video":    {"x": 100, "y": 50, "scale": 0.8, "enabled": True,
+                         "crop_x": 0, "crop_y": 0, "crop_w": 1920, "crop_h": 1080,
+                         "crop_aspect_lock": True},
+            "subtitle": {"x": 200, "y": 900, "scale": 1.0, "enabled": False},
+            "cover":    {"enabled": True, "duration": 3.5},
+            "bg":       {"x": 0, "y": 0, "scale": 1.0, "enabled": True},
+        },
+        "font": {
+            "family": "Noto Sans SC", "size": 24, "color": "#FFFFFF",
+            "bold": True, "align": "center", "left_offset": 0,
+            "stroke_width": 2, "stroke_color": "#000000",
+        },
+        "output": {"resolution": "1080p", "codec": "h264"},
+        "audio":  {"enabled": True, "volume": 0.3, "fade_in": 0.5, "fade_out": 1.5},
+        "detected_region": None,
+    }
+
+    r = client.post(
+        "/slirn/api/import_fine_params",
+        json={
+            "task_id": t.task_id,
+            "content": json.dumps(payload, ensure_ascii=False),
+        },
+    )
+    assert r.status_code == 200, f"导入失败：{r.text}"
+    body = r.json()
+    assert body["ok"] is True
+
+    # 读回 fc：所有 enabled 状态都应被恢复
+    fc = _get_fine_compose(m, t.task_id)
+    assert fc["layout"]["video"]["enabled"] is True
+    assert fc["layout"]["subtitle"]["enabled"] is False
+    assert fc["layout"]["cover"]["enabled"] is True
+    assert fc["layout"]["cover"]["duration"] == 3.5
+    assert fc["layout"]["bg"]["enabled"] is True
+    assert fc["layout"]["video"]["x"] == 100
+    assert fc["layout"]["video"]["scale"] == 0.8
+    assert fc["audio"]["enabled"] is True
+    assert fc["audio"]["volume"] == 0.3
+
+
 # ============================================================
 # REQ-20260919-062 v19 用户反馈：生成预览弹窗无法拖动 + 拖动后位置不持久化。
 # 根因：

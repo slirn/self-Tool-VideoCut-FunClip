@@ -2781,15 +2781,23 @@
     });
     document.querySelectorAll('.slirn-fine-enabled, [data-key][type="checkbox"]').forEach(function(c) {
       var k = c.getAttribute('data-key') || '';
-      if (!k || k.indexOf('.') < 0) return;
+      if (!k) return;
       var parts = k.split('.');
-      var k1 = parts[0], k2 = parts[1];
-      layout[k1] = layout[k1] || {};
-      // REQ-20260919-062 v18：crop_aspect_lock 字段名不是 "enabled"，直接存原字段。
-      // 其它 .slirn-fine-enabled 仍然写 .enabled。
+      // REQ-20260920-100：5 个 .slirn-fine-enabled checkbox（cover/bg/audio/video/subtitle）
+      // 的 data-key 是单段（不带「.」），旧逻辑按 k.indexOf('.')<0 一刀跳过 → 勾选
+      // 状态永远不写回 fc.json，刷新页面后回到原值。现统一按 k1 = 段1 处理：
+      // 单段 .slirn-fine-enabled 自动落到 layout[k1].enabled；其它 [data-key][type=checkbox]
+      // 必须是 section.field 形式（例：video.crop_aspect_lock），跳过非法格式。
+      var k1 = parts[0];
       if (c.classList.contains('slirn-fine-enabled')) {
+        // 5 元素 enable checkbox：cover/bg/audio/video/subtitle → layout[k1].enabled
+        layout[k1] = layout[k1] || {};
         layout[k1].enabled = c.checked;
       } else {
+        // 普通 [data-key] checkbox 必须是 section.field 形式
+        if (parts.length !== 2) return;
+        var k2 = parts[1];
+        layout[k1] = layout[k1] || {};
         layout[k1][k2] = c.checked;
       }
     });
@@ -2846,8 +2854,19 @@
     var audio = {};
     document.querySelectorAll('[data-audio-key]').forEach(function(el) {
       var k = el.getAttribute('data-audio-key');
-      audio[k] = parseFloat(el.value);
+      // REQ-20260920-100：data-audio-key 也用于 checkbox（启用开关），不能 parseFloat
+      if (el.type === 'checkbox') {
+        audio[k] = el.checked;
+      } else {
+        audio[k] = parseFloat(el.value);
+      }
     });
+    // REQ-20260920-100：「🎵 启用背景音乐」checkbox 是 .slirn-fine-enabled 单段
+    // data-key="audio"，不在上面 data-audio-key 选择器里。单独补一次：
+    var audioEnaCb = document.querySelector('.slirn-fine-enabled[data-key="audio"]');
+    if (audioEnaCb) {
+      audio.enabled = audioEnaCb.checked;
+    }
     if (Object.keys(audio).length > 0) {
       promises.push(
         fetch('/slirn/api/save_fine_audio?task_id=' + encodeURIComponent(tid), {
@@ -3572,310 +3591,6 @@
       });
       ro.observe(flt);
     }
-  }
-
-  // REQ-20260920-090：合成元素组合测试面板（debug）
-  // 5 checkbox + 一键测试 + 诊断 BGM 路径
-  function comboTestAction(action, target) {
-    var tid = target.getAttribute('data-task-id');
-    if (!tid) { toast('❌ 缺少 task_id'); return; }
-    var outputEl = document.getElementById('slirn-combo-test-output-' + tid);
-    var detailsEl = document.getElementById('slirn-combo-test-details');
-    if (!detailsEl) return;
-    var checkboxes = detailsEl.querySelectorAll('input[type="checkbox"][data-combo-kind]');
-    function _readComboState() {
-      var state = {};
-      checkboxes.forEach(function(cb) {
-        state[cb.getAttribute('data-combo-kind')] = cb.checked;
-      });
-      return state;
-    }
-    // REQ-20260920-091：读开始时间（时:分:秒）+ 时长（秒）；返回 preview_start / duration
-    function _readTimeParams() {
-      var h = parseInt(document.getElementById('slirn-combo-test-start-h').value, 10) || 0;
-      var m = parseInt(document.getElementById('slirn-combo-test-start-m').value, 10) || 0;
-      var s = parseInt(document.getElementById('slirn-combo-test-start-s').value, 10) || 0;
-      var preview_start = Math.max(0, h * 3600 + m * 60 + s);
-      var durRaw = parseFloat(document.getElementById('slirn-combo-test-duration').value);
-      // 时长钳到 [2, 86400]；缺省或非法值 → null（= 完整视频）
-      var duration = (isFinite(durRaw) && durRaw >= 2) ? Math.min(durRaw, 86400) : null;
-      return { preview_start: preview_start, duration: duration };
-    }
-    // REQ-20260920-091：根据 time 参数算 output_path（与后端命名规则一致）
-    function _computeOutputPath(tp) {
-      if (tp.preview_start === 0 && tp.duration === null) {
-        return 'outputs/fine_export.mp4';
-      }
-      var dTag = tp.duration != null ? tp.duration.toFixed(1) : 'full';
-      return 'outputs/fine_export_t' + tp.preview_start.toFixed(1) + '_d' + dTag + '.mp4';
-    }
-    function _appendOutput(html) {
-      if (outputEl) {
-        outputEl.style.display = 'block';
-        outputEl.innerHTML = html;
-      }
-    }
-    function _snapshot() {
-      // REQ-20260920-091 v2：snapshot 只在「还没 snapshot 过」时记录
-      // 避免 combo-apply 完后点 combo-test，snapshot 被覆盖为「测试状态」
-      // （导致 ↩️ 还原按钮还原不到原始 fc）
-      window._comboSnapshot = window._comboSnapshot || {};
-      if (window._comboSnapshot[tid] !== undefined) return;
-      window._comboSnapshot[tid] = _readComboState();
-      var restoreBtn = detailsEl.querySelector('[data-action="combo-restore"]');
-      if (restoreBtn) restoreBtn.hidden = false;
-    }
-    function _setBusy(busy) {
-      detailsEl.querySelectorAll('button[data-action^="combo-"]').forEach(function(b) {
-        if (b.getAttribute('data-action') !== 'combo-restore') b.disabled = busy;
-      });
-    }
-
-    if (action === 'combo-diagnose') {
-      _appendOutput('🔍 正在诊断...');
-      fetch('/slirn/api/diagnose_bgm', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ task_id: tid })
-      })
-        .then(function(r) { return r.json(); })
-        .then(function(j) {
-          if (!j.ok) { _appendOutput('<span class="err">❌ ' + (j.error || '诊断失败') + '</span>'); return; }
-          var html = '[预测诊断]\n';
-          html += '  inputs_count = ' + j.inputs_count + '\n';
-          html += '  audio_idx = ' + j.audio_idx + '\n';
-          html += '  predicted_has_bgm = ' + (j.predicted_has_bgm ? '<span class="ok">✅ true</span>' : '<span class="warn">⚠ false</span>') + '\n';
-          if (j.why_no_bgm) html += '  why_no_bgm: ' + j.why_no_bgm + '\n';
-          html += '\n[元素状态]\n';
-          var kinds = ['video', 'subtitle', 'cover', 'bg', 'audio'];
-          kinds.forEach(function(k) {
-            var e = j.elements[k];
-            var mark = e.will_render ? '<span class="ok">✅</span>' : '<span class="warn">⚠</span>';
-            html += '  ' + mark + ' ' + k + ': layout=' + e.layout_enabled + ', material=' + (e.material_path ? '✓' : '✗') + ', will_render=' + e.will_render + '\n';
-          });
-          if (j.predicted_audio_filters) {
-            html += '\n[预测 audio filter]\n  ' + j.predicted_audio_filters.replace(/;/g, ';\n  ') + '\n';
-          } else {
-            html += '\n[预测 audio filter]\n  <span class="warn">⚠ 无（未启用 BGM 或素材缺失）</span>\n';
-          }
-          _appendOutput(html);
-        })
-        .catch(function(e) { _appendOutput('<span class="err">❌ 网络错误: ' + e.message + '</span>'); });
-      return;
-    }
-
-    if (action === 'combo-restore') {
-      var snap = (window._comboSnapshot || {})[tid];
-      if (!snap) { toast('⚠ 没有可还原的快照'); return; }
-      // 把 snapshot 写回 checkboxes → 调 combo-apply 写 fc
-      checkboxes.forEach(function(cb) {
-        var k = cb.getAttribute('data-combo-kind');
-        if (k in snap) cb.checked = snap[k];
-      });
-      _applyComboToFC(tid, _readComboState()).then(function() {
-        toast('↩️ 已还原 snapshot');
-        var restoreBtn = detailsEl.querySelector('[data-action="combo-restore"]');
-        if (restoreBtn) restoreBtn.hidden = true;
-        window._comboSnapshot[tid] = null;
-      }).catch(function(e) { toast('❌ 还原失败: ' + e.message); });
-      return;
-    }
-
-    // combo-apply / combo-test 共用：先 snapshot 原状态，再 apply 当前勾选
-    _snapshot();
-    var state = _readComboState();
-    if (action === 'combo-test') {
-      var testBtn = detailsEl.querySelector('[data-action="combo-test"]');
-      _setBusy(true);
-      if (testBtn) { testBtn.textContent = '⏳ 合成中…'; testBtn.disabled = true; }
-      var tp = _readTimeParams();
-      var outPath = _computeOutputPath(tp);
-      _appendOutput('🚀 正在应用勾选并启动合成（start=' + tp.preview_start + 's, dur=' + (tp.duration || 'full') + 's）...');
-      toast('🚀 一键合成已启动（' + (tp.duration || '完整') + '）');
-      _applyComboToFC(tid, state).then(function() {
-        // REQ-20260920-091：combo-test 传 time 参数给 export_fine_video（不导完整视频）
-        var exportBody = { task_id: tid, preview_start: tp.preview_start };
-        if (tp.duration !== null) exportBody.duration = tp.duration;
-        return fetch('/slirn/api/export_fine_video', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(exportBody)
-        });
-      })
-        .then(function(r) { return r.json(); })
-        .then(function(j) {
-          if (!j.ok || !j.job_id) {
-            _appendOutput('<span class="err">❌ 启动失败: ' + (j.error || '未知错误') + '</span>');
-            toast('❌ 启动失败: ' + (j.error || '未知错误'));
-            if (testBtn) { testBtn.textContent = '🚀 一键合成'; testBtn.disabled = false; }
-            _setBusy(false);
-            return;
-          }
-          var jobId = j.job_id;
-          _appendOutput('🚀 已启动 job_id=' + jobId + '\n⏳ 轮询渲染状态...');
-          // REQ-20260920-093：改用 setInterval + .catch（参考 startFineExportInline 的 _poll）
-          // 原 setTimeout 链脆弱——任何一次 fetch 失败/慢/页面切后台都会断链，
-          // 用户看到「轮询 1 次」永远不再更新（实测截图就是这个状态）
-          var pollCount = 0;
-          var _comboTimer = null;
-          var _comboPoll = function() {
-            pollCount++;
-            fetch('/slirn/api/render_status?job_id=' + encodeURIComponent(jobId))
-              .then(function(r) { return r.json(); })
-              .then(function(s) {
-                if (!s.ok) {
-                  // job 不存在（可能 server 重启 GC 掉了）—— 显示「未找到」+ 恢复按钮
-                  _appendOutput('<span class="warn">⚠ job_id=' + jobId + ' 不存在（可能 server 重启了）| 第 ' + pollCount + ' 次查询</span>');
-                  if (testBtn) { testBtn.textContent = '🚀 一键合成'; testBtn.disabled = false; }
-                  clearInterval(_comboTimer); _comboTimer = null;
-                  _setBusy(false);
-                  return;
-                }
-                var st = s.state;
-                if (st === 'running' || st === 'queued') {
-                  _appendOutput('🚀 job_id=' + jobId + ' | progress=' + (s.progress_pct || 0) + '% | 已轮询 ' + pollCount + ' 次');
-                  if (pollCount >= 600) {
-                    _appendOutput('<span class="warn">⚠ 轮询超时（15 分钟）</span>');
-                    toast('⚠ 合成超时');
-                    if (testBtn) { testBtn.textContent = '🚀 一键合成'; testBtn.disabled = false; }
-                    clearInterval(_comboTimer); _comboTimer = null;
-                    _setBusy(false);
-                  }
-                } else if (st === 'done') {
-                  clearInterval(_comboTimer); _comboTimer = null;
-                  _onRenderDone(s, jobId, tp, outPath, testBtn);
-                } else {
-                  clearInterval(_comboTimer); _comboTimer = null;
-                  _appendOutput('<span class="err">❌ 渲染 ' + st + ' | ' + (s.error || '') + '</span>');
-                  toast('❌ 渲染 ' + st);
-                  if (testBtn) { testBtn.textContent = '❌ 失败 · 重试'; testBtn.disabled = false; }
-                  _setBusy(false);
-                }
-              })
-              .catch(function(e) {
-                // 网络抖动不立即报错，下一轮再试（和 startFineExportInline 一致）
-                console.warn('[combo_render_status]', e);
-              });
-          };
-          _comboPoll();
-          _comboTimer = setInterval(_comboPoll, 1500);
-          // 立刻 return 不再 return Promise —— outer .then(finalState) 不再适用
-          // 因为 done 由 _comboPoll 内部直接调 _onRenderDone 处理
-          return null;
-        })
-        .then(function() { /* 占位：原 finalState 处理已挪到 _onRenderDone */ })
-        .catch(function(e) {
-          _appendOutput('<span class="err">❌ 异常: ' + e.message + '</span>');
-          toast('❌ 异常: ' + e.message);
-          if (testBtn) { testBtn.textContent = '❌ 失败 · 重试'; testBtn.disabled = false; }
-          _setBusy(false);
-        });
-      return;
-    }
-
-    // REQ-20260920-093：抽离 combo-test 的 done 处理（被 setInterval 轮询调）
-    function _onRenderDone(finalState, jobId, tp, outPath, testBtn) {
-      // REQ-20260920-091：probe 探测**对应**的 output 文件（不是默认 final.mp4）
-      _appendOutput('✅ 合成完成（' + (finalState.elapsed_sec || '?') + ' 秒）\n🔍 探测 output 音频（' + outPath + '）...');
-      fetch('/slirn/api/probe_output_audio', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ task_id: tid, output_path: outPath })
-      }).then(function(r) { return r.json(); }).then(function(p) {
-        var html = '✅ 合成完成（' + (finalState.elapsed_sec || '?') + ' 秒）\n\n[BGM 检测报告]\n';
-        if (!p.ok) {
-          html += '<span class="err">❌ probe 失败: ' + p.error + '</span>';
-          _appendOutput(html);
-          toast('✅ 合成完成（' + (finalState.elapsed_sec || '?') + ' 秒）· probe 失败');
-          if (testBtn) { testBtn.textContent = '🚀 一键合成'; testBtn.disabled = false; }
-          _setBusy(false);
-          return;
-        }
-        html += '  audio stream 数: ' + p.audio_stream_count + '\n';
-        html += '  duration: ' + (p.duration ? p.duration.toFixed(1) + 's' : '?') + '\n';
-        html += '  mean_volume: ' + (p.mean_volume_db != null ? p.mean_volume_db.toFixed(1) + ' dB' : '?') + '\n';
-        html += '  max_volume: ' + (p.max_volume_db != null ? p.max_volume_db.toFixed(1) + ' dB' : '?') + '\n';
-        if (p.bgm_mean_volume_db != null) {
-          html += '  BGM 源 mean_volume: ' + p.bgm_mean_volume_db.toFixed(1) + ' dB\n';
-          var diff = Math.abs((p.mean_volume_db || 0) - p.bgm_mean_volume_db);
-          html += '  差距: ' + diff.toFixed(1) + ' dB\n';
-          if (diff < 3) html += '  <span class="ok">✅ 高度一致（BGM 正常合成）</span>\n';
-          else if (diff < 10) html += '  <span class="warn">⚠ 部分匹配（差距较大）</span>\n';
-          else html += '  <span class="err">❌ 差距过大（BGM 可能缺失或异常）</span>\n';
-        } else {
-          if (p.audio_stream_count === 0) html += '  <span class="err">❌ output 无 audio stream（BGM 缺失）</span>\n';
-          else html += '  <span class="warn">⚠ 未对比 BGM 源（未提供 bgm_path）</span>\n';
-        }
-        _appendOutput(html);
-        // REQ-20260920-092：done 时按钮变「✅ 完成 · 重新合成」+ **自动弹播放窗口**
-        // 用户原话：「弹窗播放视频，不要下载」
-        // 注意：/slirn/api/video 端点只支持 src=original/rough_compose/fine_preview/fine_export
-        // （见 app.py:6584 src_q in ("fine_preview", "fine_export")）
-        // 所以 time-suffix 文件（如 fine_export_t30_d20.mp4）无法走 video 端点
-        // → 只有 default（fine_export.mp4）能弹播放窗口；time-suffix 给本地路径提示
-        toast('✅ 合成完成（' + (finalState.elapsed_sec || '?') + ' 秒）');
-        var isDefaultOutput = outPath === 'outputs/fine_export.mp4';
-        if (isDefaultOutput) {
-          var autoUrl = '/slirn/api/video/' + tid + '?src=fine_export&t=' + Date.now();
-          // 自动弹播放窗口（用户明确要求：直接看，不下载）
-          try { window.open(autoUrl, '_blank'); } catch (e) { /* 弹窗被浏览器拦截 */ }
-          if (testBtn) {
-            testBtn.textContent = '✅ 完成 · 重新合成';
-            testBtn.onclick = function(ev) {
-              ev.preventDefault(); ev.stopPropagation();
-              window.open(autoUrl, '_blank');
-              return false;
-            };
-          }
-        } else {
-          // time-suffix 合成：video 端点不支持，给本地绝对路径提示（REQ-094）
-          // 用后端返回的 output_abs_path（完整绝对路径，用户可直接复制到文件管理器/拖到浏览器）
-          var absPath = p.output_abs_path || ('tasks/' + tid + '/' + outPath);
-          var tipHtml = html + '<div class="hint" style="margin-top:6px;">'
-            + '💡 提示：time-suffix 文件无法走 video 端点播放<br>'
-            + '📂 <b>本地绝对路径</b>：<code style="user-select:all;">' + absPath + '</code><br>'
-            + '→ 复制路径到文件管理器打开，或直接拖到浏览器/VLC 播放'
-            + '</div>';
-          _appendOutput(tipHtml);
-          if (testBtn) { testBtn.textContent = '✅ 完成 · 重新合成'; testBtn.disabled = false; }
-        }
-        _setBusy(false);
-      }).catch(function(e) {
-        _appendOutput('<span class="err">❌ probe 异常: ' + e.message + '</span>');
-        toast('❌ probe 异常');
-        if (testBtn) { testBtn.textContent = '✅ 完成 · 重新合成'; testBtn.disabled = false; }
-        _setBusy(false);
-      });
-    }
-
-    if (action === 'combo-apply') {
-      _appendOutput('📝 正在应用勾选...');
-      _applyComboToFC(tid, state).then(function() {
-        _appendOutput('✅ 勾选已写入 fc（layout.video/subtitle/cover/bg + audio）\n💡 点「🚀 一键合成」跑 ffmpeg，自动弹视频播放窗口');
-      }).catch(function(e) { _appendOutput('<span class="err">❌ 写 fc 失败: ' + e.message + '</span>'); });
-      return;
-    }
-  }
-
-  // REQ-20260920-090：把 5 个勾选状态写入 fc（save_fine_layout + save_fine_audio）
-  function _applyComboToFC(tid, state) {
-    // /save_fine_layout 接受 body.layout = {element: {enabled, ...}}（一次写 4 个 elements）
-    var layoutUpdate = {
-      video: { enabled: !!state.video },
-      subtitle: { enabled: !!state.subtitle },
-      cover: { enabled: !!state.cover },
-      bg: { enabled: !!state.bg },
-    };
-    return fetch('/slirn/api/save_fine_layout', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ task_id: tid, layout: layoutUpdate })
-    })
-      .then(function(r) { return r.json(); })
-      .then(function() {
-        // /save_fine_audio 接受 body.audio = {enabled: true}
-        return fetch('/slirn/api/save_fine_audio', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ task_id: tid, audio: { enabled: !!state.audio } })
-        });
-      })
-      .then(function(r) { return r.json(); });
   }
 
   // 由 export_fine_video 端点启动后台线程后，前端调 startFineExportInline：
@@ -6210,6 +5925,14 @@
     }
     else if (action === 'fine-preview' || action === 'fine-export') {
       // REQ-20260919-061 Phase B：调 ffmpeg 渲染
+      // REQ-20260920-098：直接读参数卡 .slirn-fine-enabled checkbox 状态（覆盖 fc.json）
+      function _readPerElementCombo() {
+        var combo = {};
+        document.querySelectorAll('.slirn-fine-enabled[data-key]').forEach(function(cb) {
+          combo[cb.getAttribute('data-key')] = !!cb.checked;
+        });
+        return combo;
+      }
       var _b = target;
       if (_b.disabled) return;
       var _isPreview = (action === 'fine-preview');
@@ -6222,7 +5945,7 @@
         _b.textContent = '💾 启动导出...';
         fetch('/slirn/api/export_fine_video', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ task_id: _tid })
+          body: JSON.stringify({ task_id: _tid, combo: _readPerElementCombo() })
         })
           .then(function(r) { return r.json(); })
           .then(function(j) {
@@ -6269,6 +5992,8 @@
                      (_s < 10 ? '0' + _s : _s);
       var _durStr = isNaN(_dur) ? '10' : _dur;
       _b.textContent = '🎬 渲染中（' + _timeStr + ' 起 ' + _durStr + ' 秒）...';
+      // REQ-20260920-098：把参数卡当前 5 个 checkbox 状态也带过去
+      _payload.combo = _readPerElementCombo();
       fetch(_api, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(_payload)
@@ -6322,11 +6047,6 @@
           toast('❌ 网络错误: ' + e.message);
           if (_ceBtn) { _ceBtn.disabled = false; _ceBtn.setAttribute('data-state', 'running'); }
         });
-    }
-    else if (action === 'combo-apply' || action === 'combo-test' || action === 'combo-diagnose' || action === 'combo-restore') {
-      // REQ-20260920-090：合成元素组合测试面板（debug）—— 5 checkbox 调试入口
-      comboTestAction(action, target);
-      return;
     }
     else if (action === 'opt-page-prev' || action === 'opt-page-next') {
       // REQ-20260918-050：词频列表翻页
