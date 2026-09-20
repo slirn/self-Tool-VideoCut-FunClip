@@ -1709,11 +1709,13 @@ def test_render_fine_crop_zone_includes_aspect_link_toggle(tmp_path):
     assert '16 / 9' in js, "按 16:9 比例换算"
 
 
-def test_run_fine_render_cover_audio_adelay_filter(tmp_path, monkeypatch):
-    """REQ-20260919-061 用户反馈：封面播放期间不输出原视频人声，封面结束后才开始。
+def test_run_fine_render_cover_audio_silence_concat_filter(tmp_path, monkeypatch):
+    """REQ-20260920-096：封面播放期间不输出原视频人声，封面结束后才开始。
 
-    实现：filter_complex 里 [0:a]（视频的音轨）在 cover 启用时插一个 `adelay=<ms>:<ms>:all=1`，
-    cover_dur_ms 期间静音，cover 结束后原声才开始。
+    实现：filter_complex 里 [0:a]（视频的音轨）在 cover 启用时前面拼一段 lavfi
+    anullsrc 静音（时长 = cover_dur），形成 [silence][v_raw]concat=n=2:a=1[voice]，
+    替代原 adelay。adelay + input-level -ss + aloop 会触发 ffmpeg PTS 错位把 audio
+    截断到 ~22ms，改成 concat 后 PTS 干净稳定。
     """
     import json
     import subprocess
@@ -1776,16 +1778,24 @@ def test_run_fine_render_cover_audio_adelay_filter(tmp_path, monkeypatch):
     res = _run_fine_render(t.task_id, m, out_path, duration=10.0)
     assert res["ok"] is True
 
-    # 关键断言：[0:a] 后面接了 adelay=2500|2500:all=1
+    # 关键断言：voice 链必须走 [ss][v_raw]concat=n=2:v=0:a=1[voice] 而非 adelay；
+    # anullsrc 静音输入在 input_args（cmd）里，filter_complex 只看到 [silence_idx:a]。
     f = captured["filter"]
-    assert "adelay=2500|2500:all=1" in f, (
-        f"封面 (duration=2.5s) 启用时，[0:a] 后面应有 adelay=2500|2500:all=1，"
+    assert "[ss][v_raw]concat=n=2:v=0:a=1[voice]" in f, (
+        f"voice 链必须走 silence + sliced-audio concat 模式，实际: {f}"
+    )
+    assert "adelay=" not in f, (
+        f"REQ-20260920-096：已废弃 adelay，避免 PTS 错位把 audio 截断到 ~22ms，"
         f"实际 filter: {f}"
     )
+    # cmd 里应该有 -f lavfi -t 2.50 -i anullsrc=... 输入
+    cmd = captured["cmd"]
+    assert "-f" in cmd and "lavfi" in cmd, f"缺少 lavfi 静音输入: {cmd}"
+    assert any("anullsrc" in a for a in cmd), f"cmd 中找不到 anullsrc 输入: {cmd}"
 
 
 def test_run_fine_render_no_cover_no_adelay_filter(tmp_path, monkeypatch):
-    """封面未启用时不应插 adelay（[0:a] 直接 volume=1.0[voice]）。"""
+    """封面未启用时不应插 adelay（[0:a] 直接 asetpts+PTS-STARTPTS,volume=1.0[voice]）。"""
     import subprocess
     from slirn_home.app import _run_fine_render, _save_fine_compose
 
@@ -1832,7 +1842,11 @@ def test_run_fine_render_no_cover_no_adelay_filter(tmp_path, monkeypatch):
 
     f = captured["filter"]
     assert "adelay" not in f, "封面禁用时不应有 adelay 滤镜"
-    assert "[0:a]volume=1.0[voice]" in f, "封面禁用时 [0:a] 应直通 volume=1.0"
+    # REQ-096：voice 链现在无条件带 asetpts=PTS-STARTPTS（防御性，
+    # 即使 cover 关闭也要重置 PTS，防止 -ss 输入级 seek + amix duration=first 组合出错）
+    assert "[0:a]asetpts=PTS-STARTPTS,volume=1.0[voice]" in f, (
+        "封面禁用时 voice 链应为 [0:a]asetpts=PTS-STARTPTS,volume=1.0[voice]"
+    )
 
 
 # ---------- REQ-20260919-061 用户反馈：预览时长可调（2-30 秒） ----------
@@ -5797,6 +5811,147 @@ def test_assemble_fine_filter_bgm_chain_has_no_comma_before_label(tmp_path):
     assert "amix=inputs=2:duration=first:normalize=0[aout]" in fc_text
 
 
+# =====================================================================
+# REQ-20260920-095：BGM fade_out 起算 st 必须是「总时长 - fade_out」，
+# 不能再写 st=0。st=0 时两条 afade (t=in/t=out) 都从 0 起 ——
+# 第二条覆盖第一条 → 1s 后 BGM 整段静音（实测 mean_volume -91 dB）、
+# amix 输出只剩 voice（-23.3 dB），听不见 BGM。
+# =====================================================================
+
+def test_assemble_fine_filter_bgm_fade_out_st_points_to_end(tmp_path):
+    """REQ-095：传入 duration 时 fade_out 起算应 = max(0, duration - fade_out)。"""
+    from slirn_home.app import (
+        _assemble_fine_filter, _get_fine_compose, _save_fine_compose,
+    )
+
+    mgr, video = _make_mgr(tmp_path)
+    t = mgr.create(name="bgm-fade-st-test", original_video=video)
+
+    upload = tmp_path / "tasks" / t.task_id / "upload"
+    upload.mkdir(parents=True, exist_ok=True)
+    audio_src = upload / "bgm.mp3"
+    audio_src.write_bytes(b"ID3" + b"\x00" * 100)
+
+    fc = _get_fine_compose(mgr, t.task_id)
+    fc["materials"]["video"] = {"path": str(video.relative_to(tmp_path)),
+                                "type": "video", "source": "upload"}
+    fc["materials"]["audio"] = {
+        "path": f"tasks/{t.task_id}/upload/bgm.mp3", "type": "audio", "source": "upload",
+    }
+    fc["audio"]["enabled"] = True
+    fc["audio"]["volume"] = 0.9
+    fc["audio"]["fade_in"] = 1.0
+    fc["audio"]["fade_out"] = 1.0
+    _save_fine_compose(mgr, t.task_id, fc)
+
+    # 用 10s clip：fade_out=1.0 → st 应 = 10 - 1 = 9.0
+    asm = _assemble_fine_filter(t.task_id, mgr, duration=10.0, preview_start=0.0)
+    assert asm.get("ok") is True, asm
+
+    fc_text = asm["filter_complex"]
+    # REQ-095：必须出现 st=9.00（指向靠近末尾），不能再 st=0
+    assert "afade=t=out:st=9.00:d=1.00" in fc_text, (
+        f"REQ-095：fade_out st 应=9.00 (audio_total_duration - fade_out)，"
+        f"实际 filter_complex：\n{fc_text}"
+    )
+    # REQ-095 反向：不应再出现 st=0（除非 fade_out ≥ total，退化兜底）
+    assert ",afade=t=out:st=0:d=1.00" not in fc_text, (
+        f"REQ-095：fade_out st=0 会让 BGM 1s 后全程静音，filter_complex：\n{fc_text}"
+    )
+    # 正向：fade_in st 仍是 0（头部淡入）
+    assert "afade=t=in:st=0:d=1.00" in fc_text
+
+
+def test_assemble_fine_filter_bgm_fade_out_st_clamped_when_fade_too_long(tmp_path):
+    """REQ-095：fade_out ≥ audio_total_duration 时 st 应退化到 0 且 warning 兜底。"""
+    from slirn_home.app import (
+        _assemble_fine_filter, _get_fine_compose, _save_fine_compose,
+    )
+
+    mgr, video = _make_mgr(tmp_path)
+    t = mgr.create(name="bgm-fade-clamp", original_video=video)
+
+    upload = tmp_path / "tasks" / t.task_id / "upload"
+    upload.mkdir(parents=True, exist_ok=True)
+    audio_src = upload / "bgm.mp3"
+    audio_src.write_bytes(b"ID3" + b"\x00" * 100)
+
+    fc = _get_fine_compose(mgr, t.task_id)
+    fc["materials"]["video"] = {"path": str(video.relative_to(tmp_path)),
+                                "type": "video", "source": "upload"}
+    fc["materials"]["audio"] = {
+        "path": f"tasks/{t.task_id}/upload/bgm.mp3", "type": "audio", "source": "upload",
+    }
+    fc["audio"]["enabled"] = True
+    fc["audio"]["volume"] = 0.9
+    fc["audio"]["fade_in"] = 0.0
+    fc["audio"]["fade_out"] = 10.0  # 等于 total duration
+    _save_fine_compose(mgr, t.task_id, fc)
+
+    # 10s clip，fade_out=10s → max(0, 10-10)=0；退化但不应崩
+    asm = _assemble_fine_filter(t.task_id, mgr, duration=10.0, preview_start=0.0)
+    assert asm.get("ok") is True, asm
+    assert "afade=t=out:st=0.00:d=10.00" in asm["filter_complex"]
+
+
+def test_predict_audio_path_bgm_fade_out_st_matches_assemble(tmp_path):
+    """REQ-095：诊断器拿到 audio_total_duration 后，预测字符串与实跑路径一致。
+
+    之前 _predict_audio_path 没接 duration，diagnose 端点固定返回 st=0，
+    误导前端以为实跑也是 st=0。修了之后两者应对齐。
+    """
+    from slirn_home.app import (
+        _predict_audio_path, _assemble_fine_filter, _get_fine_compose, _save_fine_compose,
+    )
+
+    mgr, video = _make_mgr(tmp_path)
+    t = mgr.create(name="bgm-predict", original_video=video)
+
+    upload = tmp_path / "tasks" / t.task_id / "upload"
+    upload.mkdir(parents=True, exist_ok=True)
+    audio_src = upload / "bgm.mp3"
+    audio_src.write_bytes(b"ID3" + b"\x00" * 100)
+
+    fc = _get_fine_compose(mgr, t.task_id)
+    fc["materials"]["video"] = {"path": str(video.relative_to(tmp_path)),
+                                "type": "video", "source": "upload"}
+    fc["materials"]["audio"] = {
+        "path": f"tasks/{t.task_id}/upload/bgm.mp3", "type": "audio", "source": "upload",
+    }
+    fc["audio"]["enabled"] = True
+    fc["audio"]["volume"] = 0.9
+    fc["audio"]["fade_in"] = 1.0
+    fc["audio"]["fade_out"] = 1.0
+    _save_fine_compose(mgr, t.task_id, fc)
+
+    duration = 10.0
+
+    # 实跑路径
+    asm = _assemble_fine_filter(t.task_id, mgr, duration=duration, preview_start=0.0)
+    assert asm.get("ok") is True, asm
+    asm_filters = asm["filter_complex"]
+
+    # 诊断路径（带 audio_total_duration）
+    fc_reloaded = _get_fine_compose(mgr, t.task_id)
+    pred = _predict_audio_path(fc_reloaded, audio_total_duration=duration)
+    assert pred.get("predicted_has_bgm") is True
+    # predicted_audio_filters 只含 BGM 子链 + amix；实跑 filter_complex 是完整图
+    # 应满足：诊断的 BGM 关键段（不含 amix 部分）都出现在实跑里、且 fade_out 起算与实跑完全一致
+    asm_norm = asm_filters.replace("\n", "")
+    pred_norm = pred["predicted_audio_filters"].replace("\n", "")
+    assert "afade=t=in:st=0:d=1.00" in pred_norm
+    assert "afade=t=out:st=9.00:d=1.00" in pred_norm
+    # 把分号切成段：诊断的所有段都应在实跑完整图中找到
+    for seg in pred_norm.split(";"):
+        seg = seg.strip()
+        if not seg:
+            continue
+        assert seg in asm_norm, f"诊断段在实跑中找不到：{seg!r}\n完整 asm={asm_norm}"
+    # amix 段的 voice 引用是诊断与实跑都有的 [voice] 标签，也应能找到
+    assert "[voice][bgm]amix=inputs=2:duration=first:normalize=0[aout]" in asm_norm
+    # 兜底分支：未传 duration 时仍然能用（按 st=0 退化，但不崩）
+    pred_fallback = _predict_audio_path(_get_fine_compose(mgr, t.task_id))
+    assert "afade=t=out:st=0" in pred_fallback["predicted_audio_filters"]
 def test_import_fine_params_rejects_bad_schema(tmp_path):
     """REQ-20260919-065：_schema 不兼容（不是 2/3）应返回 error，不修改 fc。"""
     from slirn_home.app import build_app, _get_fine_compose
@@ -8052,6 +8207,88 @@ def test_probe_output_audio_returns_absolute_path():
     probe_body = probe_match.group(1)
     assert '"output_abs_path"' in probe_body, (
         "REQ-094：output_abs_path 必须在 probe_output_audio 函数体内返回（不是别的端点）"
+    )
+
+
+def test_assemble_fine_filter_voice_silence_concat_no_adelay(tmp_path):
+    """REQ-20260920-096：input 0 用 -ss 输入级 seek + cover 启用时，adelay + aloop + amix
+    duration=first 会触发 ffmpeg "Queue input is backward in time"，把音频截断到 ~22ms。
+
+    修复：废弃 adelay，改用 lavfi anullsrc 注入 cover 等长静音前缀，再与 [0:a] 做
+    concat，避开 PTS 错位。本测试断言 cover 启用时必须含 anullsrc 静音输入 +
+    [ss][v_raw]concat 链，且不再含 adelay；cover 禁用时走原有的 asetpts 直通路径。
+
+    复现：preview_start=20s + cover enabled + audio enabled + bgm enabled → bug 现场。
+    """
+    from slirn_home.app import (
+        _assemble_fine_filter, _get_fine_compose, _save_fine_compose,
+    )
+
+    mgr, video = _make_mgr(tmp_path)
+    t = mgr.create(name="silence-concat-regression", original_video=video)
+
+    upload = tmp_path / "tasks" / t.task_id / "upload"
+    upload.mkdir(parents=True, exist_ok=True)
+    cover_src = upload / "cover.png"
+    cover_src.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
+    audio_src = upload / "bgm.mp3"
+    audio_src.write_bytes(b"ID3" + b"\x00" * 100)
+
+    fc = _get_fine_compose(mgr, t.task_id)
+    fc["materials"]["video"] = {"path": str(video.relative_to(tmp_path)),
+                                "type": "video", "source": "upload"}
+    fc["materials"]["cover"] = {"path": f"tasks/{t.task_id}/upload/cover.png",
+                                "type": "image", "source": "upload"}
+    fc["materials"]["audio"] = {"path": f"tasks/{t.task_id}/upload/bgm.mp3",
+                                "type": "audio", "source": "upload"}
+    fc["layout"]["cover"]["enabled"] = True
+    fc["layout"]["cover"]["duration"] = 2.0
+    fc["audio"]["enabled"] = True
+    fc["audio"]["volume"] = 0.9
+    _save_fine_compose(mgr, t.task_id, fc)
+
+    # 关键：preview_start > 0 触发 input 级 -ss seek
+    asm = _assemble_fine_filter(t.task_id, mgr, duration=5.0, preview_start=20.0)
+    assert asm.get("ok") is True, asm
+    fc_text = asm["filter_complex"].replace("\n", "")
+
+    # 1. REQ-096 修复：filter_complex 必须含 [ss][v_raw]concat + amix，
+    #    且禁用 adelay（避免 PTS 错位把 audio 截断到 ~22ms）。
+    #    anullsrc 静音源在 input_args 里（input 级别），filter_complex 只看到 [N:a]。
+    assert "[ss][v_raw]concat=n=2:v=0:a=1[voice]" in fc_text, (
+        f"voice 链必须走 silence + sliced-audio concat 模式，实际: {fc_text}"
+    )
+    assert "[voice][bgm]amix=inputs=2:duration=first:normalize=0[aout]" in fc_text
+    assert "adelay=" not in fc_text, (
+        f"REQ-096：cover 路径已废弃 adelay（会触发 PTS 错位），实际: {fc_text}"
+    )
+
+    # 2. input_args 中应含 -f lavfi -t 2.00 -i anullsrc=...（input 级别静音源）
+    cmd = asm["input_args"]
+    assert "-f" in cmd and "lavfi" in cmd, f"缺少 lavfi 输入: {cmd}"
+    assert any("anullsrc" in a for a in cmd), f"input_args 缺 anullsrc 输入: {cmd}"
+    # 输入顺序：video(0) → cover(1) → silence(2) → bgm(3)
+    # amix 的 bgm 应来自 input 3，loop 应引用 [3:a]
+    assert "[3:a]aloop" in fc_text, (
+        f"BGM 必须来自 input 3（silence 之前 bgm 索引为 1，新加 silence 后变 3），"
+        f"实际: {fc_text}"
+    )
+
+    # 3. 无 cover 路径也要带 asetpts（防御性）
+    fc2 = _get_fine_compose(mgr, t.task_id)
+    fc2["layout"]["cover"]["enabled"] = False
+    _save_fine_compose(mgr, t.task_id, fc2)
+    asm2 = _assemble_fine_filter(t.task_id, mgr, duration=5.0, preview_start=20.0)
+    assert asm2.get("ok") is True, asm2
+    fc_text2 = asm2["filter_complex"].replace("\n", "")
+    voice2 = next(
+        (s for s in fc_text2.split(";") if s.strip().startswith("[0:a]") and "voice" in s),
+        None,
+    )
+    assert voice2 is not None
+    assert "asetpts=PTS-STARTPTS" in voice2, f"无 cover 路径也必须 asetpts：{voice2}"
+    assert "anullsrc" not in fc_text2, (
+        f"无 cover 路径不应注入 anullsrc 静音前缀，实际: {fc_text2}"
     )
 
 

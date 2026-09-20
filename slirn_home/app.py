@@ -1957,15 +1957,33 @@ def _assemble_fine_filter(
         and float(layout["cover"].get("duration", 0)) > 0
         and (materials.get("cover") or {}).get("path")
     )
+    # REQ-20260920-096：用 lavfi anullsrc 注入 cover 时长对应的静音前缀，再 concat
+    # 原始 [0:a]，绕开 adelay + aloop + amix 在 input-level -ss/-t 下触发的 PTS 错位
+    # （"Queue input is backward in time" → audio 被截断到 ~22ms）。aevalsrc=0|0:...
+    # 是「每通道表达式 | 每通道表达式」的语法；若写 0:0 会被解析成 exprs=0 & duration=0，
+    # 产出 0 采样静音导致 concat 退化成只有后半段。先用 anullsrc 验证可行，再决定是否换
+    # 成 aevalsrc（语义更明确：彻底无声 vs 极低底噪）。
+    silence_idx = -1
     if cover_input_enabled:
         cover_path = _resolve_mat_abs(mgr, task_id, materials, "cover")
         if cover_path and cover_path.exists():
             cover_dur = float(layout["cover"].get("duration", 2.0))
             input_args += ["-loop", "1", "-framerate", "30", "-t", f"{cover_dur:.2f}", "-i", str(cover_path)]
+            # 在 cover 之后追加一段等长静音输入；index = 当前 inputs_count
+            input_args += ["-f", "lavfi", "-t", f"{cover_dur:.2f}", "-i", "anullsrc=r=44100:cl=stereo"]
         else:
             layout = {**layout, "cover": {**layout["cover"], "enabled": False}}
             fc["layout"] = layout
             cover_input_enabled = False
+
+    # REQ-20260920-096：silence_idx 一定在 cover 之后、bgm 之前（如果有 audio input）。
+    # inputs_count 此刻尚未更新，silence_idx 等于当前的输入数量。
+    inputs_count_now = sum(1 for i_, _ in enumerate(input_args) if input_args[i_] == "-i")
+    if cover_input_enabled:
+        # cover 占一个 slot，silence 紧随其后
+        silence_idx = inputs_count_now - 1
+    else:
+        silence_idx = -1
 
     audio_cfg = fc.get("audio") or _FINE_AUDIO_DEFAULTS
     audio_input_enabled = (
@@ -2113,12 +2131,50 @@ def _assemble_fine_filter(
 
     audio_idx = inputs_count - 1 if audio_input_enabled else -1
     if cover_input_enabled:
-        cover_delay_ms = int(round(float(layout["cover"].get("duration", 0)) * 1000))
+        # REQ-20260920-096：用「silence prefix + [0:a]」concat 替代 adelay，彻底避开
+        # PTS 错位。silence_idx 紧跟在 cover 之后，与 cover 时长一致，保证 concat 后
+        # voice 总长 = cover_dur + sliced_input_audio_duration。
         chain.append(
-            f"[0:a]adelay={cover_delay_ms}|{cover_delay_ms}:all=1,volume=1.0[voice]"
+            f"[{silence_idx}:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[ss];"
+            f"[0:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[v_raw];"
+            f"[ss][v_raw]concat=n=2:v=0:a=1[voice]"
         )
     else:
-        chain.append("[0:a]volume=1.0[voice]")
+        # 无 cover：保留原有的 asetpts 防 amix 误读
+        chain.append("[0:a]asetpts=PTS-STARTPTS,volume=1.0[voice]")
+    # REQ-20260920-095：BGM fade_out 起算时间必须指向「音频总时长 - fade_out」，
+    # 不能再写 st=0。原 st=0 让两条 afade（in/out）都从 0 起，第二条覆盖第一条，
+    # 导致 t≥1s 后 BGM 整段静音、amix 输出基本只剩 voice（实测 mean_volume -23.3 dB
+    # ≈ voice 单跑；BGM 段 1-9s 实测 -91 dB ≈ 数字 0）。
+    #
+    # amix=inputs=2:duration=first → 输出时长 = voice 总长 = video[0:a] 在 -ss/-t
+    # 限定下的长度。preview/导出有显式 duration；duration=None（导出完整视频）走 probe。
+    audio_total_duration: float | None = duration
+    if audio_total_duration is None:
+        try:
+            _ms = _probe_video_duration_ms(mgr, task_id)
+            if _ms > 0:
+                audio_total_duration = _ms / 1000.0
+        except Exception as e:  # noqa: BLE001
+            log.warning("REQ-095: probe 源视频时长失败，fade_out 起算退回 st=0: %s", e)
+
+    def _calc_fade_out_st(fade_dur: float) -> float:
+        """afade=t=out 的 st 必须靠近流末尾；总时长未知时降级 st=0 但打 warning。"""
+        if audio_total_duration is None:
+            log.warning(
+                "REQ-095: 无法确定 audio 总时长，fade_out st=0（潜在静音段），"
+                "建议传 duration 或 ffprobe 改异步预热"
+            )
+            return 0.0
+        st = max(0.0, audio_total_duration - fade_dur)
+        if st <= 0.01:
+            log.warning(
+                "REQ-095: fade_out (%ss) ≥ audio_total_duration (%ss)，st=%s，"
+                "退化为 st=0 与 fade_in 重叠",
+                fade_dur, audio_total_duration, st,
+            )
+        return st
+
     if audio_input_enabled and audio_idx >= 0:
         vol = float(audio_cfg.get("volume", 0.4))
         fade_in = float(audio_cfg.get("fade_in", 0.0))
@@ -2129,7 +2185,8 @@ def _assemble_fine_filter(
         if fade_in > 0:
             bgm_chain += f",afade=t=in:st=0:d={fade_in:.2f}"
         if fade_out > 0:
-            bgm_chain += f",afade=t=out:st=0:d={fade_out:.2f}"
+            _fo_st = _calc_fade_out_st(fade_out)
+            bgm_chain += f",afade=t=out:st={_fo_st:.2f}:d={fade_out:.2f}"
         bgm_chain += "[bgm]"
         chain.append(bgm_chain)
         chain.append(
@@ -2151,11 +2208,15 @@ def _assemble_fine_filter(
     }
 
 
-def _predict_audio_path(fc: dict) -> dict:
+def _predict_audio_path(fc: dict, audio_total_duration: float | None = None) -> dict:
     """REQ-20260920-090：根据 fc 状态预测合成路径里 BGM 的处理分支（不跑 ffmpeg、不创建临时文件）。
 
     复刻 _assemble_fine_filter 中 inputs_count + audio_idx + BGM filter 链的计算逻辑
     —— 但不调用 ffmpeg、不创建临时字幕/预缩文件。供 /slirn/api/diagnose_bgm 同步调用。
+
+    audio_total_duration: 若调用方已探测到源视频时长（秒），传入则让 fade_out 起算时间
+        与 _assemble_fine_filter 完全一致（= duration - fade_out）。None 时退回 st=0 并标注。
+        REQ-20260920-095：诊断字符串必须与实跑路径同形，避免前端误导。
     """
     layout = fc.get("layout") or {}
     materials = fc.get("materials") or {}
@@ -2165,7 +2226,7 @@ def _predict_audio_path(fc: dict) -> dict:
     inputs_count = 1  # video
     if layout.get("bg", {}).get("enabled") and (materials.get("bg") or {}).get("path"):
         inputs_count += 1
-    cover_input_enabled = (
+    cover_input_enabled = bool(
         layout.get("cover", {}).get("enabled")
         and float(layout.get("cover", {}).get("duration", 0)) > 0
         and (materials.get("cover") or {}).get("path")
@@ -2220,7 +2281,10 @@ def _predict_audio_path(fc: dict) -> dict:
         },
     }
 
-    # 4. 预测 audio filter（与 _assemble_fine_filter 行 2122-2139 一致）
+    # 4. 预测 audio filter（与 _assemble_fine_filter 行 2122-2173 一致）
+    #    REQ-20260920-095：fade_out 起算必须用「总时长 - fade_out」；
+    #    调用方若传入 audio_total_duration，则与实跑路径完全一致；
+    #    未传则按 st=0 兜底并在 why_no_bgm 中注明「diagnose-only fallback」。
     predicted_audio_filters = ""
     if audio_input_enabled and audio_idx >= 0:
         vol = float(audio_cfg.get("volume", 0.4))
@@ -2231,7 +2295,12 @@ def _predict_audio_path(fc: dict) -> dict:
         if fade_in > 0:
             bgm_chain += f",afade=t=in:st=0:d={fade_in:.2f}"
         if fade_out > 0:
-            bgm_chain += f",afade=t=out:st=0:d={fade_out:.2f}"
+            # REQ-20260920-095：fade_out 起算 = total - fade_out；与 assemble 对齐
+            if audio_total_duration is not None:
+                _fo_st = max(0.0, float(audio_total_duration) - fade_out)
+                bgm_chain += f",afade=t=out:st={_fo_st:.2f}:d={fade_out:.2f}"
+            else:
+                bgm_chain += f",afade=t=out:st=0:d={fade_out:.2f}"
         bgm_chain += "[bgm]; [voice][bgm]amix=inputs=2:duration=first:normalize=0[aout]"
         predicted_audio_filters = bgm_chain
 
@@ -7981,7 +8050,16 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             return {"ok": False, "error": "fc not found"}
         except Exception as exc:
             return {"ok": False, "error": f"读取 fc 失败: {exc}"}
-        return _predict_audio_path(fc)
+        # REQ-20260920-095：探测源视频时长，让 predicted_audio_filters 的
+        # fade_out 起算与 _assemble_fine_filter 真正执行的命令完全一致。
+        audio_total_duration: float | None = None
+        try:
+            _ms = _probe_video_duration_ms(mgr, tid)
+            if _ms and _ms > 0:
+                audio_total_duration = _ms / 1000.0
+        except Exception as exc:
+            log.debug("REQ-095 diagnose: probe 源视频时长失败，预测器退回 st=0: %s", exc)
+        return _predict_audio_path(fc, audio_total_duration=audio_total_duration)
 
     # REQ-20260920-090：ffprobe volumedetect 探测 output 文件音频信息
     @app.app.post("/slirn/api/probe_output_audio")
