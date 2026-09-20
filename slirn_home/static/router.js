@@ -3589,8 +3589,27 @@
     setExportBtnState(btnEl, 'running');
     setExportInlineState(statusEl, 'running', 0, 0, 0, 0);
 
+    // REQ-20260920-089：导出进行中显示独立取消按钮
+    var cancelBtn = document.getElementById('slirn-fine-export-cancel-btn');
+    if (cancelBtn) {
+      cancelBtn.style.display = '';
+      cancelBtn.setAttribute('data-state', 'running');
+      cancelBtn.setAttribute('data-job-id', jobId);
+      cancelBtn.disabled = false;
+    }
+
     var _stateLabel = { queued: '排队中', running: '渲染中', done: '已完成', failed: '失败', cancelled: '已取消' };
     var _timer = null;
+
+    // REQ-20260920-089：终态隐藏取消按钮
+    var _hideCancelBtn = function() {
+      var cb = document.getElementById('slirn-fine-export-cancel-btn');
+      if (cb) {
+        cb.style.display = 'none';
+        cb.setAttribute('data-state', 'idle');
+        cb.disabled = false;
+      }
+    };
 
     var _poll = function() {
       fetch('/slirn/api/render_status?job_id=' + encodeURIComponent(jobId))
@@ -3617,14 +3636,17 @@
             clearInterval(_timer); _timer = null;
             setExportBtnState(btnEl, 'done', s.output_url);
             statusEl.setAttribute('data-output-url', s.output_url || '');
+            _hideCancelBtn();
             toast('✅ 导出完成');
           } else if (st === 'failed') {
             clearInterval(_timer); _timer = null;
             setExportBtnState(btnEl, 'failed', null, s.error);
             statusEl.setAttribute('data-error', s.error || '未知错误');
+            _hideCancelBtn();
           } else if (st === 'cancelled') {
             clearInterval(_timer); _timer = null;
             setExportBtnState(btnEl, 'idle');
+            _hideCancelBtn();
           }
         })
         .catch(function(e) {
@@ -5964,6 +5986,38 @@
         }).catch(function(e) {
           _b.disabled = false; _b.textContent = _oldText;
           toast('❌ 网络错误: ' + e.message);
+        });
+    }
+    else if (action === 'fine-export-cancel') {
+      // REQ-20260920-089：独立可见的取消按钮（不依赖 status 元素 click）
+      if (!confirm('确认取消当前渲染？已生成的片段会被丢弃。')) return;
+      var _ceBtn = document.getElementById('slirn-fine-export-cancel-btn');
+      if (_ceBtn) { _ceBtn.disabled = true; _ceBtn.setAttribute('data-state', 'cancelling'); }
+      // 从 status 元素读 job_id（兜底：也可能从取消按钮的 data-job-id 读）
+      var _statusEl = document.getElementById('slirn-fine-export-status');
+      var _jobId = (_ceBtn && _ceBtn.getAttribute('data-job-id')) ||
+                   (_statusEl && _statusEl.getAttribute('data-job-id')) || '';
+      if (!_jobId) {
+        toast('❌ 找不到当前 job_id（可能已完成或已取消）');
+        if (_ceBtn) { _ceBtn.disabled = false; _ceBtn.setAttribute('data-state', 'idle'); }
+        return;
+      }
+      fetch('/slirn/api/cancel_render', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ job_id: _jobId })
+      })
+        .then(function(r) { return r.json(); })
+        .then(function(j) {
+          if (!j.ok) {
+            toast('❌ ' + (j.error || '取消失败'));
+            if (_ceBtn) { _ceBtn.disabled = false; _ceBtn.setAttribute('data-state', 'running'); }
+          } else {
+            toast('⏹ 已发送取消信号');
+          }
+        })
+        .catch(function(e) {
+          toast('❌ 网络错误: ' + e.message);
+          if (_ceBtn) { _ceBtn.disabled = false; _ceBtn.setAttribute('data-state', 'running'); }
         });
     }
     else if (action === 'opt-page-prev' || action === 'opt-page-next') {

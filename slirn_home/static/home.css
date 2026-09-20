@@ -3745,6 +3745,27 @@ input[type="checkbox"]:focus-visible {
 .slirn-fine-export-status[data-state="done"] .slirn-fine-export-bar { background: #2ea043; }
 .slirn-fine-export-status[data-state="failed"] .slirn-fine-export-bar { background: #d1242f; }
 
+/* REQ-20260920-089：独立可见的取消按钮（紧跟 status 元素后面） */
+.slirn-fine-export-cancel {
+  margin-left: 6px;
+  background: var(--danger, #d1242f);
+  color: white;
+  border: none;
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.slirn-fine-export-cancel:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+.slirn-fine-export-cancel:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.slirn-fine-export-cancel[data-state="cancelling"] {
+  background: #6e7681;
+}
+
 /* REQ-20260920-078：系统默认 BGM 下拉（一键选 5 个 lo-fi mp3 之一） */
 .slirn-fine-default-bgm-row {
   display: flex;
