@@ -292,6 +292,54 @@
       var el = document.getElementById(id);
       if (el) el.style.display = (id === targetCell) ? '' : 'none';
     });
+  }
+
+  // REQ-20260920-087：任务列表搜索框过滤（client-side）
+  // 监听 #slirn-task-search 的 input 事件，按 task_id / name / original_video 文本匹配卡片
+  // 全空字符串 → 显示全部；非空 → 隐藏不匹配的卡片 + 显示「无匹配」空态
+  function _filterTaskCards(query) {
+    var q = (query || '').trim().toLowerCase();
+    var grid = document.querySelector('.slirn-task-grid');
+    if (!grid) return;
+    var cards = grid.querySelectorAll('.slirn-task-card');
+    var matchedCount = 0;
+    cards.forEach(function(card) {
+      if (!q) {
+        card.style.display = '';
+        matchedCount++;
+        return;
+      }
+      var tid = (card.getAttribute('data-task-id') || '').toLowerCase();
+      var nameEl = card.querySelector('.slirn-task-name');
+      var videoEl = card.querySelector('.slirn-task-video');
+      var name = nameEl ? (nameEl.textContent || '').toLowerCase() : '';
+      var video = videoEl ? (videoEl.textContent || '').toLowerCase() : '';
+      var hay = tid + ' ' + name + ' ' + video;
+      var match = hay.indexOf(q) >= 0;
+      card.style.display = match ? '' : 'none';
+      if (match) matchedCount++;
+    });
+    // 处理「无匹配」空态
+    var existing = grid.querySelector('.slirn-search-empty');
+    if (existing) existing.remove();
+    if (q && matchedCount === 0) {
+      var empty = document.createElement('div');
+      empty.className = 'slirn-empty slirn-search-empty';
+      empty.style.gridColumn = '1/-1';
+      empty.innerHTML = '<div class="slirn-empty-icon">🔍</div>' +
+        '<div class="slirn-empty-text">没有匹配「' + q.replace(/[<>&"']/g, function(c) {
+          return ({'<':'<','>':'>','&':'&','"':'"',"'":'&#39;'})[c];
+        }) + '」的任务</div>';
+      grid.appendChild(empty);
+    }
+  }
+
+  // 用事件代理挂监听（避免重复绑定 — input 元素可能在刷新后被替换）
+  document.addEventListener('input', function(e) {
+    if (e.target && e.target.id === 'slirn-task-search') {
+      _filterTaskCards(e.target.value);
+    }
+  });
     var detail = document.getElementById('slirn-tab-detail');
     if (detail) detail.style.display = 'none';
     // 切到「新建任务」时初始化热词选择器（刷新 chip 显示）；

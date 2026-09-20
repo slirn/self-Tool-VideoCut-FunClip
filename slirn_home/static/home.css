@@ -399,6 +399,11 @@ footer { display: none !important; }
   border-color: var(--accent-solid);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
+.slirn-search-empty {
+  padding: 48px 16px !important;
+  text-align: center;
+  color: var(--muted, #666);
+}
 .slirn-search-wrap {
   flex: 1;
   position: relative;

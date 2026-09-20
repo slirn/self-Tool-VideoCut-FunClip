@@ -6903,3 +6903,151 @@ def test_router_logs_state_has_page_and_page_size():
     assert "_renderLogsPager" in router_js, (
         "REQ-086：router.js 必须有 _renderLogsPager 函数"
     )
+
+
+# ---------- REQ-20260920-087：任务列表搜索框过滤 ----------
+
+def test_task_list_has_search_input(tmp_path: Path):
+    """REQ-087 AC-1/AC-7：搜索框存在且 id 正确。"""
+    from slirn_home.app import _render_task_list
+
+    m, video = _make_mgr(tmp_path)
+    m.create(name="t", original_video=video)
+    html = _render_task_list(m)
+    assert 'id="slirn-task-search"' in html, (
+        "REQ-087：任务列表必须有 #slirn-task-search 输入框"
+    )
+    assert 'class="slirn-search-box"' in html, (
+        "REQ-087：搜索框必须有 slirn-search-box 类"
+    )
+
+
+def test_router_js_has_task_search_handler():
+    """REQ-087：router.js 必须有 input 事件代理监听 #slirn-task-search。"""
+    FUNCLIP_ROOT = Path(__file__).resolve().parent.parent
+    router_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "router.js").read_text(
+        encoding="utf-8"
+    )
+    # 监听 #slirn-task-search 的 input 事件
+    assert "slirn-task-search" in router_js, (
+        "REQ-087：router.js 必须引用 #slirn-task-search"
+    )
+    # _filterTaskCards 函数
+    assert "_filterTaskCards" in router_js, (
+        "REQ-087：router.js 必须定义 _filterTaskCards 函数"
+    )
+    # 实际过滤逻辑（卡片 display 切换 + data-task-id 读）
+    assert "data-task-id" in router_js, (
+        "REQ-087：_filterTaskCards 必须读 data-task-id"
+    )
+    assert ".slirn-task-card" in router_js, (
+        "REQ-087：_filterTaskCards 必须定位 .slirn-task-card"
+    )
+    # 无匹配空态文案
+    assert "slirn-search-empty" in router_js, (
+        "REQ-087：无匹配时必须显示 .slirn-search-empty 空态"
+    )
+    # 必须用 addEventListener('input', ...) 事件代理（避免重复绑定）
+    assert 'addEventListener(\'input\'' in router_js or 'addEventListener("input"' in router_js, (
+        "REQ-087：router.js 必须用 document.addEventListener('input', ...) 事件代理"
+    )
+
+
+def test_router_js_filter_function_clears_display():
+    """REQ-087 AC-2：清空查询时所有卡片重新可见。"""
+    FUNCLIP_ROOT = Path(__file__).resolve().parent.parent
+    router_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "router.js").read_text(
+        encoding="utf-8"
+    )
+    # 抓取 _filterTaskCards 函数体（用大括号平衡法）
+    import re
+    idx = router_js.find("function _filterTaskCards(")
+    assert idx >= 0, "router.js 找不到 _filterTaskCards 函数定义"
+    # 从函数定义开始找配对大括号
+    brace_start = router_js.find("{", idx)
+    depth = 0
+    i = brace_start
+    while i < len(router_js):
+        c = router_js[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    body = router_js[brace_start:i + 1]
+    # 空 query → card.style.display = ''（重置可见）
+    assert "card.style.display = ''" in body, (
+        "REQ-087 AC-2：空查询时必须重置卡片 display = '' 让所有卡片可见"
+    )
+    # 非空 query → 隐藏（三元表达式 match ? '' : 'none'）
+    assert "match ? '' : 'none'" in body or 'match ? "" : "none"' in body or "'none'" in body, (
+        "REQ-087 AC-1/AC-3：非匹配卡片必须 display = 'none'"
+    )
+
+
+def test_router_js_filter_matches_name_id_video():
+    """REQ-087 AC-3/AC-4：搜索匹配 task_id / name / video 三类文本。"""
+    FUNCLIP_ROOT = Path(__file__).resolve().parent.parent
+    router_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "router.js").read_text(
+        encoding="utf-8"
+    )
+    # 用大括号平衡法抓取函数体
+    idx = router_js.find("function _filterTaskCards(")
+    brace_start = router_js.find("{", idx)
+    depth = 0
+    i = brace_start
+    while i < len(router_js):
+        c = router_js[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    body = router_js[brace_start:i + 1]
+    # 必须读 data-task-id（AC-3 ID 匹配）
+    assert "getAttribute('data-task-id')" in body, (
+        "REQ-087 AC-3：必须读 data-task-id 属性"
+    )
+    # 必须读 .slirn-task-name（AC-3 name 匹配）
+    assert ".slirn-task-name" in body, (
+        "REQ-087 AC-3：必须读 .slirn-task-name 文本"
+    )
+    # 必须读 .slirn-task-video（AC-4 video 匹配）
+    assert ".slirn-task-video" in body, (
+        "REQ-087 AC-4：必须读 .slirn-task-video 文本"
+    )
+
+
+def test_router_js_filter_xss_escape_in_empty_message():
+    """REQ-087 AC-5：搜索关键词插入 HTML 前必须 HTML escape（防 XSS）。"""
+    FUNCLIP_ROOT = Path(__file__).resolve().parent.parent
+    router_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "router.js").read_text(
+        encoding="utf-8"
+    )
+    idx = router_js.find("function _filterTaskCards(")
+    brace_start = router_js.find("{", idx)
+    depth = 0
+    i = brace_start
+    while i < len(router_js):
+        c = router_js[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    body = router_js[brace_start:i + 1]
+    # 空态文案：含「没有匹配「" + q + "」」之前必须有 escape 逻辑（replace 或 textContent）
+    has_escape = (
+        "replace(/[<" in body  # 正则 replace 转义
+        or ".textContent" in body  # 或用 textContent
+        or "encodeURIComponent" in body  # 或 URL 编码
+    )
+    assert has_escape, (
+        "REQ-087 AC-5：搜索关键词插入空态文案前必须 HTML escape（防 XSS）"
+    )
