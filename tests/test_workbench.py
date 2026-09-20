@@ -5232,8 +5232,10 @@ def test_render_async_uses_line_buffered_stdout():
     assert "proc.stdout" in src, (
         "REQ-077：应重包 proc.stdout"
     )
-    assert "proc.stderr" in src, (
-        "REQ-077：应重包 proc.stderr（错误信息读取也走 TextIOWrapper）"
+    # REQ-20260920-089：stderr 已重定向到 DEVNULL（防死锁），不再重包
+    # 也不再 proc.stderr.read()，因此 proc.stderr 不应再被引用
+    assert "proc.stderr" not in src, (
+        "REQ-089 AC-1：_run_fine_render_async 不应再引用 proc.stderr（DEVNULL 已重定向）"
     )
 
 
@@ -7323,5 +7325,254 @@ def test_mat_detail_modal_close_action_in_router_js():
     close_uses = src.count("mat-detail-modal")
     assert close_uses >= 3, (
         f"REQ-088 AC-6：router.js 必须至少 3 处引用 mat-detail-modal（close btn + overlay + ESC），实际 {close_uses} 处"
+    )
+
+
+# ============================================================
+# REQ-20260920-089：修 ffmpeg 死锁 + 取消按钮 + record_finish 兜底
+# ============================================================
+
+def test_popen_uses_devnull_for_stderr():
+    """REQ-089 AC-1：_run_fine_render_async 的 Popen 必须用 stderr=DEVNULL（不再 PIPE）。
+
+    原 BUG：`stderr=subprocess.PIPE` 但主循环只读 stdout，stderr pipe buffer 写满后
+    ffmpeg 阻塞 → 永远死锁 → UI 进度 0% 卡死。
+    修复：`stderr=subprocess.DEVNULL`，ffmpeg 诊断信息直接丢弃，主循环只关心 stdout。
+    """
+    import re
+    FUNCLIP_ROOT = Path(__file__).resolve().parent.parent
+    app_path = FUNCLIP_ROOT / "slirn_home" / "app.py"
+    src = app_path.read_text(encoding="utf-8")
+
+    # 抓取 _run_fine_render_async 函数体（用大括号平衡法）
+    idx = src.find("def _run_fine_render_async")
+    assert idx >= 0, "找不到 _run_fine_render_async 函数"
+    # 抓第一个 Popen 调用（函数体内第一个）
+    body_idx = src.find("subprocess.Popen(", idx)
+    assert body_idx >= 0, "找不到 subprocess.Popen 调用"
+
+    # 用正则抓 Popen(...) 完整调用
+    m = re.search(r"subprocess\.Popen\(([^)]+)\)", src[body_idx:body_idx + 2000], re.DOTALL)
+    assert m, "Popen 调用匹配失败"
+    popen_call = m.group(1)
+
+    # 核心断言：必须 stderr=subprocess.DEVNULL（不允许再 PIPE）
+    assert "stderr=subprocess.DEVNULL" in popen_call, (
+        "REQ-089 AC-1：Popen 必须 stderr=subprocess.DEVNULL（防死锁），实际:\n"
+        + popen_call[:500]
+    )
+    assert "stderr=subprocess.PIPE" not in popen_call, (
+        "REQ-089 AC-1：Popen 不能再用 stderr=PIPE，会导致死锁回归"
+    )
+
+
+def test_export_cancel_button_in_app_py():
+    """REQ-089 AC-2：_render_fine_cut_zone 必须输出独立可见的取消按钮。
+
+    原 BUG：取消依赖点击 `<span id="slirn-fine-export-status">`（hidden 元素），
+    用户在 UI 上看不到 status 元素时无任何取消入口。
+    修复：加 `<button id="slirn-fine-export-cancel-btn" data-action="fine-export-cancel">⏹ 取消</button>`。
+    """
+    FUNCLIP_ROOT = Path(__file__).resolve().parent.parent
+    app_path = FUNCLIP_ROOT / "slirn_home" / "app.py"
+    src = app_path.read_text(encoding="utf-8")
+
+    # 必须有 cancel-btn DOM id
+    assert 'id="slirn-fine-export-cancel-btn"' in src, (
+        "REQ-089 AC-2：app.py 必须输出 id=\"slirn-fine-export-cancel-btn\" 的按钮"
+    )
+    # 必须有 data-action 让 router.js click handler 派发
+    assert 'data-action="fine-export-cancel"' in src, (
+        "REQ-089 AC-2：取消按钮必须有 data-action=\"fine-export-cancel\""
+    )
+    # 必须有 ⏹ 取消 文案（视觉明确告诉用户这是取消按钮）
+    assert "取消" in src, (
+        "REQ-089 AC-2：取消按钮必须有「取消」文案"
+    )
+
+
+def test_router_js_fine_export_cancel_action():
+    """REQ-089 AC-3：router.js 必须有 fine-export-cancel action 派发分支。
+
+    原 BUG：UI 没取消入口（依赖 hidden status 元素 click），用户无法中断死锁。
+    修复：click handler 派发 action='fine-export-cancel' → confirm() → POST /slirn/api/cancel_render。
+    """
+    FUNCLIP_ROOT = Path(__file__).resolve().parent.parent
+    router_js_path = FUNCLIP_ROOT / "slirn_home" / "static" / "router.js"
+    src = router_js_path.read_text(encoding="utf-8")
+
+    # 必须有 fine-export-cancel action 分支
+    assert "fine-export-cancel" in src, (
+        "REQ-089 AC-3：router.js 必须有 fine-export-cancel action 派发"
+    )
+    # 必须调 /slirn/api/cancel_render 端点
+    assert "/slirn/api/cancel_render" in src, (
+        "REQ-089 AC-3：router.js 必须调用 /slirn/api/cancel_render"
+    )
+    # 必须先 confirm 用户
+    assert "confirm(" in src, (
+        "REQ-089 AC-3：取消前必须 confirm() 让用户二次确认（防误触）"
+    )
+
+
+def test_router_js_cancel_button_toggle():
+    """REQ-089 AC-2：startFineExportInline 必须正确显示/隐藏取消按钮。
+
+    - 启动渲染时：display='' (显示)
+    - done / failed / cancelled 时：display='none' (隐藏)
+    """
+    FUNCLIP_ROOT = Path(__file__).resolve().parent.parent
+    router_js_path = FUNCLIP_ROOT / "slirn_home" / "static" / "router.js"
+    src = router_js_path.read_text(encoding="utf-8")
+
+    # startFineExportInline 函数体里必须 show cancel button
+    fn_idx = src.find("function startFineExportInline(")
+    assert fn_idx >= 0, "找不到 startFineExportInline 函数"
+    # 抓函数体（括号平衡法）
+    brace_start = src.find("{", fn_idx)
+    depth = 0
+    i = brace_start
+    while i < len(src):
+        c = src[i]
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    body = src[brace_start:i + 1]
+
+    # 必须引用 cancel button id
+    assert "slirn-fine-export-cancel-btn" in body, (
+        "REQ-089 AC-2：startFineExportInline 必须引用取消按钮 DOM id"
+    )
+    # 必须 display=''（显示）—— 变量名 cancelBtn 或 cb 都行
+    has_show = (
+        "cancelBtn.style.display = ''" in body
+        or 'cancelBtn.style.display = ""' in body
+        or "cb.style.display = ''" in body
+        or 'cb.style.display = ""' in body
+    )
+    assert has_show, (
+        "REQ-089 AC-2：startFineExportInline 必须 display='' 显示取消按钮"
+    )
+    # 必须 display='none'（隐藏）—— 变量名 cancelBtn 或 cb 都行
+    has_hide = (
+        "cancelBtn.style.display = 'none'" in body
+        or 'cancelBtn.style.display = "none"' in body
+        or "cb.style.display = 'none'" in body
+        or 'cb.style.display = "none"' in body
+    )
+    assert has_hide, (
+        "REQ-089 AC-2：startFineExportInline 必须 display='none' 隐藏取消按钮"
+    )
+
+
+def test_render_async_finally_records_finish():
+    """REQ-089 AC-4：_run_fine_render_async 的 record_finish 必须在 finally 块。
+
+    原 BUG：cancel/failed/done 分支各调一次 record_finish，外部 kill 后主循环不
+    执行到任何分支 → execution_history 永远 running。
+    修复：所有 record_finish + _delete_active_export_job 挪到 finally。
+    """
+    FUNCLIP_ROOT = Path(__file__).resolve().parent.parent
+    app_path = FUNCLIP_ROOT / "slirn_home" / "app.py"
+    src = app_path.read_text(encoding="utf-8")
+    lines = src.splitlines()
+
+    # 找 def _run_fine_render_async 行号
+    def_line = -1
+    for i, line in enumerate(lines):
+        if line.startswith("def _run_fine_render_async("):
+            def_line = i
+            break
+    assert def_line >= 0, "找不到 _run_fine_render_async 函数"
+
+    # 找下一个顶层 def 或 async def（函数体结束）
+    body_end = len(lines)
+    for i in range(def_line + 1, len(lines)):
+        stripped = lines[i].lstrip()
+        if (stripped.startswith("def ") or stripped.startswith("async def ") or
+                stripped.startswith("@")) and not lines[i].startswith(" " * (def_line == i)):
+            # 同缩进的 def/async def → 下一个函数
+            indent = len(lines[i]) - len(stripped)
+            if indent == 0:
+                body_end = i
+                break
+
+    body = "\n".join(lines[def_line:body_end])
+
+    # finally 块必须存在
+    assert "finally:" in body, (
+        "REQ-089 AC-4：_run_fine_render_async 必须有 try/finally 块"
+    )
+    # finally 块里必须有 record_finish 调用
+    finally_idx = body.rfind("finally:")
+    assert finally_idx > 0, "找不到 finally 块"
+    finally_body = body[finally_idx:]
+    assert "record_finish" in finally_body, (
+        "REQ-089 AC-4：finally 块必须调用 record_finish（保证所有路径都写历史）"
+    )
+    # finally 块里必须有 _delete_active_export_job（落盘清理）
+    assert "_delete_active_export_job" in finally_body, (
+        "REQ-089 AC-4：finally 块必须调 _delete_active_export_job（清理落盘文件）"
+    )
+    # finally 块里必须有兜底 kill（取消/外部 kill 也要让 ffmpeg 退出）
+    assert "_kill_proc_with_grace" in finally_body, (
+        "REQ-089 AC-4：finally 块必须兜底 _kill_proc_with_grace（处理未退出的 ffmpeg）"
+    )
+
+
+def test_render_async_local_execution_history_import():
+    """REQ-089 关键补丁：daemon 线程里 execution_history 没有模块级导入，必须本地 import。
+
+    原 BUG（REQ-081 留下的潜在隐患，REQ-089 实测暴露）：
+    _run_fine_render_async 是 daemon 线程跑在 export_fine_video endpoint 之外；
+    原代码 `from slirn_home import execution_history` 在 endpoint 内是局部的，daemon 线程里
+    没有 `execution_history` 变量。调用 `execution_history.record_finish(...)` 抛
+    NameError 被 try/except 静默吞掉 → execution_history 永远 running。
+
+    修复：finally 块 + 早期 return 分支都加 `from slirn_home import execution_history as _eh`。
+    """
+    import re
+    FUNCLIP_ROOT = Path(__file__).resolve().parent.parent
+    app_path = FUNCLIP_ROOT / "slirn_home" / "app.py"
+    src = app_path.read_text(encoding="utf-8")
+
+    # 抓 _run_fine_render_async 函数体
+    lines = src.splitlines()
+    def_line = -1
+    for i, line in enumerate(lines):
+        if line.startswith("def _run_fine_render_async("):
+            def_line = i
+            break
+    assert def_line >= 0, "找不到 _run_fine_render_async 函数"
+    body_end = len(lines)
+    for i in range(def_line + 1, len(lines)):
+        stripped = lines[i].lstrip()
+        if stripped.startswith("def ") or stripped.startswith("async def "):
+            indent = len(lines[i]) - len(stripped)
+            if indent == 0:
+                body_end = i
+                break
+    body = "\n".join(lines[def_line:body_end])
+
+    # 找 record_finish 调用位置（每处都必须在调用前有本地 import）
+    rf_lines = []
+    for i, line in enumerate(lines[def_line:body_end]):
+        if "record_finish(" in line and "execution_history" not in line:
+            # 已经是 _eh.record_finish 或 _eh_xxx.record_finish 形式
+            rf_lines.append(def_line + i)
+
+    # 至少 1 处 record_finish（在 finally 块里）
+    assert len(rf_lines) >= 1, (
+        "REQ-089：_run_fine_render_async 必须至少有 1 处 record_finish（finally 块）"
+    )
+
+    # 函数体里必须至少有 1 处 `from slirn_home import execution_history`
+    assert "from slirn_home import execution_history" in body, (
+        "REQ-089：_run_fine_render_async 函数体里必须有 `from slirn_home import execution_history` "
+        "（daemon 线程无模块级 execution_history，必须本地导入）"
     )
 
