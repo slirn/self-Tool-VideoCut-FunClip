@@ -3590,6 +3590,25 @@
       });
       return state;
     }
+    // REQ-20260920-091：读开始时间（时:分:秒）+ 时长（秒）；返回 preview_start / duration
+    function _readTimeParams() {
+      var h = parseInt(document.getElementById('slirn-combo-test-start-h').value, 10) || 0;
+      var m = parseInt(document.getElementById('slirn-combo-test-start-m').value, 10) || 0;
+      var s = parseInt(document.getElementById('slirn-combo-test-start-s').value, 10) || 0;
+      var preview_start = Math.max(0, h * 3600 + m * 60 + s);
+      var durRaw = parseFloat(document.getElementById('slirn-combo-test-duration').value);
+      // 时长钳到 [2, 86400]；缺省或非法值 → null（= 完整视频）
+      var duration = (isFinite(durRaw) && durRaw >= 2) ? Math.min(durRaw, 86400) : null;
+      return { preview_start: preview_start, duration: duration };
+    }
+    // REQ-20260920-091：根据 time 参数算 output_path（与后端命名规则一致）
+    function _computeOutputPath(tp) {
+      if (tp.preview_start === 0 && tp.duration === null) {
+        return 'outputs/fine_export.mp4';
+      }
+      var dTag = tp.duration != null ? tp.duration.toFixed(1) : 'full';
+      return 'outputs/fine_export_t' + tp.preview_start.toFixed(1) + '_d' + dTag + '.mp4';
+    }
     function _appendOutput(html) {
       if (outputEl) {
         outputEl.style.display = 'block';
@@ -3663,11 +3682,16 @@
     var state = _readComboState();
     if (action === 'combo-test') {
       _setBusy(true);
-      _appendOutput('🚀 正在应用勾选并启动合成...');
+      var tp = _readTimeParams();
+      var outPath = _computeOutputPath(tp);
+      _appendOutput('🚀 正在应用勾选并启动合成（start=' + tp.preview_start + 's, dur=' + (tp.duration || 'full') + 's）...');
       _applyComboToFC(tid, state).then(function() {
+        // REQ-20260920-091：combo-test 传 time 参数给 export_fine_video（不导完整视频）
+        var exportBody = { task_id: tid, preview_start: tp.preview_start };
+        if (tp.duration !== null) exportBody.duration = tp.duration;
         return fetch('/slirn/api/export_fine_video', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ task_id: tid })
+          body: JSON.stringify(exportBody)
         });
       })
         .then(function(r) { return r.json(); })
@@ -3697,11 +3721,11 @@
             _appendOutput('<span class="err">❌ 渲染 ' + finalState.state + ' | ' + (finalState.error || '') + '</span>');
             _setBusy(false); return;
           }
-          // 完成后 ffprobe 探测 output
-          _appendOutput('✅ 渲染完成（' + (finalState.elapsed_sec || '?') + ' 秒）\n🔍 探测 output 音频...');
+          // REQ-20260920-091：probe 探测**对应**的 output 文件（不是默认 final.mp4）
+          _appendOutput('✅ 渲染完成（' + (finalState.elapsed_sec || '?') + ' 秒）\n🔍 探测 output 音频（' + outPath + '）...');
           return fetch('/slirn/api/probe_output_audio', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ task_id: tid, output_path: 'outputs/final.mp4' })
+            body: JSON.stringify({ task_id: tid, output_path: outPath })
           }).then(function(r) { return r.json(); }).then(function(p) {
             var html = '✅ 渲染完成（' + (finalState.elapsed_sec || '?') + ' 秒）\n\n[BGM 检测报告]\n';
             if (!p.ok) { html += '<span class="err">❌ probe 失败: ' + p.error + '</span>'; _appendOutput(html); _setBusy(false); return; }

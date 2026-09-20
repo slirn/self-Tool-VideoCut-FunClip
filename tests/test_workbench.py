@@ -1461,7 +1461,8 @@ def test_render_fine_cut_zone_renders_number_input_and_stepper_per_slider(tmp_pa
     # REQ-20260919-064 加了 1 个预览开始时间输入框 → 21
     # REQ-20260919-066 预览开始时间改 时:分:秒 三段 → 23（class 多值 `slirn-fine-num slirn-fine-preview-time`）
     #   上面正则要宽松：要么 class 字符串里就以 slirn-fine-num 开头并紧跟 " 或空格
-    assert len(re.findall(r'class="slirn-fine-num(?:\s|")', html)) == 23
+    # REQ-091：+4（start-h/m/s + duration）= 27
+    assert len(re.findall(r'class="slirn-fine-num(?:\s|")', html)) == 27
     # 不再有自定义 step-btn（与浏览器原生 stepper 重复，已移除）
     assert len(re.findall(r'slirn-fine-step-btn', html)) == 0
     # 也不再需要 num-group / step-stack 包装容器
@@ -7739,5 +7740,126 @@ def test_combo_test_saves_fc_layout_audio():
     # 3. payload 包含 audio.enabled
     assert "audio: { enabled:" in src, (
         "REQ-090 AC-7：_applyComboToFC payload 必须含 audio.enabled"
+    )
+
+
+# ====================================================================
+# REQ-20260920-091：合成元素组合测试面板 — 加时间参数
+# ====================================================================
+
+
+def test_combo_test_time_inputs_in_html():
+    """REQ-091 AC-1/AC-2/AC-3：workbench HTML 含「⏱ 开始时间」+「⏳ 时长」2 个 input。"""
+    app_path = FUNCLIP_ROOT / "slirn_home" / "app.py"
+    src = app_path.read_text(encoding="utf-8")
+
+    # 1. 开始时间 input（H:M:S 三段，复用 REQ-066 slirn-fine-preview-time class）
+    assert 'id="slirn-combo-test-start-h"' in src, "REQ-091 AC-1：缺开始时间（时）input"
+    assert 'id="slirn-combo-test-start-m"' in src, "REQ-091 AC-1：缺开始时间（分）input"
+    assert 'id="slirn-combo-test-start-s"' in src, "REQ-091 AC-1：缺开始时间（秒）input"
+    # REQ-091 AC-3：复用 slirn-fine-preview-time class
+    assert "slirn-fine-preview-time" in src
+
+    # 2. 时长 input（2-30 秒）
+    assert 'id="slirn-combo-test-duration"' in src, "REQ-091 AC-1：缺时长 input"
+    # min="2" max="30" 范围
+    duration_re = re.search(r'id="slirn-combo-test-duration"[^>]*min="2"[^>]*max="30"', src)
+    assert duration_re is not None, "REQ-091：时长 input 必须 min=2 max=30"
+
+    # 3. AC-2：默认值 start=00:00:00（value="0"）+ duration=10 秒
+    assert re.search(r'id="slirn-combo-test-start-h"[^>]*value="0"', src) is not None
+    assert re.search(r'id="slirn-combo-test-start-m"[^>]*value="0"', src) is not None
+    assert re.search(r'id="slirn-combo-test-start-s"[^>]*value="0"', src) is not None
+    duration_default_re = re.search(r'id="slirn-combo-test-duration"[^>]*value="10"', src)
+    assert duration_default_re is not None, "REQ-091 AC-2：duration 默认 10 秒"
+
+
+def test_export_fine_video_accepts_time_params():
+    """REQ-091 AC-4/AC-5/AC-6：export_fine_video 接受 body.preview_start/duration 并透传到 _run_fine_render_async。"""
+    app_path = FUNCLIP_ROOT / "slirn_home" / "app.py"
+    src = app_path.read_text(encoding="utf-8")
+
+    # 1. 读 body.preview_start 和 body.duration
+    assert "body.get(\"preview_start\")" in src, (
+        "REQ-091 AC-4：export_fine_video 必须读 body.preview_start"
+    )
+    assert "body.get(\"duration\")" in src, (
+        "REQ-091 AC-4：export_fine_video 必须读 body.duration"
+    )
+
+    # 2. 缺省回退：preview_start=0.0 / duration=None
+    assert "or 0.0" in src and "_start = float" in src, (
+        "REQ-091 AC-5：preview_start 缺省应回退到 0.0"
+    )
+
+    # 3. 透传给 _run_fine_render_async（args 里含 _start + _dur_f）
+    # 找 _run_fine_render_async 的调用点（args 元组）
+    call_re = re.search(
+        r"args=\(job, tid, mgr, out_path, _ext_exec, outputs_dir, _start, _dur_f\)",
+        src,
+    )
+    assert call_re is not None, (
+        "REQ-091 AC-6：export_fine_video 必须把 _start + _dur_f 透传给 _run_fine_render_async"
+    )
+
+    # 4. _run_fine_render_async 函数签名扩展
+    func_re = re.search(
+        r"def _run_fine_render_async\([^)]*preview_start:\s*float\s*=\s*0\.0,\s*duration:\s*float\s*\|\s*None\s*=\s*None",
+        src,
+    )
+    assert func_re is not None, (
+        "REQ-091 AC-6：_run_fine_render_async 必须扩展签名为 preview_start=0.0, duration=None"
+    )
+
+    # 5. _run_fine_render_async 函数体内把参数透传给 _assemble_fine_filter
+    # 函数体内必须有 _assemble_fine_filter(tid, mgr, duration=duration, preview_start=preview_start)
+    body_re = re.search(
+        r"_assemble_fine_filter\(tid, mgr, duration=duration, preview_start=preview_start\)",
+        src,
+    )
+    assert body_re is not None, (
+        "REQ-091 AC-6：_run_fine_render_async 必须用入参的 duration + preview_start 调 _assemble_fine_filter"
+    )
+
+
+def test_export_fine_video_output_path_has_time_suffix():
+    """REQ-091 AC-7：output 文件名加 _t{start}_d{duration}.mp4 后缀（防覆盖完整视频）。"""
+    app_path = FUNCLIP_ROOT / "slirn_home" / "app.py"
+    src = app_path.read_text(encoding="utf-8")
+
+    # 1. 默认路径（无 time 参数）
+    assert 'fine_export.mp4' in src, "REQ-091：默认 output 必须是 fine_export.mp4"
+
+    # 2. 有 time 参数时的后缀路径
+    suffix_re = re.search(r"fine_export_t\{_start", src)
+    assert suffix_re is not None, (
+        "REQ-091 AC-7：export_fine_video 必须输出 fine_export_t{_start...} 文件名"
+    )
+    assert "_d{_dur_tag}" in src, (
+        "REQ-091 AC-7：output 文件名必须含 _d{duration} 后缀"
+    )
+
+
+def test_combo_test_passes_time_params_to_export():
+    """REQ-091 AC-8/AC-9：combo-test 把 time 参数传给 /export_fine_video + probe 对应 output。"""
+    js_path = FUNCLIP_ROOT / "slirn_home" / "static" / "router.js"
+    src = js_path.read_text(encoding="utf-8")
+
+    # 1. combo-test 必须 fetch /export_fine_video 时带 preview_start + duration
+    assert "_readTimeParams" in src, "REQ-091 AC-8：combo-test 必须读 time 参数"
+    assert "preview_start: tp.preview_start" in src, (
+        "REQ-091 AC-8：combo-test 必须把 preview_start 传给 export_fine_video body"
+    )
+    assert "exportBody.duration = tp.duration" in src, (
+        "REQ-091 AC-8：combo-test 必须把 duration 传给 export_fine_video body"
+    )
+
+    # 2. _computeOutputPath 函数（与后端命名规则一致）
+    assert "_computeOutputPath" in src, "REQ-091 AC-9：combo-test 必须算 output_path"
+    assert "fine_export_t" in src, "REQ-091 AC-9：前端 _computeOutputPath 必须生成 _t 后缀"
+
+    # 3. probe_output_audio 用算出的 output_path（不是硬编码 outputs/final.mp4）
+    assert "output_path: outPath" in src, (
+        "REQ-091 AC-9：probe_output_audio 必须用算出的 outPath（不是硬编码 final.mp4）"
     )
 

@@ -2467,7 +2467,8 @@ def _probe_video_duration_ms(mgr, tid: str) -> int:
 
 
 def _run_fine_render_async(job: _RenderJob, tid: str, mgr, out_path: Path,
-                          exec_id: str = "", outputs_dir: Path | None = None) -> None:
+                          exec_id: str = "", outputs_dir: Path | None = None,
+                          preview_start: float = 0.0, duration: float | None = None) -> None:
     """REQ-20260919-074：后台 daemon 线程跑 ffmpeg（1-3 小时不再超时）。
 
     写入 job.state/progress_pct/elapsed_sec/speed_x/eta_sec/progress_time_ms/
@@ -2476,12 +2477,16 @@ def _run_fine_render_async(job: _RenderJob, tid: str, mgr, out_path: Path,
     REQ-20260920-081：exec_id 与 outputs_dir 由 export_fine_video endpoint 传入，
     用于在多出口（assemble 失败 / FileNotFound / cancelled / returncode 非 0 /
     returncode 0）都补 record_finish。失败也写（status="failed"）。
+
+    REQ-20260920-091：combo-test 调试面板可指定开始时间 + 时长（不导完整视频）。
+    缺省 preview_start=0.0 / duration=None → 等价于跑完整视频。
     """
     job.state = "running"
     job.started_at = time.monotonic()
     job.wall_started_at = time.time()
 
-    asm = _assemble_fine_filter(tid, mgr, duration=None, preview_start=0.0)
+    # REQ-20260920-091：用调用方传入的 time 参数（无值则导出完整视频，保持向后兼容）
+    asm = _assemble_fine_filter(tid, mgr, duration=duration, preview_start=preview_start)
     if not asm.get("ok"):
         job.state = "failed"
         job.error = asm.get("error", "filter 组装失败")
@@ -3659,8 +3664,9 @@ def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
         f'</details>'
         f'{combined_actions_bar}'
         # REQ-20260920-090：合成元素组合测试面板（debug）—— 5-checkbox 调试入口
+        # REQ-20260920-091：加开始时间 + 时长（避免跑完整 1-3 小时视频）
         f'<details class="slirn-fine-section slirn-combo-test-details" id="slirn-combo-test-details" open>'
-        f'<summary class="slirn-fine-section-summary">🧪 合成元素组合测试 <span class="slirn-fine-section-status">5 项可勾选</span></summary>'
+        f'<summary class="slirn-fine-section-summary">🧪 合成元素组合测试 <span class="slirn-fine-section-status">5 项可勾选 + 时间参数</span></summary>'
         f'<div class="slirn-combo-test-block">'
         f'<div class="slirn-form-hint">⚠️ 这会修改 fc 当前勾选状态；测试后会提示还原</div>'
         f'<div class="slirn-combo-test-row">'
@@ -3669,6 +3675,23 @@ def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
         f'<label><input type="checkbox" data-combo-kind="cover"> 🖼 封面</label>'
         f'<label><input type="checkbox" data-combo-kind="bg"> 🎨 背景图片</label>'
         f'<label><input type="checkbox" data-combo-kind="audio" checked> 🎵 BGM</label>'
+        f'</div>'
+        # REQ-20260920-091：开始时间（时:分:秒）+ 时长（秒，2-30）
+        f'<div class="slirn-combo-test-time-row">'
+        f'<span class="slirn-fine-actions-label">⏱ 开始时间</span>'
+        f'<input type="number" id="slirn-combo-test-start-h" class="slirn-fine-num slirn-fine-preview-time" '
+        f'aria-label="开始时间（小时）" min="0" step="1" value="0" maxlength="2">'
+        f'<span class="slirn-fine-time-sep">:</span>'
+        f'<input type="number" id="slirn-combo-test-start-m" class="slirn-fine-num slirn-fine-preview-time" '
+        f'aria-label="开始时间（分钟）" min="0" max="59" step="1" value="0" maxlength="2">'
+        f'<span class="slirn-fine-time-sep">:</span>'
+        f'<input type="number" id="slirn-combo-test-start-s" class="slirn-fine-num slirn-fine-preview-time" '
+        f'aria-label="开始时间（秒）" min="0" max="59" step="1" value="0" maxlength="2">'
+        f'<span class="slirn-fine-actions-label">（时:分:秒）</span>'
+        f'<span class="slirn-fine-actions-label" style="margin-left:14px;">⏳ 时长</span>'
+        f'<input type="number" id="slirn-combo-test-duration" class="slirn-fine-num" '
+        f'aria-label="时长（秒，2-30）" min="2" max="30" step="1" value="10">'
+        f'<span class="slirn-fine-actions-label">秒（2–30）</span>'
         f'</div>'
         f'<div class="slirn-combo-test-actions">'
         f'<button class="slirn-btn" data-action="combo-apply" data-task-id="{_esc(task_id)}">📝 应用勾选（写 fc）</button>'
@@ -6155,8 +6178,17 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
 
         # 创建 job + 启线程
         job_id = f"job_{int(time.time() * 1000)}_{os.getpid()}"
-        out_path = mgr.tasks_dir / tid / "outputs" / "fine_export.mp4"
         outputs_dir = mgr.tasks_dir / tid / "outputs"
+        # REQ-20260920-091：combo-test 调试面板可指定开始时间 + 时长（不导完整视频）
+        _start = float(body.get("preview_start") or 0.0)
+        _dur = body.get("duration")
+        _dur_f: float | None = float(_dur) if _dur is not None else None
+        # 输出文件名：默认 fine_export.mp4；有 time 参数时加 _t{start}_d{dur}.mp4 后缀防覆盖
+        if _start == 0.0 and _dur_f is None:
+            out_path = outputs_dir / "fine_export.mp4"
+        else:
+            _dur_tag = f"{_dur_f:.1f}" if _dur_f is not None else "full"
+            out_path = outputs_dir / f"fine_export_t{_start:.1f}_d{_dur_tag}.mp4"
         job = _RenderJob(job_id=job_id, task_id=tid)
         with _JOB_LOCK:
             _JOB_REGISTRY[job_id] = job
@@ -6179,7 +6211,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
 
         t = threading.Thread(
             target=_run_fine_render_async,
-            args=(job, tid, mgr, out_path, _ext_exec, outputs_dir),
+            args=(job, tid, mgr, out_path, _ext_exec, outputs_dir, _start, _dur_f),
             daemon=True,
             name=f"fine-render-{job_id}",
         )
