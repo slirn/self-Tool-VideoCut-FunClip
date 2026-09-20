@@ -7912,13 +7912,20 @@ def test_combo_test_button_state_changes():
     js_path = FUNCLIP_ROOT / "slirn_home" / "static" / "router.js"
     src = js_path.read_text(encoding="utf-8")
 
-    # combo-test action 分支开始位置
+    # combo-test action 分支开始位置（抓 combo-test 分支 + 抽离出的 _onRenderDone 函数体）
+    # v3：combo-test 内部嵌套了 _onRenderDone 子函数，所以用 _onRenderDone 锚点更稳
+    on_done = re.search(
+        r"function _onRenderDone\([^)]*\)\s*\{(.*?)\n\s{4}\}",
+        src, re.DOTALL,
+    )
     test_branch = re.search(
-        r"if \(action === 'combo-test'\)\s*\{(.*?)return;\s*\}\s*if \(action === 'combo-apply'\)",
+        r"if \(action === 'combo-test'\)\s*\{(.*?)\n\s{4}\}\s*\n\s+if \(action === 'combo-apply'\)",
         src, re.DOTALL,
     )
     assert test_branch is not None, "REQ-092：必须能找到 combo-test action 分支"
+    assert on_done is not None, "REQ-093：必须能找到 _onRenderDone 抽离函数"
     body = test_branch.group(1)
+    on_done_body = on_done.group(1)
 
     # AC-1：进入时立刻 toast
     assert "toast('🚀 一键合成已启动" in body, (
@@ -7928,17 +7935,21 @@ def test_combo_test_button_state_changes():
     assert "⏳ 合成中…" in body, (
         "REQ-092：combo-test 进入时按钮文字必须变 ⏳ 合成中…"
     )
-    # AC-3：done 时 testBtn.textContent 变 '✅ 完成 · 重新合成'
-    assert "✅ 完成 · 重新合成" in body, (
+    # AC-3：done 时 testBtn.textContent 变 '✅ 完成 · 重新合成'（在 _onRenderDone 里）
+    assert "✅ 完成 · 重新合成" in on_done_body, (
         "REQ-092：combo-test done 时按钮文字必须变 ✅ 完成 · 重新合成"
     )
-    # AC-4：done 时有 window.open(autoUrl) 自动打开视频
-    assert "window.open(" in body and ("autoUrl" in body or "outUrl" in body), (
+    # AC-4：done 时有 window.open(autoUrl) 自动打开视频（在 _onRenderDone 里）
+    assert "window.open(" in on_done_body and "autoUrl" in on_done_body, (
         "REQ-092：combo-test done 时必须 window.open 视频（新窗口反馈）"
     )
     # AC-5：fail 分支有按钮文字变 ❌
     assert "❌ 失败 · 重试" in body, (
         "REQ-092：combo-test 失败时按钮文字必须变 ❌ 失败 · 重试"
+    )
+    # AC-6：REQ-093 新增——必须用 setInterval（不是 setTimeout 链）
+    assert "setInterval" in body and "setInterval(_comboPoll" in body, (
+        "REQ-093：combo-test 轮询必须改用 setInterval（不是脆弱的 setTimeout 链）"
     )
 
 
@@ -7953,12 +7964,13 @@ def test_combo_test_only_autoopens_for_default_output():
     js_path = FUNCLIP_ROOT / "slirn_home" / "static" / "router.js"
     src = js_path.read_text(encoding="utf-8")
 
-    test_branch = re.search(
-        r"if \(action === 'combo-test'\)\s*\{(.*?)return;\s*\}\s*if \(action === 'combo-apply'\)",
+    # v3：从 _onRenderDone 函数体里找
+    on_done = re.search(
+        r"function _onRenderDone\([^)]*\)\s*\{(.*?)\n\s{4}\}",
         src, re.DOTALL,
     )
-    assert test_branch is not None, "REQ-092：必须能找到 combo-test action 分支"
-    body = test_branch.group(1)
+    assert on_done is not None, "REQ-093：必须能找到 _onRenderDone 抽离函数"
+    body = on_done.group(1)
 
     # AC-1：必须有 isDefaultOutput 判断
     assert "isDefaultOutput" in body, (
@@ -7971,5 +7983,36 @@ def test_combo_test_only_autoopens_for_default_output():
     # AC-3：time-suffix 时提示用户本地绝对路径 + Gradio 预览
     assert ("Gradio" in body) or ("preview" in body.lower()) or ("本地路径" in body), (
         "REQ-092：time-suffix 文件必须给用户提示（去哪查看，含本地路径或 Gradio 预览）"
+    )
+
+
+def test_combo_test_poll_handles_missing_job():
+    """REQ-20260920-093：job 不存在（server 重启 GC）时轮询应优雅恢复。
+
+    原 BUG：用 setTimeout 链时 job 不存在会进 error 分支，UI 卡住；
+    现在 setInterval 也要明确处理 s.ok=false（job GC 掉了），恢复按钮文字 + 停止轮询。
+    """
+    js_path = FUNCLIP_ROOT / "slirn_home" / "static" / "router.js"
+    src = js_path.read_text(encoding="utf-8")
+
+    # combo-test 分支
+    test_branch = re.search(
+        r"if \(action === 'combo-test'\)\s*\{(.*?)\n\s{4}\}\s*\n\s+if \(action === 'combo-apply'\)",
+        src, re.DOTALL,
+    )
+    assert test_branch is not None, "REQ-093：必须能找到 combo-test action 分支"
+    body = test_branch.group(1)
+
+    # AC-1：s.ok=false 分支必须显式处理（不再依赖 catch）
+    assert "if (!s.ok)" in body, (
+        "REQ-093：轮询内必须显式 if (!s.ok) 分支处理 job 不存在（server GC）"
+    )
+    # AC-2：必须 clearInterval 停止轮询
+    assert "clearInterval(_comboTimer)" in body, (
+        "REQ-093：job 不存在时必须 clearInterval 停止轮询"
+    )
+    # AC-3：恢复按钮文字为「🚀 一键合成」
+    assert "🚀 一键合成'; testBtn.disabled = false" in body, (
+        "REQ-093：job 不存在时必须恢复按钮文字为「🚀 一键合成」+ 可点击"
     )
 

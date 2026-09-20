@@ -3711,100 +3711,57 @@
           }
           var jobId = j.job_id;
           _appendOutput('🚀 已启动 job_id=' + jobId + '\n⏳ 轮询渲染状态...');
+          // REQ-20260920-093：改用 setInterval + .catch（参考 startFineExportInline 的 _poll）
+          // 原 setTimeout 链脆弱——任何一次 fetch 失败/慢/页面切后台都会断链，
+          // 用户看到「轮询 1 次」永远不再更新（实测截图就是这个状态）
           var pollCount = 0;
-          function poll() {
+          var _comboTimer = null;
+          var _comboPoll = function() {
             pollCount++;
-            return fetch('/slirn/api/render_status?job_id=' + jobId).then(function(r) { return r.json(); })
+            fetch('/slirn/api/render_status?job_id=' + encodeURIComponent(jobId))
+              .then(function(r) { return r.json(); })
               .then(function(s) {
-                if (s.state === 'running') {
+                if (!s.ok) {
+                  // job 不存在（可能 server 重启 GC 掉了）—— 显示「未找到」+ 恢复按钮
+                  _appendOutput('<span class="warn">⚠ job_id=' + jobId + ' 不存在（可能 server 重启了）| 第 ' + pollCount + ' 次查询</span>');
+                  if (testBtn) { testBtn.textContent = '🚀 一键合成'; testBtn.disabled = false; }
+                  clearInterval(_comboTimer); _comboTimer = null;
+                  _setBusy(false);
+                  return;
+                }
+                var st = s.state;
+                if (st === 'running' || st === 'queued') {
                   _appendOutput('🚀 job_id=' + jobId + ' | progress=' + (s.progress_pct || 0) + '% | 已轮询 ' + pollCount + ' 次');
-                  if (pollCount < 600) setTimeout(poll, 1500);
-                  else {
+                  if (pollCount >= 600) {
                     _appendOutput('<span class="warn">⚠ 轮询超时（15 分钟）</span>');
                     toast('⚠ 合成超时');
                     if (testBtn) { testBtn.textContent = '🚀 一键合成'; testBtn.disabled = false; }
+                    clearInterval(_comboTimer); _comboTimer = null;
                     _setBusy(false);
                   }
-                  return null;
+                } else if (st === 'done') {
+                  clearInterval(_comboTimer); _comboTimer = null;
+                  _onRenderDone(s, jobId, tp, outPath, testBtn);
+                } else {
+                  clearInterval(_comboTimer); _comboTimer = null;
+                  _appendOutput('<span class="err">❌ 渲染 ' + st + ' | ' + (s.error || '') + '</span>');
+                  toast('❌ 渲染 ' + st);
+                  if (testBtn) { testBtn.textContent = '❌ 失败 · 重试'; testBtn.disabled = false; }
+                  _setBusy(false);
                 }
-                return s;
+              })
+              .catch(function(e) {
+                // 网络抖动不立即报错，下一轮再试（和 startFineExportInline 一致）
+                console.warn('[combo_render_status]', e);
               });
-          }
-          return poll();
+          };
+          _comboPoll();
+          _comboTimer = setInterval(_comboPoll, 1500);
+          // 立刻 return 不再 return Promise —— outer .then(finalState) 不再适用
+          // 因为 done 由 _comboPoll 内部直接调 _onRenderDone 处理
+          return null;
         })
-        .then(function(finalState) {
-          if (!finalState) return;
-          if (finalState.state !== 'done') {
-            _appendOutput('<span class="err">❌ 渲染 ' + finalState.state + ' | ' + (finalState.error || '') + '</span>');
-            toast('❌ 渲染 ' + finalState.state);
-            if (testBtn) { testBtn.textContent = '❌ 失败 · 重试'; testBtn.disabled = false; }
-            _setBusy(false);
-            return;
-          }
-          // REQ-20260920-091：probe 探测**对应**的 output 文件（不是默认 final.mp4）
-          _appendOutput('✅ 合成完成（' + (finalState.elapsed_sec || '?') + ' 秒）\n🔍 探测 output 音频（' + outPath + '）...');
-          return fetch('/slirn/api/probe_output_audio', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ task_id: tid, output_path: outPath })
-          }).then(function(r) { return r.json(); }).then(function(p) {
-            var html = '✅ 合成完成（' + (finalState.elapsed_sec || '?') + ' 秒）\n\n[BGM 检测报告]\n';
-            if (!p.ok) {
-              html += '<span class="err">❌ probe 失败: ' + p.error + '</span>';
-              _appendOutput(html);
-              toast('✅ 合成完成（' + (finalState.elapsed_sec || '?') + ' 秒）· probe 失败');
-              if (testBtn) { testBtn.textContent = '🚀 一键合成'; testBtn.disabled = false; }
-              _setBusy(false);
-              return;
-            }
-            html += '  audio stream 数: ' + p.audio_stream_count + '\n';
-            html += '  duration: ' + (p.duration ? p.duration.toFixed(1) + 's' : '?') + '\n';
-            html += '  mean_volume: ' + (p.mean_volume_db != null ? p.mean_volume_db.toFixed(1) + ' dB' : '?') + '\n';
-            html += '  max_volume: ' + (p.max_volume_db != null ? p.max_volume_db.toFixed(1) + ' dB' : '?') + '\n';
-            if (p.bgm_mean_volume_db != null) {
-              html += '  BGM 源 mean_volume: ' + p.bgm_mean_volume_db.toFixed(1) + ' dB\n';
-              var diff = Math.abs((p.mean_volume_db || 0) - p.bgm_mean_volume_db);
-              html += '  差距: ' + diff.toFixed(1) + ' dB\n';
-              if (diff < 3) html += '  <span class="ok">✅ 高度一致（BGM 正常合成）</span>\n';
-              else if (diff < 10) html += '  <span class="warn">⚠ 部分匹配（差距较大）</span>\n';
-              else html += '  <span class="err">❌ 差距过大（BGM 可能缺失或异常）</span>\n';
-            } else {
-              if (p.audio_stream_count === 0) html += '  <span class="err">❌ output 无 audio stream（BGM 缺失）</span>\n';
-              else html += '  <span class="warn">⚠ 未对比 BGM 源（未提供 bgm_path）</span>\n';
-            }
-            _appendOutput(html);
-            // REQ-20260920-092 v2：done 时按钮变「✅ 完成 · 查看视频」+ **自动弹播放窗口**
-            // 用户原话：「弹窗播放视频，不要下载」
-            // 注意：/slirn/api/video 端点只支持 src=original/rough_compose/fine_preview/fine_export
-            // （见 app.py:6584 src_q in ("fine_preview", "fine_export")）
-            // 所以 time-suffix 文件（如 fine_export_t30_d20.mp4）无法走 video 端点
-            // → 只有 default（fine_export.mp4）能弹播放窗口；time-suffix 给本地路径提示
-            toast('✅ 合成完成（' + (finalState.elapsed_sec || '?') + ' 秒）');
-            var isDefaultOutput = outPath === 'outputs/fine_export.mp4';
-            if (isDefaultOutput) {
-              var autoUrl = '/slirn/api/video/' + tid + '?src=fine_export&t=' + Date.now();
-              // 自动弹播放窗口（用户明确要求：直接看，不下载）
-              try { window.open(autoUrl, '_blank'); } catch (e) { /* 弹窗被浏览器拦截 */ }
-              if (testBtn) {
-                testBtn.textContent = '✅ 完成 · 重新合成';
-                testBtn.onclick = function(ev) {
-                  ev.preventDefault(); ev.stopPropagation();
-                  window.open(autoUrl, '_blank');
-                  return false;
-                };
-              }
-            } else {
-              // time-suffix 合成：video 端点不支持，给本地绝对路径提示
-              var tipHtml = html + '<div class="hint" style="margin-top:6px;">'
-                + '💡 提示：time-suffix 文件（' + outPath + '）无法走 video 端点播放<br>'
-                + '📂 本地路径：tasks/<code>' + tid + '</code>/' + outPath + '<br>'
-                + '→ 可直接拖到浏览器播放，或在 Gradio 上方「预览」面板选该文件查看'
-                + '</div>';
-              _appendOutput(tipHtml);
-              if (testBtn) { testBtn.textContent = '✅ 完成 · 重新合成'; testBtn.disabled = false; }
-            }
-            _setBusy(false);
-          });
-        })
+        .then(function() { /* 占位：原 finalState 处理已挪到 _onRenderDone */ })
         .catch(function(e) {
           _appendOutput('<span class="err">❌ 异常: ' + e.message + '</span>');
           toast('❌ 异常: ' + e.message);
@@ -3812,6 +3769,78 @@
           _setBusy(false);
         });
       return;
+    }
+
+    // REQ-20260920-093：抽离 combo-test 的 done 处理（被 setInterval 轮询调）
+    function _onRenderDone(finalState, jobId, tp, outPath, testBtn) {
+      // REQ-20260920-091：probe 探测**对应**的 output 文件（不是默认 final.mp4）
+      _appendOutput('✅ 合成完成（' + (finalState.elapsed_sec || '?') + ' 秒）\n🔍 探测 output 音频（' + outPath + '）...');
+      fetch('/slirn/api/probe_output_audio', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ task_id: tid, output_path: outPath })
+      }).then(function(r) { return r.json(); }).then(function(p) {
+        var html = '✅ 合成完成（' + (finalState.elapsed_sec || '?') + ' 秒）\n\n[BGM 检测报告]\n';
+        if (!p.ok) {
+          html += '<span class="err">❌ probe 失败: ' + p.error + '</span>';
+          _appendOutput(html);
+          toast('✅ 合成完成（' + (finalState.elapsed_sec || '?') + ' 秒）· probe 失败');
+          if (testBtn) { testBtn.textContent = '🚀 一键合成'; testBtn.disabled = false; }
+          _setBusy(false);
+          return;
+        }
+        html += '  audio stream 数: ' + p.audio_stream_count + '\n';
+        html += '  duration: ' + (p.duration ? p.duration.toFixed(1) + 's' : '?') + '\n';
+        html += '  mean_volume: ' + (p.mean_volume_db != null ? p.mean_volume_db.toFixed(1) + ' dB' : '?') + '\n';
+        html += '  max_volume: ' + (p.max_volume_db != null ? p.max_volume_db.toFixed(1) + ' dB' : '?') + '\n';
+        if (p.bgm_mean_volume_db != null) {
+          html += '  BGM 源 mean_volume: ' + p.bgm_mean_volume_db.toFixed(1) + ' dB\n';
+          var diff = Math.abs((p.mean_volume_db || 0) - p.bgm_mean_volume_db);
+          html += '  差距: ' + diff.toFixed(1) + ' dB\n';
+          if (diff < 3) html += '  <span class="ok">✅ 高度一致（BGM 正常合成）</span>\n';
+          else if (diff < 10) html += '  <span class="warn">⚠ 部分匹配（差距较大）</span>\n';
+          else html += '  <span class="err">❌ 差距过大（BGM 可能缺失或异常）</span>\n';
+        } else {
+          if (p.audio_stream_count === 0) html += '  <span class="err">❌ output 无 audio stream（BGM 缺失）</span>\n';
+          else html += '  <span class="warn">⚠ 未对比 BGM 源（未提供 bgm_path）</span>\n';
+        }
+        _appendOutput(html);
+        // REQ-20260920-092：done 时按钮变「✅ 完成 · 重新合成」+ **自动弹播放窗口**
+        // 用户原话：「弹窗播放视频，不要下载」
+        // 注意：/slirn/api/video 端点只支持 src=original/rough_compose/fine_preview/fine_export
+        // （见 app.py:6584 src_q in ("fine_preview", "fine_export")）
+        // 所以 time-suffix 文件（如 fine_export_t30_d20.mp4）无法走 video 端点
+        // → 只有 default（fine_export.mp4）能弹播放窗口；time-suffix 给本地路径提示
+        toast('✅ 合成完成（' + (finalState.elapsed_sec || '?') + ' 秒）');
+        var isDefaultOutput = outPath === 'outputs/fine_export.mp4';
+        if (isDefaultOutput) {
+          var autoUrl = '/slirn/api/video/' + tid + '?src=fine_export&t=' + Date.now();
+          // 自动弹播放窗口（用户明确要求：直接看，不下载）
+          try { window.open(autoUrl, '_blank'); } catch (e) { /* 弹窗被浏览器拦截 */ }
+          if (testBtn) {
+            testBtn.textContent = '✅ 完成 · 重新合成';
+            testBtn.onclick = function(ev) {
+              ev.preventDefault(); ev.stopPropagation();
+              window.open(autoUrl, '_blank');
+              return false;
+            };
+          }
+        } else {
+          // time-suffix 合成：video 端点不支持，给本地绝对路径提示
+          var tipHtml = html + '<div class="hint" style="margin-top:6px;">'
+            + '💡 提示：time-suffix 文件（' + outPath + '）无法走 video 端点播放<br>'
+            + '📂 本地路径：tasks/<code>' + tid + '</code>/' + outPath + '<br>'
+            + '→ 可直接拖到浏览器播放，或在 Gradio 上方「预览」面板选该文件查看'
+            + '</div>';
+          _appendOutput(tipHtml);
+          if (testBtn) { testBtn.textContent = '✅ 完成 · 重新合成'; testBtn.disabled = false; }
+        }
+        _setBusy(false);
+      }).catch(function(e) {
+        _appendOutput('<span class="err">❌ probe 异常: ' + e.message + '</span>');
+        toast('❌ probe 异常');
+        if (testBtn) { testBtn.textContent = '✅ 完成 · 重新合成'; testBtn.disabled = false; }
+        _setBusy(false);
+      });
     }
 
     if (action === 'combo-apply') {
