@@ -7996,7 +7996,8 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         Returns:
           ok, audio_streams (list), duration, mean_volume_db (output),
           max_volume_db (output), bgm_mean_volume_db (if bgm_path),
-          bgm_max_volume_db (if bgm_path), match_score (0..1)
+          bgm_max_volume_db (if bgm_path), match_score (0..1),
+          output_abs_path (str, 完整绝对路径，REQ-094 新增——前端给用户展示用)
         """
         import subprocess as _sp
         import json as _json
@@ -8086,6 +8087,8 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             "bgm_mean_volume_db": bgm_mean_volume_db,
             "bgm_max_volume_db": bgm_max_volume_db,
             "match_score": match_score,
+            # REQ-20260920-094：返回绝对路径给前端展示（用户可直接拖到浏览器）
+            "output_abs_path": str(output_abs),
         }
 
     @app.app.post("/slirn/api/cancel_create")

@@ -3825,11 +3825,13 @@
             };
           }
         } else {
-          // time-suffix 合成：video 端点不支持，给本地绝对路径提示
+          // time-suffix 合成：video 端点不支持，给本地绝对路径提示（REQ-094）
+          // 用后端返回的 output_abs_path（完整绝对路径，用户可直接复制到文件管理器/拖到浏览器）
+          var absPath = p.output_abs_path || ('tasks/' + tid + '/' + outPath);
           var tipHtml = html + '<div class="hint" style="margin-top:6px;">'
-            + '💡 提示：time-suffix 文件（' + outPath + '）无法走 video 端点播放<br>'
-            + '📂 本地路径：tasks/<code>' + tid + '</code>/' + outPath + '<br>'
-            + '→ 可直接拖到浏览器播放，或在 Gradio 上方「预览」面板选该文件查看'
+            + '💡 提示：time-suffix 文件无法走 video 端点播放<br>'
+            + '📂 <b>本地绝对路径</b>：<code style="user-select:all;">' + absPath + '</code><br>'
+            + '→ 复制路径到文件管理器打开，或直接拖到浏览器/VLC 播放'
             + '</div>';
           _appendOutput(tipHtml);
           if (testBtn) { testBtn.textContent = '✅ 完成 · 重新合成'; testBtn.disabled = false; }

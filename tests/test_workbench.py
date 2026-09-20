@@ -7981,8 +7981,12 @@ def test_combo_test_only_autoopens_for_default_output():
         "REQ-092：自动 window.open 必须用 src=fine_export（video 端点唯一支持的精剪文件）"
     )
     # AC-3：time-suffix 时提示用户本地绝对路径 + Gradio 预览
-    assert ("Gradio" in body) or ("preview" in body.lower()) or ("本地路径" in body), (
-        "REQ-092：time-suffix 文件必须给用户提示（去哪查看，含本地路径或 Gradio 预览）"
+    assert ("Gradio" in body) or ("preview" in body.lower()) or ("本地路径" in body) or ("绝对路径" in body), (
+        "REQ-092/094：time-suffix 文件必须给用户提示（去哪查看，含本地路径或 Gradio 预览）"
+    )
+    # REQ-094：必须用 p.output_abs_path（后端返回的绝对路径），不是前端拼的相对路径
+    assert "p.output_abs_path" in body or "output_abs_path" in body, (
+        "REQ-094：time-suffix 必须用后端返回的 output_abs_path（绝对路径），不是前端拼的相对路径"
     )
 
 
@@ -8015,4 +8019,39 @@ def test_combo_test_poll_handles_missing_job():
     assert "🚀 一键合成'; testBtn.disabled = false" in body, (
         "REQ-093：job 不存在时必须恢复按钮文字为「🚀 一键合成」+ 可点击"
     )
+
+
+def test_probe_output_audio_returns_absolute_path():
+    """REQ-20260920-094：probe_output_audio 端点必须返回 output_abs_path 完整绝对路径。
+
+    原 BUG：前端只拼相对路径 `tasks/<tid>/outputs/...`，用户不知道相对于哪个目录
+    （server 工作目录？repo 根？浏览器当前路径？）。截图证据：
+    用户问「你这写了一个相对路径，是相对哪的？我上哪儿找这个生成的文件呢？」
+
+    修复：probe_output_audio 端点把解析后的绝对路径塞进 response，
+    前端直接展示，用户可复制到文件管理器或拖到浏览器。
+    """
+    app_path = FUNCLIP_ROOT / "slirn_home" / "app.py"
+    src = app_path.read_text(encoding="utf-8")
+
+    # 端点内必须显式返回 output_abs_path（用 str(output_abs) 解析后的完整路径）
+    assert '"output_abs_path"' in src, (
+        "REQ-094：probe_output_audio 必须返回 output_abs_path 字段（绝对路径）"
+    )
+    assert "str(output_abs)" in src, (
+        "REQ-094：probe_output_audio 必须用 str(output_abs) 把 Path 转字符串"
+    )
+
+    # 端点位置确认（probe_output_audio 函数体内含 output_abs_path）
+    # 签名含 Body(default_factory=dict)) — 双 )，用 \)\): 匹配
+    probe_match = re.search(
+        r"@app\.app\.post\(\"/slirn/api/probe_output_audio\"\)\s*\n\s*async def probe_output_audio\(body: dict[^)]+\)\):(.*?)(?=\n    @app\.app\.|\n    def |\n    async def [a-z])",
+        src, re.DOTALL,
+    )
+    assert probe_match is not None, "REQ-094：必须能找到 probe_output_audio 端点函数体"
+    probe_body = probe_match.group(1)
+    assert '"output_abs_path"' in probe_body, (
+        "REQ-094：output_abs_path 必须在 probe_output_audio 函数体内返回（不是别的端点）"
+    )
+
 
