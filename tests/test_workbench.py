@@ -9232,8 +9232,8 @@ def test_pipeline_js_has_reset_stages_button():
     assert "slirn-pipe-reset-warning" in pipeline_js, (
         "按钮旁边必须有 warning 文案（slirn-pipe-reset-warning）"
     )
-    assert "subtitle.json" in pipeline_js and "fc.json" in pipeline_js, (
-        "warning 应列出阶段产物文件名（subtitle.json / fc.json 等）"
+    assert "subtitle.json" in pipeline_js and "fine_compose.json" in pipeline_js, (
+        "warning 应列出阶段产物文件名（subtitle.json / fine_compose.json 等）"
     )
 
 
@@ -9294,7 +9294,9 @@ def test_app_py_pipeline_reset_stages_endpoint_exists():
     )
     # 端点必须调 pipeline_service.clear_pipeline_state
     ep_idx = app_src.find('"/slirn/api/pipeline_reset_stages"')
-    ep_section = app_src[ep_idx:ep_idx + 3000]
+    # 取大一点的窗口：端点后面有 delete 列表 + DRAFT 降级 + clear_pipeline_state，
+    # 防止后续重构导致 clear_pipeline_state 落在窗口外
+    ep_section = app_src[ep_idx:ep_idx + 6000]
     assert "clear_pipeline_state" in ep_section, (
         "/pipeline_reset_stages 端点必须调 pipeline_service.clear_pipeline_state"
     )
@@ -9340,6 +9342,10 @@ def test_pipeline_reset_stages_clears_wb_stage_marks(tmp_path: Path):
     - assets：原视频还在 → done（原视频被显式保留）
     - subtitle / subtitle_review / rough_cut / rough_compose / fine_review /
       fine_cut：产物已删 + 状态降为 DRAFT → 全部 pending
+
+    同时验证：所有阶段产物文件名与服务常量对齐 ——
+    - optimize 阶段产物实际是 optimize_subtitle.json（不是 opt_subtitle.json）
+    - 精剪配置实际是任务根目录的 fine_compose.json（不是 outputs/fc.json）
     """
     from fastapi.testclient import TestClient
     from tasklib.models import TaskStatus
@@ -9354,7 +9360,13 @@ def test_pipeline_reset_stages_clears_wb_stage_marks(tmp_path: Path):
     outputs_dir = m.tasks_dir / t.task_id / "outputs"
     outputs_dir.mkdir(parents=True, exist_ok=True)
     (outputs_dir / "subtitle.json").write_text("{}")
-    (outputs_dir / "fc.json").write_text("{}")
+    (outputs_dir / "optimize_subtitle.json").write_text(
+        '{"saved_at": "2026-09-21T00:00:00", "words": []}'
+    )
+    # 精剪配置在任务根目录（mgr.tasks_dir/tid/fine_compose.json），
+    # 不在 outputs/ —— 见 app.py:3439 _save_fine_compose
+    fc_root = m.tasks_dir / t.task_id / "fine_compose.json"
+    fc_root.write_text("{}")
 
     # 清理前：因产物 + 高 rank 状态 → 大部分阶段应 done
     pre_html = _render_workbench(t.task_id, m)
@@ -9369,6 +9381,21 @@ def test_pipeline_reset_stages_clears_wb_stage_marks(tmp_path: Path):
         json={"task_id": t.task_id},
     )
     assert r.json()["ok"] is True
+    payload = r.json()
+
+    # 关键回归点：在 _render_workbench 重新触发任何副作用前验证所有产物
+    # 都被实际删除（文件名必须与各 service 对齐）。
+    # 重要：_render_workbench → _render_fine_cut_zone → _get_fine_compose
+    # 会在文件丢失时触发 _schema 迁移并重新 _save_fine_compose，所以
+    # 必须先验证文件存在性，再渲染 wb。
+    deleted_files = payload.get("deleted") or []
+    assert "subtitle.json" in deleted_files, \
+        "subtitle.json 应在响应 deleted 列表中"
+    assert "optimize_subtitle.json" in deleted_files, \
+        "optimize_subtitle.json（优化字幕产物）必须被删除 — 否则「优化字幕」" \
+        "fakereview 阶段会因 _wb_stage_states() 看 opt_subtitle 仍带 saved_at 显示 done"
+    assert "fine_compose.json" in deleted_files, \
+        "fine_compose.json（任务根目录下的精剪配置）必须被删除 — 否则精剪阶段仍可能残留状态"
 
     # 清理后：只剩 assets 阶段仍 done（原视频保留），其他都 pending
     post_html = _render_workbench(t.task_id, m)
@@ -9376,9 +9403,50 @@ def test_pipeline_reset_stages_clears_wb_stage_marks(tmp_path: Path):
     assert post_done_count == 1, (
         f"清理后应仅 assets 仍 done（其他都应清空），实际 done 数={post_done_count}"
     )
-    # subtitle 阶段产物被删 → pending
-    assert (outputs_dir / "subtitle.json").exists() is False
-    assert (outputs_dir / "fc.json").exists() is False
+
+
+def test_pipeline_reset_stages_uses_real_service_filenames(tmp_path: Path):
+    """REQ-20260921-NNN：清理列表必须用各 service 的真实常量文件名。
+
+    之前列表里写的 opt_subjson / opt_replacements / outputs/fc.json 都没人对上
+    实际文件，结果「优化字幕」「精剪合成」阶段清理后状态仍是 done（产物没真删）。
+
+    验证：
+    1. 创建「假」错名文件（opt_subtitle.json / outputs/fc.json）— 不应被删
+    2. 创建「真」对名文件（optimize_subtitle.json / fine_compose.json）— 必须被删
+    """
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="reset-filenames", original_video=video)
+    outputs_dir = m.tasks_dir / t.task_id / "outputs"
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+
+    # 错名（不应被清理逻辑关心 —— 没有 service 写它，留作健壮性）
+    fake_opt = outputs_dir / "opt_subtitle.json"
+    fake_opt.write_text("{}")
+    fake_fc = outputs_dir / "fc.json"
+    fake_fc.write_text("{}")
+    # 真名（应被删）
+    real_opt = outputs_dir / "optimize_subtitle.json"
+    real_opt.write_text('{"saved_at": "2026-09-21T00:00:00"}')
+    real_fc = m.tasks_dir / t.task_id / "fine_compose.json"
+    real_fc.write_text("{}")
+
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.post(
+        "/slirn/api/pipeline_reset_stages",
+        json={"task_id": t.task_id},
+    )
+    assert r.json()["ok"] is True
+
+    # 真名被删
+    assert real_opt.exists() is False, \
+        "optimize_subtitle.json 必须被删（优化字幕 service 的真实常量）"
+    assert real_fc.exists() is False, \
+        "fine_compose.json 必须被删（_save_fine_compose 的真实路径）"
+    # 错名：本测试不约束（如果未来清理逻辑也清错名也无害），但现在保留无害
 
 
 def test_pipeline_js_reset_stages_calls_openWorkbench():

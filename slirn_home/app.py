@@ -8162,10 +8162,13 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
     async def pipeline_reset_stages(body: dict = Body(default_factory=dict)):
         """清理所有阶段生成的产物（REQ-20260921-NNN）。
 
-        删除范围：subtitle.json / opt_subtitle.json / revision.json /
-        cutlist.json / rev_speaker_link.json / cut_speaker_link.json /
-        fc.json / fine_export.mp4 等 outputs/ 下阶段产物 + materials/。
-        保留：原视频 / 时间截取 / 热词 / 任务 metadata。
+        删除范围：outputs/ 下 subtitle.json / revision.json /
+        rev_speaker_link.json / cutlist.json / cut_speaker_link.json /
+        rough_compose.mp4 / optimize_subtitle.json / fine_revision.json
+        （旧流程）/ fine_export*.mp4 / fine_preview*.mp4 +
+        任务根目录下 fine_compose.json（精剪参数）。
+        保留：原视频 / 时间截取 / 热词 / 任务 metadata / materials/。
+        清理后 t.status 降回 DRAFT（让工作台顶部绿色对号也清空）。
 
         前端应做两次确认（按钮旁有 warning 文案 + onClick 内 confirm 弹窗）。
         """
@@ -8180,15 +8183,24 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             return _err("任务不存在")
 
         outputs_dir = mgr.tasks_dir / tid / "outputs"
+        task_dir = mgr.tasks_dir / tid  # 任务根目录（含 fine_compose.json 等非 outputs/ 产物）
         materials_dir = mgr.tasks_dir / tid / "materials"
 
         # REQ-20260921-NNN：要清理的产物（按文件名精确匹配；其他文件不动）
+        # 文件名必须与各 service 的常量对齐：
+        #   - asr_service.SUBTITLE_JSON       = "subtitle.json"
+        #   - revision_service.REVISION_JSON  = "revision.json"
+        #   - cutlist_service.CUTLIST_JSON    = "cutlist.json"
+        #   - compose_service.ROUGH_COMPOSE_NAME = "rough_compose.mp4"
+        #   - optimize_service.OPTIMIZE_JSON  = "optimize_subtitle.json"（不是 opt_subtitle.json）
+        #   - fine_service.FINE_JSON          = "fine_revision.json"（旧流程，兼容删除）
+        #   - app._save_fine_compose          → 任务根目录下的 fine_compose.json（不在 outputs/）
         # - 字幕生成：subtitle.json
         # - 字幕修订：revision.json + rev_speaker_link.json
         # - 切分修剪：cutlist.json + cut_speaker_link.json
         # - 粗剪合成：rough_compose.mp4（及相关 .json 标记）
-        # - 优化字幕：opt_subtitle.json
-        # - 精剪合成：fc.json + fine_export*.mp4 + fine_preview*.mp4
+        # - 优化字幕：optimize_subtitle.json + 旧流程 fine_revision.json
+        # - 精剪合成：fine_compose.json + fine_export*.mp4 + fine_preview*.mp4
         files_to_delete: list[Path] = []
         if outputs_dir.exists():
             file_globs = [
@@ -8196,8 +8208,9 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
                 "revision.json", "rev_speaker_link.json",
                 "cutlist.json", "cut_speaker_link.json",
                 "rough_compose.mp4", "rough_compose.json",
-                "opt_subtitle.json", "opt_replacements.json",
-                "fc.json",
+                # 优化字幕（REQ-20260917-030 新流程 + REQ-20260917-029 旧流程）
+                "optimize_subtitle.json",  # 新流程实际文件名
+                "fine_revision.json",       # 旧流程（fine_service 写），兼容删除
                 # fine_export 全篇 + 区间导出（REQ-20260919-061）
                 "fine_export.mp4",
                 "fine_preview.mp4",
@@ -8212,6 +8225,11 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
                 files_to_delete.append(p)
             for p in outputs_dir.glob("fine_preview_t*.mp4"):
                 files_to_delete.append(p)
+        # 精剪合成配置：fine_compose.json 在任务根目录（不在 outputs/）
+        # 路径约定见 app.py:3439 _save_fine_compose → mgr.tasks_dir/{tid}/fine_compose.json
+        fc_root = task_dir / "fine_compose.json"
+        if fc_root.exists():
+            files_to_delete.append(fc_root)
 
         deleted: list[str] = []
         skipped: list[str] = []

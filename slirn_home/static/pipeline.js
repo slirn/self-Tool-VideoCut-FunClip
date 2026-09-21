@@ -282,7 +282,7 @@
       '<div class="slirn-pipe-reset-block">'
       + '<button type="button" class="slirn-btn slirn-btn-danger slirn-btn-sm slirn-pipe-reset"'
       + ' data-action="pipe-reset-stages"'
-      + ' title="删除本任务所有阶段的生成产物（subtitle.json / cutlist.json / fc.json / fine_export.mp4 等），并清空内存中的 stages_done 与 execution_history。原视频 / 时间截取 / 热词 / 任务 metadata 保留。">'
+      + ' title="删除本任务所有阶段的生成产物（subtitle.json / revision.json / cutlist.json / rough_compose.mp4 / optimize_subtitle.json / fine_compose.json / fine_export*.mp4 等），并清空内存中的 stages_done 与 execution_history。原视频 / 时间截取 / 热词 / 任务 metadata 保留。">'
       + '🧹 清理所有阶段产物</button>'
       + '<div class="slirn-pipe-reset-warning">'
       + '⚠ 清理后：字幕 / 修订 / 切分 / 粗剪 / 优化 / 精剪合成 6 个阶段的所有产物都会被删除，'
@@ -893,9 +893,9 @@
       + '• 字幕修订：revision.json + rev_speaker_link.json\n'
       + '• 切分修剪：cutlist.json + cut_speaker_link.json\n'
       + '• 粗剪合成：rough_compose.mp4\n'
-      + '• 优化字幕：opt_subtitle.json\n'
-      + '• 精剪合成：fc.json + fine_export.mp4\n'
-      + '• 内存中的「已完成阶段」标记 + 执行历史\n\n'
+      + '• 优化字幕：optimize_subtitle.json（+ 旧流程 fine_revision.json）\n'
+      + '• 精剪合成：fine_compose.json + fine_export*.mp4 + fine_preview*.mp4\n'
+      + '• 内存中的「已完成阶段」标记 + 执行历史 + 任务状态回退到 DRAFT\n\n'
       + '会保留：原视频 / 时间截取 / 热词 / 任务 metadata。'
     );
     if (!firstConfirm) return;
