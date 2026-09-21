@@ -44,3 +44,13 @@ slirn/.temp/
 # 公共热词库为运行时数据（界面维护；缺失时 HotwordLibrary 自动创建）
 /hotwords/
 tmp_test_vid/
+
+# REQ-20260921-NNN-git-push：本地调试脚本 + 任务数据目录不入库
+# - _debug_*.py：一次性手动调试脚本（本机留存，需要时再写）
+# - tests/_check_*.py：CDP/AI 验证脚本（不在正式测试集 _test_*.py 命名空间）
+# - /tasks/ + /slirn_home/tasks/：本机跑流程生成的真实任务数据（含敏感路径）
+/_debug_*.py
+/_debug_*.sh
+/tests/_check_*.py
+/tasks/
+/slirn_home/tasks/
