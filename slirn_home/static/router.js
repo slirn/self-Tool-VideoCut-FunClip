@@ -3830,7 +3830,7 @@
         var profiles = (j && j.ok && j.profiles) ? j.profiles : [];
         if (!profiles.length) {
           list.innerHTML =
-            '<div class="slirn-fine-profile-empty">暂无模板 — 在顶部「模板名」输入框填名字，点「💾 保存设置参数」即可创建</div>';
+            '<div class="slirn-fine-profile-empty">暂无模板 — 在顶部「模板名」输入框填名字，点「💾 保存参数为模板」即可创建</div>';
           return;
         }
         list.innerHTML = profiles.map(function(p) {

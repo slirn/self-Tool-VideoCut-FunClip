@@ -1331,7 +1331,7 @@ def test_router_fine_import_row_has_export_button():
 
 
 def test_render_fine_cut_zone_includes_profile_block(tmp_path):
-    """REQ-20260919-061 用户反馈：保存设置参数搬到顶部操作栏 + 引用参数 modal。
+    """REQ-20260919-061 用户反馈：保存参数为模板搬到顶部操作栏 + 引用参数 modal。
 
     旧版「底部 profile block + 单独的 fine-profile-save 按钮」已被移除，模板列表搬到
     「📥 引用参数」弹出的 modal 里。
@@ -1420,16 +1420,20 @@ def test_save_fine_layout_response_shape_uses_ok_field(tmp_path):
 
 
 def test_render_fine_cut_zone_renames_save_button_to_settings(tmp_path):
-    """REQ-20260919-061 用户反馈：「保存全部」应改成「保存设置参数」（语义更准 —
+    """REQ-20260919-061 用户反馈：「保存全部」应改成「保存参数为模板」（语义更准 —
     只存参数，不存素材/视频本身）。
+
+    REQ-20260921-NNN：进一步把名字从「保存设置参数」改成「保存参数为模板」，
+    让按钮语义直接说明会写入模板。
     """
     from slirn_home.app import _render_workbench
 
     m, video = _make_mgr(tmp_path)
     t = m.create(name="save-btn", original_video=video)
     html = _render_workbench(t.task_id, m)
-    assert "💾 保存设置参数" in html
+    assert "💾 保存参数为模板" in html
     assert "💾 保存全部" not in html  # 旧文案彻底移除
+    assert "💾 保存设置参数" not in html  # 中间版文案也彻底移除
 
 
 def test_render_fine_cut_zone_renders_number_input_and_stepper_per_slider(tmp_path):
@@ -5049,7 +5053,7 @@ def test_get_fine_compose_migrates_left_offset_to_negative_offset(tmp_path: Path
 
 
 def test_fine_preview_button_uses_primary_style(tmp_path: Path):
-    """REQ-20260921-NNN：🎬 生成预览 按钮使用 slirn-btn-primary（与 💾 保存设置参数 同款）。"""
+    """REQ-20260921-NNN：🎬 生成预览 按钮使用 slirn-btn-primary（与 💾 保存参数为模板 同款）。"""
     import re as _re
     from slirn_home.app import _render_fine_cut_zone
 
@@ -5065,7 +5069,7 @@ def test_fine_preview_button_uses_primary_style(tmp_path: Path):
     assert preview_btn is not None, "应存在 data-action=fine-preview 的按钮"
     seg = preview_btn.group(0)
     assert 'slirn-btn-primary' in seg, (
-        f"REQ-20260921-NNN：生成预览按钮应使用 slirn-btn-primary（与保存设置参数同款），实际片段：{seg}"
+        f"REQ-20260921-NNN：生成预览按钮应使用 slirn-btn-primary（与保存参数为模板同款），实际片段：{seg}"
     )
 
 
@@ -5353,7 +5357,7 @@ def test_render_fine_cut_zone_actions_bar_split_into_two_rows(tmp_path: Path):
     assert "fine-export-params" in row1, "行 1 应有「📤 导出参数」按钮"
     assert "fine-import-params" in row1, "行 1 应有「📥 导入参数」按钮"
     # 行 2：模板管理
-    assert "fine-save-all" in row2, "行 2 应有保存设置参数按钮"
+    assert "fine-save-all" in row2, "行 2 应有保存参数为模板按钮"
     assert "fine-import-show" in row2, "行 2 应有引用参数按钮"
     assert "fine-profile-name" in row2, "行 2 应有模板名输入框"
     # 行 3：预览参数（独立一行）

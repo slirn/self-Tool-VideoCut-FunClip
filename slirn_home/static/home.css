@@ -3445,7 +3445,7 @@ input[type="checkbox"]:focus-visible {
 }
 .slirn-fine-layout-title { font-weight: 600; font-size: 13px; margin-bottom: 8px; }
 .slirn-fine-layout-title label { cursor: pointer; user-select: none; }
-/* REQ-20260919-061 用户反馈：把「保存设置参数」+ 引用参数搬到顶部操作栏 */
+/* REQ-20260919-061 用户反馈：把「保存参数为模板」+ 引用参数搬到顶部操作栏 */
 /* REQ-20260919-061a v6：合并 preview-bar + actions-bar 到同一行；flex-wrap: nowrap
    保证元素都在一行（视口窄时整体横向滚动，不换行打乱布局） */
 .slirn-fine-actions-bar {

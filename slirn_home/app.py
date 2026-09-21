@@ -3914,10 +3914,10 @@ def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
         '本页已去掉内嵌预览；点「🎬 生成预览」后用「👁️ 预览」弹窗查看效果。</div>'
     )
 
-    # REQ-20260919-061 用户反馈：把「保存设置参数」+ 模板管理搬到顶部操作栏。
+    # REQ-20260919-061 用户反馈：把「保存参数为模板」+ 模板管理搬到顶部操作栏。
     # 设计：
     #   - 模板名输入框（空着也行，但保存时会弹窗要求填名）
-    #   - 💾 保存设置参数：保存当前参数到 fine_compose；如有模板名 → 同步另存为全局模板
+    #   - 💾 保存参数为模板：保存当前参数到 fine_compose；如有模板名 → 同步另存为全局模板
     #   - 📥 引用参数：弹出模态框列出所有已保存模板，点「应用」覆盖当前任务参数
     #   - 状态指示器：显示「未保存 / 保存中 / 上次保存 HH:MM:SS / 保存失败」
     #   - 自动保存（滑块拖动 300ms 防抖）仍然只写 fine_compose，不写模板（避免一堆「未命名」）
@@ -3998,11 +3998,11 @@ def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
         f'title="从 JSON 文件导入参数（覆盖当前参数；不动素材文件）">'
         f'📥 导入参数</button>'
         f'</div>'
-        # 行 2：模板管理 + 引用参数（REQ-20260921-NNN：「💾 保存设置参数」挪到行首）
+        # 行 2：模板管理 + 引用参数（REQ-20260921-NNN：「💾 保存参数为模板」挪到行首）
         f'<div class="slirn-fine-actions-bar">'
         f'<button class="slirn-btn slirn-btn-primary" data-action="fine-save-all" '
-        f'data-task-id="{_esc(task_id)}" title="保存当前参数；未填名会弹窗要求填">'
-        f'💾 保存设置参数</button>'
+        f'data-task-id="{_esc(task_id)}" title="保存当前参数为模板；未填名会弹窗要求填">'
+        f'💾 保存参数为模板</button>'
         f'<span class="slirn-fine-actions-label">模板名</span>'
         f'<input type="text" class="slirn-fine-profile-name" id="slirn-fine-profile-name" '
         f'placeholder="（可选）填了名另存为模板" maxlength="30" autocomplete="off">'
@@ -4185,7 +4185,7 @@ def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
         # REQ-20260920-098：「一键合成」两步流程已废弃 —— 删除组合测试面板
         # 现在「生成预览」「导出最终视频」直接读参数卡的 .slirn-fine-enabled checkbox
         f'<div class="slirn-form-hint">💡 上传 5 个素材后调滑块调位置/缩放/字体；改动后 300ms 自动保存到当前任务。'
-        f'点「💾 保存设置参数」会同时把当前参数另存为全局模板（未填模板名则弹窗要求填）。</div>'
+        f'点「💾 保存参数为模板」会同时把当前参数另存为全局模板（未填模板名则弹窗要求填）。</div>'
         f'{preview_box}'
         f'{fine_cols_html}'
         f'{import_modal}'
