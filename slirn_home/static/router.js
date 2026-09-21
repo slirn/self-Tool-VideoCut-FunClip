@@ -728,8 +728,20 @@
         var _inner = document.getElementById('slirn-tab-workbench-inner');
         if (_inner) {
           // pipe-panel 紧跟 wb 顶部信息卡之后（在 slirn-wb-main 之前；位置与模板一致）
-          if (_pipeStatus && _pipeStatus.parentNode !== _inner) _inner.appendChild(_pipeStatus);
-          if (_pipePanel && _pipePanel.parentNode !== _inner) _inner.appendChild(_pipePanel);
+          // REQ-20260921-NNN：用 insertBefore(.slirn-wb-main) 而非 appendChild —
+          // appendChild 会把节点搬到 _inner 末尾（流程配置跑到工作台最下边），
+          // 与模板「status → panel → wb-main」的位置约定不一致。pipe-panel
+          // 必须在 wb-main 之前才能保持「阶段切换时还在原地」的感觉。
+          var _wbMainAnchor = _inner.querySelector(':scope > .slirn-wb-main');
+          if (!_wbMainAnchor) _wbMainAnchor = null; // null = appendChild 兜底
+          if (_pipeStatus && _pipeStatus.parentNode !== _inner) {
+            if (_wbMainAnchor) _inner.insertBefore(_pipeStatus, _wbMainAnchor);
+            else _inner.appendChild(_pipeStatus);
+          }
+          if (_pipePanel && _pipePanel.parentNode !== _inner) {
+            if (_wbMainAnchor) _inner.insertBefore(_pipePanel, _wbMainAnchor);
+            else _inner.appendChild(_pipePanel);
+          }
           // ===== BUGFIX：拔掉 r.html 模板里的「空壳」重复元素 =====
           // 现象：用户切换任务（或工作台刷新时）出现两个「流程配置」面板 ——
           // 一个是当前任务的（新挂载，由 slirnPipelineMount 渲染），一个是上一个

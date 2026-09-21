@@ -9483,6 +9483,34 @@ def test_router_js_exposes_openWorkbench():
     )
 
 
+def test_router_js_openWorkbench_inserts_pipe_panel_before_wb_main():
+    """REQ-20260921-NNN：openWorkbench 把 pipe-panel + pipe-status 插回 _inner 时，
+    必须用 insertBefore(.slirn-wb-main) 而不是 appendChild —— 否则节点会被搬
+    到 _inner 末尾，导致「清理所有阶段产物」后面板跑到工作台最下边。
+    """
+    src = (FUNCLIP_ROOT / "slirn_home" / "static" / "router.js").read_text(encoding="utf-8")
+    # 找 openWorkbench 函数（局部变量，没暴露之前无法直接调，所以从源码判断）
+    func_idx = src.find("function openWorkbench")
+    assert func_idx >= 0, "缺 openWorkbench 函数定义"
+    # 取到 5) 把流程配置面板插回新的 wb-inner 之后的代码段
+    section_idx = src.find("插回新的 wb-inner", func_idx)
+    assert section_idx >= 0, "openWorkbench 缺「插回新的 wb-inner」处理段"
+    next_section = src.find("// 6)", section_idx)
+    section = src[section_idx:next_section if next_section > 0 else section_idx + 1500]
+    # 关键断言：必须用 insertBefore(.slirn-wb-main)
+    assert "insertBefore" in section and "slirn-wb-main" in section, (
+        "openWorkbench 必须用 insertBefore 配合 .slirn-wb-main 锚点 —— "
+        "appendChild 会把 pipe-panel 搬到 _inner 末尾（流程配置跑到工作台最下边）"
+    )
+    # 必须先用 _inner.querySelector 找到 .slirn-wb-main 作为锚点
+    assert "_inner.querySelector" in section, \
+        "openWorkbench 必须用 _inner.querySelector 找 .slirn-wb-main 作为锚点"
+    # 防御兜底：appendChild 只在 _wbMainAnchor 不存在时才允许使用
+    # （不能是默认路径，必须有 if (_wbMainAnchor) 守卫）
+    assert "if (_wbMainAnchor)" in section, \
+        "insertBefore 前必须有 if (_wbMainAnchor) 守卫，否则 anchor 为 null 时会报错"
+
+
 def test_css_has_reset_block_styling():
     """REQ-20260921-NNN：home.css 必须有 slirn-pipe-reset-block 样式。"""
     css_src = (FUNCLIP_ROOT / "slirn_home" / "static" / "home.css").read_text(encoding="utf-8")
