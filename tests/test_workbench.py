@@ -2781,6 +2781,108 @@ def test_serve_fine_material_file_preview_button_disabled_when_no_file(tmp_path)
         f"cover 已上传时预览按钮不应 disabled：{btn_seg1}"
 
 
+def test_router_js_fineUpload_enables_preview_and_detail_after_success():
+    """REQ-20260921-NNN：fineUpload 上传成功后必须把「预览」和「详情」按钮的
+    disabled 解掉（之前只更新 status 文本 + 加 has-file 类，用户体验 BUG：
+    实际已上传但预览按钮还是灰的，详情按钮也打不开）。
+    """
+    js_src = (FUNCLIP_ROOT / "slirn_home" / "static" / "router.js").read_text(
+        encoding="utf-8"
+    )
+    # 定位 fineUpload 函数
+    idx = js_src.find("function fineUpload(btn, kind)")
+    assert idx > 0, "router.js 必须有 fineUpload 函数"
+    # 取函数体 2500 字（覆盖完整 fetch then 块；函数实际约 1700 字）
+    window = js_src[idx:idx + 2500]
+    # 必须有解 disabled 的逻辑
+    assert "pvBtn.disabled = false" in window, (
+        "fineUpload 上传成功后必须解 fine-mat-preview 按钮的 disabled"
+    )
+    assert "detBtn.disabled = false" in window, (
+        "fineUpload 上传成功后必须解 fine-mat-detail 按钮的 disabled"
+    )
+    # 还应有 'data-action="fine-mat-preview"' / 'data-action="fine-mat-detail"' 选择器
+    assert 'data-action="fine-mat-preview"' in window
+    assert 'data-action="fine-mat-detail"' in window
+
+
+def test_app_py_default_bgm_label_is_system_provided():
+    """REQ-20260921-NNN：把「系统默认 BGM」下拉 label 改为「系统提供的 BGM」。"""
+    app_src = (FUNCLIP_ROOT / "slirn_home" / "app.py").read_text(encoding="utf-8")
+    assert "系统提供的 BGM" in app_src, (
+        "app.py 渲染 audio 卡片时必须显示「系统提供的 BGM」label"
+    )
+    # 旧文案应被替换
+    audio_idx = app_src.find("系统提供的 BGM")
+    assert audio_idx > 0
+    # 在 audio 卡片渲染段附近不应再出现「系统默认 BGM」
+    nearby = app_src[max(0, audio_idx - 500):audio_idx + 500]
+    assert "系统默认 BGM" not in nearby
+
+
+def test_router_js_fineDefaultBgmLoad_filters_unavailable():
+    """REQ-20260921-NNN：fineDefaultBgmLoad 必须过滤掉 available=false 的 BGM
+    （避免选了之后 select_default_bgm 报「文件不存在」错误）。
+    """
+    js_src = (FUNCLIP_ROOT / "slirn_home" / "static" / "router.js").read_text(
+        encoding="utf-8"
+    )
+    idx = js_src.find("window.fineDefaultBgmLoad = async function fineDefaultBgmLoad")
+    assert idx > 0, "router.js 必须有 fineDefaultBgmLoad 函数"
+    window = js_src[idx:idx + 1800]
+    # 必须有 filter available=true 的逻辑
+    assert "filter" in window and "available" in window, (
+        "fineDefaultBgmLoad 必须按 available 过滤 BGM 列表"
+    )
+    # 应没有「文件缺失」灰色 option（旧行为是显示但 disabled）
+    assert "文件缺失" not in window, (
+        "REQ-20260921-NNN：缺文件的 BGM 不应再出现在下拉里（旧行为是显示但 disabled）"
+    )
+
+
+def test_router_js_fineDefaultBgmSelect_marks_audio_card_green():
+    """REQ-20260921-NNN：fineDefaultBgmSelect 成功后必须把 audio 上传卡视觉切到
+    「已提供 BGM」绿色状态（加 has-file 类 + 解预览按钮 disabled + 紫色 default_bgm 徽章）。
+    """
+    js_src = (FUNCLIP_ROOT / "slirn_home" / "static" / "router.js").read_text(
+        encoding="utf-8"
+    )
+    idx = js_src.find("async function fineDefaultBgmSelect(bgmId, tid)")
+    assert idx > 0, "router.js 必须有 fineDefaultBgmSelect 函数"
+    # 2500 字覆盖完整 fetch then + 视觉更新
+    window = js_src[idx:idx + 3000]
+    # 1. 必须给 audio 卡加 has-file 类
+    assert "audioCard.classList.add('has-file')" in window, (
+        "fineDefaultBgmSelect 成功后必须给 audio 卡加 has-file 类（绿色背景）"
+    )
+    # 2. 必须更新 status 为「🎵 已选 BGM」
+    assert "已选 BGM" in window, (
+        "fineDefaultBgmSelect 成功后必须更新 status 文本为「已选 BGM」"
+    )
+    # 3. 必须解预览 / 详情按钮 disabled
+    assert "pvBtn.disabled = false" in window, (
+        "fineDefaultBgmSelect 成功后必须解 fine-mat-preview 按钮的 disabled"
+    )
+    assert "detBtn.disabled = false" in window, (
+        "fineDefaultBgmSelect 成功后必须解 fine-mat-detail 按钮的 disabled"
+    )
+    # 4. 必须有 default_bgm 徽章（紫色 — 系统 BGM 来源）
+    assert "default_bgm" in window, (
+        "fineDefaultBgmSelect 必须用 default_bgm 徽章标识来源"
+    )
+
+
+def test_home_css_has_default_bgm_badge_style():
+    """REQ-20260921-NNN：home.css 必须新增 .slirn-fine-source-badge.default_bgm
+    紫色样式（与 modal 详情色块保持一致）。"""
+    css_src = (FUNCLIP_ROOT / "slirn_home" / "static" / "home.css").read_text(
+        encoding="utf-8"
+    )
+    assert ".slirn-fine-source-badge.default_bgm" in css_src, (
+        "home.css 必须定义 .slirn-fine-source-badge.default_bgm 样式"
+    )
+
+
 # ---------- REQ-20260919-062 v3：中心扩展算法（默认；4 方向矩形扫描） ----------
 
 
@@ -8162,7 +8264,10 @@ def test_mat_info_distinguishes_three_sources():
     # 3 个 source_label 推导分支
     assert 'source_label = "上游产物"' in body, "REQ-088 AC-3：auto → 上游产物"
     assert 'source_label = "用户上传"' in body, "REQ-088 AC-3：upload → 用户上传"
-    assert 'source_label = "系统默认 BGM"' in body, "REQ-088 AC-3：default_bgm → 系统默认 BGM"
+    # REQ-20260921-NNN：改名「系统提供的 BGM」（对齐 audio 卡片 label / 下拉文案）
+    assert 'source_label = "系统提供的 BGM"' in body, (
+        "REQ-088 AC-3：default_bgm → 系统提供的 BGM"
+    )
 
 
 def test_upload_card_has_detail_button():

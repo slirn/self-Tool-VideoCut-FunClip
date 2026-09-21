@@ -3499,7 +3499,9 @@ def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
                 f'data-kind="{kind}" title="从上游阶段产物自动获取：{_esc(upstream_name)}">'
                 f'📥 自动获取（{_esc(upstream_name)}）</button>'
             )
-        # REQ-20260920-082：把「系统默认 BGM」下拉嵌进 audio 上传卡（从参数区迁移）。
+        # REQ-20260920-082：把「系统提供的 BGM」下拉嵌进 audio 上传卡（从参数区迁移）。
+        # REQ-20260921-NNN：改名「系统提供的 BGM」+ 仅显示可用（available=true）项
+        # （missing 的不让选，避免运行时崩溃）。
         # 只在 audio 卡片里追加；其他 kind 不显示。
         # class 名复用 REQ-20260920-078 的 .slirn-fine-default-bgm-row，
         # 避免 router.js / CSS 改动。data-task-id 用于 router.js 的 change 委托拿 tid。
@@ -3507,7 +3509,7 @@ def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
         if kind == "audio":
             default_bgm_html = (
                 f'<div class="slirn-fine-default-bgm-row" data-task-id="{_esc(task_id)}">'
-                f'<span class="slirn-fine-actions-label">📦 系统默认 BGM</span>'
+                f'<span class="slirn-fine-actions-label">📦 系统提供的 BGM</span>'
                 f'<select id="slirn-fine-default-bgm" class="slirn-fine-default-bgm-select">'
                 f'<option value="">— 不选（清空选择）—</option>'
                 f'</select>'
@@ -3711,9 +3713,9 @@ def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
         f'</div>'
         f'<div class="slirn-form-hint">上传 mp3/wav/m4a 文件 → 原说话人语音 + BGM 同时播放；'
         f'短 BGM 自动循环填充。'
-        # REQ-20260920-082：系统默认 BGM 下拉已从参数区迁移到「🎵 背景音乐」素材上传卡内
+        # REQ-20260920-082：系统提供的 BGM 下拉已从参数区迁移到「🎵 背景音乐」素材上传卡内
         # （贴在 audio upload card status 行下方）。下方留 hint 引导用户去上传区选 BGM。
-        f'或在上方「🎵 背景音乐」上传卡内点「📦 系统默认 BGM」选内置 lo-fi mp3。</div>'
+        f'或在上方「🎵 背景音乐」上传卡内点「📦 系统提供的 BGM」选内置 lo-fi mp3。</div>'
         f'</div>'
     )
 
@@ -6338,11 +6340,11 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         source = mat.get("source") or ""
         if not source and fc_path:
             source = "upload"  # 兜底：旧数据没 source 字段
-        # audio 来自 materials/audio/<id>.mp3 → 系统默认 BGM 复制品
+        # audio 来自 materials/audio/<id>.mp3 → 系统提供的 BGM 复制品
         source_label = ""
         if kind == "audio" and fc_path.startswith(f"tasks/{task_id}/materials/audio/"):
             source = "default_bgm"
-            source_label = "系统默认 BGM"
+            source_label = "系统提供的 BGM"
         elif source == "auto":
             source_label = "上游产物"
         elif source == "upload":

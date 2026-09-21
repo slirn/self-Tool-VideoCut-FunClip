@@ -2731,7 +2731,23 @@
           var status = document.querySelector('[data-status-kind="' + kind + '"]');
           if (status) status.innerHTML = '✅ ' + (j.path || file.name).split(/[\\/]/).pop();
           var card = document.querySelector('.slirn-fine-upload-card[data-kind="' + kind + '"]');
-          if (card) card.classList.add('has-file');
+          if (card) {
+            card.classList.add('has-file');
+            card.setAttribute('data-source', 'upload');
+          }
+          // REQ-20260921-NNN：上传成功后解除预览 / 详情按钮的 disabled 状态
+          // （之前只更新 status 文本 + 加 has-file 类，没去 disabled → 用户看到
+          // 预览/详情按钮还是灰的，体验 bug）。逐个条件 DOM 选择器解掉 disabled。
+          var pvBtn = card && card.querySelector('[data-action="fine-mat-preview"]');
+          if (pvBtn) {
+            pvBtn.disabled = false;
+            pvBtn.title = '打开预览窗口（可缩放）';
+          }
+          var detBtn = card && card.querySelector('[data-action="fine-mat-detail"]');
+          if (detBtn) {
+            detBtn.disabled = false;
+            detBtn.title = '查看完整路径 + 文件元数据';
+          }
           toast('✅ ' + (j.toast || '已上传'));
           // REQ-20260920-079：超大图片上传时提示用户「合成时自动缩放」
           if (j.warning) {
@@ -4231,21 +4247,31 @@
       });
       var j = await r.json();
       if (!j.ok) return;
-      _defaultBgmsCache = j.bgms || [];
+      // REQ-20260921-NNN：只列「文件确实存在」的可用 BGM（available=true）。
+      // 缺失的不显示（避免选了之后 select_default_bgm 返回「文件不存在」错误）。
+      _defaultBgmsCache = (j.bgms || []).filter(function(b) {
+        return !!b.available;
+      });
+      var _allBgms = j.bgms || [];
+      var _missingCount = _allBgms.length - _defaultBgmsCache.length;
       // 清空已有 options（保留「— 不选 —」）
       while (sel.options.length > 1) sel.remove(1);
-      _defaultBgmsCache.forEach(function(b) {
-        var opt = document.createElement('option');
-        opt.value = b.id;
-        if (b.available) {
+      if (_defaultBgmsCache.length === 0) {
+        // 一个可用的都没有 → 显示提示 option
+        var opt0 = document.createElement('option');
+        opt0.value = '';
+        opt0.disabled = true;
+        opt0.textContent = '（系统暂无可用 BGM，请上传自定义）';
+        sel.appendChild(opt0);
+      } else {
+        _defaultBgmsCache.forEach(function(b) {
+          var opt = document.createElement('option');
+          opt.value = b.id;
           var mb = (b.size_bytes / 1048576).toFixed(1);
           opt.textContent = '🎵 ' + b.name + '（' + mb + ' MB）';
-        } else {
-          opt.textContent = '⚠️ ' + b.name + '（文件缺失）';
-          opt.disabled = true;
-        }
-        sel.appendChild(opt);
-      });
+          sel.appendChild(opt);
+        });
+      }
       sel.dataset.loaded = '1';
       // 同步当前 fc.materials.audio.path → 对应 ID
       fineDefaultBgmSyncFromFc();
@@ -4296,6 +4322,39 @@
       }
       // 缓存当前路径，供 sync 用
       window._slirnFineAudioPath = 'materials/audio/' + bgmId + '.mp3';
+      // REQ-20260921-NNN：把 audio 上传卡视觉切到「已提供 BGM」绿色状态
+      // （等价于 has-file class —— 与上传成功的视觉效果一致，让用户立即看到
+      // 「背景音乐这一框变成绿色 = 素材已就绪」）。同步更新 status / 解预览按钮 disabled。
+      var audioCard = document.querySelector('.slirn-fine-upload-card[data-kind="audio"]');
+      if (audioCard) {
+        audioCard.classList.add('has-file');
+        audioCard.setAttribute('data-source', 'default_bgm');
+        var st = audioCard.querySelector('[data-status-kind="audio"]');
+        if (st) st.innerHTML = '🎵 已选 BGM：' + (j.name || bgmId);
+        var pvBtn = audioCard.querySelector('[data-action="fine-mat-preview"]');
+        if (pvBtn) {
+          pvBtn.disabled = false;
+          pvBtn.title = '打开预览窗口（可缩放）';
+        }
+        var detBtn = audioCard.querySelector('[data-action="fine-mat-detail"]');
+        if (detBtn) {
+          detBtn.disabled = false;
+          detBtn.title = '查看完整路径 + 文件元数据';
+        }
+        // 替换 source_badge：把原 auto/upload 徽章替换为「📦 系统 BGM」
+        var badge = audioCard.querySelector('.slirn-fine-source-badge');
+        if (badge) {
+          badge.outerHTML = '<span class="slirn-fine-source-badge default_bgm">📦 系统 BGM</span>';
+        } else {
+          var label = audioCard.querySelector('.slirn-fine-upload-label');
+          if (label) {
+            var newBadge = document.createElement('span');
+            newBadge.className = 'slirn-fine-source-badge default_bgm';
+            newBadge.textContent = '📦 系统 BGM';
+            label.appendChild(newBadge);
+          }
+        }
+      }
     } catch (e) {
       toast('❌ 网络错误: ' + (e.message || e));
     }

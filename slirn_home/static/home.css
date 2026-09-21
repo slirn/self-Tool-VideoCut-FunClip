@@ -3385,6 +3385,12 @@ input[type="checkbox"]:focus-visible {
   color: rgba(49, 120, 198, 1);
   border: 1px solid rgba(49, 120, 198, 0.4);
 }
+/* REQ-20260921-NNN：系统提供 BGM 徽章（紫色 — 与 modal 详情色块保持一致） */
+.slirn-fine-source-badge.default_bgm {
+  background: rgba(168, 85, 247, 0.12);
+  color: rgba(126, 34, 206, 1);
+  border: 1px solid rgba(168, 85, 247, 0.4);
+}
 .slirn-fine-upload-hint code {
   font-family: ui-monospace, "Cascadia Code", Menlo, monospace;
   font-size: 10.5px;
