@@ -387,6 +387,20 @@
       + '</span>'
       + '</summary>'
       + '<div class="slirn-pipe-sections">' + sectionsHtml + '</div>'
+      // REQ-20260921-NNN-outputs-browser：一站式查看本任务所有产物
+      // （video / subtitle / audio / json），取代用户自己翻目录或记区间导出文件名
+      // （fine_export_t*_d*.mp4）。默认收起，点开才拉。
+      + '<details class="slirn-pipe-outputs-panel" data-pipe-outputs-panel open>'
+      + '<summary class="slirn-pipe-outputs-summary">📦 产物浏览器（视频 / 字幕 / JSON / 音频）</summary>'
+      + '<div class="slirn-pipe-outputs-body" data-pipe-outputs-body>'
+      + '<button type="button" class="slirn-btn slirn-btn-sm slirn-pipe-outputs-refresh"'
+      + ' data-action="pipe-outputs-refresh" title="调用 /slirn/api/list_outputs 重新列出本任务所有产物">'
+      + '🔄 刷新产物列表</button>'
+      + '<div class="slirn-pipe-outputs-list" data-pipe-outputs-list>'
+      + '<div class="slirn-pipe-outputs-empty">点击「🔄 刷新产物列表」查看本任务 outputs/ 下的所有产物。</div>'
+      + '</div>'
+      + '</div>'
+      + '</details>'
       + '</details>';
     // REQ-20260918-049 v2：渲染完后同步「📊 状态」按钮可见性（status hidden 时显示）
     refreshStatusToggleBtn();
@@ -849,18 +863,211 @@
     if (!btn) return;
     btn.hidden = !(box && box.hidden);
   }
+
+  // ---- REQ-20260921-NNN-outputs-browser：产物文件浏览器 ----
+  // 渲染单条产物项（含视频预览 / 字幕文本预览 / JSON 折叠 / 音频 / 其他文件下载）
+  function _renderOutputItem(item) {
+    var sizeKb = (item.size / 1024).toFixed(1);
+    var sizeMb = (item.size / 1024 / 1024).toFixed(2);
+    var sizeText = item.size > 1024 * 1024 ? (sizeMb + ' MB') : (sizeKb + ' KB');
+    var kindEmoji = {
+      video: '🎬', subtitle: '📝', audio: '🎵',
+      json: '📋', image: '🖼', log: '📜', other: '📄'
+    }[item.kind] || '📄';
+    var scopeTag = item.scope === 'task_root' ? '（任务根）' : '';
+    // previewable=true → 给 <video>/<audio>/文本容器；否则只给下载按钮
+    var previewHtml = '';
+    if (item.kind === 'video' && item.previewable) {
+      previewHtml = '<video controls preload="metadata" class="slirn-pipe-outputs-video" '
+        + 'src="' + escapeHtml(item.url) + '"></video>';
+    } else if (item.kind === 'audio' && item.previewable) {
+      previewHtml = '<audio controls preload="metadata" class="slirn-pipe-outputs-audio" '
+        + 'src="' + escapeHtml(item.url) + '"></audio>';
+    } else if (item.kind === 'subtitle' && item.previewable) {
+      // 字幕预览用 fetch 抓文本内容（前 30 行）显示在 <pre>
+      previewHtml = '<details class="slirn-pipe-outputs-sub-details">'
+        + '<summary class="slirn-pipe-outputs-sub-summary">查看字幕内容</summary>'
+        + '<pre class="slirn-pipe-outputs-sub-pre" data-pipe-outputs-sub-pre '
+        + 'data-sub-url="' + escapeHtml(item.url) + '">（点击展开后加载…）</pre>'
+        + '</details>';
+    } else if (item.kind === 'json' && item.previewable) {
+      previewHtml = '<details class="slirn-pipe-outputs-json-details">'
+        + '<summary class="slirn-pipe-outputs-json-summary">查看 JSON 内容</summary>'
+        + '<pre class="slirn-pipe-outputs-json-pre" data-pipe-outputs-json-pre '
+        + 'data-json-url="' + escapeHtml(item.url) + '">（点击展开后加载…）</pre>'
+        + '</details>';
+    } else if (item.kind === 'image' && item.previewable) {
+      previewHtml = '<img class="slirn-pipe-outputs-img" src="' + escapeHtml(item.url) + '" alt="">';
+    }
+    return '<div class="slirn-pipe-outputs-item" data-pipe-outputs-item '
+      + 'data-kind="' + escapeHtml(item.kind) + '">'
+      + '<div class="slirn-pipe-outputs-item-head">'
+      + '<span class="slirn-pipe-outputs-emoji">' + kindEmoji + '</span>'
+      + '<span class="slirn-pipe-outputs-label">' + escapeHtml(item.label) + '</span>'
+      + '<span class="slirn-pipe-outputs-name">' + escapeHtml(item.name) + scopeTag + '</span>'
+      + '<span class="slirn-pipe-outputs-size">' + sizeText + '</span>'
+      + '<a class="slirn-btn slirn-btn-sm slirn-pipe-outputs-dl" '
+      + 'href="' + escapeHtml(item.url) + '" download="' + escapeHtml(item.name) + '">⬇ 下载</a>'
+      + '</div>'
+      + '<div class="slirn-pipe-outputs-item-body">' + previewHtml + '</div>'
+      + '</div>';
+  }
+
+  // 把 list_outputs 返回的 items 渲染到列表区
+  function _renderOutputsList(items) {
+    var box = document.querySelector('[data-pipe-outputs-list]');
+    if (!box) return;
+    if (!items || !items.length) {
+      box.innerHTML = '<div class="slirn-pipe-outputs-empty">'
+        + '该任务还没有任何产物（先跑流程或单独执行各阶段）。</div>';
+      return;
+    }
+    // 按 kind 分组显示（视频 / 字幕 / 音频 / JSON / 其他）
+    var groups = {video: [], subtitle: [], audio: [], json: [], image: [], log: [], other: []};
+    items.forEach(function(it) {
+      var k = groups[it.kind] ? it.kind : 'other';
+      groups[k].push(it);
+    });
+    var order = [
+      ['video', '🎬 视频'],
+      ['subtitle', '📝 字幕'],
+      ['audio', '🎵 音频'],
+      ['image', '🖼 图片'],
+      ['json', '📋 JSON 元数据'],
+      ['log', '📜 日志'],
+      ['other', '📄 其他'],
+    ];
+    var html = '';
+    order.forEach(function(pair) {
+      var kind = pair[0], title = pair[1];
+      if (!groups[kind].length) return;
+      html += '<div class="slirn-pipe-outputs-group" data-outputs-kind="' + kind + '">'
+        + '<div class="slirn-pipe-outputs-group-title">' + title + '（' + groups[kind].length + '）</div>';
+      groups[kind].forEach(function(it) {
+        html += _renderOutputItem(it);
+      });
+      html += '</div>';
+    });
+    box.innerHTML = html;
+    // 绑定字幕 / JSON 折叠懒加载（避免一次性下载所有）
+    box.querySelectorAll('[data-pipe-outputs-sub-details]').forEach(function(d) {
+      d.addEventListener('toggle', function() {
+        if (!d.open) return;
+        var pre = d.querySelector('[data-pipe-outputs-sub-pre]');
+        if (!pre || pre.dataset.loaded === '1') return;
+        var url = pre.dataset.subUrl;
+        fetch(url).then(function(r) {
+          if (!r.ok) { pre.textContent = '加载失败: HTTP ' + r.status; return; }
+          return r.text();
+        }).then(function(txt) {
+          if (txt == null) return;
+          // 只显示前 200 行，避免长字幕卡顿
+          var lines = txt.split('\n');
+          pre.textContent = lines.length > 200
+            ? lines.slice(0, 200).join('\n') + '\n…（共 ' + lines.length + ' 行，已截断）'
+            : txt;
+          pre.dataset.loaded = '1';
+        }).catch(function(e) { pre.textContent = '加载失败: ' + e; });
+      });
+    });
+    box.querySelectorAll('[data-pipe-outputs-json-details]').forEach(function(d) {
+      d.addEventListener('toggle', function() {
+        if (!d.open) return;
+        var pre = d.querySelector('[data-pipe-outputs-json-pre]');
+        if (!pre || pre.dataset.loaded === '1') return;
+        var url = pre.dataset.jsonUrl;
+        fetch(url).then(function(r) {
+          if (!r.ok) { pre.textContent = '加载失败: HTTP ' + r.status; return; }
+          return r.text();
+        }).then(function(txt) {
+          if (txt == null) return;
+          // JSON 美化（如果可解析）
+          try {
+            var obj = JSON.parse(txt);
+            txt = JSON.stringify(obj, null, 2);
+          } catch (e) { /* 保留原文 */ }
+          // 截断（> 200KB 不全展开）
+          if (txt.length > 200 * 1024) {
+            txt = txt.slice(0, 200 * 1024) + '\n…（已截断，共 ' + txt.length + ' 字符）';
+          }
+          pre.textContent = txt;
+          pre.dataset.loaded = '1';
+        }).catch(function(e) { pre.textContent = '加载失败: ' + e; });
+      });
+    });
+  }
+
+  // 点击「🔄 刷新产物列表」时调 /slirn/api/list_outputs
+  // 防并发：用一个 ongoingTasksR 标记，refreshOutputsList 进行中再点会忽略。
+  // 5s 超时（fetch 没返回 → 报「加载失败: 超时」而不是永远「加载中…」）。
+  var _outputsRefreshBusy = false;
+  async function refreshOutputsList() {
+    var panel = document.getElementById('slirn-pipe-panel');
+    if (!panel) return;
+    var taskId = panel.getAttribute('data-task-id');
+    if (!taskId) return;
+    if (_outputsRefreshBusy) return;
+    _outputsRefreshBusy = true;
+    var box = document.querySelector('[data-pipe-outputs-list]');
+    if (box) {
+      box.innerHTML = '<div class="slirn-pipe-outputs-empty">加载中…</div>';
+    }
+    try {
+      var r = await _postJSONWithTimeout(SLIRN_API + '/list_outputs', {task_id: taskId}, 5000);
+      if (!r || !r.ok) {
+        if (box) box.innerHTML = '<div class="slirn-pipe-outputs-empty">'
+          + '加载失败: ' + (r && r.error ? escapeHtml(r.error) : '未知错误') + '</div>';
+        return;
+      }
+      var payload = r.html || {};
+      _renderOutputsList(payload.items || []);
+    } catch (e) {
+      if (box) box.innerHTML = '<div class="slirn-pipe-outputs-empty">'
+        + '加载失败: ' + escapeHtml(String(e && e.message || e)) + '</div>';
+    } finally {
+      _outputsRefreshBusy = false;
+    }
+  }
+  // postJSON + 超时（fetch 没在 ms 毫秒内返回就 reject，AbortController 取消）
+  function _postJSONWithTimeout(url, payload, ms) {
+    var ctrl = ('AbortController' in window) ? new AbortController() : null;
+    var timer = setTimeout(function() { if (ctrl) ctrl.abort(); }, ms || 5000);
+    var p = fetch(url, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload || {}),
+      signal: ctrl ? ctrl.signal : undefined,
+    });
+    return p.then(function(r) { clearTimeout(timer); return r.json(); })
+      .catch(function(e) {
+        clearTimeout(timer);
+        // AbortError → 包装成「超时」错误消息
+        if (e && (e.name === 'AbortError' || e.code === 20)) {
+          return Promise.reject(new Error('请求超时（>5s）'));
+        }
+        return {ok: false, error: String(e)};
+      });
+  }
   function pollStatus(taskId) {
     postJSON(SLIRN_API + '/pipeline_status', {task_id: taskId}).then(function(r) {
       if (!r || !r.ok) return;
+      var prevRunning = (pollStatus._lastState === 'running');
+      var nowRunning = (r.state === 'running');
+      pollStatus._lastState = r.state;
       renderStatusBar(r);
       // REQ-20260918-049：每个 stage section 加徽章回显
       updateStageBadges(r);
-      if (r.state !== 'running') {
+      if (!nowRunning) {
         if (pipeStatusTimer) { clearInterval(pipeStatusTimer); pipeStatusTimer = null; }
         // 终态再画一次（确保徽章显示最终态而非中间态）
         updateStageBadges(r);
         // REQ-20260918-049 v3：终态后刷新头部「续跑」按钮（让按钮反映最新 stages_done）
         refreshRunBtnFromStatus(r);
+        // REQ-20260921-NNN-outputs-browser：只在 running → 终态（边沿触发）才自动 refresh，
+        // 否则每次 poll 都会刷新一次（idle 状态下也会调，浪费请求 + 可能堆积）。
+        if (prevRunning && !nowRunning && document.querySelector('[data-pipe-outputs-list]')) {
+          refreshOutputsList();
+        }
       }
     });
   }
@@ -1154,6 +1361,12 @@
         pipeStatusTimer = setInterval(function() { pollStatus(t); }, 1500);
         pollStatus(t);
       }
+      return;
+    }
+    // REQ-20260921-NNN-outputs-browser：刷新产物列表
+    if (action === 'pipe-outputs-refresh') {
+      ev.preventDefault();
+      refreshOutputsList();
       return;
     }
   });

@@ -3120,8 +3120,12 @@ def _run_fine_render_async(job: _RenderJob, tid: str, mgr, out_path: Path,
             if proc.returncode == 0:
                 job.state = "done"
                 job.progress_pct = 100.0
+                # REQ-20260921-NNN-outputs-browser：output_url 必须带实际文件名
+                # （区间导出是 fine_export_t*_d*.mp4，而非 fine_export.mp4）。
+                # 用 out_path.name 透传，前端点 status 直接打开正确文件。
                 job.output_url = (
-                    f"/slirn/api/video/{tid}?src=fine_export&t={int(time.time())}"
+                    f"/slirn/api/video/{tid}?src=fine_export&fname={out_path.name}"
+                    f"&t={int(time.time())}"
                 )
             else:
                 job.state = "failed"
@@ -7121,6 +7125,193 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             return _err(f"删除失败: {e} — 可能有文件正被预览/占用，关闭预览后重试")
         return _ok(_render_task_list(mgr), toast="✅ 已删除（任务文件已从磁盘移除）")
 
+    # REQ-20260921-NNN-outputs-browser：列出任务 outputs/ + 任务根下的全部产物
+    # 给「📦 查看产物」面板用 — 之前用户必须自己翻目录或记文件名（区间导出是
+    # fine_export_t*_d*.mp4，每次文件名都变）。现在一站式列出 + 人类标签 + 预览/下载链接。
+    @app.app.post("/slirn/api/list_outputs")
+    async def list_outputs(body: dict = Body(default_factory=dict)):
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            mgr.get(tid)
+        except TaskNotFoundError:
+            return _err("任务不存在或已删除")
+        except Exception:  # noqa: BLE001
+            return _err("任务不存在或已删除")
+
+        outputs_dir = mgr.tasks_dir / tid / "outputs"
+        task_root = mgr.tasks_dir / tid
+
+        # 已知文件名 → (label, kind, previewable) 的标签表
+        # kind: video / subtitle / audio / json / image / other
+        # previewable: True = 可在 <video>/<audio>/subtitles 容器里直接展示
+        KNOWN_FILES = {
+            # 视频产物（按文件名 pattern，因为区间导出每次文件名都变）
+            "rough_compose.mp4": ("粗剪成片", "video", True),
+            "fine_export.mp4": ("最终导出视频（全片）", "video", True),
+            "fine_preview.mp4": ("精剪预览（全片）", "video", True),
+            # 字幕产物
+            "subtitle.json": ("原始字幕 JSON", "json", False),
+            "subtitle.srt": ("原始字幕 SRT", "subtitle", True),
+            "optimize.json": ("优化字幕 JSON", "json", False),
+            "optimize.srt": ("优化字幕 SRT", "subtitle", True),
+            "revision.json": ("逐条决策结果 JSON", "json", False),
+            "cutlist.json": ("切分清单 JSON", "json", False),
+            "speaker_link.json": ("说话人归并 JSON", "json", False),
+            "rev_speaker_link.json": ("复核说话人 JSON", "json", False),
+            "fine_revision.json": ("精剪修订 JSON", "json", False),
+            # 流程 / 元数据
+            "pipeline.json": ("流程配置 JSON", "json", False),
+            "execution_history.json": ("执行历史 JSON", "json", False),
+            ".export_job.json": ("当前导出任务 JSON（隐藏）", "json", False),
+            # 精剪合成配置（任务根）
+            "fine_compose.json": ("精剪合成配置 JSON", "json", False),
+        }
+        # pattern → label（区间导出 / 精剪预览区间等变长文件名）
+        KNOWN_PATTERNS = [
+            (re.compile(r"^fine_export_t[\d.]+_d[\d.]+\.mp4$"), "最终导出视频（区间）", "video", True),
+            (re.compile(r"^fine_preview_t[\d.]+_d[\d.]+\.mp4$"), "精剪预览（区间）", "video", True),
+            (re.compile(r"^subtitle[_.].+\.(srt|ass)$"), "字幕文件", "subtitle", True),
+            (re.compile(r"^optimize[_.].+\.(srt|ass)$"), "优化字幕文件", "subtitle", True),
+            (re.compile(r"^rough_compose[_.].+\.mp4$"), "粗切成片变体", "video", True),
+            (re.compile(r".+\.log$"), "日志文件", "log", False),
+        ]
+
+        items: list[dict] = []
+
+        def _classify(fname: str) -> tuple[str, str, bool] | None:
+            if fname in KNOWN_FILES:
+                return KNOWN_FILES[fname]
+            for pat, label, kind, prev in KNOWN_PATTERNS:
+                if pat.match(fname):
+                    return (label, kind, prev)
+            # 兜底：按扩展名粗分
+            ext = fname.rsplit(".", 1)[-1].lower() if "." in fname else ""
+            if ext in ("mp4", "webm", "mkv", "mov", "avi"):
+                return ("视频文件", "video", True)
+            if ext in ("srt", "ass"):
+                return ("字幕文件", "subtitle", True)
+            if ext in ("mp3", "wav", "m4a", "flac"):
+                return ("音频文件", "audio", True)
+            if ext == "json":
+                return ("JSON 元数据", "json", False)
+            if ext in ("png", "jpg", "jpeg", "webp"):
+                return ("图片文件", "image", True)
+            return ("其他文件", "other", False)
+
+        def _collect(root: Path, scope_label: str) -> None:
+            if not root.exists() or not root.is_dir():
+                return
+            try:
+                entries = sorted(
+                    root.iterdir(),
+                    key=lambda p: (not p.is_file(), p.name.lower()),
+                )
+            except OSError:
+                return
+            for p in entries:
+                if not p.is_file():
+                    continue
+                # 跳过常见的隐藏 / 临时文件，但 .export_job.json 在 KNOWN_FILES 里
+                if p.name.startswith(".") and p.name not in KNOWN_FILES:
+                    continue
+                cls = _classify(p.name)
+                if cls is None:
+                    continue
+                label, kind, previewable = cls
+                try:
+                    st = p.stat()
+                    size = st.st_size
+                    mtime = st.st_mtime
+                except OSError:
+                    continue
+                # 构造预览/下载 URL → /slirn/api/output_file?task_id=...&name=...&root=...
+                # （区间导出 fine_export_t*_d*.mp4 用，详见同 app.py list_outputs 注释）
+                url = f"/slirn/api/output_file?task_id={tid}&name={urllib.parse.quote(p.name)}&root={scope_label}"
+                items.append({
+                    "name": p.name,
+                    "label": label,
+                    "kind": kind,
+                    "previewable": previewable,
+                    "size": size,
+                    "mtime": mtime,
+                    "url": url,
+                    "scope": scope_label,
+                })
+
+        import urllib.parse
+        _collect(outputs_dir, "outputs")
+        _collect(task_root, "task_root")
+        # 按 mtime 倒序（新 → 旧），同名按 scope 优先 outputs
+        items.sort(key=lambda x: (-x["mtime"], x["scope"] != "outputs", x["name"]))
+        return _ok({"items": items, "task_id": tid})
+
+    @app.app.get("/slirn/api/output_file")
+    async def serve_output_file(
+        task_id: str, name: str, root: str = "outputs",
+    ):
+        """REQ-20260921-NNN-outputs-browser：通用 outputs/ 文件下载/预览端点。
+
+        - root=outputs → tasks/<tid>/outputs/<name>
+        - root=task_root → tasks/<tid>/<name>（如 fine_compose.json）
+
+        路径遍历保护：name 不允许 / \\ .. 字符；name 必须是文件名（不含路径分隔符）。
+        """
+        from fastapi import HTTPException as _HTTP
+        from fastapi.responses import FileResponse as _FR
+
+        tid = (task_id or "").strip()
+        fname = (name or "").strip()
+        if not tid or not fname:
+            raise _HTTP(400, "缺少 task_id 或 name")
+        # 路径遍历保护
+        if "/" in fname or "\\" in fname or ".." in fname:
+            raise _HTTP(400, f"非法文件名: {fname}")
+        # 任务存在性
+        try:
+            mgr.get(tid)
+        except Exception:
+            raise _HTTP(404, f"任务不存在: {tid}")
+        # 根路径白名单
+        if root == "outputs":
+            base = mgr.tasks_dir / tid / "outputs"
+        elif root == "task_root":
+            base = mgr.tasks_dir / tid
+        else:
+            raise _HTTP(400, f"非法 root: {root}")
+        abs_path = base / fname
+        # 二次校验（防止 base 之外的 symlink 之类）
+        try:
+            abs_resolved = abs_path.resolve()
+            base_resolved = base.resolve()
+            if not str(abs_resolved).startswith(str(base_resolved) + ("\\" if os.name == "nt" else "/")):
+                raise _HTTP(400, "路径越界")
+        except (OSError, RuntimeError):
+            raise _HTTP(404, f"文件不存在或不可访问")
+        if not abs_resolved.exists() or not abs_resolved.is_file():
+            raise _HTTP(404, f"文件不存在: {fname}")
+        # MIME
+        ext = abs_resolved.suffix.lower()
+        _OUT_MT = {
+            ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+            ".webp": "image/webp", ".bmp": "image/bmp", ".gif": "image/gif",
+            ".mp4": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm",
+            ".mkv": "video/x-matroska", ".avi": "video/x-msvideo",
+            ".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4",
+            ".flac": "audio/flac",
+            ".srt": "text/plain; charset=utf-8",
+            ".ass": "text/plain; charset=utf-8",
+            ".json": "application/json",
+            ".log": "text/plain; charset=utf-8",
+            ".txt": "text/plain; charset=utf-8",
+        }
+        media_type = _OUT_MT.get(ext, "application/octet-stream")
+        return _FR(
+            abs_resolved, media_type=media_type,
+            headers={"Cache-Control": "no-cache"},
+        )
+
     # ---------- 字幕生成（REQ-20260915-001）----------
 
     from slirn_home import asr_service as _asr
@@ -7157,8 +7348,20 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
                 rc = _comp_mod.rough_compose_path(mgr.tasks_dir / tid / "outputs")
                 video = rc if rc.exists() else None
             elif src_q in ("fine_preview", "fine_export"):
-                p = mgr.tasks_dir / tid / "outputs" / f"{src_q}.mp4"
-                video = p if p.exists() else None
+                # REQ-20260921-NNN-outputs-browser：支持 ?fname= 显式文件名（区间导出
+                # fine_export_t{start}_d{dur}.mp4 用）。fallback 到默认 fine_*.mp4。
+                qs2 = _parse_qs(scope.get("query_string", b"").decode("latin-1"))
+                fname_q = (qs2.get("fname", [""])[0] or "").strip()
+                if fname_q:
+                    # 防 path traversal：拒绝 / \ .. 字符
+                    if "/" in fname_q or "\\" in fname_q or ".." in fname_q:
+                        video = None
+                    else:
+                        p = mgr.tasks_dir / tid / "outputs" / fname_q
+                        video = p if (p.exists() and p.is_file()) else None
+                else:
+                    p = mgr.tasks_dir / tid / "outputs" / f"{src_q}.mp4"
+                    video = p if p.exists() else None
             else:
                 video, _label = _resolve_task_video(t)
         except Exception:  # noqa: BLE001

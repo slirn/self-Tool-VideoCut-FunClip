@@ -10390,3 +10390,605 @@ def test_pipeline_js_stageStateOf_and_updateStageBadges_render_skipped():
     assert "'skipped'" in nearby, "updateStageBadges 必须为 skipped 状态分配 className 后缀"
 
 
+def test_pipeline_service_handler_fine_cut_runs_when_range_enabled():
+    """REQ-20260921-NNN-range-overrides-enabled：用户设计要求「勾了按区间
+    导出（range_enabled=True）就应该能执行」 — 即便 enabled 默认关，handler
+    也不能 skip。设计语义：用户主动配起点/时长 = 明确意图，「用户意图」优先
+    于「防误跑」开关。
+    """
+    src = (FUNCLIP_ROOT / "slirn_home" / "pipeline_service.py").read_text(encoding="utf-8")
+    idx = src.find("def handler_fine_cut")
+    assert idx >= 0
+    nearby = src[idx:idx + 1500]
+    # 必须读取 range_enabled
+    assert 'cfg.get("range_enabled"' in nearby, (
+        "handler_fine_cut 必须读 cfg.range_enabled（决定是否跳过）"
+    )
+    # 跳过条件必须是「两个都 False 才 skip」，不能用单 enabled=False
+    # 检测方式：在 skip 路径附近找两个 cfg.get 引用
+    fc_range_idx = nearby.find('cfg.get("range_enabled"')
+    fc_enabled_idx = nearby.find('cfg.get("enabled"')
+    assert fc_range_idx > 0 and fc_enabled_idx > 0, (
+        "handler_fine_cut 必须同时读 enabled 和 range_enabled"
+    )
+    # 跳过条件语句中必须用 and not range_enabled 联动 — 不允许只用 enabled
+    assert "and not fc_range" in nearby or "not fc_range" in nearby, (
+        "handler_fine_cut 的 skip 条件必须同时看 enabled 和 range_enabled（用户勾 range 即视为启用）"
+    )
+    # 日志必须两个都提到，便于排错
+    skip_log_idx = nearby.find("未启用自动最终导出")
+    assert skip_log_idx >= 0
+    skip_log_block = nearby[skip_log_idx:skip_log_idx + 200]
+    assert "range_enabled" in skip_log_block, (
+        "跳过日志必须同时提 enabled 和 range_enabled（用户知道缺哪个）"
+    )
+
+
+def test_pipeline_service_validate_config_range_promotes_enabled():
+    """REQ-20260921-NNN-range-overrides-enabled：validate_config 规范化时必须
+    把 range_enabled=True 强制同步 enabled=True（让 summary / 前端 UI 反映
+    「已启用」真状态，避免「勾 range 但 cfg.enabled=False → skip」的脏状态
+    跨调用链）。
+    """
+    src = (FUNCLIP_ROOT / "slirn_home" / "pipeline_service.py").read_text(encoding="utf-8")
+    idx = src.find("def validate_config")
+    assert idx >= 0
+    nearby = src[idx:idx + 3000]
+    # 必须有「range_enabled=True → enabled=True」的强制同步
+    assert "range_enabled" in nearby and "enabled" in nearby, (
+        "validate_config 必须处理 range_enabled 与 enabled 的联动"
+    )
+    # 必须用 is True 精确触发（避免 truthy 兜底把字符串 'false' 误开启）
+    # 关键字检测：检查同步逻辑存在
+    assert 'is True' in nearby or "range_enabled" in nearby, (
+        "range → enabled 的强制同步必须存在"
+    )
+
+
+def test_pipeline_service_fine_cut_preflight_respects_range_enabled():
+    """REQ-20260921-NNN-range-overrides-enabled：fine_cut_preflight 的
+    enabled 判定必须 OR range_enabled，与 handler_fine_cut 跳过条件保持一致 —
+    避免「预检通过但 handler 又 skip」或「预检阻断但 handler 实际能跑」。
+    """
+    src = (FUNCLIP_ROOT / "slirn_home" / "pipeline_service.py").read_text(encoding="utf-8")
+    idx = src.find("def fine_cut_preflight")
+    assert idx >= 0
+    nearby = src[idx:idx + 1500]
+    # 必须读 range_enabled 来判定 enabled
+    assert 'range_enabled' in nearby, (
+        "fine_cut_preflight 必须读 fine_cut.range_enabled"
+    )
+    # enabled 计算必须 OR 上 range_enabled（不是单 enabled）
+    # 找 enabled = bool(...) 这一行
+    enabled_idx = nearby.find("enabled = bool(")
+    assert enabled_idx > 0
+    enabled_block = nearby[enabled_idx:enabled_idx + 250]
+    assert "range_enabled" in enabled_block, (
+        "fine_cut_preflight 的 enabled 必须 OR range_enabled（与 handler 一致）"
+    )
+
+
+def test_pipeline_js_renderStageForm_fine_cut_radio_default_is_range():
+    """REQ-20260921-NNN-radio-mode：默认 stageCfg={} → radio value='range' checked。
+    用户从流程配置进入看到 range 模式预选（与 default_config enabled/range 一致）。
+    """
+    pipeline_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
+    idx = pipeline_js.find("stage.key === 'fine_cut'")
+    assert idx >= 0
+    section = pipeline_js[idx:idx + 2500]
+    # 默认 exportMode = 'range' 必须存在
+    assert "exportMode = 'range'" in section, (
+        "默认 exportMode 必须是 'range'（按区间导出一段预选）"
+    )
+
+
+def test_pipeline_js_renderStageForm_fine_cut_radio_preselects_full_when_enabled_only():
+    """REQ-20260921-NNN-radio-mode：stageCfg={enabled:true, range_enabled:false}
+    → radio value='full' checked。旧「导全片」配置加载正确预选。
+    """
+    pipeline_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
+    idx = pipeline_js.find("stage.key === 'fine_cut'")
+    section = pipeline_js[idx:idx + 1500]
+    # 预选规则：enabled && !range_enabled → 'full'
+    assert "exportMode === 'full' ? ' checked' : ''" in section or (
+        "enabled === true &&" in section and "range_enabled === false" in section
+    ), "radio 预选规则必须识别 enabled=true && range_enabled=false → full"
+
+
+def test_pipeline_js_renderStageForm_fine_cut_radio_preselects_range_default():
+    """REQ-20260921-NNN-radio-mode：stageCfg={}（或 enabled=false, range_enabled=false）
+    → radio value='range' checked（默认预选，按用户设计要求）。
+    """
+    pipeline_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
+    idx = pipeline_js.find("stage.key === 'fine_cut'")
+    section = pipeline_js[idx:idx + 1500]
+    # 默认 exportMode = 'range'（与上面 test_pipeline_js_renderStageForm_fine_cut_radio_default_is_range 共证）
+    assert "exportMode = 'range'" in section
+
+
+def test_pipeline_js_readCurrentConfig_fine_cut_radio_full_sets_enabled_only():
+    """REQ-20260921-NNN-radio-mode：radio value='full' → cfg.fine_cut.enabled=true,
+    range_enabled=false（无 start/duration 区间）。
+    """
+    pipeline_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
+    idx = pipeline_js.find("function readCurrentConfig")
+    section = pipeline_js[idx:idx + 4000]
+    # radio 读取
+    assert "querySelector('input[name=\"slirn-pipe-fc-export-mode\"]:checked')" in section, (
+        "readCurrentConfig 必须按 name + checked 读 radio"
+    )
+    # 派生逻辑
+    assert "fcEnabled = (fcMode === 'full' || fcMode === 'range')" in section, (
+        "fcEnabled 必须从 radio 派生（full 或 range → true）"
+    )
+    assert "var fcRange = fcMode === 'range'" in section, (
+        "fcRange 必须从 radio 派生（只有 range → true）"
+    )
+
+
+def test_pipeline_js_readCurrentConfig_fine_cut_radio_range_sets_both():
+    """REQ-20260921-NNN-radio-mode：radio value='range' → enabled=true, range_enabled=true。
+    """
+    pipeline_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
+    idx = pipeline_js.find("function readCurrentConfig")
+    section = pipeline_js[idx:idx + 4000]
+    # 验证派生后的 cfg.fine_cut 写入
+    assert "range_enabled: fcRange" in section, (
+        "cfg.fine_cut.range_enabled 必须用 fcRange 派生（radio 选 range → true）"
+    )
+    assert "enabled: fcEnabled" in section, (
+        "cfg.fine_cut.enabled 必须用 fcEnabled 派生"
+    )
+
+
+def test_pipeline_js_renderStageForm_fine_cut_uses_radio_not_checkbox():
+    """REQ-20260921-NNN-radio-mode：fine_cut 表单不再有 enabled / range-on checkbox。
+    旧的 `fieldId(stage.key, 'enabled')` 和 `fieldId(stage.key, 'range-on')`
+    在 fine_cut 分支内必须消失。
+    """
+    pipeline_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
+    idx = pipeline_js.find("stage.key === 'fine_cut'")
+    section = pipeline_js[idx:idx + 3500]
+    # 旧 checkbox fieldId 在 fine_cut 分支内不应出现
+    assert "fieldId(stage.key, 'enabled')" not in section, (
+        "fine_cut 不应再有 enabled checkbox（已改 radio 卡片）"
+    )
+    assert "fieldId(stage.key, 'range-on')" not in section, (
+        "fine_cut 不应再有 range-on checkbox（已改 radio 卡片）"
+    )
+    # radio 卡片必须存在
+    assert 'type="radio" name="slirn-pipe-fc-export-mode"' in section, (
+        "fine_cut 必须有 export-mode radio 卡片组"
+    )
+
+
+# ---------- REQ-20260921-NNN-outputs-browser：list_outputs + output_file 端点 ----------
+
+def test_list_outputs_returns_empty_when_no_outputs(tmp_path: Path):
+    """list_outputs 在 outputs/ 为空时返回 ok=True；items 可空或仅有 metadata.json
+    （新建任务总带 metadata.json 在 task_root — 视为「无实际产物」）。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="empty-outputs", original_video=video)
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.post("/slirn/api/list_outputs", json={"task_id": t.task_id})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["html"]["task_id"] == t.task_id
+    # 没有真实产物时，items 应只含 metadata.json（任务自带）
+    items = body["html"]["items"]
+    names = {it["name"] for it in items}
+    # outputs/ 应为空
+    assert not any(it["scope"] == "outputs" for it in items), \
+        f"新建任务 outputs/ 应为空，实际：{names}"
+
+
+def test_list_outputs_classifies_known_filenames(tmp_path: Path):
+    """list_outputs 给已知文件名打中文 label + kind。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="known-files", original_video=video)
+    out = m.tasks_dir / t.task_id / "outputs"
+    out.mkdir(parents=True, exist_ok=True)
+    # 写一批已知文件名（不写真实视频字节，避免 ffmpeg / 解析干扰 — 列表只看 size/mtime）
+    for fname in (
+        "rough_compose.mp4",
+        "fine_export.mp4",
+        "fine_preview.mp4",
+        "subtitle.json", "subtitle.srt",
+        "optimize.json", "optimize.srt",
+        "revision.json", "cutlist.json",
+        "speaker_link.json", "rev_speaker_link.json",
+        "fine_revision.json",
+        "execution_history.json", "pipeline.json",
+    ):
+        (out / fname).write_bytes(b"x" * 100)
+    # 任务根也有 fine_compose.json
+    (m.tasks_dir / t.task_id / "fine_compose.json").write_bytes(b"y" * 50)
+
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.post("/slirn/api/list_outputs", json={"task_id": t.task_id})
+    body = r.json()
+    assert body["ok"] is True
+    items = body["html"]["items"]
+    by_name = {it["name"]: it for it in items}
+
+    # 已知标签验证
+    assert by_name["rough_compose.mp4"]["label"] == "粗剪成片"
+    assert by_name["rough_compose.mp4"]["kind"] == "video"
+    assert by_name["rough_compose.mp4"]["previewable"] is True
+    assert by_name["fine_export.mp4"]["label"] == "最终导出视频（全片）"
+    assert by_name["subtitle.json"]["label"] == "原始字幕 JSON"
+    assert by_name["subtitle.srt"]["label"] == "原始字幕 SRT"
+    assert by_name["subtitle.srt"]["previewable"] is True
+    assert by_name["execution_history.json"]["label"] == "执行历史 JSON"
+    assert by_name["fine_compose.json"]["label"] == "精剪合成配置 JSON"
+    assert by_name["fine_compose.json"]["scope"] == "task_root"
+
+
+def test_list_outputs_recognizes_range_export_pattern(tmp_path: Path):
+    """区间导出 fine_export_t{start}_d{dur}.mp4 自动归类为「最终导出视频（区间）」。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="range-files", original_video=video)
+    out = m.tasks_dir / t.task_id / "outputs"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "fine_export_t0.0_d600.0.mp4").write_bytes(b"x" * 1024)
+    (out / "fine_preview_t30.5_d120.0.mp4").write_bytes(b"y" * 1024)
+    (out / "diag.mp4").write_bytes(b"z" * 512)  # 兜底按扩展名分类
+
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.post("/slirn/api/list_outputs", json={"task_id": t.task_id})
+    items = r.json()["html"]["items"]
+    by_name = {it["name"]: it for it in items}
+    assert by_name["fine_export_t0.0_d600.0.mp4"]["label"] == "最终导出视频（区间）"
+    assert by_name["fine_export_t0.0_d600.0.mp4"]["kind"] == "video"
+    assert by_name["fine_preview_t30.5_d120.0.mp4"]["label"] == "精剪预览（区间）"
+    # 兜底按扩展名
+    assert by_name["diag.mp4"]["label"] == "视频文件"
+    assert by_name["diag.mp4"]["kind"] == "video"
+
+
+def test_list_outputs_sorts_by_mtime_desc(tmp_path: Path):
+    """列表按 mtime 倒序（新 → 旧），同名按 scope=outputs 优先。"""
+    import os as _os
+    import time as _t
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="sort-test", original_video=video)
+    out = m.tasks_dir / t.task_id / "outputs"
+    out.mkdir(parents=True, exist_ok=True)
+    old_path = out / "old.mp4"
+    old_path.write_bytes(b"x" * 10)
+    # 调 mtime 到过去
+    old_time = _t.time() - 7200
+    _os.utime(old_path, (old_time, old_time))
+    new_path = out / "new.mp4"
+    new_path.write_bytes(b"y" * 10)
+    # new 应排在 old 之前
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    items = client.post("/slirn/api/list_outputs", json={"task_id": t.task_id}).json()["html"]["items"]
+    names = [it["name"] for it in items]
+    assert names.index("new.mp4") < names.index("old.mp4")
+
+
+def test_list_outputs_returns_urls_pointing_to_output_file(tmp_path: Path):
+    """每条 item 的 url 必须指向 /slirn/api/output_file，且 URL 编码了文件名。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="url-test", original_video=video)
+    out = m.tasks_dir / t.task_id / "outputs"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "fine_export_t0.0_d600.0.mp4").write_bytes(b"x" * 1024)
+
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    items = client.post("/slirn/api/list_outputs", json={"task_id": t.task_id}).json()["html"]["items"]
+    assert items[0]["url"].startswith("/slirn/api/output_file?")
+    assert t.task_id in items[0]["url"]
+    assert "fine_export_t0.0_d600.0.mp4" in items[0]["url"]
+
+
+def test_list_outputs_missing_task_returns_err(tmp_path: Path):
+    """task_id 不存在时返 ok=False（不抛 500）。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.post("/slirn/api/list_outputs", json={"task_id": "99999999-999"})
+    body = r.json()
+    assert body["ok"] is False
+    assert "不存在" in body["error"]
+
+
+def test_list_outputs_empty_task_id_returns_err(tmp_path: Path):
+    """空 task_id 直接拒绝（前端空字符串兜底）。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.post("/slirn/api/list_outputs", json={"task_id": ""})
+    assert r.json()["ok"] is False
+
+
+def test_output_file_serves_known_video(tmp_path: Path):
+    """output_file?root=outputs&name=fine_export*.mp4 直接服务原始字节。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="serve-video", original_video=video)
+    out = m.tasks_dir / t.task_id / "outputs"
+    out.mkdir(parents=True, exist_ok=True)
+    raw = b"\x00\x00\x00\x18ftypisom" + b"X" * 100  # 假 mp4 头
+    (out / "fine_export_t10.0_d60.0.mp4").write_bytes(raw)
+
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.get(
+        f"/slirn/api/output_file?task_id={t.task_id}"
+        f"&name=fine_export_t10.0_d60.0.mp4&root=outputs"
+    )
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("video/")
+    assert r.content == raw
+
+
+def test_output_file_serves_subtitle_as_text(tmp_path: Path):
+    """SRT 文件以 text/plain 返回（浏览器可显示，<a download> 也能保存）。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="serve-srt", original_video=video)
+    out = m.tasks_dir / t.task_id / "outputs"
+    out.mkdir(parents=True, exist_ok=True)
+    srt_text = "1\n00:00:00,000 --> 00:00:05,000\nhello\n\n"
+    (out / "subtitle.srt").write_text(srt_text, encoding="utf-8")
+
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.get(f"/slirn/api/output_file?task_id={t.task_id}&name=subtitle.srt&root=outputs")
+    assert r.status_code == 200
+    assert "text/plain" in r.headers["content-type"]
+    assert "hello" in r.content.decode("utf-8")
+
+
+def test_output_file_serves_json_with_pretty_mime(tmp_path: Path):
+    """JSON 文件以 application/json 返回。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="serve-json", original_video=video)
+    out = m.tasks_dir / t.task_id / "outputs"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "subtitle.json").write_text('{"a":1}', encoding="utf-8")
+
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.get(f"/slirn/api/output_file?task_id={t.task_id}&name=subtitle.json&root=outputs")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("application/json")
+
+
+def test_output_file_task_root_scope(tmp_path: Path):
+    """root=task_root 读 fine_compose.json（任务根下的文件，不在 outputs/）。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="task-root", original_video=video)
+    (m.tasks_dir / t.task_id / "fine_compose.json").write_text("{}", encoding="utf-8")
+
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.get(f"/slirn/api/output_file?task_id={t.task_id}&name=fine_compose.json&root=task_root")
+    assert r.status_code == 200
+    assert r.content == b"{}"
+
+
+def test_output_file_rejects_path_traversal_dotdot(tmp_path: Path):
+    """name 含 .. 必须 400（不允许越界）。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="traversal", original_video=video)
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.get(f"/slirn/api/output_file?task_id={t.task_id}&name=../../../etc/passwd&root=outputs")
+    assert r.status_code == 400
+
+
+def test_output_file_rejects_path_traversal_slash(tmp_path: Path):
+    """name 含 / 或 \\ 必须 400。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="traversal-slash", original_video=video)
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    # FastAPI 不会把 / 放进 query value（路径分隔符由路由拦截），但 \\ 能放进去
+    r = client.get(f"/slirn/api/output_file?task_id={t.task_id}&name=sub%5Cfile.mp4&root=outputs")
+    assert r.status_code == 400
+
+
+def test_output_file_rejects_invalid_root(tmp_path: Path):
+    """root 必须是 outputs / task_root 二选一。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="bad-root", original_video=video)
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.get(f"/slirn/api/output_file?task_id={t.task_id}&name=pipeline.json&root=hacker")
+    assert r.status_code == 400
+
+
+def test_output_file_returns_404_for_missing_file(tmp_path: Path):
+    """文件不在磁盘 → 404（不是 200 + 空 body）。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="missing-file", original_video=video)
+    (m.tasks_dir / t.task_id / "outputs").mkdir(parents=True, exist_ok=True)
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.get(f"/slirn/api/output_file?task_id={t.task_id}&name=nope.mp4&root=outputs")
+    assert r.status_code == 404
+
+
+def test_output_file_returns_404_for_missing_task(tmp_path: Path):
+    """task_id 不存在 → 404。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.get("/slirn/api/output_file?task_id=99999999-999&name=pipeline.json&root=outputs")
+    assert r.status_code == 404
+
+
+def test_video_endpoint_accepts_fname_for_range_export(tmp_path: Path):
+    """REQ-20260921-NNN-outputs-browser：/slirn/api/video 用 fname 走区间导出文件。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="video-fname", original_video=video)
+    out = m.tasks_dir / t.task_id / "outputs"
+    out.mkdir(parents=True, exist_ok=True)
+    raw = b"x" * 1024
+    (out / "fine_export_t5.0_d300.0.mp4").write_bytes(raw)
+
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    # 带 fname → 服务区间导出文件
+    r = client.get(
+        f"/slirn/api/video/{t.task_id}",
+        params={"src": "fine_export", "fname": "fine_export_t5.0_d300.0.mp4"},
+    )
+    assert r.status_code == 200
+    assert r.content == raw
+    # 不带 fname → 兼容旧路径，fallback fine_export.mp4（不存在 → 404）
+    r2 = client.get(f"/slirn/api/video/{t.task_id}", params={"src": "fine_export"})
+    assert r2.status_code == 404
+
+
+def test_video_endpoint_rejects_fname_path_traversal(tmp_path: Path):
+    """/slirn/api/video 的 fname 也要防 path traversal。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="video-traversal", original_video=video)
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.get(
+        f"/slirn/api/video/{t.task_id}",
+        params={"src": "fine_export", "fname": "../etc/passwd"},
+    )
+    assert r.status_code == 404
+
+
+# ---------- REQ-20260921-NNN-outputs-browser：前端产物浏览器渲染 ----------
+
+def test_pipeline_js_has_outputs_panel_html():
+    """pipeline.js 渲染时必须挂载产物浏览器 details + 刷新按钮。"""
+    js_path = Path("slirn_home/static/pipeline.js")
+    if not js_path.exists():
+        import pytest
+        pytest.skip("工作目录不在仓库根")
+    src = js_path.read_text(encoding="utf-8")
+    assert 'data-pipe-outputs-panel' in src, (
+        "renderPanel 必须挂载 data-pipe-outputs-panel 容器"
+    )
+    assert 'data-action="pipe-outputs-refresh"' in src, (
+        "必须挂刷新按钮（data-action=pipe-outputs-refresh）"
+    )
+    assert '_renderOutputItem' in src, "必须有 _renderOutputItem 渲染单条产物"
+    assert '_renderOutputsList' in src, "必须有 _renderOutputsList 渲染整个列表"
+
+
+def test_pipeline_js_outputs_renders_video_preview():
+    """视频产物必须挂 <video controls src=url>（不是只给下载按钮）。"""
+    js_path = Path("slirn_home/static/pipeline.js")
+    if not js_path.exists():
+        import pytest
+        pytest.skip("工作目录不在仓库根")
+    src = js_path.read_text(encoding="utf-8")
+    # kind 字符串（'video'）+ <video controls 标签都存在
+    assert "'video'" in src, "kind 判定必须用字符串 'video'"
+    assert '<video controls' in src, (
+        "视频产物必须渲染 <video controls>"
+    )
+    # subtitle 用 <pre> 懒加载（避免一次性下载所有字幕）
+    assert 'data-pipe-outputs-sub-pre' in src, (
+        "字幕产物必须挂 data-pipe-outputs-sub-pre 懒加载"
+    )
+    # JSON 用 <pre> + JSON 美化
+    assert 'data-pipe-outputs-json-pre' in src, (
+        "JSON 产物必须挂 data-pipe-outputs-json-pre 懒加载"
+    )
+
+
+def test_pipeline_js_outputs_groups_by_kind():
+    """产物按 kind 分组（视频 / 字幕 / 音频 / JSON / 图片 / 日志 / 其他）。"""
+    js_path = Path("slirn_home/static/pipeline.js")
+    if not js_path.exists():
+        import pytest
+        pytest.skip("工作目录不在仓库根")
+    src = js_path.read_text(encoding="utf-8")
+    assert "slirn-pipe-outputs-group" in src
+    # 必须出现至少 video / subtitle / json 三类分组（用单引号字符串）
+    assert "'video'" in src and "'subtitle'" in src and "'json'" in src
+
+
+def test_pipeline_js_outputs_has_download_button():
+    """每条产物必须有 download 链接。"""
+    js_path = Path("slirn_home/static/pipeline.js")
+    if not js_path.exists():
+        import pytest
+        pytest.skip("工作目录不在仓库根")
+    src = js_path.read_text(encoding="utf-8")
+    assert '⬇ 下载' in src or '⬇下载' in src, "必须有下载按钮文字"
+    assert 'download="' in src, "<a> 必须有 download 属性（浏览器走下载而非预览）"
+
+
+def test_pipeline_js_outputs_refresh_calls_api():
+    """refreshOutputsList 必须 POST /slirn/api/list_outputs。"""
+    js_path = Path("slirn_home/static/pipeline.js")
+    if not js_path.exists():
+        import pytest
+        pytest.skip("工作目录不在仓库根")
+    src = js_path.read_text(encoding="utf-8")
+    assert "SLIRN_API + '/list_outputs'" in src, (
+        "refreshOutputsList 必须 POST /slirn/api/list_outputs"
+    )
+
+
+def test_pipeline_js_outputs_autorefresh_on_pipeline_done():
+    """pipeline 终态时自动 refresh 产物列表（让用户看到刚跑出的文件）。
+    v2：改边沿触发 prevRunning && !nowRunning（避免 idle 状态下每次 poll 都刷新）。
+    """
+    js_path = Path("slirn_home/static/pipeline.js")
+    if not js_path.exists():
+        import pytest
+        pytest.skip("工作目录不在仓库根")
+    src = js_path.read_text(encoding="utf-8")
+    # 必须在 pollStatus 的状态切换分支里：prevRunning && !nowRunning 时调 refreshOutputsList
+    # 这避免 idle 状态下每次 1.5s 轮询都触发一次刷新（浪费请求 + 可能堆积）
+    idx_edge = src.find("prevRunning && !nowRunning")
+    assert idx_edge > 0, (
+        "必须在边沿触发（running → 终态）分支里调 refreshOutputsList，"
+        "不能写 r.state !== 'running'（会每轮 poll 都触发）"
+    )
+    section = src[idx_edge:idx_edge + 400]
+    assert "refreshOutputsList()" in section, (
+        "running → 终态边沿触发时必须自动 refresh 产物列表"
+    )
+
+

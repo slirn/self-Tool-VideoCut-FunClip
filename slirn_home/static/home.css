@@ -4044,3 +4044,147 @@ input[type="checkbox"]:focus-visible {
 .slirn-combo-test-output .ok { color: #22c55e; font-weight: 600; }
 .slirn-combo-test-output .warn { color: #f59e0b; font-weight: 600; }
 .slirn-combo-test-output .err { color: #d1242f; font-weight: 600; }
+
+/* REQ-20260921-NNN-outputs-browser：产物浏览器面板 */
+.slirn-pipe-outputs-panel {
+  margin-top: 14px;
+  padding: 10px 14px;
+  border: 1px solid var(--border-color, rgba(148, 163, 184, 0.25));
+  border-radius: 8px;
+  background: var(--surface-soft, rgba(255, 255, 255, 0.4));
+}
+:root[data-theme="dark"] .slirn-pipe-outputs-panel {
+  background: rgba(15, 23, 42, 0.4);
+}
+.slirn-pipe-outputs-summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 14px;
+  padding: 4px 0;
+  list-style: none;
+  user-select: none;
+}
+.slirn-pipe-outputs-summary::-webkit-details-marker { display: none; }
+.slirn-pipe-outputs-summary::before {
+  content: '▸ ';
+  display: inline-block;
+  margin-right: 4px;
+  transition: transform 0.15s;
+}
+.slirn-pipe-outputs-panel[open] .slirn-pipe-outputs-summary::before { content: '▾ '; }
+.slirn-pipe-outputs-body { padding: 10px 0 0; display: flex; flex-direction: column; gap: 10px; }
+.slirn-pipe-outputs-refresh { align-self: flex-start; }
+.slirn-pipe-outputs-list { display: flex; flex-direction: column; gap: 14px; }
+.slirn-pipe-outputs-empty {
+  padding: 20px;
+  text-align: center;
+  color: var(--text-secondary, #64748b);
+  font-size: 13px;
+  font-style: italic;
+}
+.slirn-pipe-outputs-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.slirn-pipe-outputs-group-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary, #475569);
+  padding-bottom: 4px;
+  border-bottom: 1px dashed var(--border-color, rgba(148, 163, 184, 0.3));
+}
+.slirn-pipe-outputs-item {
+  display: flex;
+  flex-direction: column;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color, rgba(148, 163, 184, 0.2));
+  border-radius: 6px;
+  background: var(--surface-soft, rgba(255, 255, 255, 0.5));
+}
+:root[data-theme="dark"] .slirn-pipe-outputs-item {
+  background: rgba(30, 41, 59, 0.5);
+}
+.slirn-pipe-outputs-item-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.slirn-pipe-outputs-emoji { font-size: 16px; }
+.slirn-pipe-outputs-label {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text-primary, #0f172a);
+}
+.slirn-pipe-outputs-name {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: var(--text-secondary, #64748b);
+  background: var(--surface-code, rgba(148, 163, 184, 0.1));
+  padding: 1px 6px;
+  border-radius: 3px;
+  word-break: break-all;
+}
+.slirn-pipe-outputs-size {
+  font-size: 11px;
+  color: var(--text-tertiary, #94a3b8);
+  margin-left: auto;
+}
+.slirn-pipe-outputs-dl {
+  font-size: 12px;
+  padding: 2px 8px;
+  text-decoration: none;
+}
+.slirn-pipe-outputs-item-body {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border-color, rgba(148, 163, 184, 0.2));
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.slirn-pipe-outputs-video {
+  width: 100%;
+  max-width: 480px;
+  max-height: 360px;
+  background: #000;
+  border-radius: 4px;
+}
+.slirn-pipe-outputs-audio { width: 100%; max-width: 480px; }
+.slirn-pipe-outputs-img {
+  max-width: 240px;
+  max-height: 240px;
+  border-radius: 4px;
+  border: 1px solid var(--border-color, rgba(148, 163, 184, 0.2));
+}
+.slirn-pipe-outputs-sub-details,
+.slirn-pipe-outputs-json-details {
+  font-size: 12px;
+}
+.slirn-pipe-outputs-sub-summary,
+.slirn-pipe-outputs-json-summary {
+  cursor: pointer;
+  color: var(--accent-solid, #667eea);
+  user-select: none;
+}
+.slirn-pipe-outputs-sub-pre,
+.slirn-pipe-outputs-json-pre {
+  margin: 6px 0 0;
+  padding: 8px;
+  background: var(--surface-code, rgba(148, 163, 184, 0.1));
+  border-radius: 4px;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  max-height: 320px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--text-primary, #0f172a);
+}
+:root[data-theme="dark"] .slirn-pipe-outputs-sub-pre,
+:root[data-theme="dark"] .slirn-pipe-outputs-json-pre {
+  background: rgba(15, 23, 42, 0.6);
+  color: #e2e8f0;
+}
