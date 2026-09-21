@@ -1,4 +1,10 @@
-"""Gradio Blocks 构造 — 全 HTML 自定义渲染，玻璃拟态统一风格。"""
+"""Gradio Blocks 构造 — 全 HTML 自定义渲染，玻璃拟态统一风格。
+
+本批次更新（REQ-20260921-NNN — pipeline 端点 + 预检）：
+- /pipeline_run 端点：精剪合成预检失败时改成 ok=True 携带 preflight 详情返回，
+  而不是 ok=False 被前端走「未知错误」分支吞掉。started=False 不启动守护线程，
+  前端按 r.preflight 结构化渲染「缺哪些素材/参数原因 + 解决路径」。
+"""
 
 from __future__ import annotations
 

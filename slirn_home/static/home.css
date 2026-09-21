@@ -1,5 +1,19 @@
 /* Slirn 自定义首页 — 玻璃拟态 + Dashboard 全 tab 统一样式 */
 
+/* 本批次更新（REQ-20260921-NNN-skip-warn — 跳过徽章视觉区分）：
+   之前 handler 被调用但主动跳过（如 cfg.enabled=False）的阶段，徽章和
+   顶部 status 都显示「done 绿色对勾」，用户以为真跑通了。handler_fine_cut
+   加 (True, "skip") + warn 级日志后，徽章独立显示「skipped 琥珀色」——
+   明确「跳过（不产生产物）」vs「真跑通」。配套约定见
+   pipeline_service.handler_fine_cut / pipeline.js renderSectionState /
+   renderStatusBar。
+
+   本批在 CSS 里加的 3 组样式（按文件内位置往下找，本注释仅为位置索引）：
+   ① section summary 徽章类（滑块底 + 深棕字），亮/暗主题各一套
+   ② section header num 圆形（琥珀实底 + 白字；与 done/error 并列第 4 状态）
+   ③ status bar 「done 但含跳过」徽章（琥珀色），区别于 done 绿/error 红。
+*/
+
 /* JS 触发用隐藏按钮 — 必须保留 DOM 但不可见 */
 .slirn-hidden-trigger { display: none !important; }
 
@@ -3097,6 +3111,16 @@ input[type="checkbox"]:focus-visible {
   background: rgba(248, 113, 113, 0.20);
   color: #fca5a5;
 }
+/* REQ-20260921-NNN-skip-warn：跳过徽章用琥珀色（区别于 done 绿、error 红）——
+   表示「handler 被调用但主动跳过（如 cfg.enabled=False），不是真跑通」 */
+.slirn-pipe-section-state-skipped {
+  background: rgba(245, 158, 11, 0.15);
+  color: #b45309;
+}
+[data-theme="dark"] .slirn-pipe-section-state-skipped {
+  background: rgba(245, 158, 11, 0.20);
+  color: #fbbf24;
+}
 
 /* num 圆形按 data-pipe-state 变色（done=绿 / running=蓝+脉动 / error=红） */
 .slirn-pipe-section[data-pipe-state="done"] .slirn-pipe-section-num {
@@ -3110,6 +3134,11 @@ input[type="checkbox"]:focus-visible {
 }
 .slirn-pipe-section[data-pipe-state="error"] .slirn-pipe-section-num {
   background: #dc2626;
+  color: #fff;
+}
+/* REQ-20260921-NNN-skip-warn：skipped 徽章琥珀色（区别于 done 绿、error 红） */
+.slirn-pipe-section[data-pipe-state="skipped"] .slirn-pipe-section-num {
+  background: #f59e0b;
   color: #fff;
 }
 /* done 后整个 summary 灰一点（视觉降权） */
@@ -3253,9 +3282,11 @@ input[type="checkbox"]:focus-visible {
 }
 .slirn-pipe-status-state-running { background: rgba(59, 130, 246, 0.15); color: #2563eb; }
 .slirn-pipe-status-state-done { background: rgba(34, 197, 94, 0.15); color: #16a34a; }
+.slirn-pipe-status-state-done-with-skip { background: rgba(245, 158, 11, 0.18); color: #b45309; }
 .slirn-pipe-status-state-error { background: rgba(239, 68, 68, 0.15); color: #dc2626; }
 .slirn-pipe-status-state-stopped { background: rgba(148, 163, 184, 0.15); color: #475569; }
 .slirn-pipe-status-state-idle { background: rgba(148, 163, 184, 0.1); color: #64748b; }
+[data-theme="dark"] .slirn-pipe-status-state-done-with-skip { background: rgba(245, 158, 11, 0.22); color: #fbbf24; }
 .slirn-pipe-status-stage { color: var(--text-secondary); flex: 1; }
 .slirn-pipe-status-bar {
   width: 80px;

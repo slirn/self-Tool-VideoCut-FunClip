@@ -1,5 +1,20 @@
 // Slirn 流程配置 + 自动执行 — REQ-20260918-047（v4：全局停止阶段下拉 + 每阶段从本阶段起跑）
 //
+// 本批次更新（REQ-20260921-NNN — schema 同步 + UI 简化 + range_enabled UI）：
+// - TEMPLATES.default_tpl / 半自动 / 全自动 3 套模板去掉 fine_cut.cover_image/
+//   bg_image/bgm 死字段（v2 用户反馈：handler 不读这几个字段，实际素材路径
+//   在 fc.json 的 materials.{cover,bg,audio}.path，由工作台第 6 阶段详情页
+//   上传写入）。流程配置面板 fine_cut 区段只保留「跑不跑 / 跑哪段 / 用哪份
+//   参数」3 类决策。
+// - fine_cut UI 改 HH:MM:SS 输入（pattern 校验），内部存秒（preview_start/
+//   duration）；新增「按区间导出」checkbox = range_enabled 门控 —— 不勾 =
+//   全片（保留默认意图），勾上 = 用下面两个时间导；range_enabled=False
+//   时输入框显示但 disabled（让用户看到「会导 10 分钟」默认但不会被误触发）。
+// - renderStageForm 加精剪素材维护位置说明（明确告诉用户素材在工作台
+//   第 6 阶段页维护，不要在这里上传；video/subtitle 由上游产物自动获取）。
+// - _pipePanelPopulateDeps 去掉 bgm 下拉填充逻辑（v2：cfg.fine_cut 已无 bgm
+//   字段，UI 也无 data-bgm-select 元素，端点保留由工作台侧引用）。
+//
 // 设计要点：
 // - 整个面板用 <details> 包裹，summary 是头部（含标题 + 模板 + 全局停止阶段下拉 + 主操作 + 折叠箭头）
 // - 5 个阶段每个内部又是一个 <details open>，可独立折叠
@@ -611,12 +626,38 @@
     }
     return done;
   }
+  // REQ-20260921-NNN-skip-warn：单独推导跳过的 stage key 列表，让徽章区分
+  // 「✓ 已完成（真跑通）」vs「⚠️ 已跳过（cfg.enabled=False 之类，没真做）」
+  // — 之前两者都显示 ✅，用户以为 fine_cut 跑完了实际 fine_export.mp4 根本没生成。
+  function deriveStagesSkipped(st) {
+    if (!st) return [];
+    if (st.summary && Array.isArray(st.summary.stages_skipped)) {
+      return st.summary.stages_skipped.slice();
+    }
+    // running 中：log 里 '跳过' 字样视为该阶段被跳过
+    var sk = [];
+    var seen = {};
+    var log = Array.isArray(st.log) ? st.log : [];
+    for (var i = 0; i < log.length; i++) {
+      var e = log[i] || {};
+      var k = e.stage, m = e.msg || '';
+      if (!k || seen[k]) continue;
+      if (m.indexOf('跳过') >= 0) {
+        seen[k] = 1;
+        sk.push(k);
+      }
+    }
+    return sk;
+  }
 
-  // 单个 stage 当前状态：error / running / done / pending
-  function stageStateOf(stageKey, st, doneSet, currentStage) {
+  // 单个 stage 当前状态：error / running / done / pending / skipped
+  // REQ-20260921-NNN-skip-warn：skipped 优先于 done（不会两者同时）——
+  // 语义上「跳过」不是「完成」。UI 徽章渲染 ⚠️ 已跳过（黄）区别 ✓ 已完成（绿）。
+  function stageStateOf(stageKey, st, doneSet, skipSet, currentStage) {
     if (!st) return 'pending';
     if (st.state === 'error' && currentStage === stageKey) return 'error';
     if (st.state === 'running' && currentStage === stageKey) return 'running';
+    if (skipSet.indexOf(stageKey) >= 0) return 'skipped';
     if (doneSet.indexOf(stageKey) >= 0) return 'done';
     return 'pending';
   }
@@ -634,19 +675,24 @@
   function updateStageBadges(st) {
     if (!st) return;
     var doneSet = deriveStagesDone(st);
+    // REQ-20260921-NNN-skip-warn：也读 skipped，用于徽章区分真跑通 vs 跳过
+    var skipSet = deriveStagesSkipped(st);
     var currentStage = st.current_stage || null;
     STAGES.forEach(function(stage, idx) {
       var sec = document.querySelector(
         '#slirn-pipe-panel .slirn-pipe-section[data-pipe-section="' + stage.key + '"]'
       );
       if (!sec) return;
-      var s = stageStateOf(stage.key, st, doneSet, currentStage);
+      var s = stageStateOf(stage.key, st, doneSet, skipSet, currentStage);
       sec.setAttribute('data-pipe-state', s);
 
-      // num 圆形：done → ✓，running → ⏳，其他 → 原始序号
+      // num 圆形：done → ✓，running → ⏳，skipped → ⚠，其他 → 原始序号
       var num = sec.querySelector('.slirn-pipe-section-num');
       if (num) {
-        num.textContent = s === 'done' ? '✓' : s === 'running' ? '⏳' : String(idx + 1);
+        num.textContent = s === 'done' ? '✓'
+          : s === 'running' ? '⏳'
+          : s === 'skipped' ? '⚠'
+          : String(idx + 1);
       }
 
       // 徽章：在 label 后插/更新
@@ -665,6 +711,7 @@
       badge.className = 'slirn-pipe-section-state slirn-pipe-section-state-' + (
         s === 'running' ? 'running' :
         s === 'done'    ? 'done'    :
+        s === 'skipped' ? 'skipped' :
         s === 'error'   ? 'error'   : 'pending'
       );
       var pctTxt = '';
@@ -678,6 +725,8 @@
       var textMap = {
         running: '⏳ 运行中' + pctTxt + elapsedTxt,
         done:    '✅ 已完成',
+        // REQ-20260921-NNN-skip-warn：徽章文案区别于 done（避免用户误以为跑完了）
+        skipped: '⚠️ 已跳过',
         error:   '❌ 出错',
         pending: '⏸ 待执行'
       };
@@ -836,10 +885,22 @@
       stopped: '已停止',
       idle: '空闲'
     })[st.state] || st.state;
+    // REQ-20260921-NNN-skip-warn：state=done 但含 skipped 时改文案为「已完成（含跳过）」
+    // 并显示橙色（不再绿），避免用户在 status 顶部误以为全部真跑通
+    var skipSet = deriveStagesSkipped(st);
+    var stateClass = st.state;
+    if (st.state === 'done' && skipSet.length > 0) {
+      stateLabel = '已完成（含 ' + skipSet.length + ' 个跳过）';
+      stateClass = 'done-with-skip';
+    }
     box.innerHTML =
       '<div class="slirn-pipe-status-head" title="拖动此处移动状态条">'
-      + '<span class="slirn-pipe-status-state slirn-pipe-status-state-' + st.state + '">'
-      + (st.state === 'running' ? '⏳' : (st.state === 'done' ? '✅' : (st.state === 'error' ? '❌' : (st.state === 'stopped' ? '⏹' : '•'))))
+      + '<span class="slirn-pipe-status-state slirn-pipe-status-state-' + stateClass + '">'
+      + (st.state === 'running' ? '⏳'
+        : (st.state === 'done' && skipSet.length > 0) ? '⚠'
+        : (st.state === 'done' ? '✅'
+        : (st.state === 'error' ? '❌'
+        : (st.state === 'stopped' ? '⏹' : '•'))))
       + ' ' + escapeHtml(stateLabel) + '</span>'
       + '<span class="slirn-pipe-status-stage">当前阶段：' + escapeHtml(stageLabel) + '</span>'
       + '<progress class="slirn-pipe-status-bar" max="100" value="' + pct + '"></progress>'

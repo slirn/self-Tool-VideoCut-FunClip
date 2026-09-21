@@ -8,6 +8,21 @@
 - run_pipeline stop 标志位
 - v4/v3/v2 旧数据兼容
 - REQ-20260921-NNN：fine_cut 阶段 + 每阶段新字段（link_person_ids / fine_cut config）
+
+本批次更新（REQ-20260921-NNN — 多子任务一起测）：
+- v2 dead 字段移除：default_config fine_cut 不再有 cover_image/bg_image/
+  bgm 键（TEMPLATES 同步：3 套模板 + loadPanel 默认值都不再含）。
+- v4 range_enabled：default_config 含 range_enabled=False；validate_config
+  兜底非 bool → False；脏数据容错。
+- v3 _poll_status 切 POST：必须 POST（form-encoded task_id），不能 GET。
+- v3 handler_optimize accept_all：构造全量 decisions 数组
+  {occ_id, applied, after, reviewed}；occ_id 非 int 的 occurrence 跳过。
+- v2 _check_fine_cut_materials 简化规则：
+  · video/subtitle 上游产物不预检（即使 path 为空也不报 missing）
+  · cover/bg 仅在 layout.<kind>.enabled=True 时检查 path
+  · reference/audio 缺失走 optional_missing 不阻塞
+  · 未启用 fine_cut → 直接 ok=True 不进素材检查
+  · fc.json 不存在 → ok=True（参数缺由 params 预检负责）
 """
 from __future__ import annotations
 

@@ -4,6 +4,16 @@
 // 不能作为内联脚本放进 gr.HTML(head=...)：Gradio 6.17.3 的 head 传输链路会把
 // 脚本文本里的反斜杠转义解码（\n -> 换行、\x20 -> 空格、\\ -> \、孤立的 \ 被删除），
 // 含反斜杠的内联 JS 会变成非法语法而整体失效（2026-09-17 排查结论）。
+//
+// 本批次更新（REQ-20260921-NNN-shake-fix — UI 抖动修复）：
+// - scrollIntoView 去掉 smooth：optWordFilterApply 在「行隐藏 + 加 hint → 列表
+//   高度突变」期间平滑滚动可能被反复打断，视觉上「滚动条上下抖」。即时
+//   scrollIntoView({block:'center'}) 一次到位更稳。
+// - optInputOverflowCheck 改 ±50px 滞回（hysteresis）打破反馈环：原来用
+//   ±2px 容差时，CSS `:has(.wrapped)` 把第 4 列从 260px 切到 minmax(360,1fr)
+//   cw 跨度 ~100px；内容宽度落 (cw+2, cw+102) 死区时，wrapped 类反复切 →
+//   grid 列宽不停变 → ResizeObserver 再触发 → 滚动条上下抖。50px 滞回让
+//   wrap 触发 cw 涨 100px 后落点必在 unwrap 阈值另一侧，状态稳定。
 (function() {
   // 幂等保护：同一页面被注入两次时避免重复绑定
   if (window.__slirnRouterBound) return;

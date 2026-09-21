@@ -2,6 +2,19 @@
 
 渲染层测试：任务卡片按钮、编辑模式预填、工作台阶段状态/面板。
 update_task 的重截取逻辑走 E2E（见 work/REQ-20260915-003-workbench/）。
+
+本批次更新（REQ-20260921-NNN — pipeline 端点 + UI shake-fix 测试）：
+- /pipeline_run 端点 preflight 失败时返回 ok=True 携带 preflight 详情；
+  前端按 r.ok=true & r.preflight.kind 分支显示「去精剪合成页补 X」结构化
+  提示，而不是 r.ok=false 走「未知错误」分支。
+- 跑不到精剪合成时不预检：since=fine_cut 之后阶段跳过；
+  run_mode=stop_after + stop_after < fine_cut_idx 也跳过。
+- pipeline.js HH:MM:SS range_enabled UI：start/dur 输入框 pattern 校验 +
+  range_enabled=False 时 disabled（attribute 而非 CSS）。
+- router.js shake-fix：
+  · scrollIntoView 不带 smooth（opt 词频行过滤「滚到第一个出现处」）。
+  · optInputOverflowCheck ±50px 滞回（hysteresis）—— 测 wrap 状态稳定
+    切换后不抖动；cw 跨度 ~100px 时，cw±50 阈值保证落点稳定。
 """
 
 from __future__ import annotations
@@ -10262,5 +10275,129 @@ def test_pipeline_js_range_on_checkbox_auto_enables_fine_cut():
     assert "enabledCb.checked = true" in nearby, (
         "联动效果：enabledCb.checked = true（不反向设为 false）"
     )
+
+
+def test_pipeline_service_handler_fine_cut_skip_logs_warn_level():
+    """REQ-20260921-NNN-skip-warn：handler_fine_cut 在 enabled=False 时必须以
+    warn 级别记录「跳过」日志（不能 info，否则用户看不到 ⚠️ 标记 = 不知道
+    fine_export.mp4 不会产出 = 续跑按钮误显示「续跑」误导用户）。
+    """
+    src = (FUNCLIP_ROOT / "slirn_home" / "pipeline_service.py").read_text(encoding="utf-8")
+    # 定位 handler_fine_cut 函数体（不用 cfg.get marker — preflight 里也有，
+    # 会错位）。从 def handler_fine_cut 之后取后续 ~1500 字符。
+    idx = src.find("def handler_fine_cut")
+    assert idx >= 0, "handler_fine_cut 函数必须存在"
+    nearby = src[idx:idx + 1800]
+    # 函数内必须读 cfg.enabled（确认是 handler_fine_cut 不是别的）
+    assert 'cfg.get("enabled"' in nearby, "handler_fine_cut 必须读 cfg.enabled"
+    # 必须有「跳过」字样的日志
+    assert "跳过" in nearby, "handler_fine_cut 跳过时必须记录「跳过」日志"
+    # 必须是 warn 级别（不是 info）
+    assert '"warn"' in nearby, (
+        "handler_fine_cut 跳过的日志必须是 warn 级别（用户能在 status 条看到 ⚠️）"
+    )
+
+
+def test_pipeline_service_run_pipeline_summary_includes_stages_skipped():
+    """REQ-20260921-NNN-skip-warn：run_pipeline 必须把 skip 阶段记录到
+    summary.stages_skipped 数组中，前端才能 deriveStagesSkipped 区分 done vs skip。
+    """
+    src = (FUNCLIP_ROOT / "slirn_home" / "pipeline_service.py").read_text(encoding="utf-8")
+    # 顶层 main loop 必须有 stages_skipped 列表 + append 逻辑
+    assert "stages_skipped" in src, (
+        "run_pipeline 主循环必须维护 stages_skipped 列表（前端按它显示 ⚠️）"
+    )
+    assert "stages_skipped.append" in src, "stages_skipped.append 必须存在"
+    # summary dict 必须含 stages_skipped 字段
+    assert '"stages_skipped"' in src or "'stages_skipped'" in src, (
+        "summary 必须含 stages_skipped 字段（前端 deriveStagesSkipped 靠它）"
+    )
+    # 主循环必须按 msg == 'skip' 区分 done vs skipped
+    assert 'msg == "skip"' in src, (
+        "主循环必须按 msg=='skip' 区分 done vs skipped（而非无脑 append done）"
+    )
+
+
+def test_pipeline_js_deriveStagesSkipped_reads_summary_first():
+    """REQ-20260921-NNN-skip-warn：deriveStagesSkipped 必须优先读
+    summary.stages_skipped（权威源），回退到 log 文本扫描（兼容旧 run）。
+    """
+    src = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
+    assert "function deriveStagesSkipped" in src, (
+        "deriveStagesSkipped 必须存在（前端唯一 stage-skip 派生函数）"
+    )
+    idx = src.find("function deriveStagesSkipped")
+    nearby = src[idx:idx + 1000]
+    # 优先 summary
+    assert "stages_skipped" in nearby, (
+        "deriveStagesSkipped 必须读 st.summary.stages_skipped"
+    )
+    # 回退到 log 扫描「跳过」
+    assert "跳过" in nearby, (
+        "deriveStagesSkipped 必须回退到 log 文本扫描「跳过」（兼容旧 run）"
+    )
+
+
+def test_pipeline_js_renderStatusBar_shows_done_with_skip_label():
+    """REQ-20260921-NNN-skip-warn：renderStatusBar 在 state=done 但
+    summary.stages_skipped 非空时，必须改文案为「已完成（含 N 个跳过）」
+    并打 done-with-skip 类（橙色），不再绿色误导用户。
+    """
+    src = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
+    idx = src.find("function renderStatusBar")
+    assert idx >= 0, "renderStatusBar 必须存在"
+    nearby = src[idx:idx + 3500]
+    # 必须调用 deriveStagesSkipped（拿 skip 集合）
+    assert "deriveStagesSkipped(st)" in nearby, (
+        "renderStatusBar 必须算 skip 集合（决定是否改文案）"
+    )
+    # 必须出现「含 ... 跳过」文案
+    assert "已完成（含" in nearby, (
+        "renderStatusBar 必须改文案为「已完成（含 N 个跳过）」"
+    )
+    # 必须有 done-with-skip 样式类（CSS 才有橙色）
+    assert "done-with-skip" in nearby, (
+        "renderStatusBar 必须给含 skip 的 done 加 done-with-skip 类（CSS 橙色）"
+    )
+
+
+def test_home_css_status_state_done_with_skip_amber_color():
+    """REQ-20260921-NNN-skip-warn：CSS 必须为 done-with-skip 提供橙色样式
+    （不再绿色），让 status 头部一眼能看出「跑了但有跳过」。
+    """
+    css = (FUNCLIP_ROOT / "slirn_home" / "static" / "home.css").read_text(encoding="utf-8")
+    assert ".slirn-pipe-status-state-done-with-skip" in css, (
+        "CSS 必须为 done-with-skip 状态提供样式"
+    )
+    # 必须在 done-with-skip 选择器块内包含琥珀色（amber）
+    idx = css.find(".slirn-pipe-status-state-done-with-skip")
+    nearby = css[idx:idx + 400]
+    assert "245, 158, 11" in nearby or "#b45309" in nearby or "#fbbf24" in nearby, (
+        "done-with-skip 必须使用琥珀色（amber）背景或文字"
+    )
+
+
+def test_pipeline_js_stageStateOf_and_updateStageBadges_render_skipped():
+    """REQ-20260921-NNN-skip-warn：stageStateOf 必须把 skip 状态优先级提到
+    done 之前；updateStageBadges 必须为 skip 状态输出 ⚠️ 标记 + 「已跳过」
+    文本（让用户在 6 阶段列表里也能看到哪个阶段被跳了）。
+    """
+    src = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
+    # stageStateOf 必须在 done 之前判 skipped
+    idx = src.find("function stageStateOf")
+    assert idx >= 0, "stageStateOf 必须存在"
+    nearby = src[idx:idx + 1500]
+    assert "'skipped'" in nearby, "stageStateOf 必须支持 'skipped' 状态"
+    sk_idx = nearby.find("'skipped'")
+    done_idx = nearby.find("'done'")
+    assert sk_idx < done_idx, (
+        "stageStateOf 必须先判 'skipped' 再判 'done'（skip 优先于 done）"
+    )
+    # updateStageBadges 必须渲染「已跳过」文案
+    idx = src.find("function updateStageBadges")
+    assert idx >= 0, "updateStageBadges 必须存在"
+    nearby = src[idx:idx + 3000]
+    assert "已跳过" in nearby, "updateStageBadges 必须为 skipped 状态渲染「已跳过」文案"
+    assert "'skipped'" in nearby, "updateStageBadges 必须为 skipped 状态分配 className 后缀"
 
 

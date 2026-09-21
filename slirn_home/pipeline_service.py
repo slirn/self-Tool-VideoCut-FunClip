@@ -1,11 +1,12 @@
 """REQ-20260918-047 — 流程配置 + 自动执行。
 
 Per-task 持久化 `outputs/pipeline.json`：
-- `config`：5 阶段可选项（subtitle_generation/subtitle_review/rough_cut/rough_compose/optimize）
+- `config`：6 阶段可选项（subtitle_generation/subtitle_review/rough_cut/
+  rough_compose/optimize/fine_cut；v5 schema）
 - `stop_after`：流程层总停点（覆盖每阶段的 stop_after，取更严的）
 - `history`：最近 10 次完整运行的 summary
 
-后台调度器（`_PIPELINE_JOBS[tid]`）守护线程顺序跑 5 个 handler，每个
+后台调度器（`_PIPELINE_JOBS[tid]`）守护线程顺序跑 6 个 handler，每个
 handler 通过 in-process HTTP client（urllib）调现有 `/slirn/api/*` 端点，
 复用现有 client polling 与 modal 状态机。
 
@@ -16,6 +17,22 @@ handler 通过 in-process HTTP client（urllib）调现有 `/slirn/api/*` 端点
 service 的 _JOBS，并发时按各 service 的「running 拒绝新起」语义处理。
 
 设计见 docs/design/DESIGN-20260918-047-pipeline-auto-run.md。
+
+本批次更新（REQ-20260921-NNN — v2/v3/v4 多子任务一起收）：
+- v2：default_config 移除 cover_image/bg_image/bgm 死字段（实际在 fc.json
+  的 materials.{cover,bg,audio}.path，由工作台第 6 阶段详情页上传写入）；
+  _check_fine_cut_materials 简化规则 —— video/subtitle 上游产物不预检，
+  cover/bg 仅当 layout.enabled=True 时检查，reference/audio 缺失不阻塞。
+- v3：_poll_status 改 POST 调 4 个 status 端点
+  （/subtitle_status / /revise_status / /compose_rough_status /
+  /optimize_subtitle_status）—— 早期版本误用 _http_get 导致
+  state 永远不是 done，主循环卡第一阶段。/render_status 由独立
+  _poll_export 处理（GET 端点）不要混用。handler_optimize accept_all
+  改构造全量 decisions 数组 {occ_id, applied, after, reviewed} ——
+  save_optimize_subtitle 端点硬约束；不接受 applied_all 标志。
+- v4：fine_cut 加 range_enabled 门控「区间导出」（HH:MM:SS 输入）——
+  不勾 = 全片（保留默认意图），勾上 = 按 preview_start/duration 导。
+  validate_config 同步兜底 range_enabled bool（脏数据 → False）。
 """
 from __future__ import annotations
 
@@ -957,7 +974,11 @@ def handler_fine_cut(tid: str, cfg: dict, outputs_dir: Path, api: str,
     _result: list = [False, ""]
     try:
         if not bool(cfg.get("enabled", False)):
-            _log(job, "fine_cut", "未启用自动最终导出（cfg.enabled=False），跳过", "info")
+            # REQ-20260921-NNN-skip-warn：升级 log 等级为 warn，让 UI 顶部 status
+            # 能区分「真跑通」vs「跳过」（之前 info 级 + 最终 ✅ 已完成 误显示
+            # 为绿色对勾，用户以为精剪合成跑完了，实际 cfg.enabled=False 没产出
+            # fine_export.mp4）。
+            _log(job, "fine_cut", "⚠️ 未启用自动最终导出（cfg.enabled=False），跳过 — 不会产出 fine_export.mp4", "warn")
             _result[0] = True
             _result[1] = "skip"
             return (True, _result[1])
@@ -1084,6 +1105,11 @@ def run_pipeline(tid: str, api: str, outputs_dir: Path, *,
             # since 解析：None 表示从头跑；否则「从 since 这一阶段开始」跳过更早的阶段
             since_idx = STAGE_INDEX.get(since, -1) if since else -1
             stages_done: list[str] = []
+            # REQ-20260921-NNN-skip-warn：单独追踪跳过的 stage，让 UI 能区分
+            # 「真跑通」vs「被跳过」（之前 stages_done 不含 skip，结果 UI 把
+            # fine_cut.cfg.enabled=False 跳过误显示为 ✅ 完成）。skip 不算
+            # 「done」，但要暴露出来给前端渲染徽章用。
+            stages_skipped: list[str] = []
             for stage_key, stage_label, _pane in STAGE_ORDER:
                 idx = STAGE_INDEX[stage_key]
                 if idx < since_idx:
@@ -1116,7 +1142,9 @@ def run_pipeline(tid: str, api: str, outputs_dir: Path, *,
                     _log(job, stage_key, f"❌ {msg}", "error")
                     break
                 if msg == "skip":
-                    pass  # 跳过不计入 done
+                    # REQ-20260921-NNN-skip-warn：单独记录跳过的 stage，让前端
+                    # 能区分「真跑通（✓ 绿）」vs「跳过（⚠️ 黄）」徽章
+                    stages_skipped.append(stage_key)
                 else:
                     stages_done.append(stage_key)
                 # v5 stop_after：run_mode=to_end 时 flow_stop 已被 validate_config 重置为 None；
@@ -1127,9 +1155,17 @@ def run_pipeline(tid: str, api: str, outputs_dir: Path, *,
                     job.state = "stopped"
                     break
             else:
-                # 全部阶段正常 → done
+                # 全部阶段正常 → done（但区分全跑通 vs 含跳过）
                 job.state = "done"
-                _log(job, "_end", "✅ 全部阶段完成", "ok")
+                if stages_skipped:
+                    # REQ-20260921-NNN-skip-warn：含跳过的完成用 warn 级 + 明确
+                    # 计数，让用户在 status 顶部一眼看到「不是真跑通」
+                    skip_list = "、".join(stages_skipped)
+                    _log(job, "_end",
+                         f"⚠️ 全部阶段完成（含 {len(stages_skipped)} 个跳过：{skip_list}）",
+                         "warn")
+                else:
+                    _log(job, "_end", "✅ 全部阶段完成", "ok")
             job.finished_at = time.time()
             job.percent = 100.0 if job.state == "done" else job.percent
             # summary + append history
@@ -1139,6 +1175,8 @@ def run_pipeline(tid: str, api: str, outputs_dir: Path, *,
                 "duration_ms": int((job.finished_at - (job.started_at or job.finished_at)) * 1000),
                 "status": job.state,
                 "stages_done": stages_done,
+                # REQ-20260921-NNN-skip-warn：把跳过列表写进 summary，前端能读到
+                "stages_skipped": stages_skipped,
                 "since": since,
                 "error": job.error,
             }
