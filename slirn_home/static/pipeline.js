@@ -912,6 +912,13 @@
         toast(r.toast || ('🧹 已清理 ' + (r.deleted || []).length + ' 个产物'));
         // 刷新面板：让 stages_done / history 全部重新加载（清空后）
         loadPanel(taskId);
+        // REQ-20260921-NNN：服务端把 t.status 也降回 DRAFT 后，工作台顶部
+        // 「阶段」tab 的绿色对号（_wb_stage_states 看 t.status + 磁盘产物）
+        // 必须整页重渲才消失。loadPanel 只刷流程配置面板，不刷 wb —— 显式
+        // 触发 openWorkbench 重拉整张 wb HTML（router.js: window.slirnOpenWorkbench）。
+        if (typeof window.slirnOpenWorkbench === 'function') {
+          try { window.slirnOpenWorkbench(taskId); } catch (e) {}
+        }
       } else {
         toast('清理失败：' + (r && r.error || '未知错误'), 'error');
       }

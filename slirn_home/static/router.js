@@ -766,6 +766,9 @@
       }
     });
   }
+  // REQ-20260921-NNN：暴露到 window，让其他模块（如 pipeline.js 清理所有阶段后）
+  // 能强制刷新工作台（让 _wb_stage_states 重算，绿色对号立即消失）。
+  window.slirnOpenWorkbench = openWorkbench;
 
   // ===== 阶段列表收起/展开（localStorage 记忆 — REQ-20260916-002）=====
   function applyWbStagesState() {

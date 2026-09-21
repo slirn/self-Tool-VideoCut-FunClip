@@ -9300,6 +9300,121 @@ def test_app_py_pipeline_reset_stages_endpoint_exists():
     )
 
 
+def test_pipeline_reset_stages_resets_task_status_to_draft(tmp_path: Path):
+    """REQ-20260921-NNN：清理所有阶段产物后，必须把 t.status 降回 DRAFT。
+
+    根因：_wb_stage_states() 既看磁盘产物，也看 t.status 等级。即使产物
+    全删了，t.status=FINE_CUT_DONE 仍会让所有阶段显示绿色对号（cur_rank
+    >= rank[status_name] 为真）。降到 DRAFT 后：assets 看原视频（还在就
+    done），其他 5 阶段产物已删 + rank 不足 → 全部 pending。
+    """
+    from fastapi.testclient import TestClient
+    from tasklib.models import TaskStatus
+    from slirn_home import build_app
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="reset-status", original_video=video)
+
+    # 把任务推到 FINE_CUT_DONE 模拟「全部完成」
+    m.update_status(t.task_id, TaskStatus.FINE_CUT_DONE)
+    assert m.get(t.task_id).status == TaskStatus.FINE_CUT_DONE
+
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.post(
+        "/slirn/api/pipeline_reset_stages",
+        json={"task_id": t.task_id},
+    )
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+
+    # 状态必须回到 DRAFT（否则工作台所有阶段仍是绿色对号）
+    after = m.get(t.task_id)
+    assert after.status == TaskStatus.DRAFT, (
+        f"清理后状态应回到 DRAFT，实际为 {after.status}"
+    )
+
+
+def test_pipeline_reset_stages_clears_wb_stage_marks(tmp_path: Path):
+    """REQ-20260921-NNN：清理后 _render_workbench 应只让 assets 阶段显示 done。
+
+    - assets：原视频还在 → done（原视频被显式保留）
+    - subtitle / subtitle_review / rough_cut / rough_compose / fine_review /
+      fine_cut：产物已删 + 状态降为 DRAFT → 全部 pending
+    """
+    from fastapi.testclient import TestClient
+    from tasklib.models import TaskStatus
+    from slirn_home import build_app
+    from slirn_home.app import _render_workbench
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="reset-marks", original_video=video)
+    m.update_status(t.task_id, TaskStatus.FINE_CUT_DONE)
+
+    # 在 outputs 放产物（清理前应被识别为 done；清理后应都被删）
+    outputs_dir = m.tasks_dir / t.task_id / "outputs"
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    (outputs_dir / "subtitle.json").write_text("{}")
+    (outputs_dir / "fc.json").write_text("{}")
+
+    # 清理前：因产物 + 高 rank 状态 → 大部分阶段应 done
+    pre_html = _render_workbench(t.task_id, m)
+    pre_done_count = pre_html.count('class="slirn-wb-stage done')
+    assert pre_done_count >= 4, (
+        f"清理前应有 ≥4 个 done 阶段（产物 + 状态都在），实际={pre_done_count}"
+    )
+
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.post(
+        "/slirn/api/pipeline_reset_stages",
+        json={"task_id": t.task_id},
+    )
+    assert r.json()["ok"] is True
+
+    # 清理后：只剩 assets 阶段仍 done（原视频保留），其他都 pending
+    post_html = _render_workbench(t.task_id, m)
+    post_done_count = post_html.count('class="slirn-wb-stage done')
+    assert post_done_count == 1, (
+        f"清理后应仅 assets 仍 done（其他都应清空），实际 done 数={post_done_count}"
+    )
+    # subtitle 阶段产物被删 → pending
+    assert (outputs_dir / "subtitle.json").exists() is False
+    assert (outputs_dir / "fc.json").exists() is False
+
+
+def test_pipeline_js_reset_stages_calls_openWorkbench():
+    """REQ-20260921-NNN：resetStages 成功后必须调 window.slirnOpenWorkbench。
+
+    原因：loadPanel 只刷流程配置面板，不刷 wb；服务端把 t.status 降到
+    DRAFT 后，工作台顶部的绿色对号必须整页重渲（_wb_stage_states）才
+    真正消失。
+    """
+    src = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
+    func_idx = src.find("function resetStages")
+    assert func_idx >= 0, "缺 resetStages 函数"
+    next_func = src.find("\n  function ", func_idx + 1)
+    func_body = src[func_idx:next_func if next_func > 0 else func_idx + 3000]
+    assert "slirnOpenWorkbench" in func_body, (
+        "resetStages 成功后必须调 window.slirnOpenWorkbench(taskId) "
+        "让工作台整页重渲（绿色对号立即消失）"
+    )
+    # 同时仍要刷流程配置面板
+    assert "loadPanel(taskId)" in func_body, (
+        "resetStages 应继续调 loadPanel(taskId) 刷流程配置面板"
+    )
+
+
+def test_router_js_exposes_openWorkbench():
+    """REQ-20260921-NNN：router.js 必须把 openWorkbench 暴露到 window。
+
+    让 pipeline.js 清理所有阶段后能强制刷新工作台（让 _wb_stage_states
+    重算，绿色对号立即消失）。
+    """
+    src = (FUNCLIP_ROOT / "slirn_home" / "static" / "router.js").read_text(encoding="utf-8")
+    assert "window.slirnOpenWorkbench = openWorkbench" in src, (
+        "router.js 必须有 window.slirnOpenWorkbench = openWorkbench 暴露语句"
+    )
+
+
 def test_css_has_reset_block_styling():
     """REQ-20260921-NNN：home.css 必须有 slirn-pipe-reset-block 样式。"""
     css_src = (FUNCLIP_ROOT / "slirn_home" / "static" / "home.css").read_text(encoding="utf-8")

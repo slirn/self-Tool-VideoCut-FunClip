@@ -8229,6 +8229,19 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         except Exception:
             pass
 
+        # REQ-20260921-NNN：把任务状态回到 DRAFT — 否则 _wb_stage_states() 会
+        # 因为 t.status=FINE_CUT_DONE 让所有阶段仍然显示绿色对号（cur_rank>=
+        # rank[status_name] 为真）。降到 DRAFT 后：assets 看磁盘（原视频还在
+        # 就 done），其他 5 阶段产物已删 + rank 不足 → 全部回到 pending。
+        try:
+            from tasklib.models import TaskStatus as _TS
+            if getattr(t.status, "name", str(t.status)) != _TS.DRAFT.name:
+                mgr.update_status(tid, _TS.DRAFT)
+                log.info("REQ-20260921-NNN：清理后把状态 %s → DRAFT",
+                         getattr(t.status, "name", t.status))
+        except Exception as e:  # noqa: BLE001
+            log.warning("REQ-20260921-NNN：清理后状态回退失败（不影响主流程）：%s", e)
+
         return _ok("", deleted=deleted, skipped=skipped,
                    toast=f"🧹 已清理 {len(deleted)} 个阶段产物"
                          + (f"（{len(skipped)} 跳过）" if skipped else ""))
