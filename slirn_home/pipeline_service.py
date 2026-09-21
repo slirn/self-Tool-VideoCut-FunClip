@@ -155,15 +155,15 @@ def default_config() -> dict:
         # 实际素材路径在 fc.json 的 materials.{cover,bg,audio}.path，由工作台第 6 阶段
         # 详情页上传写入。流程配置面板只保留「跑不跑」+「跑哪段」+「用哪份参数」3 类决策。
         "fine_cut": {
-            "enabled": False,             # 默认关，避免误触发几小时重编码
+            # REQ-20260921-NNN-radio-mode：默认 enabled=true + range_enabled=true
+            # （与 UI 默认 radio=range「按区间导出一段」一致）。设计要求：默认
+            # 行为 = 跑到 fine_cut 就导 10 分钟看效果；想导全片用户在 UI 切到
+            # 「出整个片」；想彻底跳过 fine_cut 走顶层 stop_after="optimize"。
+            "enabled": True,
             "params_source": "current",   # "current" | "template:<profile_id>"
-            # REQ-20260921-NNN-v4：range_enabled 门控「区间导出」——
-            # 不勾 = 全片（忽略 preview_start/duration）；勾上 = 按下面两个值导。
-            # 设计动机：HH:MM:SS 输入 + 默认 00:10:00 会让「默认行为」从全片变成
-            # 前 10 分钟，回归太大。加 checkbox 保留「全片」作为默认意图。
-            "range_enabled": False,
+            "range_enabled": True,         # 默认按区间（10 分钟）
             "preview_start": 0.0,         # 导出起点（秒，0 = 全篇）
-            "duration": None,             # 导出时长（秒，None = 全篇）
+            "duration": 600.0,            # 导出时长（秒，默认 10 分钟）
         },
         # REQ-20260921-NNN：顶层运行模式
         #   "to_end"      = 一键跑到底（忽略 stop_after）
@@ -224,12 +224,18 @@ def validate_config(cfg: dict) -> dict:
     valid_rigor = ("high", "medium", "low", "custom")
     if base["subtitle_review"].get("rigor") not in valid_rigor:
         base["subtitle_review"]["rigor"] = "medium"
-    # REQ-20260921-NNN：fine_cut.enabled 必须 bool（脏数据兜底 False — 防误跑）
+    # REQ-20260921-NNN-radio-mode：fine_cut.enabled / range_enabled 必须 bool。
+    # 脏数据兜底回退到 default_config 的默认值（True — 与 UI 默认 radio=range 一致），
+    # 而非硬编码 False（v5 旧逻辑已废）。
     if not isinstance(base["fine_cut"].get("enabled"), bool):
-        base["fine_cut"]["enabled"] = False
-    # REQ-20260921-NNN-v4：range_enabled 必须 bool（脏数据兜底 False — 默认全片）
+        base["fine_cut"]["enabled"] = True
     if not isinstance(base["fine_cut"].get("range_enabled"), bool):
-        base["fine_cut"]["range_enabled"] = False
+        base["fine_cut"]["range_enabled"] = True
+    # REQ-20260921-NNN-range-overrides-enabled：legacy 迁移 — 旧 cfg 可能是
+    # enabled=False, range_enabled=True（联动修复前的脏状态）。规范化时强制
+    # enabled=True。新 radio UI 已物理保证一致性，本块仅为兼容 legacy pipeline.json。
+    if base["fine_cut"].get("range_enabled") is True:
+        base["fine_cut"]["enabled"] = True
     # link_person_ids 兜底为 bool（脏数据 → False）
     for sk in ("subtitle_review", "rough_cut"):
         if not isinstance(base[sk].get("link_person_ids"), bool):
@@ -590,7 +596,10 @@ def fine_cut_preflight(tid: str, cfg: dict, outputs_dir: Path) -> dict:
       - parameters: dict {ok, reason, has_fc_json, params_source}
     """
     fc_cfg = (cfg or {}).get("fine_cut") or {}
-    enabled = bool(fc_cfg.get("enabled", False))
+    # REQ-20260921-NNN-range-overrides-enabled：勾了 range_enabled 也视为启用
+    # （与 handler_fine_cut 跳过条件保持一致 — 单点真相，避免「预检通过但
+    # 跑到 handler 又被 skip」的语义错位）。
+    enabled = bool(fc_cfg.get("enabled", False)) or bool(fc_cfg.get("range_enabled", False))
     if not enabled:
         return {"ok": True, "reason": "", "enabled": False,
                 "has_fc_json": True,
@@ -973,12 +982,19 @@ def handler_fine_cut(tid: str, cfg: dict, outputs_dir: Path, api: str,
     """
     _result: list = [False, ""]
     try:
-        if not bool(cfg.get("enabled", False)):
+        # REQ-20260921-NNN-range-overrides-enabled：用户表达「按区间导出」意图
+        # 时（range_enabled=True），即便 enabled 默认关也要执行 — 用户主动配
+        # 起点 / 时长 = 明确要导一区段，不能再让 enabled 漏勾卡住。「用户意图」
+        # 优先于「防误跑」开关。设计要求：勾 range 就该能跑（用户只看不跑全片
+        # 就要看一段的反馈）。
+        fc_enabled = bool(cfg.get("enabled", False))
+        fc_range = bool(cfg.get("range_enabled", False))
+        if not fc_enabled and not fc_range:
             # REQ-20260921-NNN-skip-warn：升级 log 等级为 warn，让 UI 顶部 status
             # 能区分「真跑通」vs「跳过」（之前 info 级 + 最终 ✅ 已完成 误显示
             # 为绿色对勾，用户以为精剪合成跑完了，实际 cfg.enabled=False 没产出
             # fine_export.mp4）。
-            _log(job, "fine_cut", "⚠️ 未启用自动最终导出（cfg.enabled=False），跳过 — 不会产出 fine_export.mp4", "warn")
+            _log(job, "fine_cut", "⚠️ 未启用自动最终导出（enabled=False, range_enabled=False），跳过 — 不会产出 fine_export.mp4", "warn")
             _result[0] = True
             _result[1] = "skip"
             return (True, _result[1])

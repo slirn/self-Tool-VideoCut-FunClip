@@ -73,10 +73,13 @@ def test_default_config_has_run_mode_stop_after():
     assert cfg["run_mode"] == "stop_after"
 
 
-def test_default_config_fine_cut_enabled_false():
-    """v5：fine_cut.enabled 默认 False（防误跑）。"""
+def test_default_config_fine_cut_enabled_true_by_default():
+    """REQ-20260921-NNN-radio-mode：fine_cut.enabled 默认 True（与 UI 默认
+    radio=range「按区间导出一段」一致）。用户从流程配置进入看到 range 模式预选，
+    pipeline 跑到底默认会导 10 分钟看效果。想跳过 fine_cut 走顶层 stop_after。
+    """
     cfg = P.default_config()
-    assert cfg["fine_cut"]["enabled"] is False
+    assert cfg["fine_cut"]["enabled"] is True
 
 
 def test_default_config_fine_cut_has_required_keys():
@@ -221,12 +224,15 @@ def test_validate_config_invalid_run_mode_falls_back_to_stop_after():
     assert out["run_mode"] == "stop_after"
 
 
-def test_validate_config_fine_cut_enabled_non_bool_falls_back_false():
-    """v5：fine_cut.enabled 非 bool → 回退 False（防误跑）。"""
+def test_validate_config_fine_cut_enabled_non_bool_falls_back_true():
+    """REQ-20260921-NNN-radio-mode：fine_cut.enabled 非 bool → 回退到默认 True
+    （与 default_config 一致）。原 v5「防误跑回退 False」逻辑已废 — 现在默认
+    启用 + 单选 UI 物理保证二选一，「防误跑」改由用户主动选 stop_after 表达。
+    """
     user = P.default_config()
     user["fine_cut"]["enabled"] = "yes"
     out = P.validate_config(user)
-    assert out["fine_cut"]["enabled"] is False
+    assert out["fine_cut"]["enabled"] is True
 
 
 def test_validate_config_fine_cut_accepts_full_settings():
@@ -717,27 +723,33 @@ def test_handler_fine_cut_applies_template_before_export(monkeypatch, tmp_path: 
 # - handler_fine_cut 在 range_enabled=True 时发 preview_start/duration（区间导出）
 
 
-def test_default_config_fine_cut_has_range_enabled_default_false():
-    """v4 默认 range_enabled=False（全片导出）。"""
+def test_default_config_fine_cut_has_range_enabled_default_true():
+    """REQ-20260921-NNN-radio-mode：range_enabled 默认 True（与 UI 默认
+    radio=range 一致 — 默认按区间导一段）。
+    """
     cfg = P.default_config()
     assert "range_enabled" in cfg["fine_cut"]
-    assert cfg["fine_cut"]["range_enabled"] is False
+    assert cfg["fine_cut"]["range_enabled"] is True
 
 
-def test_validate_config_fine_cut_range_enabled_non_bool_falls_back_false():
-    """v4 兜底：脏数据（字符串/None/数字）→ False，不抛异常。"""
-    # 字符串 True（用户误填）
+def test_validate_config_fine_cut_range_enabled_non_bool_falls_back_true():
+    """REQ-20260921-NNN-radio-mode：脏数据 → 回退到默认 True（与 default 一致）。
+    注：range 标志是 fine_cut 是否按区间导的开关，validate_config 仅做类型兜底。
+    - 字符串 truthy / 数字 truthy → 强制 bool(v)
+    - None / 缺省 → 默认 True（与 default_config 一致；旧版「None → False」逻辑已废）
+    """
+    # 字符串 True（用户误填）→ 视为 True（truthy）
     cfg = P.validate_config({"fine_cut": {"range_enabled": "true"}})
-    assert cfg["fine_cut"]["range_enabled"] is False
-    # None
+    assert cfg["fine_cut"]["range_enabled"] is True
+    # None → 默认 True（无显式意图 = 用新默认；与 radio UI 默认预选 range 一致）
     cfg = P.validate_config({"fine_cut": {"range_enabled": None}})
-    assert cfg["fine_cut"]["range_enabled"] is False
-    # 数字 1
+    assert cfg["fine_cut"]["range_enabled"] is True
+    # 数字 1 → truthy
     cfg = P.validate_config({"fine_cut": {"range_enabled": 1}})
-    assert cfg["fine_cut"]["range_enabled"] is False
-    # 缺省
+    assert cfg["fine_cut"]["range_enabled"] is True
+    # 缺省 → 默认 True
     cfg = P.validate_config({"fine_cut": {}})
-    assert cfg["fine_cut"]["range_enabled"] is False
+    assert cfg["fine_cut"]["range_enabled"] is True
 
 
 def test_handler_fine_cut_range_disabled_sends_full_video_body(monkeypatch, tmp_path: Path):
@@ -1324,12 +1336,15 @@ def _write_fc(task_dir: Path, fc: dict) -> Path:
 
 
 def test_fine_cut_preflight_disabled_returns_ok(tmp_path: Path):
-    """fine_cut.enabled=False → 预检直接通过，不读 fc.json。"""
+    """REQ-20260921-NNN-radio-mode：enabled=False AND range_enabled=False →
+    预检直接通过，不读 fc.json。两个都得显式关（与 handler 跳过条件一致）。
+    """
     from slirn_home import pipeline_service as P
 
     task_dir, outputs_dir = _make_task_dir(tmp_path)
     cfg = P.default_config()
     cfg["fine_cut"]["enabled"] = False
+    cfg["fine_cut"]["range_enabled"] = False
     pre = P.fine_cut_preflight("t-fc", cfg, outputs_dir)
     assert pre["ok"] is True
     assert pre["enabled"] is False

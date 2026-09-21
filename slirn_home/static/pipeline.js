@@ -224,21 +224,43 @@
     // 上传写入）。流程配置面板只保留「跑不跑」+「跑哪段」+「用哪份参数」3 类决策。
     if (stage.key === 'fine_cut') {
       var fc0 = stageCfg || {};
-      var enabledOn = fc0.enabled ? ' checked' : '';
-      var rangeOn = fc0.range_enabled ? ' checked' : '';
+      // REQ-20260921-NNN-radio-mode：精剪合成导出方式改单选卡片组（二选一）。
+      //   - 「出整个片」(full) → enabled=true, range_enabled=false
+      //   - 「按区间导出一段」(range) → enabled=true, range_enabled=true（默认）
+      // 设计要求：要么导全片，要么导一段看效果。要彻底跳过 fine_cut 走
+      // 顶层 stop_after="optimize" 配置，不在本 radio 表达。
+      // 预选规则（覆盖 stageCfg）：
+      //   - enabled && !range_enabled → full
+      //   - 其他（默认 / legacy 脏状态 / disabled-and-range-true）→ range
+      var exportMode = 'range';
+      if (fc0.enabled === true && fc0.range_enabled === false) {
+        exportMode = 'full';
+      }
       var paramsSrc = fc0.params_source || 'current';
       // REQ-20260921-NNN-v4：UI 改 HH:MM:SS，内部仍是秒。
-      // 默认 start=00:00:00 / duration=00:10:00；range_enabled=False 时输入框
-      // 显示但 disabled（让用户看到默认「会导 10 分钟」但不会被误触发）。
+      // 默认 start=00:00:00 / duration=00:10:00；range 模式下输入框 enable，
+      // full 模式下 disabled（全片导没必要配区间）。
       var startStr = secondsToHms(fc0.preview_start != null ? Number(fc0.preview_start) : 0);
       var durStr   = secondsToHms(fc0.duration != null ? Number(fc0.duration) : 600);
-      var rangeDisabled = fc0.range_enabled ? '' : ' disabled';
+      var rangeDisabled = exportMode === 'range' ? '' : ' disabled';
       return '<div class="slirn-pipe-form">'
         + '<div class="slirn-pipe-desc">' + escapeHtml(stage.desc) + '</div>'
-        // 启用开关（默认关，防误跑几小时重编码）
-        + '<label class="slirn-pipe-field">'
-        + '<input type="checkbox" id="' + fieldId(stage.key, 'enabled') + '"' + enabledOn + '> 启用自动最终导出（默认关 — 启用会触发几小时重编码）'
+        // REQ-20260921-NNN-radio-mode：导出方式单选卡片组（复用 .slirn-rigor-card 样式）
+        + '<div class="slirn-pipe-subhead">导出方式（必选其一；选「按区间导出一段」= 默认 10 分钟可快速看效果）：</div>'
+        + '<div class="slirn-rigor-cards slirn-pipe-export-mode-cards">'
+        + '<label class="slirn-rigor-card slirn-pipe-export-mode-card" title="导出整个粗剪成片，1-3 小时重编码（按视频长度）">'
+        + '<input type="radio" name="slirn-pipe-fc-export-mode" value="full"' + (exportMode === 'full' ? ' checked' : '') + '>'
+        + '<span class="slirn-rigor-card-title">🎬 出整个片</span>'
+        + '<span class="slirn-rigor-card-desc">导出全片（1-3 小时重编码）</span>'
+        + '<span class="slirn-rigor-card-example">适合最终成品交付；耗时较长。</span>'
         + '</label>'
+        + '<label class="slirn-rigor-card slirn-pipe-export-mode-card" title="导出起止时间内的片段，1-10 分钟重编码（按区间长度）">'
+        + '<input type="radio" name="slirn-pipe-fc-export-mode" value="range"' + (exportMode === 'range' ? ' checked' : '') + '>'
+        + '<span class="slirn-rigor-card-title">✂️ 按区间导出一段</span>'
+        + '<span class="slirn-rigor-card-desc">按下面 HH:MM:SS 起点 + 时长导出（默认 10 分钟）</span>'
+        + '<span class="slirn-rigor-card-example">适合快速看效果、交付片段。</span>'
+        + '</label>'
+        + '</div>'
         // REQ-20260921-NNN：素材说明 —— 明确告诉用户素材在哪维护，哪些自动获取
         + '<div class="slirn-pipe-hint slirn-pipe-fine-cut-materials-note">'
         + '<b>📦 素材维护位置：</b>精剪合成的所有素材（封面 / 背景 / 背景音乐 / 视频 / 字幕）都在 '
@@ -258,11 +280,7 @@
         + '<div class="slirn-pipe-hint slirn-pipe-fine-cut-params-note" data-fine-cut-params-note>'
         + '>若本任务已保存过精剪参数（<code>fine_compose.json</code>），可选「当前参数」；'
         + '否则必须选模板，或去精剪合成详情页「导入参数」。</div>'
-        // REQ-20260921-NNN-v4：导出区间（HH:MM:SS）+ range_enabled checkbox 门控
-        + '<label class="slirn-pipe-field">'
-        + '<input type="checkbox" id="' + fieldId(stage.key, 'range-on') + '" data-range-on' + rangeOn + '>'
-        + ' 按区间导出（不勾 = 全片；勾上 = 用下面两个时间导）'
-        + '</label>'
+        // REQ-20260921-NNN-v4：导出区间（HH:MM:SS）。range 模式时 enable，full 时 disabled。
         + '<label class="slirn-pipe-field"><span>导出起点（HH:MM:SS，0=全篇）：</span>'
         + '<input type="text" id="' + fieldId(stage.key, 'start') + '" data-range-input'
         + ' value="' + escapeHtml(startStr) + '" placeholder="00:00:00"'
@@ -458,21 +476,18 @@
         paramsNote.style.color = '';
       }
     }
-    // REQ-20260921-NNN-v4：range_on checkbox 切换 HH:MM:SS 输入框 disabled 状态
-    var rangeCb = document.querySelector('[data-range-on]');
-    if (rangeCb) {
-      rangeCb.addEventListener('change', function() {
-        var inputs = document.querySelectorAll('[data-range-input]');
-        inputs.forEach(function(i) { i.disabled = !rangeCb.checked; });
-        // REQ-20260921-NNN-range-couples-enabled：勾上「按区间导出」→ 自动启用
-        // fine_cut（用户主动配 start/duration = 明确要导）。enabled 默认关是
-        // 防误触发几小时重编码，但用户已经表达意图就不该再让 enabled 漏勾导致
-        // 「cfg.enabled=False → 跳过」一直卡住。反向不解耦：用户取消 range 不
-        // 影响 enabled（可能仍想导全片）。
-        if (rangeCb.checked) {
-          var enabledCb = document.getElementById(fieldId('fine_cut', 'enabled'));
-          if (enabledCb && !enabledCb.checked) enabledCb.checked = true;
-        }
+    // REQ-20260921-NNN-radio-mode：单选卡片切换 HH:MM:SS 输入框 disabled 状态。
+    // 选「按区间导出一段」= enable inputs（用户要配起点 + 时长）；选「出整个片」=
+    // disable inputs（全片导没必要配区间）。无需联动 enabled — radio 已经保证
+    // 二选一语义（不可能漏勾），enabled 在 readCurrentConfig 里从 radio 派生。
+    var exportModeRadios = document.querySelectorAll('input[name="slirn-pipe-fc-export-mode"]');
+    if (exportModeRadios.length) {
+      exportModeRadios.forEach(function(radio) {
+        radio.addEventListener('change', function() {
+          if (!radio.checked) return;
+          var inputs = document.querySelectorAll('[data-range-input]');
+          inputs.forEach(function(i) { i.disabled = radio.value !== 'range'; });
+        });
       });
     }
   };
@@ -537,13 +552,16 @@
     cfg.optimize = {
       accept_all_replacements: _checked(fieldId('optimize', 'accept-rep'), false)
     };
-    // REQ-20260921-NNN：精剪合成（最终导出视频）— 默认 enabled=False 防误触发
-    // v2 用户反馈：去掉 cover_image/bg_image/bgm 输入（死字段，handler 不读），
-    // 只保留 enabled + params_source + preview_start + duration 4 个真正生效的字段。
-    // v4 用户反馈：start/duration 改 HH:MM:SS UI 输入；range_enabled 门控「区间导出」。
-    var fcEnabled = _checked(fieldId('fine_cut', 'enabled'), false);
+    // REQ-20260921-NNN-radio-mode：精剪合成改单选卡片组（默认 range）。
+    //   - 「出整个片」→ enabled=true, range_enabled=false（全片，1-3h）
+    //   - 「按区间导出一段」→ enabled=true, range_enabled=true（默认 10min）
+    // 没有第三「跳过」选项 — 要跳过 fine_cut 走顶层 stop_after="optimize"。
+    // 单选物理保证二选一，无需任何 enabled/range_enabled 联动。
+    var fcModeRadio = document.querySelector('input[name="slirn-pipe-fc-export-mode"]:checked');
+    var fcMode = fcModeRadio ? String(fcModeRadio.value || '') : '';
+    var fcEnabled = (fcMode === 'full' || fcMode === 'range');
+    var fcRange = fcMode === 'range';
     var fcParams = _val(fieldId('fine_cut', 'params-src'), 'current') || 'current';
-    var fcRangeOn = _checked(fieldId('fine_cut', 'range-on'), false);
     var fcStartRaw = _val(fieldId('fine_cut', 'start'), '00:00:00');
     var fcDurRaw = _val(fieldId('fine_cut', 'dur'), '00:10:00');
     var fcStartSec = hmsToSeconds(fcStartRaw);
@@ -557,20 +575,18 @@
       fcDurSec = 600;  // 10 分钟兜底
       try { window.slirnToast && window.slirnToast('导出时长格式不对（应为 HH:MM:SS），已用 00:10:00 兜底', 'warn'); } catch (e) {}
     }
-    // range_enabled=False → 不传 start/duration（保留给 handler 当成「全片」语义）；
-    // 但 preview_start/duration 仍存，让用户再次勾选 checkbox 时不丢值。
-    cfg.fine_cut = {
-      enabled: fcEnabled,
-      params_source: fcParams,
-      range_enabled: fcRangeOn,
-      preview_start: fcStartSec,
-      duration: fcDurSec
-    };
     // v5 顶层 run_mode + stop_after：
     // - run_mode="to_end" → 服务端 validate_config 强制 stop_after=None
     // - run_mode="stop_after" → stop_after 由用户选（"" → null = 跑到结尾但不停）
     var runMode = _val('slirn-pipe-run-mode', 'stop_after');
     cfg.run_mode = (runMode === 'to_end' || runMode === 'stop_after') ? runMode : 'stop_after';
+    cfg.fine_cut = {
+      enabled: fcEnabled,
+      params_source: fcParams,
+      range_enabled: fcRange,
+      preview_start: fcStartSec,
+      duration: fcDurSec
+    };
     var flowStop = _val('slirn-pipe-flow-stop', '');
     cfg.stop_after = flowStop || null;
     return cfg;

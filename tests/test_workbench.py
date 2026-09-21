@@ -9243,12 +9243,9 @@ def test_pipeline_js_rough_cut_has_link_person_checkbox():
 
 
 def test_pipeline_js_fine_cut_section_has_all_fields():
-    """REQ-20260921-NNN AC-3 v2：fine_cut 阶段只含 4 个真正生效字段
-    （enabled / params-src / start / dur）。cover/bg/bgm 是死字段 —— 已在 UI 移除
-    （实际素材在工作台第 6 阶段详情页 fc.json 的 materials.*）。
-
-    v4 AC：start/duration 改 HH:MM:SS UI + 新增 range_enabled checkbox 门控
-    （「按区间导出」），默认 range_enabled=False（全片）。
+    """REQ-20260921-NNN-radio-mode：fine_cut 阶段改单选卡片组（替代 v4
+    双 checkbox），但仍只含 4 类生效字段（params-src / start / dur + 单选）。
+    cover/bg/bgm 是死字段 —— 已在 UI 移除。
     """
     pipeline_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
     # 找到 renderStageForm 的 fine_cut 分支
@@ -9258,11 +9255,9 @@ def test_pipeline_js_fine_cut_section_has_all_fields():
     section = pipeline_js[fc_branch_idx:fc_branch_idx + 4500]
     # renderStageForm 通过 fieldId() 生成 ID；检查字段名 token
     required_field_names = [
-        "'enabled'",      # 启用开关
         "'params-src'",   # 设置参数
         "'start'",        # 导出起点（HH:MM:SS）
         "'dur'",          # 导出时长（HH:MM:SS）
-        "'range-on'",     # v4：按区间导出 checkbox
     ]
     for fld in required_field_names:
         assert fld in section, f"fine_cut 阶段缺字段 {fld}"
@@ -9277,14 +9272,24 @@ def test_pipeline_js_fine_cut_section_has_all_fields():
     assert "data-bgm-select" not in section, (
         "fine_cut 不应再有 data-bgm-select 选择器 —— bgm 是死字段，UI 不要画"
     )
+    # 单选卡片组：必须有两个 radio（full + range）
+    assert 'type="radio"' in section, "fine_cut 必须用 radio（导出方式二选一）"
+    assert 'name="slirn-pipe-fc-export-mode"' in section, (
+        "fine_cut radio 必须统一 name='slirn-pipe-fc-export-mode'（互斥）"
+    )
+    assert 'value="full"' in section, "fine_cut radio 必须含 value='full'（出整个片）"
+    assert 'value="range"' in section, "fine_cut radio 必须含 value='range'（按区间导出）"
     # v4 校验：start/duration 改 text input + pattern HH:MM:SS
     assert 'type="text"' in section, "v4 fine_cut 的 start/dur 应改 text input（HH:MM:SS）"
     assert "00:00:00" in section, "v4 fine_cut 默认 start 占位符应为 00:00:00"
     assert "00:10:00" in section, "v4 fine_cut 默认 duration 占位符应为 00:10:00"
-    # range_enabled 字段名出现在 readCurrentConfig
-    assert "data-range-on" in section, "v4 fine_cut 缺 range-on checkbox 的 data-attr"
+    # 旧 v4 checkbox 字段名不应再出现在 section（radio 已替代）
+    for old in ("'range-on'", "data-range-on"):
+        assert old not in section, (
+            f"fine_cut 不应再有 v4 checkbox 字段 {old}（已改 radio）"
+        )
 
-    # readCurrentConfig 必须读 fine_cut 5 个真正生效字段（含 range_enabled）
+    # readCurrentConfig 必须写 fine_cut 4 类生效字段（含 range_enabled — radio 派生）
     rc_idx = pipeline_js.find("cfg.fine_cut = {")
     assert rc_idx >= 0, "readCurrentConfig 缺 cfg.fine_cut = {...}"
     rc_section = pipeline_js[rc_idx:rc_idx + 1800]
@@ -9312,18 +9317,19 @@ def test_pipeline_js_hms_helpers_present():
     # hmsToSeconds 必须容错（解析失败返回 null，让调用方兜底）
 
 
-def test_pipeline_js_range_on_checkbox_toggles_inputs_disabled():
-    """v4：勾选「按区间导出」→ start/duration 输入框 disabled=false；不勾 → disabled=true。"""
+def test_pipeline_js_export_mode_radio_toggles_inputs_disabled():
+    """REQ-20260921-NNN-radio-mode：选「按区间导出一段」radio → start/duration
+    输入框 enable；选「出整个片」→ disable。复用 v4 的 data-range-input 标记。
+    """
     pipeline_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
-    # 定位 listener 块 —— 用 querySelector('[data-range-on]') 这个独有的查询语句，
-    # 避免和 HTML 字符串模板里的 data-range-on 属性混淆。
-    idx = pipeline_js.find("document.querySelector('[data-range-on]')")
-    assert idx >= 0, "缺 range-on 的 element-scoped change listener"
-    nearby = pipeline_js[idx:idx + 600]
-    assert "addEventListener('change'" in nearby, "range-on 必须绑 change 事件"
-    assert "data-range-input" in nearby, "range-on 切换的输入框必须标 data-range-input"
-    assert ".disabled = !rangeCb.checked" in nearby, (
-        "change handler 必须切换 inputs.disabled = !rangeCb.checked"
+    # 定位 listener 块 —— 用 querySelectorAll('input[name="slirn-pipe-fc-export-mode"]') 这个独有的查询语句。
+    idx = pipeline_js.find("querySelectorAll('input[name=\"slirn-pipe-fc-export-mode\"]')")
+    assert idx >= 0, "缺 export-mode radio 的 change listener 块"
+    nearby = pipeline_js[idx:idx + 800]
+    assert "addEventListener('change'" in nearby, "export-mode radio 必须绑 change 事件"
+    assert "data-range-input" in nearby, "切换的输入框必须标 data-range-input"
+    assert "radio.value !== 'range'" in nearby or "!== 'range'" in nearby, (
+        "change handler 必须根据 radio.value 是否为 'range' 切换 inputs.disabled"
     )
 
 
@@ -9363,8 +9369,10 @@ def test_pipeline_js_run_mode_change_disables_flow_stop():
     )
 
 
-def test_pipeline_js_read_config_has_run_mode_and_fine_cut_default_false():
-    """REQ-20260921-NNN：readCurrentConfig 必须有 run_mode + fine_cut.enabled 默认 False。"""
+def test_pipeline_js_read_config_has_run_mode_and_fine_cut_radio_default_range():
+    """REQ-20260921-NNN-radio-mode：readCurrentConfig 必须有 run_mode +
+    fine_cut 通过 radio 派生 enabled/range_enabled（默认 range=True）。
+    """
     pipeline_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
     rc_idx = pipeline_js.find("function readCurrentConfig")
     assert rc_idx >= 0, "缺 readCurrentConfig 函数"
@@ -9374,14 +9382,22 @@ def test_pipeline_js_read_config_has_run_mode_and_fine_cut_default_false():
     assert "'to_end'" in section and "'stop_after'" in section, (
         "readCurrentConfig 必须把 run_mode 限定在 to_end / stop_after"
     )
-    # fine_cut 默认 enabled False
-    assert "_checked(fieldId('fine_cut', 'enabled'), false)" in section, (
-        "readCurrentConfig.fine_cut.enabled 默认值应为 false（防误触发最终导出）"
+    # fine_cut 通过 radio 派生（不再 _checked enabled/range-on checkbox）
+    assert 'slirn-pipe-fc-export-mode' in section, (
+        "readCurrentConfig 必须读 export-mode radio（单选卡片组）"
+    )
+    assert "_checked(fieldId('fine_cut', 'enabled'), false)" not in section, (
+        "v4 旧 enabled checkbox 读取已废（改 radio 派生）"
+    )
+    assert "_checked(fieldId('fine_cut', 'range-on'), false)" not in section, (
+        "v4 旧 range-on checkbox 读取已废（改 radio 派生）"
     )
 
 
 def test_pipeline_js_templates_have_run_mode_and_fine_cut():
-    """REQ-20260921-NNN：3 套 TEMPLATES 必须含 run_mode + fine_cut 块。"""
+    """REQ-20260921-NNN-radio-mode：3 套 TEMPLATES 必须含 run_mode + fine_cut 块。
+    默认 enabled/range_enabled 已改为 true（与 default_config + UI radio=range 一致）。
+    """
     pipeline_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
     # TEMPLATES 区段
     tpl_idx = pipeline_js.find("var TEMPLATES = {")
@@ -9398,10 +9414,6 @@ def test_pipeline_js_templates_have_run_mode_and_fine_cut():
     # fine_cut 块至少出现 3 次
     assert section.count("fine_cut:") >= 3, (
         "3 套 TEMPLATES 都必须含 fine_cut 字段"
-    )
-    # 默认模板 enabled: false（防误触发）
-    assert "enabled: false" in section, (
-        "TEMPLATES.fine_cut.enabled 应为 false（默认关）"
     )
 
 
@@ -10139,7 +10151,9 @@ def test_pipeline_service_fine_cut_preflight_function_exists():
 
 
 def test_pipeline_service_fine_cut_preflight_skipped_path():
-    """REQ-20260921-NNN：enabled=False → 预检返回 ok=True 且不读 fc.json。"""
+    """REQ-20260921-NNN-radio-mode：enabled=False AND range_enabled=False →
+    预检返回 ok=True 且不读 fc.json。两个都得显式关（与 handler 跳过条件一致）。
+    """
     from slirn_home import pipeline_service as P
     import tempfile
 
@@ -10147,9 +10161,10 @@ def test_pipeline_service_fine_cut_preflight_skipped_path():
         td = Path(td)
         outputs_dir = td / "outputs"
         outputs_dir.mkdir(parents=True, exist_ok=True)
-        # fc.json 不存在 + enabled=False → 应通过且 has_fc_json 兜底 True
+        # fc.json 不存在 + enabled=False + range_enabled=False → 应通过且 has_fc_json 兜底 True
         cfg = P.default_config()
         cfg["fine_cut"]["enabled"] = False
+        cfg["fine_cut"]["range_enabled"] = False
         pre = P.fine_cut_preflight("t-disabled", cfg, outputs_dir)
         assert pre["ok"] is True
         assert pre["enabled"] is False
@@ -10248,32 +10263,6 @@ def test_pipeline_js_computeNextSince_respects_last_since_when_skipped():
     assert "sinceIdx > lastIdx" in func_body, (
         "computeNextSince 必须比较 sinceIdx > lastIdx 才返回 since "
         "(否则 done 末尾在 since 之后会误退)"
-    )
-
-
-def test_pipeline_js_range_on_checkbox_auto_enables_fine_cut():
-    """REQ-20260921-NNN-range-couples-enabled：勾上「按区间导出」必须自动勾上
-    「启用自动最终导出」。用户主动配 start/duration = 明确想导；不让 enabled
-    漏勾导致「cfg.enabled=False → 跳过」反复卡住。
-    反向不解耦：取消 range 不影响 enabled（用户可能仍想导全片）。
-    """
-    pipeline_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
-    # 定位 range_on 的 change listener 块（用 data-range-on querySelector 唯一定位）
-    idx = pipeline_js.find("document.querySelector('[data-range-on]')")
-    assert idx >= 0, "缺 range-on 的 change listener"
-    nearby = pipeline_js[idx:idx + 1500]
-    # 必须监听 change 事件
-    assert "addEventListener('change'" in nearby, "range-on 必须绑 change"
-    # 必须联动启用 fine_cut（按 fieldId('fine_cut', 'enabled') 取 enabled checkbox）
-    assert "fieldId('fine_cut', 'enabled')" in nearby, (
-        "range-on change handler 必须联动启用 fine_cut enabled（用 fieldId 唯一定位）"
-    )
-    # 仅在 rangeCb.checked=true 时启用（不取消 range 时取消 enabled）
-    assert "rangeCb.checked" in nearby, (
-        "联动只在 rangeCb.checked=true 时启用 enabled（不要反向解耦）"
-    )
-    assert "enabledCb.checked = true" in nearby, (
-        "联动效果：enabledCb.checked = true（不反向设为 false）"
     )
 
 
