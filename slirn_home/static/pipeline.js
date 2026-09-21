@@ -276,7 +276,21 @@
         + ' data-action="pipe-run"'
         + ' title="保存并按当前配置顺序执行所有阶段">▶ 从头跑</button>';
 
-    var sectionsHtml = STAGES.map(function(stage, idx) {
+    // REQ-20260921-NNN：清理所有阶段产物按钮 — 加在「字幕生成」section 上方
+    // 两次确认（按钮旁 warning 文案 + onClick 内 confirm 弹窗）。
+    var resetBlockHtml =
+      '<div class="slirn-pipe-reset-block">'
+      + '<button type="button" class="slirn-btn slirn-btn-danger slirn-btn-sm slirn-pipe-reset"'
+      + ' data-action="pipe-reset-stages"'
+      + ' title="删除本任务所有阶段的生成产物（subtitle.json / cutlist.json / fc.json / fine_export.mp4 等），并清空内存中的 stages_done 与 execution_history。原视频 / 时间截取 / 热词 / 任务 metadata 保留。">'
+      + '🧹 清理所有阶段产物</button>'
+      + '<div class="slirn-pipe-reset-warning">'
+      + '⚠ 清理后：字幕 / 修订 / 切分 / 粗剪 / 优化 / 精剪合成 6 个阶段的所有产物都会被删除，'
+      + '内存中的「已完成阶段」标记也会清空。下次跑流程会从头开始。'
+      + '</div>'
+      + '</div>';
+
+    var sectionsHtml = resetBlockHtml + STAGES.map(function(stage, idx) {
       return '<details class="slirn-pipe-section" data-pipe-section="' + stage.key + '" open>'
         + '<summary class="slirn-pipe-section-summary">'
         + '<span class="slirn-pipe-section-num">' + (idx + 1) + '</span>'
@@ -868,6 +882,42 @@
     });
   }
 
+  // ---- REQ-20260921-NNN：清理所有阶段产物（两次确认）----
+  function resetStages(taskId) {
+    if (!taskId) { toast('缺少 task_id', 'error'); return; }
+    // 第一次确认：解释会删哪些东西
+    var firstConfirm = window.confirm(
+      '🧹 确认要清理本任务所有阶段的生成产物吗？\n\n'
+      + '会删除以下产物：\n'
+      + '• 字幕生成：subtitle.json\n'
+      + '• 字幕修订：revision.json + rev_speaker_link.json\n'
+      + '• 切分修剪：cutlist.json + cut_speaker_link.json\n'
+      + '• 粗剪合成：rough_compose.mp4\n'
+      + '• 优化字幕：opt_subtitle.json\n'
+      + '• 精剪合成：fc.json + fine_export.mp4\n'
+      + '• 内存中的「已完成阶段」标记 + 执行历史\n\n'
+      + '会保留：原视频 / 时间截取 / 热词 / 任务 metadata。'
+    );
+    if (!firstConfirm) return;
+    // 第二次确认：最后一道
+    var secondConfirm = window.confirm(
+      '⚠ 最后确认：此操作不可撤销。\n\n'
+      + '真的要清理全部阶段产物吗？\n'
+      + '（点取消则保留，下次跑流程会从上次完成的地方继续）'
+    );
+    if (!secondConfirm) return;
+    // 真的发了
+    postJSON(SLIRN_API + '/pipeline_reset_stages', {task_id: taskId}).then(function(r) {
+      if (r && r.ok) {
+        toast(r.toast || ('🧹 已清理 ' + (r.deleted || []).length + ' 个产物'));
+        // 刷新面板：让 stages_done / history 全部重新加载（清空后）
+        loadPanel(taskId);
+      } else {
+        toast('清理失败：' + (r && r.error || '未知错误'), 'error');
+      }
+    });
+  }
+
   // ---- 全局 click 委托 ----
   // v4：每阶段 summary 内有「▶ 从本阶段开始」按钮（data-action="pipe-run-since"），
   // 不放 data-pipe-action，因此不会被 closest('button[data-pipe-action]') 早退抢走。
@@ -899,6 +949,7 @@
       return;
     }
     if (action === 'pipe-stop') { ev.preventDefault(); stopPipeline(tid); return; }
+    if (action === 'pipe-reset-stages') { ev.preventDefault(); resetStages(tid); return; }
     if (action === 'pipe-open') { ev.preventDefault(); loadPanel(tid); return; }
     if (action === 'pipe-status-collapse') {
       ev.preventDefault();

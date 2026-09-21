@@ -1086,3 +1086,65 @@ def test_handler_propagates_auto_session_id_to_http_post(tmp_path: Path, monkeyp
         assert call["auto_session_id"] == "sess-handler-1", (
             f"所有 _http_post 调用应透传 session_id: {call}"
         )
+
+
+# =====================================================================
+# REQ-20260921-NNN：清理所有阶段产物（clear_pipeline_state）
+# =====================================================================
+
+def test_clear_pipeline_state_clears_jobs_and_stop(tmp_path: Path):
+    """REQ-20260921-NNN：clear_pipeline_state 清内存 job + stop flag + 历史。"""
+    from slirn_home import pipeline_service as P
+
+    tid = "tid-clear-1"
+
+    # 1. 制造内存 job + stop flag
+    job = P.PipelineJob(state="running", started_at=time.time(),
+                       current_stage="rough_cut", percent=50.0,
+                       auto_session_id="s")
+    P._set_job(tid, job)
+    P._request_stop(tid)
+
+    # 2. 历史文件路径（用 tmp_path）
+    history_path = tmp_path / "execution_history.json"
+    history_path.write_text('[{"started_at":"x"}]', encoding="utf-8")
+
+    # 3. 调 clear
+    result = P.clear_pipeline_state(tid, history_path=history_path)
+
+    # 4. 内存 job 应被清
+    assert P._PIPELINE_JOBS.get(tid) is None, "内存 job 应清"
+    # 5. stop flag 应被清
+    assert P._consume_stop(tid) is False, "stop flag 应清（consume 应返回 False）"
+    # 6. 历史文件应被删
+    assert not history_path.exists(), "execution_history.json 应被删"
+    # 7. 返回值
+    assert result["cleared_jobs"] == 1
+    assert result["cleared_stop"] is True
+    assert result["cleared_history"] is True
+
+
+def test_clear_pipeline_state_handles_missing_job(tmp_path: Path):
+    """REQ-20260921-NNN：clear_pipeline_state 容忍 missing job（不抛错）。"""
+    from slirn_home import pipeline_service as P
+
+    tid = "tid-no-job"
+    # 没 job / 没 stop flag / 没 history
+    result = P.clear_pipeline_state(tid, history_path=tmp_path / "nope.json")
+    assert result["cleared_jobs"] == 0
+    assert result["cleared_stop"] is False
+    assert result["cleared_history"] is False
+
+
+def test_clear_pipeline_state_no_history_path_specified(tmp_path: Path, monkeypatch):
+    """REQ-20260921-NNN：不传 history_path → 尝试候选路径（不抛错）。"""
+    from slirn_home import pipeline_service as P
+
+    tid = "tid-cand"
+    # 不传 history_path → 内部尝试 2 个候选（都不存在也无害）
+    result = P.clear_pipeline_state(tid)
+    # cleared_history 应是 False（候选路径都不存在）
+    assert result["cleared_history"] is False
+    # 其他字段也不应抛错
+    assert "cleared_jobs" in result
+    assert "cleared_stop" in result

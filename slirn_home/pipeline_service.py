@@ -970,3 +970,58 @@ def stop_pipeline(tid: str) -> bool:
         return False
     _request_stop(tid)
     return True
+
+
+def clear_pipeline_state(tid: str, *, history_path: Path | None = None) -> dict:
+    """REQ-20260921-NNN：清理任务的 in-memory pipeline 状态（不删磁盘产物）。
+
+    - 清 _PIPELINE_JOBS[tid]（让前端 /status 返回 None）
+    - 清 _STOP_FLAGS[tid]（防止 reset 后用户再 stop 时无效）
+    - 删磁盘 history（execution_history.json），下次 load_pipeline_state 重读为 0
+
+    返回 {cleared_jobs, cleared_stop, cleared_history}。
+    实际磁盘产物删除由 app.py 的 /pipeline_reset_stages 端点做。
+
+    参数 history_path：可选 — 指定 execution_history.json 路径（精确）；不传就尝试 2 个候选路径。
+    """
+    cleared_jobs = 0
+    cleared_stop = False
+    cleared_history = False
+    with _JOBS_LOCK:
+        if tid in _PIPELINE_JOBS:
+            try:
+                del _PIPELINE_JOBS[tid]
+            except Exception:
+                pass
+            cleared_jobs = 1
+    with _STOP_LOCK:
+        if tid in _STOP_FLAGS:
+            try:
+                del _STOP_FLAGS[tid]
+            except Exception:
+                pass
+            cleared_stop = True
+    # 删磁盘 history
+    try:
+        from slirn_home.execution_history import HISTORY_FILENAME
+        candidates: list[Path] = []
+        if history_path is not None:
+            candidates.append(history_path)
+        # 兜底：2 个候选路径（mgr.tasks_dir 是 slirn_home/tasks 或 tasks）
+        candidates += [
+            Path("slirn_home/tasks") / tid / "outputs" / HISTORY_FILENAME,
+            Path("tasks") / tid / "outputs" / HISTORY_FILENAME,
+        ]
+        for c in candidates:
+            if c.exists():
+                try:
+                    c.unlink()
+                    cleared_history = True
+                except Exception:
+                    pass
+                break
+    except Exception:
+        pass
+    return {"cleared_jobs": cleared_jobs,
+            "cleared_stop": cleared_stop,
+            "cleared_history": cleared_history}

@@ -2962,6 +2962,33 @@ input[type="checkbox"]:focus-visible {
   outline: 2px solid rgba(245, 158, 11, 0.55);
   outline-offset: 1px;
 }
+/* REQ-20260921-NNN：清理所有阶段产物块 — 醒目红色 warning + 警告文案 */
+.slirn-pipe-reset-block {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0 14px;
+  padding: 10px 12px;
+  background: rgba(220, 38, 38, 0.06);
+  border: 1px solid rgba(220, 38, 38, 0.30);
+  border-radius: 6px;
+}
+.slirn-pipe-reset-block .slirn-pipe-reset {
+  flex-shrink: 0;
+  font-size: 12.5px;
+  padding: 5px 12px;
+}
+.slirn-pipe-reset-warning {
+  flex: 1;
+  min-width: 280px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: #b91c1c;
+}
+[data-theme="dark"] .slirn-pipe-reset-warning {
+  color: #fca5a5;
+}
 
 .slirn-pipe-sections {
   display: flex;

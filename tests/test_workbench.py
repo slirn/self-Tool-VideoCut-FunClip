@@ -221,7 +221,7 @@ def test_render_workbench_layout(tmp_path: Path):
 
 
 def test_render_workbench_autonext_switch(tmp_path: Path):
-    """REQ-20260918-046 — 完成后自动进下一阶段开关在顶部阶段列表内渲染，未勾选，
+    """REQ-20260918-046 + REQ-20260921-NNN — 完成后自动打开下一阶段界面开关在顶部阶段列表内渲染，未勾选，
     标题解释语义；由 JS 读 localStorage 并按之前已 done 的节点决定是否触发跳转。"""
     from slirn_home.app import _render_workbench
 
@@ -232,8 +232,9 @@ def test_render_workbench_autonext_switch(tmp_path: Path):
     assert 'id="slirn-wb-autonext"' in html
     # 默认未勾选（用户主动开启后才生效）
     assert '<input type="checkbox" id="slirn-wb-autonext">' in html
-    assert "完成后自动进下一阶段" in html
-    assert "title=" in html and "自动切换到下一阶段" in html.replace("&#39;", "'")
+    # REQ-20260921-NNN：文案改为「完成后，自动打开下一阶段界面」
+    assert "完成后，自动打开下一阶段界面" in html
+    assert "title=" in html and "自动打开下一阶段" in html.replace("&#39;", "'")
 
 
 def test_render_workbench_missing_task(tmp_path: Path):
@@ -9206,5 +9207,108 @@ def test_pipeline_js_populate_deps_function_exists():
     assert "_pipePanelPopulateDeps" in load_panel_body, (
         "loadPanel 必须调用 _pipePanelPopulateDeps"
     )
+
+
+# =====================================================================
+# REQ-20260921-NNN：清理所有阶段产物（前端按钮 + 两次确认 + warning 文案）
+# =====================================================================
+
+def test_pipeline_js_has_reset_stages_button():
+    """REQ-20260921-NNN：pipeline.js 字幕生成 section 上方必须有清理按钮。"""
+    pipeline_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
+    # 按钮
+    assert 'data-action="pipe-reset-stages"' in pipeline_js, (
+        "pipeline.js 必须有 pipe-reset-stages 按钮（清理所有阶段产物）"
+    )
+    # 按钮文案
+    assert "清理所有阶段产物" in pipeline_js, (
+        "清理按钮文案应为「清理所有阶段产物」"
+    )
+    # warning 文案
+    assert "slirn-pipe-reset-warning" in pipeline_js, (
+        "按钮旁边必须有 warning 文案（slirn-pipe-reset-warning）"
+    )
+    assert "subtitle.json" in pipeline_js and "fc.json" in pipeline_js, (
+        "warning 应列出阶段产物文件名（subtitle.json / fc.json 等）"
+    )
+
+
+def test_pipeline_js_reset_stages_has_two_confirms():
+    """REQ-20260921-NNN：清理按钮必须有两次 window.confirm。"""
+    pipeline_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
+    # resetStages 函数存在
+    func_idx = pipeline_js.find("function resetStages")
+    assert func_idx >= 0, "缺 resetStages 函数"
+    func_body = pipeline_js[func_idx:func_idx + 2500]
+    # 至少 2 次 window.confirm
+    confirm_count = func_body.count("window.confirm")
+    assert confirm_count >= 2, (
+        f"resetStages 必须有至少 2 次 window.confirm（实际 {confirm_count}）"
+    )
+
+
+def test_pipeline_js_reset_stages_calls_endpoint():
+    """REQ-20260921-NNN：resetStages 必须调 /pipeline_reset_stages 端点。"""
+    pipeline_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
+    func_idx = pipeline_js.find("function resetStages")
+    func_body = pipeline_js[func_idx:func_idx + 2500]
+    # 端点路径可能用 SLIRN_API + '/pipeline_reset_stages' 拼接
+    assert "pipeline_reset_stages" in func_body, (
+        "resetStages 必须调 /pipeline_reset_stages 端点"
+    )
+
+
+def test_pipeline_js_reset_block_above_first_stage():
+    """REQ-20260921-NNN：清理块必须渲染在字幕生成 section 上方（即 STAGES map 之前）。"""
+    pipeline_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
+    # reset 块定义位置
+    reset_idx = pipeline_js.find("slirn-pipe-reset-block")
+    # STAGES.map 渲染位置
+    map_idx = pipeline_js.find("STAGES.map(function(stage")
+    assert reset_idx >= 0 and map_idx >= 0 and reset_idx < map_idx, (
+        "清理块必须在 STAGES.map 之前（subtitle_generation 上方）"
+    )
+
+
+def test_pipeline_js_click_handler_dispatches_reset():
+    """REQ-20260921-NNN：click 委托必须分发 pipe-reset-stages 动作。"""
+    pipeline_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
+    # 找 click listener
+    click_idx = pipeline_js.find("document.addEventListener('click'")
+    assert click_idx >= 0, "缺 click listener"
+    click_body = pipeline_js[click_idx:click_idx + 3000]
+    assert "action === 'pipe-reset-stages'" in click_body, (
+        "click 委托必须分发 pipe-reset-stages → resetStages(tid)"
+    )
+
+
+def test_app_py_pipeline_reset_stages_endpoint_exists():
+    """REQ-20260921-NNN：app.py 必须新增 /pipeline_reset_stages 端点。"""
+    app_src = (FUNCLIP_ROOT / "slirn_home" / "app.py").read_text(encoding="utf-8")
+    assert '"/slirn/api/pipeline_reset_stages"' in app_src, (
+        "app.py 必须新增 /slirn/api/pipeline_reset_stages 端点"
+    )
+    # 端点必须调 pipeline_service.clear_pipeline_state
+    ep_idx = app_src.find('"/slirn/api/pipeline_reset_stages"')
+    ep_section = app_src[ep_idx:ep_idx + 3000]
+    assert "clear_pipeline_state" in ep_section, (
+        "/pipeline_reset_stages 端点必须调 pipeline_service.clear_pipeline_state"
+    )
+
+
+def test_css_has_reset_block_styling():
+    """REQ-20260921-NNN：home.css 必须有 slirn-pipe-reset-block 样式。"""
+    css_src = (FUNCLIP_ROOT / "slirn_home" / "static" / "home.css").read_text(encoding="utf-8")
+    assert ".slirn-pipe-reset-block" in css_src, (
+        "home.css 缺 .slirn-pipe-reset-block 样式"
+    )
+    assert ".slirn-pipe-reset-warning" in css_src, (
+        "home.css 缺 .slirn-pipe-reset-warning 样式"
+    )
+    # warning 应是红色
+    warn_block_idx = css_src.find(".slirn-pipe-reset-warning {")
+    assert warn_block_idx >= 0, "缺 .slirn-pipe-reset-warning 块"
+    warn_block = css_src[warn_block_idx:warn_block_idx + 600]
+    assert "color" in warn_block, "warning 块必须有 color 属性"
 
 

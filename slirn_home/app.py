@@ -8130,6 +8130,81 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             return _ok("", stopped=False, toast="没有正在运行的流程")
         return _ok("", stopped=True, toast="⏹ 已请求停止（当前阶段完成后退出）")
 
+    @app.app.post("/slirn/api/pipeline_reset_stages")
+    async def pipeline_reset_stages(body: dict = Body(default_factory=dict)):
+        """清理所有阶段生成的产物（REQ-20260921-NNN）。
+
+        删除范围：subtitle.json / opt_subtitle.json / revision.json /
+        cutlist.json / rev_speaker_link.json / cut_speaker_link.json /
+        fc.json / fine_export.mp4 等 outputs/ 下阶段产物 + materials/。
+        保留：原视频 / 时间截取 / 热词 / 任务 metadata。
+
+        前端应做两次确认（按钮旁有 warning 文案 + onClick 内 confirm 弹窗）。
+        """
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            t = mgr.get(tid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+        if t is None:
+            return _err("任务不存在")
+
+        outputs_dir = mgr.tasks_dir / tid / "outputs"
+        materials_dir = mgr.tasks_dir / tid / "materials"
+
+        # REQ-20260921-NNN：要清理的产物（按文件名精确匹配；其他文件不动）
+        # - 字幕生成：subtitle.json
+        # - 字幕修订：revision.json + rev_speaker_link.json
+        # - 切分修剪：cutlist.json + cut_speaker_link.json
+        # - 粗剪合成：rough_compose.mp4（及相关 .json 标记）
+        # - 优化字幕：opt_subtitle.json
+        # - 精剪合成：fc.json + fine_export*.mp4 + fine_preview*.mp4
+        files_to_delete: list[Path] = []
+        if outputs_dir.exists():
+            file_globs = [
+                "subtitle.json",
+                "revision.json", "rev_speaker_link.json",
+                "cutlist.json", "cut_speaker_link.json",
+                "rough_compose.mp4", "rough_compose.json",
+                "opt_subtitle.json", "opt_replacements.json",
+                "fc.json",
+                # fine_export 全篇 + 区间导出（REQ-20260919-061）
+                "fine_export.mp4",
+                "fine_preview.mp4",
+                # 区间导出后缀：fine_export_t{start}_d{dur}.mp4（见 /export_fine_video 6718-6721）
+            ]
+            for name in file_globs:
+                p = outputs_dir / name
+                if p.exists():
+                    files_to_delete.append(p)
+            # glob 区间导出文件
+            for p in outputs_dir.glob("fine_export_t*.mp4"):
+                files_to_delete.append(p)
+            for p in outputs_dir.glob("fine_preview_t*.mp4"):
+                files_to_delete.append(p)
+
+        deleted: list[str] = []
+        skipped: list[str] = []
+        for p in files_to_delete:
+            try:
+                p.unlink()
+                deleted.append(p.name)
+            except Exception as e:  # noqa: BLE001
+                skipped.append(f"{p.name}（{e}）")
+
+        # 顺手清 pipeline_service 的内存状态（in-memory stages_done + status）
+        try:
+            pipeline_service.clear_pipeline_state(tid,
+                history_path=outputs_dir / "execution_history.json")
+        except Exception:
+            pass
+
+        return _ok("", deleted=deleted, skipped=skipped,
+                   toast=f"🧹 已清理 {len(deleted)} 个阶段产物"
+                         + (f"（{len(skipped)} 跳过）" if skipped else ""))
+
     @app.app.post("/slirn/api/optimize_subtitle")
     async def optimize_subtitle(request: Request, body: dict = Body(default_factory=dict)):
         """启动优化字幕（REQ-20260917-030）：ASR 重识别粗剪成片 → 大模型提取不明确字词。
