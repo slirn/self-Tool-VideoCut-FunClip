@@ -1208,21 +1208,6 @@ input[type="checkbox"]:focus-visible {
 .slirn-empty-icon { font-size: 48px; margin-bottom: 12px; opacity: 0.5; }
 .slirn-empty-text { font-size: 15px; }
 
-/* ============ Footer ============ */
-.slirn-footer {
-  margin-top: 32px;
-  text-align: center;
-  color: var(--text-muted);
-  font-size: 12px;
-}
-.slirn-footer code {
-  background: var(--accent-soft);
-  color: var(--accent-solid);
-  padding: 2px 8px;
-  border-radius: 6px;
-  font-family: "Cascadia Code", "Consolas", monospace;
-}
-
 /* ============ Slider ============ */
 .slirn-slider-wrap { padding: 0 4px; }
 .slirn-slider {
@@ -2471,6 +2456,50 @@ input[type="checkbox"]:focus-visible {
   justify-content: flex-end;
   gap: 8px;
 }
+/* REQ-20260921-NNN：背景图检测块内「AI 智能识别布局」行
+   - 顶部加蓝紫渐变色条，提示这是「视觉 AI」入口（与背景检测的「几何识别」区分）
+   - 左边距缩进与控件对齐；AI 描述文字用小字号+浅灰，不抢按钮视觉 */
+.slirn-fine-bg-detect-ai-row {
+  margin-top: 12px;
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  background: linear-gradient(135deg, rgba(139,92,246,0.06), rgba(59,130,246,0.06));
+  border-left: 3px solid #8b5cf6;
+  border-radius: 6px;
+}
+.slirn-fine-bg-detect-ai-row .slirn-btn[disabled] {
+  /* disabled 时按钮稍灰，但 badge 提示更醒目，引导用户去上传参考图 */
+  opacity: 0.65;
+}
+.slirn-fine-bg-detect-ai-desc {
+  flex: 1 1 280px;
+  font-size: 12px;
+  color: var(--text-muted, #6b7280);
+  line-height: 1.5;
+}
+.slirn-fine-bg-detect-ai-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.slirn-fine-bg-detect-ai-badge-ok {
+  background: rgba(46,160,67,0.12);
+  color: #2ea043;
+  border: 1px solid rgba(46,160,67,0.35);
+}
+.slirn-fine-bg-detect-ai-badge-warn {
+  background: rgba(245,158,11,0.12);
+  color: #b45309;
+  border: 1px solid rgba(245,158,11,0.45);
+  cursor: help;
+}
 /* REQ-20260919-062 v12：去掉「背景图主色」大色块后，相关 CSS 已无用，一并删除 */
 /* （历史 v2/v8 样式：bg-detect 主色相关 8 条规则全部删除；几何信息区保留在结果区）*/
 #slirn-fine-bg-detect-threshold-row {
@@ -2901,6 +2930,38 @@ input[type="checkbox"]:focus-visible {
   flex-wrap: wrap;
 }
 .slirn-pipe-template { padding: 4px 8px; border-radius: 4px; border: 1px solid var(--border); background: var(--input-bg, #fff); font-size: 12px; }
+/* REQ-20260921-NNN：运行模式下拉 — 与 flow-stop 一致的橙色强调风格 */
+.slirn-pipe-run-mode-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: #b45309;
+  padding: 6px 10px;
+  background: rgba(245, 158, 11, 0.10);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 6px;
+}
+[data-theme="dark"] .slirn-pipe-run-mode-label {
+  color: #fbbf24;
+  background: rgba(245, 158, 11, 0.15);
+  border-color: rgba(245, 158, 11, 0.40);
+}
+.slirn-pipe-run-mode {
+  padding: 4px 8px;
+  border-radius: 4px;
+  border: 1px solid rgba(245, 158, 11, 0.45);
+  background: var(--input-bg, #fff);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+.slirn-pipe-run-mode:focus {
+  outline: 2px solid rgba(245, 158, 11, 0.55);
+  outline-offset: 1px;
+}
 
 .slirn-pipe-sections {
   display: flex;
@@ -3646,7 +3707,8 @@ input[type="checkbox"]:focus-visible {
 }
 .slirn-fine-font-label { font-size: 12px; color: var(--text-muted); }
 .slirn-fine-font-num,
-.slirn-fine-font-sel {
+.slirn-fine-font-sel,
+.slirn-fine-output-sel {
   padding: 3px 8px;
   font-size: 12px;
   border: 1px solid var(--border);
