@@ -3181,6 +3181,11 @@ def _get_fine_compose(mgr, task_id: str) -> dict:
     自动迁移：磁盘数据若未带 `_schema: 2`（旧 0-1 归一化 x/y），读时把每个 layout
     的 x/y 乘以 (设计空间宽, 设计空间高) 转成像素值。_schema 字段在内存里维护，
     落盘时由 _save_fine_compose 写入。
+
+    REQ-20260921-NNN-fix-scale-keyerror：补全每个 layout 子 dict 里缺失的字段
+    （如 {"x":42} 缺 scale/enabled 等）。原版只 setdefault 顶层 key，对"key 在
+    但子字段不全"的情况（典型：save_fine_layout 部分提交）会漏默认，导致渲染
+    抛 KeyError → HTTP 500。
     """
     fc_path = mgr.tasks_dir / task_id / "fine_compose.json"
     fc = {}
@@ -3201,7 +3206,16 @@ def _get_fine_compose(mgr, task_id: str) -> dict:
     fc.setdefault("detected_region", None)
     # layout 默认值与已存值合并（保留用户已设置的）
     for k, defaults in _FINE_LAYOUT_DEFAULTS.items():
-        fc["layout"].setdefault(k, dict(defaults))
+        existing_lc = fc["layout"].get(k)
+        if not isinstance(existing_lc, dict):
+            # 旧任务把 layout[k] 写成非 dict（如 None / 字符串）→ 用默认值覆盖
+            fc["layout"][k] = dict(defaults)
+            continue
+        # REQ-20260921-NNN-fix-scale-keyerror：子 dict 也补缺失字段
+        # （仅补默认里有的 key，避免覆盖用户在旧版里塞进的自定义字段）。
+        for dk, dv in defaults.items():
+            existing_lc.setdefault(dk, dv)
+        fc["layout"][k] = existing_lc
 
     # REQ-20260919-061 扩展：cover 旧字段（x/y/scale）迁移 —
     # 旧版封面是「右侧角标小图」，新版是「片头全屏海报」（仅需 duration 字段）。

@@ -420,6 +420,70 @@ def test_render_fine_cut_zone_with_string_font_does_not_500(tmp_path):
     assert 'slirn-fine-font-bg_opacity_num' in html, "font slider 仍需配 number input"
 
 
+# ---------- REQ-20260921-NNN-fix-scale-keyerror：layout 子 dict 字段补全 ----------
+
+def test_get_fine_compose_backfills_partial_layout_subdict(tmp_path):
+    """layout[k] 存在但子字段不全（如 {"x":42}）→ _get_fine_compose 必须补全 scale/enabled 等。
+
+    回归保护（REQ-20260921-NNN-fix-scale-keyerror）：生产环境 click 剪辑按钮抛
+    "SyntaxError: Unexpected token 'i' Internal Server Error"，根因：
+    save_fine_layout 部分提交后落盘的 layout[video] 只有 {"x":42}，旧版 setdefault
+    只补顶层 key，渲染 _render_fine_cut_zone 取 lc["scale"] 抛 KeyError → HTTP 500。
+    """
+    import json
+    from slirn_home.app import _get_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="partial-layout", original_video=video)
+    fc_path = m.tasks_dir / t.task_id / "fine_compose.json"
+    fc_path.parent.mkdir(parents=True, exist_ok=True)
+    # 模拟生产：仅写了一部分字段
+    fc_path.write_text(json.dumps({
+        "_schema": 2,
+        "layout": {"video": {"x": 42}, "subtitle": {"x": 100, "y": 50}},
+    }), encoding="utf-8")
+
+    fc = _get_fine_compose(m, t.task_id)
+    video_layout = fc["layout"]["video"]
+    # 用户的 x=42 必须保留
+    assert video_layout["x"] == 42
+    # 默认字段必须补全（不能 KeyError 也不能抛错）
+    for required in ("y", "scale", "enabled", "crop_x", "crop_y", "crop_w", "crop_h",
+                     "viewport", "crop_aspect_lock"):
+        assert required in video_layout, f"video.layout 应补全 {required} 字段，实际 keys={list(video_layout.keys())}"
+    # subtitle 也得补
+    sub_layout = fc["layout"]["subtitle"]
+    assert sub_layout["x"] == 100
+    assert sub_layout["y"] == 50
+    assert "scale" in sub_layout and "enabled" in sub_layout
+
+
+def test_render_workbench_with_partial_layout_does_not_500(tmp_path):
+    """layout 子 dict 缺字段时，渲染工作台不能 500（端到端回归）。
+
+    REQ-20260921-NNN-fix-scale-keyerror：用户报告点击 剪辑 按钮时收到
+    "SyntaxError: Unexpected token 'i'"，根因是后端 /slirn/api/workbench 返回
+    HTTP 500 + HTML "Internal Server Error"（来自 lc["scale"] KeyError）。
+    """
+    import json
+    from slirn_home.app import _render_workbench
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="partial-layout-render", original_video=video)
+    fc_path = m.tasks_dir / t.task_id / "fine_compose.json"
+    fc_path.parent.mkdir(parents=True, exist_ok=True)
+    # 故意制造一个只有 x 字段的 video layout
+    fc_path.write_text(json.dumps({
+        "_schema": 2,
+        "layout": {"video": {"x": 42}},
+    }), encoding="utf-8")
+
+    # 必须成功渲染，不能抛 KeyError
+    html = _render_workbench(t.task_id, m)
+    # 渲染产物里能找到 video scale 滑块（说明默认 scale 被成功读取）
+    assert "slirn-fine-video-scale" in html, "渲染产物里应有 video scale 滑块"
+
+
 # ---------- fine_compose x/y 像素化迁移（REQ-20260919-061 用户补充）----------
 
 def test_get_fine_compose_migrates_old_normalized_layout(tmp_path):
