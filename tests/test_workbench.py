@@ -220,6 +220,53 @@ def test_render_workbench_layout(tmp_path: Path):
     assert 'id="slirn-wb-pane-assets" style="display:none;"' in html
 
 
+def test_render_workbench_stage_marks_start_at_zero(tmp_path: Path):
+    """REQ-20260921-NNN：阶段序号从 0 开始（assets=0、精剪合成=6）。
+
+    之前从 1 开始（assets=1、精剪合成=7）。用户反馈：与软件开发的
+    0-based 习惯对齐，让序号看起来更自然。
+
+    mark 规则（app.py:_render_workbench）：
+      - state == "done" → ✓
+      - state == "current" → ▶
+      - state == "pending" → str(i)（i 是该阶段在 _WB_STAGES 里的下标）
+
+    7 个阶段下标：assets=0、字幕生成=1、字幕修订=2、切分修剪=3、
+    粗剪合成=4、优化字幕=5、精剪合成=6。
+
+    关键回归：mark 数字里不能出现 7（旧 1-based 精剪合成），也不能
+    出现 8（旧 1-based 第 8 阶段）。
+    """
+    import re as _re
+    from slirn_home.app import _render_workbench
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="stage-marks", original_video=video)
+    html = _render_workbench(t.task_id, m)
+
+    # 提取每个 stage 卡片里的 mark（按 DOM 出现顺序）
+    marks = _re.findall(
+        r'<span class="slirn-wb-stage-mark">([^<]+)</span>',
+        html,
+    )
+    # 7 个 stage + 1 个「执行日志」（📜）= 8 个 mark
+    assert len(marks) == 8, f"应渲染 8 个 mark，实际 {len(marks)}：{marks}"
+    # assets (i=0) 是 done → ✓
+    assert marks[0] == "✓", f"assets（原视频存在）应 done → ✓，实际 {marks[0]!r}"
+    # 字幕生成 (i=1) 是首个 pending → current → ▶
+    assert marks[1] == "▶", f"字幕生成（首个 pending）应 current → ▶，实际 {marks[1]!r}"
+    # 后续 5 个 pending：i=2..6 → 数字 2..6（用户要求从 0 开始，所以 i 直接用）
+    assert marks[2:7] == ["2", "3", "4", "5", "6"], (
+        f"剩下 5 个 pending 应是 2..6（i 直接用），实际 {marks[2:7]}"
+    )
+    # 关键：mark 数字里不能出现旧的 1-based 7 或 8
+    numeric_marks = [m for m in marks if m.isdigit()]
+    assert "7" not in numeric_marks, f"mark 中不能出现 7（旧 1-based 精剪合成），实际 {numeric_marks}"
+    assert "8" not in numeric_marks, f"mark 中不能出现 8（旧 1-based 第 8 阶段），实际 {numeric_marks}"
+    # 第 8 个是执行日志图标
+    assert "📜" in marks[7], f"第 8 个 mark 应为执行日志图标，实际 {marks[7]!r}"
+
+
 def test_render_workbench_autonext_switch(tmp_path: Path):
     """REQ-20260918-046 + REQ-20260921-NNN — 完成后自动打开下一阶段界面开关在顶部阶段列表内渲染，未勾选，
     标题解释语义；由 JS 读 localStorage 并按之前已 done 的节点决定是否触发跳转。"""
