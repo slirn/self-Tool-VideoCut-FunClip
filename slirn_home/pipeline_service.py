@@ -435,6 +435,136 @@ def _check_prereq(outputs_dir: Path, required_files: list[str]) -> tuple[bool, s
     return (True, "")
 
 
+# REQ-20260921-NNN：精剪合成（fine_cut）前置物 料预检 helper。
+# 流程跑到 fine_cut 之前必须先确认本任务在精剪合成详情页已维护好所需素材。
+# 规则（与 _render_fine_cut_zone / _FINE_AUTO_KINDS 对齐）：
+#   - video / subtitle：上游产物（auto-fetch），无需用户上传，但 layout.enabled
+#     且 materials.<kind>.path 仍必须存在（auto 抓取后写入 path）。
+#   - cover / bg / reference：用户上传，必须 path 存在。
+#   - audio（BGM）：可选，缺失不阻塞（why_no_bgm 已有诊断）。
+#
+# 返回 dict：{ok: bool, missing: [{kind, label}], optional_missing: [{kind, label}], reason: str}
+# 让前端可结构化渲染「去精剪合成页补 X」。
+def _check_fine_cut_materials(tid: str, fc_root: Path, fine_cut_cfg: dict) -> dict:
+    """精剪合成的素材预检（不读上游产物路径 —— 那是运行时 / export 时的事）。
+
+    fc_root：mgr.tasks_dir / tid / fine_compose.json
+    fine_cut_cfg：cfg.fine_cut dict（仅看 enabled，决定要不要预检；不强制读布局）。
+    """
+    # 默认无害：未启用 fine_cut → 不预检，让后续跳过
+    if not bool((fine_cut_cfg or {}).get("enabled", False)):
+        return {"ok": True, "missing": [], "optional_missing": [], "reason": ""}
+    # 没 fc.json → 视同「无任何精剪参数」，预检逻辑本身没意义；
+    # 但「缺参数」这件事另由参数模板预检负责；这里仅在 fc.json 存在时做素材预检。
+    if not fc_root.exists():
+        return {"ok": True, "missing": [], "optional_missing": [], "reason": ""}
+    try:
+        fc = json.loads(fc_root.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        return {"ok": False, "missing": [], "optional_missing": [],
+                "reason": f"fine_compose.json 解析失败：{e}"}
+    if not isinstance(fc, dict):
+        return {"ok": True, "missing": [], "optional_missing": [], "reason": ""}
+    materials = fc.get("materials") or {}
+    # _FINE_MATERIAL_KINDS 与 _FINE_MATERIAL_LABELS 的本地镜像（label 显示用）
+    _KIND_LABELS = {
+        "video":     "粗剪视频",
+        "subtitle":  "字幕文件",
+        "cover":     "封面图片",
+        "bg":        "背景图片",
+        "reference": "参考位置关系图",
+        "audio":     "背景音乐",
+    }
+    missing: list[dict] = []
+    optional_missing: list[dict] = []
+    for kind, label in _KIND_LABELS.items():
+        mat = materials.get(kind) or {}
+        path = (mat.get("path") or "").strip()
+        if not path:
+            # audio 是可选（why_no_bgm 已诊断；不阻塞 fine_cut）
+            if kind == "audio":
+                optional_missing.append({"kind": kind, "label": label})
+            else:
+                missing.append({"kind": kind, "label": label})
+    return {
+        "ok": len(missing) == 0,
+        "missing": missing,
+        "optional_missing": optional_missing,
+        "reason": "" if not missing else
+            "缺少素材：" + "、".join(m["label"] for m in missing)
+            + " — 请到「第 6 阶段 · 精剪合成」详情页上传",
+    }
+
+
+def _check_fine_cut_params(tid: str, fc_root: Path, fine_cut_cfg: dict) -> dict:
+    """精剪参数预检（REQ-20260921-NNN）。
+
+    规则：
+    - fc.json 不存在 → 必须显式选模板（template:<id>）才能跑
+      （用户无法在第 6 阶段页面导入「当前参数」，因为没 fc.json 可覆盖）
+    - fc.json 存在 → 「当前参数」可用
+
+    返回 {ok, reason, has_fc_json, params_source}。
+    """
+    has_fc = bool(fc_root.exists())
+    params_source = str((fine_cut_cfg or {}).get("params_source") or "current")
+    if has_fc:
+        return {"ok": True, "reason": "", "has_fc_json": True,
+                "params_source": params_source}
+    # fc.json 不存在：
+    if params_source.startswith("template:") and params_source != "template:":
+        return {"ok": True, "reason": "", "has_fc_json": False,
+                "params_source": params_source}
+    if params_source == "import":
+        return {"ok": True, "reason": "", "has_fc_json": False,
+                "params_source": params_source}
+    # current 或其他无效值 → 阻断
+    return {"ok": False,
+            "reason": "本任务尚未保存精剪参数（fine_compose.json）— "
+                      "请在「第 6 阶段 · 精剪合成」详情页点「导入参数」"
+                      "，或在此处选择模板。",
+            "has_fc_json": False,
+            "params_source": params_source}
+
+
+def fine_cut_preflight(tid: str, cfg: dict, outputs_dir: Path) -> dict:
+    """REQ-20260921-NNN：fine_cut 阶段启动前的素材 + 参数双重预检。
+
+    用于 `/pipeline_run` 启动前快速校验，避免跑到 fine_cut 才报错（重编码几小时）。
+    仅当 fine_cut.enabled=True 时严格检查；否则返回 ok=True（跳过整个精剪）。
+
+    返回 dict：
+      - ok: bool（必须 True 才能启动；任一子检查失败 → False）
+      - reason: str（人类可读说明；前端直接 toast）
+      - enabled: bool（是否启用 fine_cut，便于前端条件渲染）
+      - has_fc_json: bool（fc.json 是否存在 —— 影响前端能否选「当前参数」）
+      - materials: dict {missing[], optional_missing[], reason}
+      - parameters: dict {ok, reason, has_fc_json, params_source}
+    """
+    fc_cfg = (cfg or {}).get("fine_cut") or {}
+    enabled = bool(fc_cfg.get("enabled", False))
+    if not enabled:
+        return {"ok": True, "reason": "", "enabled": False,
+                "has_fc_json": True,
+                "materials": {"ok": True, "missing": [], "optional_missing": [], "reason": ""},
+                "parameters": {"ok": True, "reason": "", "has_fc_json": True,
+                               "params_source": "current"}}
+    # fc_root = tasks_dir / tid / fine_compose.json（与 _save_fine_compose 路径约定一致）
+    # outputs_dir 通常是 mgr.tasks_dir / tid / outputs；fc_root 与 outputs_dir 同级
+    fc_root = outputs_dir.parent / "fine_compose.json"
+    mat = _check_fine_cut_materials(tid, fc_root, fc_cfg)
+    par = _check_fine_cut_params(tid, fc_root, fc_cfg)
+    ok = bool(mat.get("ok")) and bool(par.get("ok"))
+    if ok:
+        reason = ""
+    else:
+        # 优先报参数（更紧迫：模板选择错了根本跑不起来；素材可中途补）
+        reason = par.get("reason") or mat.get("reason") or ""
+    return {"ok": ok, "reason": reason, "enabled": enabled,
+            "has_fc_json": bool(par.get("has_fc_json")),
+            "materials": mat, "parameters": par}
+
+
 def handler_subtitle_generation(tid: str, cfg: dict, outputs_dir: Path, api: str,
                                 job: PipelineJob) -> tuple[bool, str]:
     """字幕生成阶段 — 调 /gen_subtitle + 等 /subtitle_status。"""

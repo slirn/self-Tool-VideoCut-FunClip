@@ -219,6 +219,14 @@
         + '<label class="slirn-pipe-field">'
         + '<input type="checkbox" id="' + fieldId(stage.key, 'enabled') + '"' + enabledOn + '> 启用自动最终导出（默认关 — 启用会触发几小时重编码）'
         + '</label>'
+        // REQ-20260921-NNN：素材说明 —— 明确告诉用户素材在哪维护，哪些自动获取
+        + '<div class="slirn-pipe-hint slirn-pipe-fine-cut-materials-note">'
+        + '<b>📦 素材维护位置：</b>精剪合成的所有素材（封面 / 背景 / 背景音乐 / 视频 / 字幕）都在 '
+        + '<b>本任务的「第 6 阶段 · 精剪合成」详情页</b>里维护，不要在这里上传。'
+        + '<br>· <b>粗剪视频</b> + <b>字幕文件</b>：自动从上游产物获取，无需上传。'
+        + '<br>· <b>封面图</b> / <b>背景图</b>：若需使用，必须在精剪合成页上传。'
+        + '<br>· <b>背景音乐</b>：可选项，可不传。'
+        + '</div>'
         // 封面图（手动路径；空=用任务现有）
         + '<label class="slirn-pipe-field"><span>封面图片路径（空=用任务现有）：</span>'
         + '<input type="text" id="' + fieldId(stage.key, 'cover') + '" value="' + escapeHtml(cover) + '" placeholder="封面.jpg">'
@@ -234,10 +242,16 @@
         + '<option value="' + escapeHtml(bgmSel) + '" selected>' + escapeHtml(bgmSel || '(已选)') + '</option>'
         + '</select></label>'
         // 设置参数模板（下拉，loadPanel 时填充）
+        // REQ-20260921-NNN：参数模板选择 — 若本任务已有 fc.json（精剪参数），
+        // 可以用「当前参数」；若没有，必须选模板或在精剪合成页「导入参数」。
+        // 具体的 disable 逻辑在 loadPanel 末尾根据 fc.json 是否存在动态处理。
         + '<label class="slirn-pipe-field"><span>设置参数（=精剪面板保存的全局模板）：</span>'
         + '<select id="' + fieldId(stage.key, 'params-src') + '" data-params-select>'
         + '<option value="current"' + (paramsSrc === 'current' ? ' selected' : '') + '>当前参数</option>'
         + '</select></label>'
+        + '<div class="slirn-pipe-hint slirn-pipe-fine-cut-params-note" data-fine-cut-params-note>'
+        + '>若本任务已保存过精剪参数（<code>fine_compose.json</code>），可选「当前参数」；'
+        + '否则必须选模板，或去精剪合成详情页「导入参数」。</div>'
         // 导出区间（秒）
         + '<label class="slirn-pipe-field"><span>导出起点（秒，0=全篇）：</span>'
         + '<input type="number" id="' + fieldId(stage.key, 'start') + '" min="0" step="0.1" value="' + Number(startV) + '">'
@@ -365,9 +379,13 @@
   // loadPanel 末尾调用，调用 _pipePanelPopulateDeps(taskId)。
   // - bgm：从 /list_bgm_files 拿默认 + 上传；保留面板当前选中
   // - params：从 /list_fine_global_profiles 拿模板；追加「当前参数」/「导入 JSON」选项
-  var _pipePanelPopulateDeps = async function(taskId) {
+  // REQ-20260921-NNN：当 /pipeline_get 返回 has_fc_json=false 时，「当前参数」禁用
+  // （没 fc.json 可用「当前」），并把面板提示文案动态改成「必须选模板或去精剪页导入」。
+  var _pipePanelPopulateDeps = async function(taskId, hasFcJson) {
     var bgmSel = document.querySelector('select[data-bgm-select]');
     var paramSel = document.querySelector('select[data-params-select]');
+    var fcEnabled = !!document.getElementById(fieldId('fine_cut', 'enabled')) &&
+                    !!document.getElementById(fieldId('fine_cut', 'enabled')).checked;
     if (bgmSel) {
       // 读出当前选中（若存在），加载完后恢复
       var curBgm = bgmSel.value || '';
@@ -401,9 +419,19 @@
         });
         var j2 = await r2.json();
         paramSel.innerHTML = '';
+        // REQ-20260921-NNN：has_fc_json=false 时，「当前参数」禁用
+        // （灰色 + title 解释为什么不能用）。
         var curOpt = document.createElement('option');
-        curOpt.value = 'current'; curOpt.textContent = '当前参数（用面板保存的）';
-        if (curParam === 'current') curOpt.selected = true;
+        curOpt.value = 'current';
+        if (hasFcJson === false) {
+          curOpt.textContent = '当前参数（未保存 — 不可用）';
+          curOpt.disabled = true;
+          curOpt.title = '本任务尚未保存精剪参数（fine_compose.json 不存在）；' +
+                         '「当前参数」不能用。请选模板或去精剪合成详情页「导入参数」。';
+        } else {
+          curOpt.textContent = '当前参数（用面板保存的）';
+        }
+        if (curParam === 'current' && hasFcJson !== false) curOpt.selected = true;
         paramSel.appendChild(curOpt);
         var profs = (j2 && j2.profiles) ? j2.profiles : [];
         profs.forEach(function(p) {
@@ -418,7 +446,26 @@
         importOpt.value = 'import'; importOpt.textContent = '📥 导入 JSON（手动）';
         if (curParam === 'import') importOpt.selected = true;
         paramSel.appendChild(importOpt);
+        // 如果「当前参数」不可用 + 之前选了 current，回落到第一个 template（或 import）
+        if (hasFcJson === false && paramSel.value === 'current') {
+          paramSel.value = paramSel.querySelector('option:not([disabled])').value || 'import';
+        }
       } catch (e) { console.warn('[pipe-params-load]', e); }
+    }
+    // REQ-20260921-NNN：动态更新精剪参数提示文案 + 启用 checkbox 时高亮「未保存」警告
+    var paramsNote = document.querySelector('[data-fine-cut-params-note]');
+    if (paramsNote) {
+      if (hasFcJson === false) {
+        paramsNote.innerHTML = '⚠ 本任务<strong>尚未保存过精剪参数</strong>（' +
+          '<code>fine_compose.json</code> 不存在）。「当前参数」不可用，请在此处' +
+          '<strong>选择模板</strong>，或去「第 6 阶段 · 精剪合成」详情页' +
+          '<strong>「导入参数」</strong>。';
+        paramsNote.style.color = '#c0392b';
+      } else {
+        paramsNote.innerHTML = '>若本任务已保存过精剪参数（<code>fine_compose.json</code>），可选「当前参数」；' +
+          '否则必须选模板，或去精剪合成详情页「导入参数」。';
+        paramsNote.style.color = '';
+      }
     }
   };
 
@@ -810,7 +857,8 @@
         try { window.fineDefaultBgmLoad(); } catch (e) { console.warn('[bgm-load]', e); }
       }
       // REQ-20260921-NNN：填充 fine_cut 阶段的背景音乐 + 设置参数模板下拉
-      try { _pipePanelPopulateDeps(taskId); } catch (e) { console.warn('[pipe-deps-load]', e); }
+      // （hasFcJson：服务端 has_fc_json，控制「当前参数」是否可用）
+      try { _pipePanelPopulateDeps(taskId, !!r.has_fc_json); } catch (e) { console.warn('[pipe-deps-load]', e); }
       // REQ-20260920-084：检查是否有 in-flight export job，有则挂回进度条
       // （页面刷新 / 服务重启后自动恢复进度显示）
       try {
@@ -862,6 +910,21 @@
       if (since) payload.since = since;
       postJSON(SLIRN_API + '/pipeline_run', payload).then(function(r) {
         if (!r || !r.ok) { toast('启动失败：' + (r && r.error || '未知错误'), 'error'); return; }
+        // REQ-20260921-NNN：精剪合成预检失败 → 服务端返回 started=False + preflight 详情
+        // 提示用户去第 6 阶段详情页补齐（素材/参数），不要硬启动（避免几小时重编码到一半挂）。
+        if (r.preflight && !r.preflight.ok) {
+          var pf = r.preflight || {};
+          var matMiss = (pf.materials && pf.materials.missing) || [];
+          var par = pf.parameters || {};
+          var detail = [];
+          if (par.reason) detail.push('· 参数：' + par.reason);
+          if (matMiss.length) {
+            detail.push('· 素材：缺少 ' + matMiss.map(function(m){return m.label;}).join('、'));
+          }
+          toast((r.toast || '精剪合成预检失败') + (detail.length ? '\n\n' + detail.join('\n') : ''),
+                'error');
+          return;
+        }
         if (!r.started) {
           toast(r.toast || '已在运行');
           return;

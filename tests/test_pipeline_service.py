@@ -1148,3 +1148,200 @@ def test_clear_pipeline_state_no_history_path_specified(tmp_path: Path, monkeypa
     # 其他字段也不应抛错
     assert "cleared_jobs" in result
     assert "cleared_stop" in result
+
+
+# =====================================================================
+# REQ-20260921-NNN：fine_cut 预检（素材 + 参数）— fine_cut_preflight
+# =====================================================================
+
+
+def _make_task_dir(tmp_path: Path, tid: str = "t-fc") -> tuple[Path, Path]:
+    """建立 tasks/<tid>/ 模拟结构：返回 (task_dir, outputs_dir) 和 fc_root 路径。
+
+    outputs_dir = task_dir / outputs（pipeline.json 落盘位置）。
+    fc_root = task_dir / fine_compose.json（精剪参数落盘位置）。
+    """
+    task_dir = tmp_path / tid
+    outputs_dir = task_dir / "outputs"
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    return task_dir, outputs_dir
+
+
+def _write_fc(task_dir: Path, fc: dict) -> Path:
+    """写 fine_compose.json 到 task_dir/fine_compose.json。"""
+    fc_root = task_dir / "fine_compose.json"
+    fc_root.write_text(json.dumps(fc, ensure_ascii=False, indent=2),
+                       encoding="utf-8")
+    return fc_root
+
+
+def test_fine_cut_preflight_disabled_returns_ok(tmp_path: Path):
+    """fine_cut.enabled=False → 预检直接通过，不读 fc.json。"""
+    from slirn_home import pipeline_service as P
+
+    task_dir, outputs_dir = _make_task_dir(tmp_path)
+    cfg = P.default_config()
+    cfg["fine_cut"]["enabled"] = False
+    pre = P.fine_cut_preflight("t-fc", cfg, outputs_dir)
+    assert pre["ok"] is True
+    assert pre["enabled"] is False
+    # 即便 fc.json 不存在也不报错
+    assert pre["has_fc_json"] is True  # 未启用 → 视同 True（前端不强制）
+
+
+def test_fine_cut_preflight_enabled_no_fc_json_returns_ok(tmp_path: Path):
+    """fine_cut.enabled=True + fc.json 不存在 → preflight 不报错
+    （让用户能继续操作；具体参数是否就绪由 _check_fine_cut_params 报）。"""
+    from slirn_home import pipeline_service as P
+
+    task_dir, outputs_dir = _make_task_dir(tmp_path)
+    cfg = P.default_config()
+    cfg["fine_cut"]["enabled"] = True
+    cfg["fine_cut"]["params_source"] = "template:demo-profile-id"
+    pre = P.fine_cut_preflight("t-fc", cfg, outputs_dir)
+    # 选了模板 → 通过
+    assert pre["ok"] is True
+    assert pre["has_fc_json"] is False
+
+
+def test_fine_cut_preflight_params_blocked_when_no_fc_json_and_current(tmp_path: Path):
+    """enabled=True + 无 fc.json + params_source='current' → 阻断 + 明确原因。"""
+    from slirn_home import pipeline_service as P
+
+    task_dir, outputs_dir = _make_task_dir(tmp_path)
+    cfg = P.default_config()
+    cfg["fine_cut"]["enabled"] = True
+    cfg["fine_cut"]["params_source"] = "current"
+    pre = P.fine_cut_preflight("t-fc", cfg, outputs_dir)
+    assert pre["ok"] is False
+    assert pre["has_fc_json"] is False
+    assert "fine_compose.json" in pre["reason"]
+    assert "第 6 阶段" in pre["reason"]
+
+
+def test_fine_cut_preflight_materials_missing_when_no_upload(tmp_path: Path):
+    """enabled=True + 有 fc.json + 但 materials 全空 → 素材缺失。"""
+    from slirn_home import pipeline_service as P
+
+    task_dir, outputs_dir = _make_task_dir(tmp_path)
+    _write_fc(task_dir, {
+        "materials": {},
+        "layout": {},
+        "font": {},
+        "output": {},
+    })
+    cfg = P.default_config()
+    cfg["fine_cut"]["enabled"] = True
+    cfg["fine_cut"]["params_source"] = "current"
+    pre = P.fine_cut_preflight("t-fc", cfg, outputs_dir)
+    assert pre["ok"] is False
+    assert pre["has_fc_json"] is True
+    # 5 个必填缺（video / subtitle / cover / bg / reference）audio 是可选
+    missing_kinds = [m["kind"] for m in pre["materials"]["missing"]]
+    assert "video" in missing_kinds
+    assert "subtitle" in missing_kinds
+    assert "cover" in missing_kinds
+    assert "bg" in missing_kinds
+    assert "reference" in missing_kinds
+    assert "audio" not in missing_kinds  # BGM 可选
+    # audio 应该出现在 optional_missing
+    opt_kinds = [m["kind"] for m in pre["materials"]["optional_missing"]]
+    assert "audio" in opt_kinds
+
+
+def test_fine_cut_preflight_materials_full_ok(tmp_path: Path):
+    """enabled=True + fc.json 含全部素材 path → 通过。"""
+    from slirn_home import pipeline_service as P
+
+    task_dir, outputs_dir = _make_task_dir(tmp_path)
+    _write_fc(task_dir, {
+        "materials": {
+            "video":     {"path": "x/y.mp4"},
+            "subtitle":  {"path": "x/y.srt"},
+            "cover":     {"path": "x/y.png"},
+            "bg":        {"path": "x/bg.png"},
+            "reference": {"path": "x/ref.png"},
+            "audio":     {"path": "x/bgm.mp3"},
+        },
+        "layout": {},
+        "font": {},
+        "output": {},
+    })
+    cfg = P.default_config()
+    cfg["fine_cut"]["enabled"] = True
+    cfg["fine_cut"]["params_source"] = "current"
+    pre = P.fine_cut_preflight("t-fc", cfg, outputs_dir)
+    assert pre["ok"] is True
+    assert pre["materials"]["missing"] == []
+    assert pre["materials"]["optional_missing"] == []
+
+
+def test_fine_cut_preflight_only_bgm_missing_is_ok(tmp_path: Path):
+    """enabled=True + 仅有 BGM 缺失 → 仍通过（BGM 可选）。"""
+    from slirn_home import pipeline_service as P
+
+    task_dir, outputs_dir = _make_task_dir(tmp_path)
+    _write_fc(task_dir, {
+        "materials": {
+            "video":     {"path": "x/y.mp4"},
+            "subtitle":  {"path": "x/y.srt"},
+            "cover":     {"path": "x/y.png"},
+            "bg":        {"path": "x/bg.png"},
+            "reference": {"path": "x/ref.png"},
+            # audio 没填
+        },
+        "layout": {},
+        "font": {},
+        "output": {},
+    })
+    cfg = P.default_config()
+    cfg["fine_cut"]["enabled"] = True
+    pre = P.fine_cut_preflight("t-fc", cfg, outputs_dir)
+    assert pre["ok"] is True
+    opt_kinds = [m["kind"] for m in pre["materials"]["optional_missing"]]
+    assert "audio" in opt_kinds
+
+
+def test_fine_cut_preflight_corrupt_fc_json_blocked(tmp_path: Path):
+    """enabled=True + fc.json 解析失败 → 阻断 + 明确错误。"""
+    from slirn_home import pipeline_service as P
+
+    task_dir, outputs_dir = _make_task_dir(tmp_path)
+    fc_root = task_dir / "fine_compose.json"
+    fc_root.write_text("{not valid json", encoding="utf-8")
+    cfg = P.default_config()
+    cfg["fine_cut"]["enabled"] = True
+    pre = P.fine_cut_preflight("t-fc", cfg, outputs_dir)
+    assert pre["ok"] is False
+    assert "解析失败" in pre["reason"]
+
+
+def test_fine_cut_preflight_skipped_when_stop_after_earlier(tmp_path: Path):
+    """run_mode=stop_after + stop_after=rough_cut < fine_cut — 不会跑到精剪 → 预检无关。"""
+    from slirn_home import pipeline_service as P
+
+    task_dir, outputs_dir = _make_task_dir(tmp_path)
+    # fc.json 不存在 + params_source=current + 缺所有素材
+    # 但因 stop_after=rough_cut，handler_fine_cut 根本不会被调用 → 预检应 ok=True
+    cfg = P.default_config()
+    cfg["fine_cut"]["enabled"] = True
+    cfg["run_mode"] = "stop_after"
+    cfg["stop_after"] = "rough_cut"
+    pre = P.fine_cut_preflight("t-fc", cfg, outputs_dir)
+    # 但预检本身不知道 run_mode/stop_after，它只看 cfg.fine_cut.enabled
+    # 实际上调用方（在 app.py）根据 run_mode/stop_after 决定是否调预检
+    # 这里我们只验：预检被调时返回正确的素材缺失报告
+    assert pre["ok"] is False  # 还是会报素材缺失（调用方应跳过调用）
+
+
+def test_fine_cut_preflight_import_params_ok(tmp_path: Path):
+    """enabled=True + 无 fc.json + params_source='import' → 通过
+    （导入由第 6 阶段详情页负责，模板选择器已经允许）。"""
+    from slirn_home import pipeline_service as P
+
+    task_dir, outputs_dir = _make_task_dir(tmp_path)
+    cfg = P.default_config()
+    cfg["fine_cut"]["enabled"] = True
+    cfg["fine_cut"]["params_source"] = "import"
+    pre = P.fine_cut_preflight("t-fc", cfg, outputs_dir)
+    assert pre["ok"] is True

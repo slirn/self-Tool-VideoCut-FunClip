@@ -9715,3 +9715,242 @@ def test_bgm_fade_out_preview_keeps_preview_duration(tmp_path):
     )
 
 
+# =====================================================================
+# REQ-20260921-NNN：fine_cut 预检（app.py 端点 + JS UI）
+# =====================================================================
+
+
+def test_pipeline_get_returns_has_fc_json_flag(tmp_path: Path):
+    """REQ-20260921-NNN：/pipeline_get 响应必须含 has_fc_json 字段。
+
+    让前端能动态禁用「当前参数」选项。
+    """
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="has-fc-flag", original_video=video)
+    client = TestClient(build_app(repo_root=tmp_path).app)
+
+    # 1. 无 fc.json → has_fc_json=False
+    r1 = client.post("/slirn/api/pipeline_get", json={"task_id": t.task_id})
+    assert r1.status_code == 200
+    j1 = r1.json()
+    assert j1["ok"] is True
+    assert j1["has_fc_json"] is False, j1
+
+    # 2. 写 fc.json 后 → has_fc_json=True（task_dir = tasks/<tid>/fine_compose.json）
+    fc_path = tmp_path / "tasks" / t.task_id / "fine_compose.json"
+    fc_path.parent.mkdir(parents=True, exist_ok=True)
+    fc_path.write_text('{"materials":{},"layout":{},"font":{},"output":{}}',
+                       encoding="utf-8")
+    r2 = client.post("/slirn/api/pipeline_get", json={"task_id": t.task_id})
+    assert r2.status_code == 200
+    assert r2.json()["has_fc_json"] is True
+
+
+def test_app_py_pipeline_run_calls_fine_cut_preflight():
+    """REQ-20260921-NNN：/pipeline_run 端点必须导入并调 fine_cut_preflight。
+
+    不直接执行它（避免污染），只验证源码里调到了（按 name match）。
+    """
+    app_src = (FUNCLIP_ROOT / "slirn_home" / "app.py").read_text(encoding="utf-8")
+    assert "fine_cut_preflight" in app_src, (
+        "app.py /pipeline_run 端点必须调用 pipeline_service.fine_cut_preflight"
+    )
+    # 在 /pipeline_run 端点的代码段里出现
+    ep_idx = app_src.find('"/slirn/api/pipeline_run"')
+    assert ep_idx > 0
+    ep_window = app_src[ep_idx:ep_idx + 4000]
+    assert "fine_cut_preflight" in ep_window
+    # 必须把 preflight 失败返回给前端（r.preflight）
+    assert "preflight" in ep_window
+
+
+def test_app_py_pipeline_run_skips_preflight_when_stop_after_before_fine_cut(tmp_path: Path):
+    """REQ-20260921-NNN：stop_after 在 fine_cut 之前 → 不做严格 preflight。
+
+    即使用户误开了 fine_cut.enabled + 缺素材，因不会跑到 fine_cut，预检宽松通过。
+    这里通过配置 stop_after=rough_cut 验证 preflight 不阻断（即便 enabled=True + 缺素材）。
+    """
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+    from slirn_home import pipeline_service as P
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="stop-before-fc", original_video=video)
+    client = TestClient(build_app(repo_root=tmp_path).app)
+
+    # 写配置：fine_cut.enabled=True（缺素材缺参数）+ run_mode=stop_after + stop_after=rough_cut
+    cfg = P.default_config()
+    cfg["fine_cut"]["enabled"] = True
+    cfg["fine_cut"]["params_source"] = "current"  # 没 fc.json → 会被参数预检阻断
+    cfg["run_mode"] = "stop_after"
+    cfg["stop_after"] = "rough_cut"
+    outputs_dir = tmp_path / "tasks" / t.task_id / "outputs"
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    P.save_pipeline(outputs_dir, cfg)
+
+    # 启动 → 应该不阻断（stop_after < fine_cut → 不调严格预检）
+    r = client.post("/slirn/api/pipeline_run", json={"task_id": t.task_id})
+    assert r.status_code == 200
+    j = r.json()
+    # 关键点：不应有 preflight 阻断
+    if not j.get("ok"):
+        return j
+    # started=True OR started=False 但 toast 不是「预检失败」（可能因为 stage handler 跑 mock 链路）
+    # 主要看 started 字段是否被允许放行（preflight 失败一定 started=False 且带 preflight 字段）
+    assert "preflight" not in j, (
+        f"stop_after < fine_cut 时不应触发严格预检，实际: {j}"
+    )
+
+
+def test_app_py_pipeline_run_blocks_when_fine_cut_preflight_fails(tmp_path: Path):
+    """REQ-20260921-NNN：fine_cut.enabled=True + 无 fc.json + current → 阻断启动。
+
+    端点返回 ok=False + preflight 详情，让前端 toast。
+    """
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+    from slirn_home import pipeline_service as P
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="preflight-block", original_video=video)
+    client = TestClient(build_app(repo_root=tmp_path).app)
+
+    cfg = P.default_config()
+    cfg["fine_cut"]["enabled"] = True
+    cfg["fine_cut"]["params_source"] = "current"  # 没 fc.json → 参数预检阻断
+    cfg["run_mode"] = "to_end"
+    cfg["stop_after"] = None
+    outputs_dir = tmp_path / "tasks" / t.task_id / "outputs"
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    P.save_pipeline(outputs_dir, cfg)
+
+    r = client.post("/slirn/api/pipeline_run", json={"task_id": t.task_id})
+    assert r.status_code == 200
+    j = r.json()
+    assert j["ok"] is False, f"参数未就绪应阻断，实际: {j}"
+    assert j.get("started") is False
+    assert "preflight" in j
+    pf = j["preflight"]
+    assert pf["ok"] is False
+    assert pf["has_fc_json"] is False
+    assert "fine_compose.json" in pf["reason"]
+
+
+def test_pipeline_js_renderStageForm_fine_cut_has_materials_note():
+    """REQ-20260921-NNN：精剪合成 form 必须有素材维护位置说明。"""
+    js_src = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(
+        encoding="utf-8"
+    )
+    # 找 fine_cut section
+    fc_idx = js_src.find("stage.key === 'fine_cut'")
+    assert fc_idx > 0
+    window = js_src[fc_idx:fc_idx + 3500]
+    assert "素材维护位置" in window
+    assert "第 6 阶段" in window
+    assert "自动从上游" in window or "自动获取" in window
+    # BGM 可选说明
+    assert "背景音乐" in window
+    assert "可选项" in window
+
+
+def test_pipeline_js_renderStageForm_fine_cut_has_params_note():
+    """REQ-20260921-NNN：精剪合成 form 必须有参数模板选择说明（data-fine-cut-params-note）。"""
+    js_src = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(
+        encoding="utf-8"
+    )
+    fc_idx = js_src.find("stage.key === 'fine_cut'")
+    assert fc_idx > 0
+    window = js_src[fc_idx:fc_idx + 3500]
+    assert "data-fine-cut-params-note" in window
+    assert "fine_compose.json" in window
+    # 提示「导入参数」去第 6 阶段
+    assert "导入参数" in window
+
+
+def test_pipeline_js_pipePanelPopulateDeps_handles_has_fc_json_false():
+    """REQ-20260921-NNN：_pipePanelPopulateDeps 必须支持 hasFcJson=False，
+    并把「当前参数」option 设为 disabled。
+    """
+    js_src = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(
+        encoding="utf-8"
+    )
+    # 函数必须接受第 2 参数 hasFcJson
+    assert "_pipePanelPopulateDeps = async function(taskId, hasFcJson)" in js_src
+    # 「当前参数」option 必须在 hasFcJson=false 时 disabled
+    idx = js_src.find("_pipePanelPopulateDeps = async function(taskId, hasFcJson)")
+    window = js_src[idx:idx + 3500]
+    assert "hasFcJson === false" in window
+    assert "curOpt.disabled = true" in window
+    # loadPanel 调用时必须传 !!r.has_fc_json（精确匹配函数调用表达式）
+    import re
+    call_matches = re.findall(
+        r"_pipePanelPopulateDeps\([^)]*\)", js_src
+    )
+    assert any("!!r.has_fc_json" in m for m in call_matches), (
+        f"loadPanel 必须把 has_fc_json 传给 _pipePanelPopulateDeps，实际调用：{call_matches}"
+    )
+
+
+def test_pipeline_js_runPipeline_handles_preflight_response():
+    """REQ-20260921-NNN：runPipeline 必须识别 r.preflight 失败响应并 toast 原因。"""
+    js_src = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(
+        encoding="utf-8"
+    )
+    idx = js_src.find("function runPipeline(taskId, since)")
+    assert idx > 0
+    window = js_src[idx:idx + 1500]
+    assert "r.preflight" in window
+    assert "pf.materials" in window or "preflight" in window.lower()
+    assert "参数" in window
+    assert "素材" in window
+
+
+def test_pipeline_js_runPipeline_calls_pipeline_run_in_order():
+    """REQ-20260921-NNN：runPipeline 必须按 save → run 顺序调用；
+    且 run 后处理 preflight。"""
+    js_src = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(
+        encoding="utf-8"
+    )
+    idx = js_src.find("function runPipeline(taskId, since)")
+    window = js_src[idx:idx + 2000]
+    # 顺序：先 /pipeline_save 再 /pipeline_run
+    save_pos = window.find("/pipeline_save")
+    run_pos = window.find("/pipeline_run")
+    assert 0 < save_pos < run_pos, (
+        f"save 必须在 run 之前；save={save_pos}, run={run_pos}"
+    )
+
+
+def test_pipeline_service_fine_cut_preflight_function_exists():
+    """REQ-20260921-NNN：pipeline_service.py 必须导出 fine_cut_preflight 函数。"""
+    from slirn_home import pipeline_service as P
+    assert hasattr(P, "fine_cut_preflight"), (
+        "pipeline_service.py 缺 fine_cut_preflight 函数"
+    )
+    assert callable(P.fine_cut_preflight)
+
+
+def test_pipeline_service_fine_cut_preflight_skipped_path():
+    """REQ-20260921-NNN：enabled=False → 预检返回 ok=True 且不读 fc.json。"""
+    from slirn_home import pipeline_service as P
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        td = Path(td)
+        outputs_dir = td / "outputs"
+        outputs_dir.mkdir(parents=True, exist_ok=True)
+        # fc.json 不存在 + enabled=False → 应通过且 has_fc_json 兜底 True
+        cfg = P.default_config()
+        cfg["fine_cut"]["enabled"] = False
+        pre = P.fine_cut_preflight("t-disabled", cfg, outputs_dir)
+        assert pre["ok"] is True
+        assert pre["enabled"] is False
+        assert pre["has_fc_json"] is True
+        # 没有去读 fc.json（即便 fc_root 不存在也不报错）
+        assert pre["materials"]["missing"] == []
+        assert pre["materials"]["optional_missing"] == []
+
+

@@ -8083,8 +8083,13 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
                 "history": [],
             }
         status = pipeline_service.pipeline_status(tid)
+        # REQ-20260921-NNN：附加 fc.json 是否存在的标志，让前端可以动态禁用
+        # 「当前参数」选项（fc.json 不存在时只能选模板或导入）。
+        fc_root = mgr.tasks_dir / tid / "fine_compose.json"
+        has_fc_json = bool(fc_root.exists())
         return _ok("", config=data["config"], updated_at=data.get("updated_at"),
-                   history=data.get("history") or [], status=status)
+                   history=data.get("history") or [], status=status,
+                   has_fc_json=has_fc_json)
 
     @app.app.post("/slirn/api/pipeline_save")
     async def pipeline_save(body: dict = Body(default_factory=dict)):
@@ -8103,7 +8108,13 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
 
     @app.app.post("/slirn/api/pipeline_run")
     async def pipeline_run(body: dict = Body(default_factory=dict)):
-        """启动后台自动执行（守护线程）；已有 running job → False。"""
+        """启动后台自动执行（守护线程）；已有 running job → False。
+
+        REQ-20260921-NNN：启动前先做 fine_cut 预检 —— 若配置会跑到精剪合成
+        阶段且 cfg.fine_cut.enabled=True，则检查素材是否上传、参数是否就绪。
+        失败 → 直接返回错误（不启动守护线程），让前端 toast + 提示用户去
+        第 6 阶段详情页补齐。
+        """
         tid = (body.get("task_id") or "").strip()
         if not tid:
             return _err("缺少 task_id")
@@ -8113,6 +8124,36 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             return _err(f"任务不存在: {e}")
         since = body.get("since") or None
         outputs_dir = mgr.tasks_dir / tid / "outputs"
+        # REQ-20260921-NNN：fine_cut 预检 —— 只在「会跑到精剪合成」时才严格检查
+        # （since 跳过 fine_cut 之后的阶段；或 stop_after < fine_cut；或 run_mode != to_end
+        # 且 stop_after 是更早阶段；都视为不会跑到精剪合成）。
+        try:
+            from slirn_home.pipeline_service import (
+                STAGE_ORDER as _STAGE_ORDER,
+                STAGE_INDEX as _STAGE_INDEX,
+                fine_cut_preflight as _fine_cut_preflight,
+            )
+            _cfg_data = pipeline_service.load_pipeline(outputs_dir) or {}
+            _cfg_full = _cfg_data.get("config") or {}
+            _since_idx = _STAGE_INDEX.get(since, -1) if since else -1
+            _fine_cut_idx = _STAGE_INDEX.get("fine_cut", 5)
+            _will_run_fine_cut = _since_idx <= _fine_cut_idx
+            # 进一步：run_mode=stop_after 且 stop_after < fine_cut_idx → 不会跑到精剪
+            if _will_run_fine_cut and _cfg_full.get("run_mode") != "to_end":
+                _stop_after = _cfg_full.get("stop_after")
+                if _stop_after:
+                    _stop_idx = _STAGE_INDEX.get(_stop_after, -1)
+                    if 0 <= _stop_idx < _fine_cut_idx:
+                        _will_run_fine_cut = False
+            if _will_run_fine_cut:
+                _pre = _fine_cut_preflight(tid, _cfg_full, outputs_dir)
+                if not _pre.get("ok"):
+                    return _ok("", started=False, ok=False,
+                               preflight=_pre,
+                               toast=_pre.get("reason")
+                                     or "精剪合成预检失败")
+        except Exception as _e:  # noqa: BLE001 — 预检异常不该阻塞
+            log.warning("[pipeline_run] 预检异常（继续启动）：%s", _e)
         # base url：调度器走 in-process HTTP client（同进程同端口）。
         # 包含 /slirn/api 前缀 — pipeline_service._http_post(api, "/gen_subtitle")
         # 直接拼接 base + path，所以 base 必须含 API 前缀，否则 404。
