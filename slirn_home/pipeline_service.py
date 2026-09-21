@@ -36,12 +36,15 @@ log = logging.getLogger(__name__)
 PIPELINE_FILENAME = "pipeline.json"
 
 # 阶段顺序：key, 中文名, 工作台面板 key
+# REQ-20260921-NNN：6 阶段（最后 fine_cut = 精剪合成 / 最终导出）。
+# assets 阶段（上传/时间截取）不进 pipeline — 手动阶段，无自动 API。
 STAGE_ORDER: list[tuple[str, str, str]] = [
     ("subtitle_generation", "字幕生成", "subtitle"),
     ("subtitle_review", "字幕修订", "subtitle_review"),
     ("rough_cut", "切分修剪", "rough_cut"),
     ("rough_compose", "粗剪合成", "rough_compose"),
     ("optimize", "优化字幕", "fine_review"),
+    ("fine_cut", "精剪合成", "fine_cut"),
 ]
 
 # 阶段索引（用于 stop_after 比较）
@@ -96,10 +99,16 @@ class PipelineJob:
 
 
 def default_config() -> dict:
-    """v4 默认配置：5 阶段都跑，顶层 stop_after='subtitle_review'（字幕修订后停）。
+    """v5 默认配置：6 阶段都跑，顶层 run_mode='stop_after' / stop_after='subtitle_review'。
+
+    REQ-20260921-NNN 新增字段：
+    - subtitle_review / rough_cut：link_person_ids（自动关联人员ID checkbox）
+    - fine_cut：精剪合成（封面/背景/背景音乐/设置参数/起点/时长/enabled）
+    - 顶层 run_mode：to_end | stop_after（决定 stop_after 是否生效）
 
     accept_all_suggestions / accept_all_replacements 默认 False：避免「已勾选但
     用户不知道，第一次点反而被取消」的直觉冲突。第一次勾上才生效。
+    fine_cut.enabled 默认 False — 避免自动跑误触发几小时重编码。
     """
     return {
         "subtitle_generation": {
@@ -111,16 +120,34 @@ def default_config() -> dict:
             # REQ-20260918-049：大模型分析严谨性级别（pipe 通道支持高/中/低；
             # custom 档需在 pipe-panel 外的工作台才有 textarea，前端降级为 medium）
             "rigor": "medium",
+            # REQ-20260921-NNN：自动关联人员ID（调 /rev_speaker_link）
+            "link_person_ids": False,
         },
         "rough_cut": {
             "delete_speakers": [],
             "default_decision": "keep",
+            # REQ-20260921-NNN：自动关联人员ID（调 /cut_speaker_link）
+            "link_person_ids": False,
         },
         "rough_compose": {},
         "optimize": {
             "accept_all_replacements": False,
         },
-        # v4 顶层字段：在哪个阶段完成后停（None = 跑到底）
+        # REQ-20260921-NNN：精剪合成（最终导出视频）配置
+        "fine_cut": {
+            "enabled": False,             # 默认关，避免误触发几小时重编码
+            "cover_image": "",            # 封面图片（空 = 用任务现有 / 不传）
+            "bg_image": "",               # 背景图片（空 = 用任务现有 / 不传）
+            "bgm": "",                    # 背景音乐文件名（空 = 不配）
+            "params_source": "current",   # "current" | "template:<profile_id>"
+            "preview_start": 0.0,         # 导出起点（秒，0 = 全篇）
+            "duration": None,             # 导出时长（秒，None = 全篇）
+        },
+        # REQ-20260921-NNN：顶层运行模式
+        #   "to_end"      = 一键跑到底（忽略 stop_after）
+        #   "stop_after"  = 按下方 stop_after 字段决定停在哪
+        "run_mode": "stop_after",
+        # 兼容 v4 字段：在哪个阶段完成后停（None = 跑到底）
         "stop_after": "subtitle_review",
     }
 
@@ -128,17 +155,26 @@ def default_config() -> dict:
 def validate_config(cfg: dict) -> dict:
     """校验 + 补全配置（缺字段用 default_config 兜底）。
 
-    v4 schema：
+    v5 schema：
     - 阶段 dict 内不再含 stop_after（顶层 stop_after 才是权威源）
     - 顶层 stop_after 是字符串（STAGE_ORDER 的某个 key）或 None
-    - 兼容旧数据：v3 阶段内 boolean / v2 阶段内 string 字段被丢弃
-    - 兼容 v2 顶层 string：直接当成 v4 顶层 stop_after 接受
+    - 顶层 run_mode ∈ {"to_end", "stop_after"}（v4 无此字段，自动推算）
+    - fine_cut.enabled 默认 False（关键防误跑）
+    - 兼容 v4 旧数据：缺 run_mode 但有 stop_after → "stop_after"；缺且 stop_after=None → "to_end"
 
     返回合法配置（不抛异常 — 任何坏字段都用默认值替换，便于 UI 编辑容错）。
     """
     base = default_config()
     if not isinstance(cfg, dict):
         return base
+    # 兼容旧数据：v4 无 run_mode → 按 stop_after 推算
+    if "run_mode" in cfg:
+        rm = cfg["run_mode"]
+        if rm in ("to_end", "stop_after"):
+            base["run_mode"] = rm
+    else:
+        sa = cfg.get("stop_after")
+        base["run_mode"] = "to_end" if sa is None else "stop_after"
     # 顶层 stop_after 校验
     if "stop_after" in cfg:
         v = cfg["stop_after"]
@@ -147,6 +183,9 @@ def validate_config(cfg: dict) -> dict:
         elif isinstance(v, str) and v in STAGE_INDEX and STAGE_INDEX[v] != 99:
             base["stop_after"] = v
         # else: 无效值（None 字符串、未知 key、空串）→ 保留默认
+    # run_mode == "to_end" → 强制 stop_after = None（忽略 stop_after 配置）
+    if base["run_mode"] == "to_end":
+        base["stop_after"] = None
     for stage_key in (s[0] for s in STAGE_ORDER):
         user_stage = cfg.get(stage_key)
         if not isinstance(user_stage, dict):
@@ -163,6 +202,13 @@ def validate_config(cfg: dict) -> dict:
     valid_rigor = ("high", "medium", "low", "custom")
     if base["subtitle_review"].get("rigor") not in valid_rigor:
         base["subtitle_review"]["rigor"] = "medium"
+    # REQ-20260921-NNN：fine_cut.enabled 必须 bool（脏数据兜底 False — 防误跑）
+    if not isinstance(base["fine_cut"].get("enabled"), bool):
+        base["fine_cut"]["enabled"] = False
+    # link_person_ids 兜底为 bool（脏数据 → False）
+    for sk in ("subtitle_review", "rough_cut"):
+        if not isinstance(base[sk].get("link_person_ids"), bool):
+            base[sk]["link_person_ids"] = False
     return base
 
 
@@ -220,7 +266,7 @@ def save_pipeline(outputs_dir: Path, cfg: dict) -> str:
     # 保留旧 history
     old = _read(outputs_dir) or {}
     new_data = {
-        "version": 3,  # v4 schema：顶层 stop_after 字符串；阶段内不再含 stop_after
+        "version": 4,  # v5 schema：6 阶段 + 顶层 run_mode + fine_cut 配置
         "config": merged,
         "updated_at": ts,
         "history": list(old.get("history") or [])[-10:],
@@ -449,6 +495,17 @@ def handler_subtitle_review(tid: str, cfg: dict, outputs_dir: Path, api: str,
             _result[0] = False
             _result[1] = f"字幕修订{state}：{err}"
             return (False, _result[1])
+        # REQ-20260921-NNN：先做 link_person_ids（不依赖 save_revision 全接受 —
+        # rev_speaker_link 只读 subtitle.json + revision.json 的入口即可）。
+        # 但人工决策模式下 revision.json 已生成（/revise_subtitle 产物），所以两个分支都能跑。
+        if bool(cfg.get("link_person_ids", False)):
+            _log(job, "subtitle_review", "关联人员ID（rev_speaker_link）")
+            r = _http_post(api, "/rev_speaker_link", {"task_id": tid},
+                           auto_session_id=job.auto_session_id)
+            if not r.get("ok"):
+                _log(job, "subtitle_review", f"rev_speaker_link 失败：{r.get('error')}", "warn")
+            else:
+                _log(job, "subtitle_review", "✅ 字幕修订关联人员ID完成", "ok")
         if not accept_all:
             _log(job, "subtitle_review", "⏸ 配置要求人工决策修订 — 不自动 save_revision，等人工去工作台处理", "info")
             # v3：accept_all_suggestions=False 时只跑 revise，不自动 save_revision。
@@ -559,6 +616,15 @@ def handler_rough_cut(tid: str, cfg: dict, outputs_dir: Path, api: str,
                 patch_extra(outputs_dir, rc_id, {"del_speakers_count": len(del_spks)})
             except Exception:
                 pass
+        # REQ-20260921-NNN：自动关联人员ID（独立于 delete_speakers — 仅当 cfg.link_person_ids=True）
+        elif bool(cfg.get("link_person_ids", False)):
+            _log(job, "rough_cut", "关联人员ID（cut_speaker_link）")
+            r = _http_post(api, "/cut_speaker_link", {"task_id": tid},
+                           auto_session_id=job.auto_session_id)
+            if not r.get("ok"):
+                _log(job, "rough_cut", f"cut_speaker_link 失败：{r.get('error')}", "warn")
+            else:
+                _log(job, "rough_cut", "✅ 切分修剪关联人员ID完成", "ok")
         _log(job, "rough_cut", "✅ 切分修剪完成", "ok")
         _result[0] = True
         _result[1] = ""
@@ -659,12 +725,129 @@ def handler_optimize(tid: str, cfg: dict, outputs_dir: Path, api: str,
         raise
 
 
+def _poll_export(api: str, job_id: str, tid: str, *,
+                 timeout: float = 6 * 3600.0) -> tuple[str, str]:
+    """轮询 /render_status（GET 端点，按 job_id）。
+
+    REQ-20260921-NNN：/render_status 是 GET 端点，按 job_id 查询；与 _poll_status
+    按 task_id 不同。返回 (state, error) — state ∈ {done, failed, stopped, timeout}。
+    """
+    from urllib.parse import urlencode
+    url = api.rstrip("/") + "/render_status?" + urlencode({"job_id": job_id})
+    t0 = time.time()
+    last_err = ""
+    while True:
+        if _consume_stop(tid + ":poller"):
+            return ("stopped", "用户请求停止")
+        try:
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=15.0) as r:
+                raw = r.read().decode("utf-8", errors="replace")
+                data = json.loads(raw)
+                # /render_status 端点 _ok 包一层；job 字段平铺在 data
+                st = str((data or {}).get("state") or "")
+                if st == "done":
+                    return ("done", "")
+                if st in ("failed", "error"):
+                    return (st, str((data or {}).get("error") or "失败"))
+                last_err = str((data or {}).get("error") or "")
+        except Exception as e:  # noqa: BLE001
+            last_err = f"轮询异常: {e}"
+        if time.time() - t0 > timeout:
+            return ("timeout", f"轮询超时（>{int(timeout)}s）：{last_err}")
+        time.sleep(5.0)
+
+
+def handler_fine_cut(tid: str, cfg: dict, outputs_dir: Path, api: str,
+                     job: PipelineJob) -> tuple[bool, str]:
+    """精剪合成阶段 — 调 /export_fine_video + 等 /render_status。
+
+    REQ-20260921-NNN：可选 enabled=False 时跳过（默认 False，避免误触发
+    几小时重编码）。启用时按 cfg.preview_start / cfg.duration 决定
+    「全片 vs 区间」导出。参数模板（params_source）应用逻辑：若
+    template:<id> → 先调 /apply_fine_global_profile 应用模板到 fc.json，
+    再 export_fine_video。
+
+    prereq：rough_compose.mp4 存在（精剪是基于粗剪成片重编码）。若不存在 → skip。
+    """
+    _result: list = [False, ""]
+    try:
+        if not bool(cfg.get("enabled", False)):
+            _log(job, "fine_cut", "未启用自动最终导出（cfg.enabled=False），跳过", "info")
+            _result[0] = True
+            _result[1] = "skip"
+            return (True, _result[1])
+        # prereq 检查：粗剪成片（精剪的输入）
+        ok, err = _check_prereq(outputs_dir, ["rough_compose.mp4"])
+        if not ok:
+            _log(job, "fine_cut", f"跳过：{err}", "warn")
+            _result[0] = True
+            _result[1] = "skip"
+            return (True, _result[1])
+        # 应用参数模板（若选了某 profile）
+        params_source = str(cfg.get("params_source") or "current")
+        if params_source.startswith("template:"):
+            profile_id = params_source.split(":", 1)[1].strip()
+            if profile_id:
+                _log(job, "fine_cut", f"应用精剪模板 {profile_id}")
+                r = _http_post(api, "/apply_fine_global_profile",
+                               {"task_id": tid, "profile_id": profile_id},
+                               auto_session_id=job.auto_session_id)
+                if not r.get("ok"):
+                    _result[0] = False
+                    _result[1] = f"应用模板失败：{r.get('error')}"
+                    return (False, _result[1])
+        # 触发导出
+        body: dict = {"task_id": tid}
+        ps = cfg.get("preview_start")
+        dur = cfg.get("duration")
+        try:
+            if ps not in (None, "", 0):
+                body["preview_start"] = float(ps)
+            if dur not in (None, ""):
+                body["duration"] = float(dur)
+        except (TypeError, ValueError) as e:
+            _result[0] = False
+            _result[1] = f"preview_start/duration 数值非法: {e}"
+            return (False, _result[1])
+        range_hint = ""
+        if body.get("preview_start") or body.get("duration") is not None:
+            range_hint = f"（区间 {body.get('preview_start', 0)}s 起, {body.get('duration', '全篇')}）"
+        _log(job, "fine_cut", f"启动最终导出{range_hint}")
+        r = _http_post(api, "/export_fine_video", body,
+                       auto_session_id=job.auto_session_id)
+        if not r.get("ok"):
+            _result[0] = False
+            _result[1] = f"启动导出失败：{r.get('error')}"
+            return (False, _result[1])
+        job_id = r.get("job_id")
+        if not job_id:
+            _result[0] = False
+            _result[1] = "导出端点未返回 job_id"
+            return (False, _result[1])
+        _log(job, "fine_cut", "等待导出完成（1-3 小时重编码）")
+        state, err = _poll_export(api, job_id, tid, timeout=6 * 3600.0)
+        if state == "done":
+            _log(job, "fine_cut", "✅ 精剪合成完成（fine_export.mp4）", "ok")
+            _result[0] = True
+            _result[1] = ""
+            return (True, _result[1])
+        _result[0] = False
+        _result[1] = f"精剪合成{state}：{err}"
+        return (False, _result[1])
+    except Exception as e:
+        _result[0] = False
+        _result[1] = f"异常：{e}"
+        raise
+
+
 HANDLERS: dict[str, Callable] = {
     "subtitle_generation": handler_subtitle_generation,
     "subtitle_review": handler_subtitle_review,
     "rough_cut": handler_rough_cut,
     "rough_compose": handler_rough_compose,
     "optimize": handler_optimize,
+    "fine_cut": handler_fine_cut,
 }
 
 
@@ -699,8 +882,15 @@ def run_pipeline(tid: str, api: str, outputs_dir: Path, *,
         try:
             cfg_path_data = load_pipeline(outputs_dir) or {}
             cfg_full = cfg_path_data.get("config") or default_config()
-            # v4 顶层 stop_after：哪个阶段完成后停（None = 跑到底）
+            # v5 顶层：run_mode + stop_after（validate_config 已保证 to_end → stop_after=None）
+            run_mode = cfg_full.get("run_mode") or "stop_after"
             flow_stop = cfg_full.get("stop_after")
+            # REQ-20260921-NNN：起始日志 — 显式标出运行模式 + 停点
+            mode_desc = (
+                "一键跑到底" if run_mode == "to_end"
+                else f"停在「{flow_stop or '不限'}」后"
+            )
+            _log(job, "_start", f"运行模式：{mode_desc}（共 {len(STAGE_ORDER)} 阶段）")
             # since 解析：None 表示从头跑；否则「从 since 这一阶段开始」跳过更早的阶段
             since_idx = STAGE_INDEX.get(since, -1) if since else -1
             stages_done: list[str] = []
@@ -714,8 +904,8 @@ def run_pipeline(tid: str, api: str, outputs_dir: Path, *,
                     job.state = "stopped"
                     break
                 job.current_stage = stage_key
-                # per-stage percent: 假设 5 阶段均匀 → 100/5=20 每阶段
-                job.percent = (idx + 1) / max(len(STAGE_ORDER), 1) * 80  # 留 20% 给收尾
+                # per-stage percent: 6 阶段均匀 → 100/6 ≈ 16.7 每阶段；留 20% 给收尾
+                job.percent = (idx + 1) / max(len(STAGE_ORDER), 1) * 80
                 _log(job, stage_key, f"== 开始阶段：{stage_label} ==")
                 stage_cfg = cfg_full.get(stage_key) or {}
                 handler = HANDLERS.get(stage_key)
@@ -739,7 +929,8 @@ def run_pipeline(tid: str, api: str, outputs_dir: Path, *,
                     pass  # 跳过不计入 done
                 else:
                     stages_done.append(stage_key)
-                # v4 stop_after：顶层字段（字符串=该阶段后停；None=不停）
+                # v5 stop_after：run_mode=to_end 时 flow_stop 已被 validate_config 重置为 None；
+                # run_mode=stop_after 时按用户选的 stage_key 决定停点
                 if flow_stop and stage_key == flow_stop:
                     _log(job, stage_key,
                          f"⏸ 顶层配置要求「{stage_label}」后停（等人工）", "info")

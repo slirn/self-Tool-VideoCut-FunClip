@@ -1,12 +1,13 @@
-"""REQ-20260918-047 — pipeline_service 单测（v4 schema）。
+"""REQ-20260918-047 — pipeline_service 单测（v5 schema）。
 
 覆盖：
-- default_config / validate_config schema（v4：顶层 stop_after 字符串；阶段 dict 不再含 stop_after）
+- default_config / validate_config schema（v5：6 阶段 + 顶层 run_mode + 顶层 stop_after）
 - 持久化（load/save/atomic/concurrent/corrupt）
 - 内存 job 管理（idle / running / stop / status）
-- stop_after 顶层字段语义（v4：字符串 stage key 或 None）
+- run_mode / stop_after 顶层字段语义
 - run_pipeline stop 标志位
-- v3/v2 旧数据兼容（阶段内 stop_after 字段被丢弃；顶层 stop_after string 提升）
+- v4/v3/v2 旧数据兼容
+- REQ-20260921-NNN：fine_cut 阶段 + 每阶段新字段（link_person_ids / fine_cut config）
 """
 from __future__ import annotations
 
@@ -31,20 +32,56 @@ def _outputs(tmp_path: Path) -> Path:
 
 
 def test_default_config_keys():
-    """v4 默认配置：5 个阶段 + 顶层 stop_after 字符串。"""
+    """v5 默认配置：6 个阶段 + 顶层 run_mode + stop_after。"""
     cfg = P.default_config()
     assert set(cfg.keys()) == {
         "subtitle_generation", "subtitle_review", "rough_cut",
-        "rough_compose", "optimize", "stop_after",
+        "rough_compose", "optimize", "fine_cut",
+        "run_mode", "stop_after",
     }
     # 阶段 dict 不再含 stop_after
     for stage_key in ("subtitle_generation", "subtitle_review", "rough_cut",
-                      "rough_compose", "optimize"):
+                      "rough_compose", "optimize", "fine_cut"):
         assert "stop_after" not in cfg[stage_key], f"{stage_key} 不应含 stop_after"
 
 
+def test_default_config_has_6_stages():
+    """v5：STAGE_ORDER 含 6 阶段，fine_cut 是最后一个。"""
+    keys = [s[0] for s in P.STAGE_ORDER]
+    assert len(keys) == 6
+    assert keys[-1] == "fine_cut"
+
+
+def test_default_config_has_run_mode_stop_after():
+    """v5：默认 run_mode="stop_after"。"""
+    cfg = P.default_config()
+    assert cfg["run_mode"] == "stop_after"
+
+
+def test_default_config_fine_cut_enabled_false():
+    """v5：fine_cut.enabled 默认 False（防误跑）。"""
+    cfg = P.default_config()
+    assert cfg["fine_cut"]["enabled"] is False
+
+
+def test_default_config_fine_cut_has_required_keys():
+    """v5：fine_cut 必含 cover_image / bg_image / bgm / params_source / preview_start / duration / enabled。"""
+    cfg = P.default_config()
+    fc = cfg["fine_cut"]
+    for k in ("enabled", "cover_image", "bg_image", "bgm", "params_source",
+              "preview_start", "duration"):
+        assert k in fc, f"fine_cut 缺 {k}"
+
+
+def test_default_config_subtitle_review_rough_cut_have_link_person_ids():
+    """v5：subtitle_review / rough_cut 默认含 link_person_ids=False。"""
+    cfg = P.default_config()
+    assert cfg["subtitle_review"]["link_person_ids"] is False
+    assert cfg["rough_cut"]["link_person_ids"] is False
+
+
 def test_default_config_has_flow_level_stop_after():
-    """v4：顶层 stop_after 是 STAGE_INDEX 中的字符串。"""
+    """v5：顶层 stop_after 是 STAGE_INDEX 中的字符串。"""
     cfg = P.default_config()
     assert isinstance(cfg["stop_after"], str)
     assert cfg["stop_after"] in P.STAGE_INDEX
@@ -116,6 +153,102 @@ def test_validate_config_non_dict_returns_default():
     assert P.validate_config(None) == P.default_config()
 
 
+def test_validate_config_run_mode_to_end_forces_stop_after_null():
+    """v5：run_mode=to_end → 强制 stop_after=None（忽略用户配置）。"""
+    user = P.default_config()
+    user["run_mode"] = "to_end"
+    user["stop_after"] = "rough_cut"  # 即使设了也被强制 null
+    out = P.validate_config(user)
+    assert out["run_mode"] == "to_end"
+    assert out["stop_after"] is None
+
+
+def test_validate_config_run_mode_stop_after_keeps_stop_after():
+    """v5：run_mode=stop_after → stop_after 按用户值。"""
+    user = P.default_config()
+    user["run_mode"] = "stop_after"
+    user["stop_after"] = "rough_compose"
+    out = P.validate_config(user)
+    assert out["run_mode"] == "stop_after"
+    assert out["stop_after"] == "rough_compose"
+
+
+def test_validate_config_legacy_data_without_run_mode_stop_after_none():
+    """v4→v5 兼容：缺 run_mode + stop_after=None → 推算 run_mode=to_end。"""
+    user = P.default_config()
+    user["stop_after"] = None
+    user.pop("run_mode", None)
+    out = P.validate_config(user)
+    assert out["run_mode"] == "to_end"
+    assert out["stop_after"] is None
+
+
+def test_validate_config_legacy_data_without_run_mode_stop_after_string():
+    """v4→v5 兼容：缺 run_mode + stop_after='rough_cut' → 推算 run_mode=stop_after。"""
+    user = P.default_config()
+    user["stop_after"] = "rough_cut"
+    user.pop("run_mode", None)
+    out = P.validate_config(user)
+    assert out["run_mode"] == "stop_after"
+    assert out["stop_after"] == "rough_cut"
+
+
+def test_validate_config_invalid_run_mode_falls_back_to_stop_after():
+    """v5：run_mode 非法值 → 回退 stop_after（保守）。"""
+    user = P.default_config()
+    user["run_mode"] = "bogus"
+    out = P.validate_config(user)
+    assert out["run_mode"] == "stop_after"
+
+
+def test_validate_config_fine_cut_enabled_non_bool_falls_back_false():
+    """v5：fine_cut.enabled 非 bool → 回退 False（防误跑）。"""
+    user = P.default_config()
+    user["fine_cut"]["enabled"] = "yes"
+    out = P.validate_config(user)
+    assert out["fine_cut"]["enabled"] is False
+
+
+def test_validate_config_fine_cut_accepts_full_settings():
+    """v5：fine_cut 全字段被保留。"""
+    user = P.default_config()
+    user["fine_cut"] = {
+        "enabled": True,
+        "cover_image": "cover.jpg",
+        "bg_image": "bg.jpg",
+        "bgm": "song.mp3",
+        "params_source": "template:p_xxx",
+        "preview_start": 30.5,
+        "duration": 120.0,
+    }
+    out = P.validate_config(user)
+    assert out["fine_cut"]["enabled"] is True
+    assert out["fine_cut"]["cover_image"] == "cover.jpg"
+    assert out["fine_cut"]["bg_image"] == "bg.jpg"
+    assert out["fine_cut"]["bgm"] == "song.mp3"
+    assert out["fine_cut"]["params_source"] == "template:p_xxx"
+    assert out["fine_cut"]["preview_start"] == 30.5
+    assert out["fine_cut"]["duration"] == 120.0
+
+
+def test_validate_config_link_person_ids_non_bool_falls_back_false():
+    """v5：link_person_ids 非 bool → 回退 False。"""
+    user = P.default_config()
+    user["subtitle_review"]["link_person_ids"] = "yes"
+    user["rough_cut"]["link_person_ids"] = 1
+    out = P.validate_config(user)
+    assert out["subtitle_review"]["link_person_ids"] is False
+    assert out["rough_cut"]["link_person_ids"] is False
+
+
+def test_validate_config_drops_unknown_fine_cut_keys():
+    """v5：fine_cut 未知字段被丢弃（仅保留 whitelist）。"""
+    user = P.default_config()
+    user["fine_cut"]["bogus_field"] = "x"
+    out = P.validate_config(user)
+    assert "bogus_field" not in out["fine_cut"]
+
+
 # =============== 持久化 ===============
 
 
@@ -159,13 +292,13 @@ def test_save_pipeline_atomic_no_tmp_leftover(tmp_path: Path):
 
 
 def test_save_pipeline_writes_top_level_stop_after(tmp_path: Path):
-    """v4 save 后落盘文件含顶层 stop_after 字符串 + version=3。"""
+    """v5 save 后落盘文件含顶层 stop_after 字符串 + version=4。"""
     out = _outputs(tmp_path)
     cfg = P.default_config()
     cfg["stop_after"] = "rough_cut"
     P.save_pipeline(out, {"config": cfg})
     raw = json.loads((out / P.PIPELINE_FILENAME).read_text(encoding="utf-8"))
-    assert raw["version"] == 3
+    assert raw["version"] == 4
     assert raw["config"]["stop_after"] == "rough_cut"
     # 阶段 dict 内不再含 stop_after
     for s in ("subtitle_generation", "subtitle_review", "rough_cut",
@@ -317,6 +450,7 @@ def test_run_pipeline_stops_at_top_level_stop_after(tmp_path: Path):
     P.HANDLERS["rough_cut"] = _ok
     P.HANDLERS["rough_compose"] = _ok
     P.HANDLERS["optimize"] = _ok
+    P.HANDLERS["fine_cut"] = _ok
     try:
         out = _outputs(tmp_path)
         cfg = P.default_config()
@@ -341,6 +475,7 @@ def test_run_pipeline_stops_at_top_level_stop_after(tmp_path: Path):
         P.HANDLERS["rough_cut"] = orig
         P.HANDLERS["rough_compose"] = orig
         P.HANDLERS["optimize"] = orig
+        P.HANDLERS["fine_cut"] = orig
 
 
 def test_run_pipeline_starts_from_since_stage(tmp_path: Path):
@@ -350,6 +485,7 @@ def test_run_pipeline_starts_from_since_stage(tmp_path: Path):
     orig_c = P.HANDLERS["rough_cut"]
     orig_p = P.HANDLERS["rough_compose"]
     orig_o = P.HANDLERS["optimize"]
+    orig_f = P.HANDLERS["fine_cut"]
 
     called = []
 
@@ -364,6 +500,7 @@ def test_run_pipeline_starts_from_since_stage(tmp_path: Path):
     P.HANDLERS["rough_cut"] = _track("rough_cut")
     P.HANDLERS["rough_compose"] = _track("rough_compose")
     P.HANDLERS["optimize"] = _track("optimize")
+    P.HANDLERS["fine_cut"] = _track("fine_cut")
     try:
         out = _outputs(tmp_path)
         cfg = P.default_config()
@@ -385,6 +522,7 @@ def test_run_pipeline_starts_from_since_stage(tmp_path: Path):
         assert "rough_cut" in called
         assert "rough_compose" in called
         assert "optimize" not in called
+        assert "fine_cut" not in called
         assert st["state"] == "stopped"
         assert st["summary"]["stages_done"] == ["rough_cut", "rough_compose"]
     finally:
@@ -393,15 +531,17 @@ def test_run_pipeline_starts_from_since_stage(tmp_path: Path):
         P.HANDLERS["rough_cut"] = orig_c
         P.HANDLERS["rough_compose"] = orig_p
         P.HANDLERS["optimize"] = orig_o
+        P.HANDLERS["fine_cut"] = orig_f
 
 
 def test_run_pipeline_runs_to_end_when_stop_after_null(tmp_path: Path):
-    """v4：顶层 stop_after=None → 5 阶段全部跑完。"""
+    """v5：顶层 stop_after=None + run_mode=to_end → 6 阶段全部跑完（含 fine_cut）。"""
     orig_g = P.HANDLERS["subtitle_generation"]
     orig_r = P.HANDLERS["subtitle_review"]
     orig_c = P.HANDLERS["rough_cut"]
     orig_p = P.HANDLERS["rough_compose"]
     orig_o = P.HANDLERS["optimize"]
+    orig_f = P.HANDLERS["fine_cut"]
 
     def _ok(tid, cfg, outputs_dir, api, job):
         return (True, "")
@@ -411,9 +551,11 @@ def test_run_pipeline_runs_to_end_when_stop_after_null(tmp_path: Path):
     P.HANDLERS["rough_cut"] = _ok
     P.HANDLERS["rough_compose"] = _ok
     P.HANDLERS["optimize"] = _ok
+    P.HANDLERS["fine_cut"] = _ok
     try:
         out = _outputs(tmp_path)
         cfg = P.default_config()
+        cfg["run_mode"] = "to_end"
         cfg["stop_after"] = None
         P.save_pipeline(out, {"config": cfg})
         api = "http://127.0.0.1:1"
@@ -428,25 +570,161 @@ def test_run_pipeline_runs_to_end_when_stop_after_null(tmp_path: Path):
         st = P.pipeline_status("test-tid-null")
         assert st is not None
         assert st["state"] == "done", f"期望 done，实际 {st['state']}"
-        assert len(st["summary"]["stages_done"]) == 5
+        assert len(st["summary"]["stages_done"]) == 6
     finally:
         P.HANDLERS["subtitle_generation"] = orig_g
         P.HANDLERS["subtitle_review"] = orig_r
         P.HANDLERS["rough_cut"] = orig_c
         P.HANDLERS["rough_compose"] = orig_p
         P.HANDLERS["optimize"] = orig_o
+        P.HANDLERS["fine_cut"] = orig_f
 
 
 # =============== handler 行为（mock）==============
 
 
 def test_handler_subtitle_generation_skips_when_already_done(tmp_path: Path):
-    """handler 函数可调用、不抛异常（v4 schema）。"""
+    """handler 函数可调用、不抛异常（v5 schema）。"""
     assert callable(P.handler_subtitle_generation)
     assert callable(P.handler_subtitle_review)
     assert callable(P.handler_rough_cut)
     assert callable(P.handler_rough_compose)
     assert callable(P.handler_optimize)
+    assert callable(P.handler_fine_cut)
+
+
+def test_handler_fine_cut_skips_when_disabled(monkeypatch, tmp_path: Path):
+    """v5：fine_cut.enabled=False → 直接 skip（不调 /export_fine_video）。"""
+    # 监控 _http_post — 确认不会调用 export_fine_video
+    calls = []
+    def fake_http_post(api, path, payload, **kw):
+        calls.append(path)
+        return {"ok": True, "job_id": "job_x"}
+    monkeypatch.setattr(P, "_http_post", fake_http_post)
+
+    job = P.PipelineJob()
+    out = tmp_path / "outputs"
+    out.mkdir(parents=True, exist_ok=True)
+    cfg = {"enabled": False}
+    ok, msg = P.handler_fine_cut("t-1", cfg, out, "http://x", job)
+    assert ok is True
+    assert msg == "skip"
+    assert calls == []  # 没调用任何端点
+
+
+def test_handler_fine_cut_runs_export_when_enabled(monkeypatch, tmp_path: Path):
+    """v5：fine_cut.enabled=True → 调 /export_fine_video + 等 /render_status。"""
+    monkeypatch.setattr(P, "_poll_export",
+                        lambda api, jid, tid, **kw: ("done", ""))
+    calls = []
+    def fake_http_post(api, path, payload, **kw):
+        calls.append((path, payload))
+        if path == "/export_fine_video":
+            return {"ok": True, "job_id": "job_test"}
+        return {"ok": True}
+    monkeypatch.setattr(P, "_http_post", fake_http_post)
+
+    job = P.PipelineJob()
+    out = tmp_path / "outputs"
+    out.mkdir(parents=True, exist_ok=True)
+    # 准备 prereq 文件
+    (out / "rough_compose.mp4").write_bytes(b"")
+    cfg = {"enabled": True, "preview_start": 10.0, "duration": 60.0,
+           "params_source": "current"}
+    ok, msg = P.handler_fine_cut("t-1", cfg, out, "http://x", job)
+    assert ok is True
+    assert msg == ""
+    # 期望调用 export_fine_video
+    paths = [p for p, _ in calls]
+    assert "/export_fine_video" in paths
+
+
+def test_handler_fine_cut_skips_when_no_prereq(monkeypatch, tmp_path: Path):
+    """v5：fine_cut 启用但缺 rough_compose.mp4 → skip（不报错）。"""
+    calls = []
+    def fake_http_post(api, path, payload, **kw):
+        calls.append(path)
+        return {"ok": True}
+    monkeypatch.setattr(P, "_http_post", fake_http_post)
+
+    job = P.PipelineJob()
+    out = tmp_path / "outputs"
+    out.mkdir(parents=True, exist_ok=True)
+    # 不创建 rough_compose.mp4
+    cfg = {"enabled": True}
+    ok, msg = P.handler_fine_cut("t-1", cfg, out, "http://x", job)
+    assert ok is True
+    assert msg == "skip"
+    assert calls == []
+
+
+def test_handler_fine_cut_applies_template_before_export(monkeypatch, tmp_path: Path):
+    """v5：params_source='template:p_x' → 先 /apply_fine_global_profile，再 /export_fine_video。"""
+    monkeypatch.setattr(P, "_poll_export",
+                        lambda api, jid, tid, **kw: ("done", ""))
+    calls = []
+    def fake_http_post(api, path, payload, **kw):
+        calls.append(path)
+        if path == "/export_fine_video":
+            return {"ok": True, "job_id": "job_test"}
+        return {"ok": True}
+    monkeypatch.setattr(P, "_http_post", fake_http_post)
+
+    job = P.PipelineJob()
+    out = tmp_path / "outputs"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "rough_compose.mp4").write_bytes(b"")
+    cfg = {"enabled": True, "params_source": "template:p_xyz"}
+    ok, msg = P.handler_fine_cut("t-1", cfg, out, "http://x", job)
+    assert ok is True
+    # 期望 apply_fine_global_profile 在 export_fine_video 之前
+    assert calls.index("/apply_fine_global_profile") < calls.index("/export_fine_video")
+
+
+def test_handler_subtitle_review_calls_rev_speaker_link_when_enabled(monkeypatch, tmp_path: Path):
+    """v5：subtitle_review.link_person_ids=True → 调 /rev_speaker_link。"""
+    calls = []
+    def fake_http_post(api, path, payload, **kw):
+        calls.append(path)
+        if path == "/revise_subtitle":
+            return {"ok": True}
+        return {"ok": True}
+    def fake_poll_status(api, path, tid, **kw):
+        return ("done", "")
+    monkeypatch.setattr(P, "_http_post", fake_http_post)
+    monkeypatch.setattr(P, "_poll_status", fake_poll_status)
+    # 写空 revision.json 让 skip_categories 处理能走
+    out = tmp_path / "outputs"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "subtitle.json").write_text("{}", encoding="utf-8")
+    (out / "revision.json").write_text('{"entries":[]}', encoding="utf-8")
+
+    job = P.PipelineJob()
+    cfg = {"accept_all_suggestions": True, "link_person_ids": True,
+           "skip_categories": [], "rigor": "medium"}
+    ok, msg = P.handler_subtitle_review("t-1", cfg, out, "http://x", job)
+    assert ok is True
+    assert "/rev_speaker_link" in calls
+
+
+def test_handler_rough_cut_calls_cut_speaker_link_when_enabled(monkeypatch, tmp_path: Path):
+    """v5：rough_cut.link_person_ids=True（且 delete_speakers 为空）→ 调 /cut_speaker_link。"""
+    calls = []
+    def fake_http_post(api, path, payload, **kw):
+        calls.append(path)
+        return {"ok": True}
+    monkeypatch.setattr(P, "_http_post", fake_http_post)
+    out = tmp_path / "outputs"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "subtitle.json").write_text("{}", encoding="utf-8")
+    (out / "revision.json").write_text('{"entries":[]}', encoding="utf-8")
+
+    job = P.PipelineJob()
+    cfg = {"delete_speakers": [], "default_decision": "keep",
+           "link_person_ids": True}
+    ok, msg = P.handler_rough_cut("t-1", cfg, out, "http://x", job)
+    assert ok is True
+    assert "/cut_speaker_link" in calls
 
 
 # =============== REQ-20260918-049：rigor 字段 + 续跑语义 ===============
@@ -561,6 +839,7 @@ def test_history_stages_done_persists_through_runs(tmp_path: Path):
     P.HANDLERS["rough_cut"] = slow_other
     P.HANDLERS["rough_compose"] = slow_other
     P.HANDLERS["optimize"] = slow_other
+    P.HANDLERS["fine_cut"] = slow_other
     try:
         # 配置顶层 stop_after='subtitle_review'（默认），跑完前两阶段后停在 stop_after
         P.save_pipeline(out, {"config": P.default_config()})

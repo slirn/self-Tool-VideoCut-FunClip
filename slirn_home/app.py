@@ -1433,7 +1433,7 @@ _WB_STAGES = [
     ("rough_cut",       "ROUGH_CUT_DONE",       "切分修剪", "✂️", "按修订决策带入保留/更正段，切分段父编号+子编号"),
     ("rough_compose",  "FINE_SUBTITLE_DONE",   "粗剪合成", "🎥", "按切分保留内容用上游 VideoClipper 合成粗剪视频（含随片字幕）"),
     ("fine_review",     "FINE_SUBTITLE_REVIEWED", "优化字幕", "✨", "重识别粗剪成片字幕，大模型提取不明确字词，人工替换并保存对应关系"),
-    ("fine_cut",        "FINE_CUT_DONE",        "精剪视频", "🎬", "按精剪段生成成品视频"),
+    ("fine_cut",        "FINE_CUT_DONE",        "精剪合成", "🎬", "按精剪段生成成品视频"),
 ]
 
 
@@ -1566,7 +1566,7 @@ _FINE_FONT_DEFAULTS = {
     "bg_radius":    4,
     "bold":         True,
     "align":        "center",
-    "left_offset":  0,  # REQ-20260920-097：align=center_offset 时向左偏移的像素数（默认由 UI 按 1920 - bg_detect_cache.width 计算）
+    "offset":       0,  # REQ-20260921-NNN：align=center_offset 时相对屏幕中心的偏移像素（负数=左偏，正数=右偏；「居中」模式忽略）
     "family":       "STHeitiMedium",
 }
 # REQ-20260919-061 扩展：背景音乐 4 项（启用 + 音量 + 淡入/淡出）
@@ -1576,6 +1576,15 @@ _FINE_AUDIO_DEFAULTS = {
     "volume":   0.4,
     "fade_in":  0.0,
     "fade_out": 0.0,
+}
+# REQ-20260921-NNN：精剪·生成预览参数（独立于 layout/font/output/audio —
+# 仅控制「生成预览」临时截取的起止区间；不影响导出最终视频）。
+# start_h/m/s 是时:分:秒三段独立输入（前端友好），duration 是秒数（2-30）。
+_FINE_PREVIEW_DEFAULTS = {
+    "start_h":  0,
+    "start_m":  0,
+    "start_s":  0,
+    "duration": 10,
 }
 _FINE_OUTPUT_DEFAULTS = {
     "resolution":  "1080p",  # 720p / 1080p / source
@@ -1709,14 +1718,17 @@ def _ass_force_style(font: dict, layout: dict | None = None) -> str:
     传入时按 ``layout.subtitle.x`` / ``layout.subtitle.y`` 推导字幕在画布上的位置：
     - subtitle.y > 0 → ``MarginV = H - subtitle.y``
       （Alignment=2 bottom → baseline 到画布底的距离，字幕基线画在 y 处）
-    - subtitle.x > 0 → 按 Alignment 计算水平偏移：
-        * left  (Alignment=1) → MarginL = subtitle.x
-        * right (Alignment=3) → MarginR = W - subtitle.x
-        * center / center_offset (Alignment=2) →
-          center_x = subtitle.x - left_offset，
-          MarginR = W - 2*center_x
-          （center_offset 时再向左偏 font.left_offset，复用 REQ-097 语义）
+    - subtitle.x 按 Alignment 走独立分支（互不复用）：
+        * left  (Alignment=1) → MarginL = subtitle.x   （文字左边缘绝对位置）
+        * right (Alignment=3) → MarginR = W - subtitle.x  （文字右边缘绝对位置）
+        * center (Alignment=2, align_val=="center") → sub_x 忽略，文字中心 = W/2
+        * center_offset (Alignment=2, align_val=="center_offset") → sub_x 忽略，
+          文字中心 = W/2 + font.offset（offset 可负：负=左偏，正=右偏）
     ``layout=None`` 或 subtitle.x/y == 0 → 退回到纯 font 旧逻辑。
+
+    REQ-20260921-NNN：``font.left_offset`` 字段重命名为 ``font.offset``，
+    语义改为「相对屏幕中心的偏移，负=左偏、正=右偏」。老 fc.json 的
+    ``left_offset`` 由 ``_get_fine_compose`` 自动迁移（取负号）。
 
     REQ-20260920-099 Phase C：本函数保留 force_style 字符串生成，但
     ``_assemble_fine_filter`` 现在改用 ``ass=`` 滤镜（直接喂 ASS 文件），
@@ -1763,29 +1775,34 @@ def _ass_force_style(font: dict, layout: dict | None = None) -> str:
         margin_v = max(0, _FINE_DESIGN_H - sub_y)
         parts.append(f"MarginV={margin_v}")
 
-    # 水平：center_offset 时读 font.left_offset；与 subtitle.x 复合（center/center_offset）
+    # 水平：每个 align 走独立分支
+    # REQ-20260921-NNN：center/center_offset 不再复用 sub_x；offset（signed）决定文字相对屏幕中心的位置
     if align_val == "center_offset":
         try:
-            offset_px = int(font.get("left_offset", 0) or 0)
+            offset_px = int(font.get("offset", 0) or 0)
         except (TypeError, ValueError):
             offset_px = 0
     else:
         offset_px = 0
 
-    if sub_x > 0:
-        if align == 1:  # left
+    if align == 1:  # left：文字左边缘 = sub_x
+        if sub_x > 0:
             margin_l = max(0, sub_x)
             parts.append(f"MarginL={margin_l}")
-        elif align == 3:  # right
+    elif align == 3:  # right：文字右边缘 = W - sub_x
+        if sub_x > 0:
             margin_r = max(0, _FINE_DESIGN_W - sub_x)
             parts.append(f"MarginR={margin_r}")
-        else:  # center / center_offset (Alignment=2)
-            center_x = sub_x - offset_px
-            margin_r = max(0, _FINE_DESIGN_W - 2 * center_x)
-            parts.append(f"MarginR={margin_r}")
-    elif offset_px > 0:
-        # subtitle.x = 0 但 align=center_offset + left_offset > 0 → REQ-097 旧逻辑
-        parts.append(f"MarginR={offset_px * 2}")
+    elif align_val == "center_offset":
+        # 居中+偏移：文字中心 = W/2 + offset
+        #   offset > 0 → MarginL = 2*offset, MarginR = 0   （右偏）
+        #   offset < 0 → MarginL = 0,        MarginR = -2*offset  （左偏）
+        if offset_px > 0:
+            parts.append(f"MarginL={offset_px * 2}")
+        elif offset_px < 0:
+            parts.append(f"MarginR={-offset_px * 2}")
+        # offset_px == 0 → 不插 margin，文字自然居中
+    # align=center：什么都不插，文字自然居中（W/2）
     sw = int(font.get("stroke_width") or 0)
     if sw > 0:
         # ASS stroke_color #RRGGBB → &H00BBGGRR
@@ -1814,6 +1831,14 @@ def _ass_style_line(font: dict, layout: dict | None, W: int, H: int) -> dict:
         outline_colour, back_colour, bold, italic, underline, strike_out,
         scale_x, scale_y, spacing, angle, border_style, outline, shadow,
         alignment, margin_l, margin_r, margin_v, encoding``
+
+    水平位置推导（REQ-20260921-NNN 简化版）：
+    - left  (Alignment=1) → MarginL = sub_x    （文字左边缘绝对位置）
+    - right (Alignment=3) → MarginR = W - sub_x （文字右边缘绝对位置）
+    - center (Alignment=2, align_val=="center") → sub_x 与 font.offset 都忽略，
+      文字中心 = W/2
+    - center_offset (Alignment=2, align_val=="center_offset") → sub_x 忽略，
+      文字中心 = W/2 + font.offset（offset 可负：负=左偏、正=右偏）
 
     注：ASS Style 写「绝对值」，不能复用 force_style 串（force_style 是
     libass 的 overlay 机制，只对单 Style 行覆盖；ASS 文件必须写到底层 Style）。
@@ -1895,24 +1920,27 @@ def _ass_style_line(font: dict, layout: dict | None, W: int, H: int) -> dict:
 
     if align_val == "center_offset":
         try:
-            offset_px = int(font.get("left_offset", 0) or 0)
+            offset_px = int(font.get("offset", 0) or 0)
         except (TypeError, ValueError):
             offset_px = 0
     else:
         offset_px = 0
 
+    # REQ-20260921-NNN：每个 align 走独立分支；center/center_offset 不再复用 sub_x
     margin_l = 0
     margin_r = 0
-    if sub_x > 0:
-        if alignment == 1:
-            margin_l = max(0, sub_x)
-        elif alignment == 3:
-            margin_r = max(0, W - sub_x)
-        else:
-            center_x = sub_x - offset_px
-            margin_r = max(0, W - 2 * center_x)
-    elif offset_px > 0:
-        margin_r = max(0, offset_px * 2)
+    if alignment == 1:  # left：文字左边缘 = sub_x
+        margin_l = max(0, sub_x)
+    elif alignment == 3:  # right：文字右边缘 = W - sub_x
+        margin_r = max(0, W - sub_x)
+    elif align_val == "center_offset":
+        # 居中+偏移：文字中心 = W/2 + offset（offset 可负）
+        if offset_px > 0:
+            margin_l = 2 * offset_px
+        elif offset_px < 0:
+            margin_r = -2 * offset_px
+        # offset_px == 0 → margin_l=0, margin_r=0 → 文字自然居中
+    # align=center：margin_l=0, margin_r=0 → 文字自然居中（W/2）
 
     return {
         "name": "Default",
@@ -3126,6 +3154,8 @@ def _get_fine_compose(mgr, task_id: str) -> dict:
     fc.setdefault("font", dict(_FINE_FONT_DEFAULTS))
     # REQ-20260919-061 扩展：背景音乐默认设置（独立于 layout）
     fc.setdefault("audio", dict(_FINE_AUDIO_DEFAULTS))
+    # REQ-20260921-NNN：生成预览参数（独立保存 start_h/m/s + duration）
+    fc.setdefault("preview", dict(_FINE_PREVIEW_DEFAULTS))
     # REQ-20260919-065：检测区域正式参数（旧任务缺该字段也兼容）
     fc.setdefault("detected_region", None)
     # layout 默认值与已存值合并（保留用户已设置的）
@@ -3153,6 +3183,17 @@ def _get_fine_compose(mgr, task_id: str) -> dict:
     if "color" not in _f_color:
         _f_color["color"] = "#FFFFFF"
         fc["font"] = _f_color
+
+    # REQ-20260921-NNN：老 fc.json 的 font.left_offset（正数=左偏）→ font.offset（可负）
+    # 语义：老 left_offset=N（左偏 N）→ 新 offset=-N（仍是左偏 N；位置不变）
+    # 已存在新字段 offset 时跳过；老字段 left_offset 保留以便回溯，下次保存时清掉。
+    _f_off = fc.get("font") or {}
+    if "left_offset" in _f_off and "offset" not in _f_off:
+        try:
+            _f_off["offset"] = -int(_f_off["left_offset"] or 0)
+        except (TypeError, ValueError):
+            _f_off["offset"] = 0
+        fc["font"] = _f_off
 
     # 数字字段类型规整：JSON 不区分 int/float/str，f-string 用 .2f 时必须是数字
     # 否则报 "Unknown format code 'f' for object of type 'str'"。
@@ -3382,15 +3423,18 @@ def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
     layout = fc["layout"]
     font = fc["font"]
     output = fc["output"]
-    # REQ-20260920-097：居中+左偏移 默认值 = 1920 - bg_detect_cache.width
-    # 旧任务（无 left_offset）第一次渲染时按 bg_detect_cache 算出，不写回 fc（保留手动值）。
+    # REQ-20260921-NNN：居中+偏移 默认值（保留「左偏」语义）
+    # 老公式：left_offset = 1920 - bg_width（左偏 N 像素）
+    # 新公式：offset = -(1920 - bg_width) = bg_width - 1920，仍是左偏 N 像素
+    # 旧任务（无 offset）第一次渲染时按 bg_detect_cache 算出，不写回 fc（保留手动值）。
     _bg_cache = (fc.get("detected_region") or fc.get("bg_detect_cache") or {}) if isinstance(fc, dict) else {}
     _cache_w = _bg_cache.get("width")
-    if "left_offset" not in font:
+    if "offset" not in font:
         try:
-            font["left_offset"] = max(0, _FINE_DESIGN_W - int(_cache_w)) if _cache_w else 0
+            _w = int(_cache_w) if _cache_w else 0
+            font["offset"] = (_w - _FINE_DESIGN_W) if _w else 0
         except (TypeError, ValueError):
-            font["left_offset"] = 0
+            font["offset"] = 0
 
     # 1. 5 个素材上传卡
     upload_cards = []
@@ -3645,17 +3689,29 @@ def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
         f'</div>'
     )
 
-    # 3. AI 解析按钮
+    # 3. AI 智能识别布局按钮（REQ-20260921-NNN：移到背景图区域检测块内）
     has_reference = bool(materials.get("reference", {}).get("path"))
     # tooltip 显示「将调用的当前模型」，让用户清楚按钮背后是哪个模型
     from slirn_home import llm_config as _llm_cfg
     _cur_model_id = _llm_cfg.get_current(mgr.tasks_dir.parent) or "未选"
+    # 「必须先有参考图」单独标识 + 当前模型提示（一行展示，不挤按钮文字）
+    if has_reference:
+        _ai_badge = (
+            f'<span class="slirn-fine-bg-detect-ai-badge slirn-fine-bg-detect-ai-badge-ok" '
+            f'title="参考图已上传，可调用当前模型识别">✅ 参考图已就绪 · 模型：{_esc(_cur_model_id)}</span>'
+        )
+    else:
+        _ai_badge = (
+            f'<span class="slirn-fine-bg-detect-ai-badge slirn-fine-bg-detect-ai-badge-warn" '
+            f'title="需先在「上传素材」里添加「参考位置关系图」">⚠️ 必须先上传参考图，才能识别</span>'
+        )
     ai_btn = (
         f'<button class="slirn-btn slirn-btn-primary" data-action="fine-ai-parse" '
         f'data-task-id="{_esc(task_id)}" '
         f'{"disabled" if not has_reference else ""} '
-        f'title="{_esc("需先上传参考位置关系图") if not has_reference else _esc(f"调当前模型「{_cur_model_id}」自动解析参考图")}">'
-        f'🤖 AI 智能布局{"" if has_reference else "（需参考图）"}</button>'
+        f'title="{_esc("需先上传参考位置关系图") if not has_reference else _esc(f"调当前模型「{_cur_model_id}」自动识别参考图布局")}">'
+        f'🤖 AI 智能识别布局</button>'
+        f'{_ai_badge}'
     )
 
     # 4. 字体 5 项
@@ -3686,16 +3742,16 @@ def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
         f'<option value="left" {"selected" if font["align"] == "left" else ""}>左对齐</option>'
         f'<option value="center" {"selected" if font["align"] == "center" else ""}>居中</option>'
         f'<option value="right" {"selected" if font["align"] == "right" else ""}>右对齐</option>'
-        # REQ-20260920-097：居中+左偏移（按 left_offset 把居中文字向左挪）
-        f'<option value="center_offset" {"selected" if font["align"] == "center_offset" else ""}>居中+左偏移</option>'
+        # REQ-20260921-NNN：居中+偏移（offset 可负：负数=左偏，正数=右偏）
+        f'<option value="center_offset" {"selected" if font["align"] == "center_offset" else ""}>居中+偏移</option>'
         f'</select>'
         f'</div>'
-        # REQ-20260920-097：左偏移量（px）— 默认 = 1920 - bg_detect_cache.width
+        # REQ-20260921-NNN：偏移量（px）— signed；老 left_offset=434 已迁移为 offset=-434
         f'<div class="slirn-fine-font-row">'
-        f'<span class="slirn-fine-font-label">左偏移量（px）</span>'
-        f'<input type="number" class="slirn-fine-font-num" data-font-key="left_offset" '
-        f'min="0" max="1920" step="1" value="{int(font.get("left_offset", 0) or 0)}" '
-        f'title="默认 = 1920 - bg_detect_cache.width（背景区域检测出的宽度）">'
+        f'<span class="slirn-fine-font-label">偏移量（px）</span>'
+        f'<input type="number" class="slirn-fine-font-num" data-font-key="offset" '
+        f'min="-1920" max="1920" step="1" value="{int(font.get("offset", 0) or 0)}" '
+        f'title="相对屏幕中心的偏移像素：负数=左偏，正数=右偏（仅「居中+偏移」模式生效）">'
         f'</div>'
         f'<div class="slirn-fine-font-row">'
         f'<span class="slirn-fine-font-label">描边宽度（px）</span>'
@@ -3762,26 +3818,37 @@ def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
     export_btn_disabled = "" if has_video else "disabled"
     export_btn_title = "导出完整视频到 outputs/fine_export.mp4" if has_video else "请先上传或自动获取视频素材"
     preview_btn = (
-        f'<button class="slirn-btn" data-action="fine-preview" data-task-id="{_esc(task_id)}" '
+        f'<button class="slirn-btn slirn-btn-primary" data-action="fine-preview" data-task-id="{_esc(task_id)}" '
         f'{preview_btn_disabled} title="{_esc(preview_btn_title)}">🎬 生成预览</button>'
     )
+    # REQ-20260921-NNN：预览参数（start_h/m/s + duration）作为「设置参数」保存到 fc.json；
+    # 渲染时优先读 fc.preview（不再硬编码 0/10），刷新页面也能恢复。
+    _preview_cfg = fc.get("preview") or _FINE_PREVIEW_DEFAULTS
+    _ph = int(_preview_cfg.get("start_h", 0) or 0)
+    _pm = int(_preview_cfg.get("start_m", 0) or 0)
+    _ps = int(_preview_cfg.get("start_s", 0) or 0)
+    _pd = int(_preview_cfg.get("duration", _FINE_PREVIEW_DEFAULTS["duration"]) or _FINE_PREVIEW_DEFAULTS["duration"])
     # REQ-20260919-061a v6 用户反馈：删除预览时长旁的 ▲▼ 按钮 — 直接修改 number input 即可。
     # 仍保留 number input + min/max 限制 + Enter 提交语义。
     # REQ-20260919-064：新增「预览开始时间」input 在「预览时长」前 — 让用户能跳到视频
     # 不同时间点预览。start + duration 由后端钳到不超出源视频时长。
     # REQ-20260919-066 用户反馈：开始时间改为 时:分:秒 三段输入（比纯秒更直观）；
     # 前端在发送前转成总秒数发给后端。默认 00:00:00。
+    # REQ-20260921-NNN：input 加 data-preview-key，让 fineSaveAll 收集并持久化到 fc.preview。
     preview_start = (
         f'<span class="slirn-fine-preview-start">'
         f'<span class="slirn-fine-actions-label">预览开始时间</span>'
         f'<input type="number" id="slirn-fine-preview-start-h" class="slirn-fine-num slirn-fine-preview-time" '
-        f'aria-label="预览开始时间（小时）" min="0" step="1" value="0" maxlength="2">'
+        f'data-preview-key="start_h" aria-label="预览开始时间（小时）" '
+        f'min="0" step="1" value="{_ph}" maxlength="2">'
         f'<span class="slirn-fine-time-sep">:</span>'
         f'<input type="number" id="slirn-fine-preview-start-m" class="slirn-fine-num slirn-fine-preview-time" '
-        f'aria-label="预览开始时间（分钟）" min="0" max="59" step="1" value="0" maxlength="2">'
+        f'data-preview-key="start_m" aria-label="预览开始时间（分钟）" '
+        f'min="0" max="59" step="1" value="{_pm}" maxlength="2">'
         f'<span class="slirn-fine-time-sep">:</span>'
         f'<input type="number" id="slirn-fine-preview-start-s" class="slirn-fine-num slirn-fine-preview-time" '
-        f'aria-label="预览开始时间（秒）" min="0" max="59" step="1" value="0" maxlength="2">'
+        f'data-preview-key="start_s" aria-label="预览开始时间（秒）" '
+        f'min="0" max="59" step="1" value="{_ps}" maxlength="2">'
         f'<span class="slirn-fine-actions-label">（时:分:秒）</span>'
         f'</span>'
     )
@@ -3789,7 +3856,8 @@ def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
         f'<span class="slirn-fine-preview-duration">'
         f'<span class="slirn-fine-actions-label">预览时长</span>'
         f'<input type="number" id="slirn-fine-preview-duration" class="slirn-fine-num" '
-        f'aria-label="预览时长（秒，2-30）" min="2" max="30" step="1" value="10">'
+        f'data-preview-key="duration" aria-label="预览时长（秒，2-30）" '
+        f'min="2" max="30" step="1" value="{_pd}">'
         f'<span class="slirn-fine-actions-label">秒（2–30）</span>'
         f'</span>'
     )
@@ -3888,21 +3956,11 @@ def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
     # REQ-20260919-064：把预览/导出行 + 模板/保存行 拆成两行（每个一行 .slirn-fine-actions-bar）。
     # 模板名 input 用 flex:1 自动填充剩余宽度；不再需要 sep 分隔符。
     combined_actions_bar = (
-        # 行 1：渲染操作（AI 解析 / 生成预览 / 预览开始 / 预览时长 / 导出最终）
+        # 行 1：导出最终视频 + 参数文件导入导出（REQ-20260921-NNN：
+        #   - 预览相关参数挪到下方独立一行
+        #   - 导出参数 / 导入参数紧贴「导出最终视频」按钮）
         f'<div class="slirn-fine-actions-bar">'
-        f'{ai_btn} {preview_btn} {preview_start} {preview_duration} {export_btn}'
-        f'</div>'
-        # 行 2：模板管理 + 参数文件导入导出（REQ-065 在引用参数后追加 📤 导出 / 📥 导入按钮）
-        f'<div class="slirn-fine-actions-bar">'
-        f'<span class="slirn-fine-actions-label">模板名</span>'
-        f'<input type="text" class="slirn-fine-profile-name" id="slirn-fine-profile-name" '
-        f'placeholder="（可选）填了名另存为模板" maxlength="30" autocomplete="off">'
-        f'<button class="slirn-btn slirn-btn-primary" data-action="fine-save-all" '
-        f'data-task-id="{_esc(task_id)}" title="保存当前参数；未填名会弹窗要求填">'
-        f'💾 保存设置参数</button>'
-        f'<button class="slirn-btn" data-action="fine-import-show" '
-        f'data-task-id="{_esc(task_id)}" title="从本机已保存的全局参数模板中选择应用（不会发到外部）">'
-        f'📥 引用参数（本地）</button>'
+        f'{export_btn}'
         f'<button class="slirn-btn" data-action="fine-export-params" '
         f'data-task-id="{_esc(task_id)}" '
         f'title="下载所有参数（布局/字体/输出/音频/检测区域）为 JSON 文件">'
@@ -3911,7 +3969,24 @@ def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
         f'data-task-id="{_esc(task_id)}" '
         f'title="从 JSON 文件导入参数（覆盖当前参数；不动素材文件）">'
         f'📥 导入参数</button>'
+        f'</div>'
+        # 行 2：模板管理 + 引用参数（REQ-20260921-NNN：「💾 保存设置参数」挪到行首）
+        f'<div class="slirn-fine-actions-bar">'
+        f'<button class="slirn-btn slirn-btn-primary" data-action="fine-save-all" '
+        f'data-task-id="{_esc(task_id)}" title="保存当前参数；未填名会弹窗要求填">'
+        f'💾 保存设置参数</button>'
+        f'<span class="slirn-fine-actions-label">模板名</span>'
+        f'<input type="text" class="slirn-fine-profile-name" id="slirn-fine-profile-name" '
+        f'placeholder="（可选）填了名另存为模板" maxlength="30" autocomplete="off">'
+        f'<button class="slirn-btn" data-action="fine-import-show" '
+        f'data-task-id="{_esc(task_id)}" title="从本机已保存的全局参数模板中选择应用（不会发到外部）">'
+        f'📥 引用参数（本地）</button>'
         f'{save_status}'
+        f'</div>'
+        # 行 3：生成预览相关参数（按钮 + 预览开始秒数 + 预览时长）独立一行
+        # 紧贴模板行下方，让用户集中调节预览相关选项（与「导出最终视频」区分开）
+        f'<div class="slirn-fine-actions-bar">'
+        f'{preview_btn} {preview_start} {preview_duration}'
         f'</div>'
     )
 
@@ -4037,6 +4112,15 @@ def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
         f'✅ 填充到视频位置和裁剪</button>'
         f'</div>'
         f'</div>'
+        # REQ-20260921-NNN：AI 智能识别布局按钮从顶部操作栏移到此处；
+        # 必须有参考图（reference 素材），AI 对参考图做视觉识别，自动给出布局建议。
+        f'<div class="slirn-fine-bg-detect-ai-row">'
+        f'{ai_btn}'
+        f'<span class="slirn-fine-bg-detect-ai-desc">'
+        f'需先在「上传素材 → 参考位置关系图」里上传一张参考图，'
+        f'AI 会自动识别图中素材位置/缩放关系，并写回下方 4 个素材的滑块。'
+        f'</span>'
+        f'</div>'
         f'<div class="slirn-form-hint">白色 = R/G/B 三通道均 ≥ 阈值；阈值越小（200）越宽松，越大（255）越严格。'
         f'检测到的坐标都是 1920×1080 设计空间像素，结果自动保存到任务里（避免反复扫描）。</div>'
         f'</div>'
@@ -4056,7 +4140,7 @@ def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
 
     return (
         f'<div class="slirn-wb-pane-card">'
-        f'<div class="slirn-wb-pane-title">🎬 精剪视频 · 素材合成器</div>'
+        f'<div class="slirn-wb-pane-title">🎬 精剪合成 · 素材合成器</div>'
         # REQ-20260919-072 v1：说明挪到最顶端（标题之后立刻显示）
         f'<div class="slirn-form-hint">📐 位置坐标（X/Y）和缩放（归一化 0-1 / 0.1-2.0）</div>'
         # REQ-20260919-072 v1：素材上传区可折叠（默认折叠；不写 open 属性）
@@ -4765,7 +4849,7 @@ def build_app(repo_root: Path | None = None) -> gr.Blocks:
 
     mgr = TaskManager(repo_root)
 
-    app = gr.Blocks(title="Slirn — 自定义首页")
+    app = gr.Blocks(title="Video Studio — 自定义首页")
     _inject_css_and_js(app)
     # 放宽 Gradio 默认上传大小限制到 10 GB（原默认很小，会截断大视频）
     app.max_file_size = 10 * 1024 * 1024 * 1024  # bytes
@@ -4777,7 +4861,7 @@ def build_app(repo_root: Path | None = None) -> gr.Blocks:
     <div class="slirn-topbar">
         <div class="slirn-logo">
             <div class="slirn-logo-icon">🎬</div>
-            <span>Slirn Studio</span>
+            <span>Video Studio</span>
         </div>
         <div class="slirn-topbar-actions">
             <button class="slirn-btn-icon" data-action="open-llm-settings" aria-label="大模型设置" title="大模型设置">⚙️</button>
@@ -4804,8 +4888,6 @@ def build_app(repo_root: Path | None = None) -> gr.Blocks:
     <div id="slirn-tab-hotwords" class="slirn-tab-content" style="display:none;">{_render_hotword_lib(repo_root)}</div>
     <div id="slirn-tab-detail" class="slirn-tab-content" style="display:none;"></div>
     <div id="slirn-tab-workbench" class="slirn-tab-content" style="display:none;"></div>
-
-    <div class="slirn-footer">Slirn v0.2 · 仓库 <code>{_esc(repo_root)}</code></div>
     '''
 
     with app:
@@ -6114,6 +6196,42 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         _save_fine_compose(mgr, tid, fc)
         return _ok(toast="背景音乐设置已保存")
 
+    @app.app.post("/slirn/api/save_fine_preview")
+    async def save_fine_preview(body: dict = Body(default_factory=dict)):
+        """REQ-20260921-NNN：保存精剪·生成预览参数（start_h/m/s + duration）。
+        与 layout/font/output/audio 同级，刷新页面/工作台不丢。
+        """
+        tid = (body.get("task_id") or "").strip()
+        preview = body.get("preview") or {}
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            t = mgr.get(tid)
+        except Exception:  # noqa: BLE001
+            return _err(f"任务不存在: {tid}")
+        if not t:
+            return _err(f"任务不存在: {tid}")
+        fc = _get_fine_compose(mgr, tid)
+        allowed = set(_FINE_PREVIEW_DEFAULTS.keys())
+        # 整型字段（时:分:秒三段 + duration），非法值丢弃保持原值
+        for k in allowed:
+            if k not in preview:
+                continue
+            try:
+                v = int(preview[k])
+            except (TypeError, ValueError):
+                continue
+            # 字段级硬约束：m/s 最大 59；duration 钳到 2-30（与前端 input 一致）
+            if k in ("start_m", "start_s"):
+                v = max(0, min(59, v))
+            elif k == "start_h":
+                v = max(0, v)
+            elif k == "duration":
+                v = max(2, min(30, v))
+            fc["preview"][k] = v
+        _save_fine_compose(mgr, tid, fc)
+        return _ok(toast="预览参数已保存")
+
     # ---------- 精剪视频·系统默认 BGM（REQ-20260920-078） ----------
     @app.app.post("/slirn/api/list_default_bgms")
     async def list_default_bgms(body: dict = Body(default_factory=dict)):
@@ -6123,6 +6241,43 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         文件缺失则灰显，避免运行时崩溃。
         """
         return _ok(bgms=_get_default_bgms())
+
+    # REQ-20260921-NNN：流程配置精剪合成阶段背景音乐下拉 — 合并系统默认 + 任务上传
+    @app.app.post("/slirn/api/list_bgm_files")
+    async def list_bgm_files(body: dict = Body(default_factory=dict)):
+        """列出可选 BGM 文件：系统默认 + 任务上传的 audio 素材。
+
+        返回 [{kind: 'default'|'uploaded', name, label, available, path?}]。
+        """
+        out = []
+        # 系统默认（与精剪面板同一来源）
+        for bgm in _get_default_bgms():
+            out.append({
+                "kind": "default",
+                "name": bgm.get("filename", ""),
+                "label": bgm.get("label") or bgm.get("filename", ""),
+                "available": bool(bgm.get("available", False)),
+            })
+        # 任务上传的 audio 素材
+        tid = (body.get("task_id") or "").strip()
+        if tid:
+            try:
+                t = mgr.get(tid)
+                if t:
+                    fc = _get_fine_compose(mgr, tid)
+                    audio_mat = (fc.get("materials") or {}).get("audio") or {}
+                    audio_path = audio_mat.get("path") or ""
+                    if audio_path:
+                        out.append({
+                            "kind": "uploaded",
+                            "name": Path(audio_path).name,
+                            "label": f"已上传：{Path(audio_path).name}",
+                            "available": True,
+                            "path": audio_path,
+                        })
+            except Exception:  # noqa: BLE001
+                pass
+        return _ok("", files=out)
 
     # ---------- REQ-20260920-088：素材路径详情 ----------
     @app.app.post("/slirn/api/material_info")

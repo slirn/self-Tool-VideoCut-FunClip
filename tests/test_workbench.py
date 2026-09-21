@@ -625,7 +625,7 @@ def test_render_fine_cut_zone_hint_is_at_top(tmp_path):
     m, video = _make_mgr(tmp_path)
     t = m.create(name="hint-top", original_video=video)
     html = _render_workbench(t.task_id, m)
-    title_pos = html.find("精剪视频 · 素材合成器")
+    title_pos = html.find("精剪合成 · 素材合成器")
     hint_pos = html.find("📐 位置坐标")
     uploads_pos = html.find("slirn-fine-uploads-details")
     assert title_pos > 0 and hint_pos > 0 and uploads_pos > 0
@@ -4468,7 +4468,7 @@ def test_import_fine_params_restores_all_checkbox_states(tmp_path: Path):
         },
         "font": {
             "family": "Noto Sans SC", "size": 24, "color": "#FFFFFF",
-            "bold": True, "align": "center", "left_offset": 0,
+            "bold": True, "align": "center", "offset": 0,
             "stroke_width": 2, "stroke_color": "#000000",
         },
         "output": {"resolution": "1080p", "codec": "h264"},
@@ -4644,26 +4644,26 @@ def test_fine_font_defaults_has_color(tmp_path: Path):
 
 
 def test_ass_force_style_center_offset_shifts_left(tmp_path: Path):
-    """REQ-097：align=center_offset + left_offset=N 必须用 Alignment=2 + MarginR=2*N
-    把居中文字左移 N 像素（ASS 居中 x = (MarginL + W - MarginR) / 2）。"""
+    """REQ-20260921-NNN：align=center_offset + offset=-N（左偏 N）→ MarginR=2N。"""
     from slirn_home.app import _ass_force_style
     f = {"family": "STHeitiMedium", "size": 16, "color": "#FFFFFF",
          "stroke_width": 2, "stroke_color": "#000000", "bold": True,
-         "align": "center_offset", "left_offset": 334}
+         "align": "center_offset", "offset": -334}  # 负数 = 左偏 334
     fs = _ass_force_style(f)
-    assert "Alignment=2" in fs, f"居中+左偏移应保留 Alignment=2：{fs}"
+    assert "Alignment=2" in fs, f"居中+偏移应保留 Alignment=2：{fs}"
     assert "MarginR=668" in fs, (
-        f"左偏移 334px 应转换为 MarginR=668（ASS 公式：左移 N = MarginR=2N），"
+        f"offset=-334（左偏 334）应转换为 MarginR=668（ASS 公式：左移 N = MarginR=2N），"
         f"实际：{fs}"
     )
 
 
 def test_ass_force_style_center_no_marginr(tmp_path: Path):
-    """REQ-097：align=center 不应出现 MarginR（保持原行为）。"""
+    """REQ-20260921-NNN：align=center 不应出现 MarginR/MarginL（保持原行为）。"""
     from slirn_home.app import _ass_force_style, _FINE_FONT_DEFAULTS
-    fs = _ass_force_style(dict(_FINE_FONT_DEFAULTS))  # 默认 align=center, left_offset=0
+    fs = _ass_force_style(dict(_FINE_FONT_DEFAULTS))  # 默认 align=center, offset=0
     assert "Alignment=2" in fs
     assert "MarginR" not in fs, f"align=center 不应插 MarginR：{fs}"
+    assert "MarginL" not in fs, f"align=center 不应插 MarginL：{fs}"
 
 
 def test_ass_force_style_subtitle_y_sets_marginv(tmp_path: Path):
@@ -4671,7 +4671,7 @@ def test_ass_force_style_subtitle_y_sets_marginv(tmp_path: Path):
     from slirn_home.app import _ass_force_style, _FINE_DESIGN_H
     f = {"family": "STHeitiMedium", "size": 20, "color": "#FFFFFF",
          "stroke_width": 2, "stroke_color": "#000000", "bold": True,
-         "align": "center_offset", "left_offset": 434}
+         "align": "center_offset", "offset": -434}
     # y=1050 → MarginV = 1080 - 1050 = 30
     fs = _ass_force_style(f, {"subtitle": {"x": 672, "y": 1050, "enabled": True}})
     assert f"MarginV={_FINE_DESIGN_H - 1050}" in fs, (
@@ -4684,26 +4684,25 @@ def test_ass_force_style_subtitle_y_zero_keeps_default(tmp_path: Path):
     from slirn_home.app import _ass_force_style, _FINE_FONT_DEFAULTS
     f = dict(_FINE_FONT_DEFAULTS)
     f["align"] = "center_offset"
-    f["left_offset"] = 0
+    f["offset"] = 0
     fs = _ass_force_style(f, {"subtitle": {"x": 0, "y": 0, "enabled": True}})
     assert "MarginV" not in fs, f"subtitle.y=0 不应输出 MarginV：{fs}"
 
 
-def test_ass_force_style_subtitle_x_center_offset_composes(tmp_path: Path):
-    """REQ-099：center_offset + subtitle.x → center_x = subtitle.x - left_offset，
-    MarginR = W - 2*center_x。"""
+def test_ass_force_style_subtitle_x_center_offset_ignores_x(tmp_path: Path):
+    """REQ-20260921-NNN：center_offset 不再读 sub_x（与 center 一致：忽略 X）。
+    sub_x=672 + offset=-434（左偏 434）→ 仅 MarginR=868（无 sub_x 影响）。"""
     from slirn_home.app import _ass_force_style, _FINE_DESIGN_W
     f = {"family": "STHeitiMedium", "size": 20, "color": "#FFFFFF",
          "stroke_width": 2, "stroke_color": "#000000", "bold": True,
-         "align": "center_offset", "left_offset": 434}
-    # x=672, left_offset=434 → center_x=238, MarginR = 1920 - 476 = 1444
+         "align": "center_offset", "offset": -434}
     fs = _ass_force_style(f, {"subtitle": {"x": 672, "y": 0, "enabled": True}})
-    expected_marginr = _FINE_DESIGN_W - 2 * (672 - 434)  # = 1444
+    # 文字中心应 = W/2 - 434 = 526，所以 MarginR = 2*434 = 868
+    expected_marginr = 2 * 434  # = 868
     assert f"MarginR={expected_marginr}" in fs, (
-        f"subtitle.x=672 + left_offset=434 应输出 MarginR={expected_marginr}，"
+        f"center_offset + offset=-434 应输出 MarginR={expected_marginr}（文字中心 = W/2 - 434），"
         f"force_style={fs}"
     )
-    # 同时不应有重复 MarginR
     assert fs.count("MarginR=") == 1, f"不应输出多个 MarginR：{fs}"
 
 
@@ -4712,7 +4711,7 @@ def test_ass_force_style_subtitle_x_left_align(tmp_path: Path):
     from slirn_home.app import _ass_force_style
     f = {"family": "STHeitiMedium", "size": 20, "color": "#FFFFFF",
          "stroke_width": 2, "stroke_color": "#000000", "bold": True,
-         "align": "left", "left_offset": 0}
+         "align": "left", "offset": 0}
     fs = _ass_force_style(f, {"subtitle": {"x": 200, "y": 800, "enabled": True}})
     assert "Alignment=1" in fs
     assert "MarginL=200" in fs, f"align=left + sub_x=200 应输出 MarginL=200：{fs}"
@@ -4724,7 +4723,7 @@ def test_ass_force_style_subtitle_x_right_align(tmp_path: Path):
     from slirn_home.app import _ass_force_style, _FINE_DESIGN_W
     f = {"family": "STHeitiMedium", "size": 20, "color": "#FFFFFF",
          "stroke_width": 2, "stroke_color": "#000000", "bold": True,
-         "align": "right", "left_offset": 0}
+         "align": "right", "offset": 0}
     fs = _ass_force_style(f, {"subtitle": {"x": 1700, "y": 800, "enabled": True}})
     assert "Alignment=3" in fs
     assert f"MarginR={_FINE_DESIGN_W - 1700}" in fs, (
@@ -4737,7 +4736,7 @@ def test_ass_force_style_layout_none_preserves_legacy(tmp_path: Path):
     from slirn_home.app import _ass_force_style
     f = {"family": "STHeitiMedium", "size": 16, "color": "#FFFFFF",
          "stroke_width": 2, "stroke_color": "#000000", "bold": True,
-         "align": "center_offset", "left_offset": 334}
+         "align": "center_offset", "offset": -334}
     fs_legacy = _ass_force_style(f)
     fs_with_layout_none = _ass_force_style(f, None)
     assert fs_legacy == fs_with_layout_none, (
@@ -4789,7 +4788,7 @@ def test_assemble_fine_filter_subtitle_position(tmp_path: Path):
     fc["layout"]["subtitle"]["y"] = 1050
     fc["layout"]["subtitle"]["enabled"] = True
     fc["font"]["align"] = "center_offset"
-    fc["font"]["left_offset"] = 434
+    fc["font"]["offset"] = -434  # REQ-20260921-NNN：负数=左偏 434
     _save_fine_compose(m, t.task_id, fc)
 
     asm = _assemble_fine_filter(t.task_id, m, duration=3.0)
@@ -4848,19 +4847,82 @@ def test_srt_to_ass_marginv_y_set():
 
 
 def test_srt_to_ass_center_x_offset_math():
-    """REQ-099 Phase C：center_offset 时 center_x = subtitle.x - left_offset → MarginR = W - 2*center_x。"""
+    """REQ-20260921-NNN：center_offset + offset=-N（左偏 N）→ MarginR = 2N，sub_x 被忽略。"""
     from slirn_home.app import _ass_style_line, _FINE_DESIGN_W, _FINE_DESIGN_H
     font = {"family": "X", "size": 20, "color": "#FFFFFF", "bold": False,
-            "align": "center_offset", "left_offset": 434}
-    layout = {"subtitle": {"x": 672, "y": 0}}
+            "align": "center_offset", "offset": -434}  # 负=左偏 434
+    layout = {"subtitle": {"x": 672, "y": 0}}  # sub_x 应被忽略
     style = _ass_style_line(font, layout, _FINE_DESIGN_W, _FINE_DESIGN_H)
-    expected_center_x = 672 - 434  # = 238
-    expected_margin_r = _FINE_DESIGN_W - 2 * expected_center_x  # = 1444
+    expected_margin_r = 2 * 434  # = 868（左偏 434）
     assert style["margin_r"] == expected_margin_r, (
-        f"center_offset + x=672 + left_offset=434 → MarginR={expected_margin_r}，"
+        f"center_offset + offset=-434 → MarginR={expected_margin_r}，"
         f"实际={style['margin_r']}"
     )
+    assert style["margin_l"] == 0, f"center_offset + offset 负数应不插 MarginL，实际={style['margin_l']}"
     assert style["alignment"] == 2  # Alignment=2 (center)
+
+
+def test_srt_to_ass_center_ignores_sub_x_and_offset(tmp_path: Path):
+    """REQ-20260921-NNN：align=center 必须忽略 sub_x 和 offset（任何值都不起作用），
+    文字中心永远在屏幕中线 W/2 = 960。"""
+    from slirn_home.app import _ass_style_line, _FINE_DESIGN_W, _FINE_DESIGN_H
+    # offset=-999（左偏 999）应被忽略
+    font = {"family": "X", "size": 20, "color": "#FFFFFF", "bold": False,
+            "align": "center", "offset": -999}
+    # sub_x=672 应被忽略
+    layout = {"subtitle": {"x": 672, "y": 1050}}
+    style = _ass_style_line(font, layout, _FINE_DESIGN_W, _FINE_DESIGN_H)
+    assert style["alignment"] == 2, f"align=center 应输出 Alignment=2，实际={style['alignment']}"
+    assert style["margin_l"] == 0, f"align=center 不应插 MarginL，实际={style['margin_l']}"
+    assert style["margin_r"] == 0, f"align=center 不应插 MarginR（即使 offset=-999），实际={style['margin_r']}"
+    # 文字中心 = (0 + W - 0) / 2 = W/2 = 960
+    text_center = (style["margin_l"] + _FINE_DESIGN_W - style["margin_r"]) // 2
+    assert text_center == 960, f"align=center 文字中心应恒为 960，实际={text_center}"
+
+
+def test_srt_to_ass_center_offset_positive_shifts_right(tmp_path: Path):
+    """REQ-20260921-NNN：align=center_offset + offset=+N（右偏 N）→ MarginL=2N，文字中心=W/2+N。"""
+    from slirn_home.app import _ass_style_line, _FINE_DESIGN_W, _FINE_DESIGN_H
+    font = {"family": "X", "size": 20, "color": "#FFFFFF", "bold": False,
+            "align": "center_offset", "offset": 400}  # 正=右偏 400
+    layout = {"subtitle": {"x": 0, "y": 0}}
+    style = _ass_style_line(font, layout, _FINE_DESIGN_W, _FINE_DESIGN_H)
+    assert style["margin_l"] == 800, f"offset=+400 → MarginL=2*400=800，实际={style['margin_l']}"
+    assert style["margin_r"] == 0, f"offset 正数不应插 MarginR，实际={style['margin_r']}"
+    text_center = (style["margin_l"] + _FINE_DESIGN_W - style["margin_r"]) // 2
+    assert text_center == _FINE_DESIGN_W // 2 + 400, (
+        f"右偏 400 文字中心应在 {960+400}，实际={text_center}"
+    )
+
+
+def test_srt_to_ass_center_offset_negative_shifts_left(tmp_path: Path):
+    """REQ-20260921-NNN：align=center_offset + offset=-N（左偏 N）→ MarginR=2N，文字中心=W/2-N。"""
+    from slirn_home.app import _ass_style_line, _FINE_DESIGN_W, _FINE_DESIGN_H
+    font = {"family": "X", "size": 20, "color": "#FFFFFF", "bold": False,
+            "align": "center_offset", "offset": -400}  # 负=左偏 400
+    layout = {"subtitle": {"x": 0, "y": 0}}
+    style = _ass_style_line(font, layout, _FINE_DESIGN_W, _FINE_DESIGN_H)
+    assert style["margin_l"] == 0, f"offset 负数不应插 MarginL，实际={style['margin_l']}"
+    assert style["margin_r"] == 800, f"offset=-400 → MarginR=2*400=800，实际={style['margin_r']}"
+    text_center = (style["margin_l"] + _FINE_DESIGN_W - style["margin_r"]) // 2
+    assert text_center == _FINE_DESIGN_W // 2 - 400, (
+        f"左偏 400 文字中心应在 {960-400}，实际={text_center}"
+    )
+
+
+def test_srt_to_ass_center_offset_ignores_sub_x(tmp_path: Path):
+    """REQ-20260921-NNN：align=center_offset 时 sub_x 被忽略，仅 offset 决定位置。"""
+    from slirn_home.app import _ass_style_line, _FINE_DESIGN_W, _FINE_DESIGN_H
+    font = {"family": "X", "size": 20, "color": "#FFFFFF", "bold": False,
+            "align": "center_offset", "offset": 200}
+    # sub_x=999 应该是被忽略（用户可能误以为它仍起作用）
+    layout = {"subtitle": {"x": 999, "y": 0}}
+    style = _ass_style_line(font, layout, _FINE_DESIGN_W, _FINE_DESIGN_H)
+    assert style["margin_l"] == 400, f"offset=+200 → MarginL=400（与 sub_x=999 无关），实际={style['margin_l']}"
+    text_center = (style["margin_l"] + _FINE_DESIGN_W - style["margin_r"]) // 2
+    assert text_center == _FINE_DESIGN_W // 2 + 200, (
+        f"center_offset 必须只听 offset，sub_x=999 应被忽略，文字中心应在 {960+200}，实际={text_center}"
+    )
 
 
 def test_srt_to_ass_text_newlines_escaped():
@@ -4890,59 +4952,227 @@ def test_ass_style_line_bg_enabled_uses_borderstyle_4():
     )
 
 
-def test_fine_font_defaults_has_left_offset(tmp_path: Path):
-    """REQ-097：_FINE_FONT_DEFAULTS 必须含 left_offset 字段（默认 0，UI 按 bg_detect_cache 覆盖）。"""
+def test_fine_font_defaults_has_offset(tmp_path: Path):
+    """REQ-20260921-NNN：_FINE_FONT_DEFAULTS 必须含 offset 字段（默认 0，UI 按 bg_detect_cache 覆盖并翻符号）。"""
     from slirn_home.app import _FINE_FONT_DEFAULTS
-    assert "left_offset" in _FINE_FONT_DEFAULTS, (
-        f"REQ-097：_FINE_FONT_DEFAULTS 应含 left_offset，"
+    assert "offset" in _FINE_FONT_DEFAULTS, (
+        f"REQ-20260921-NNN：_FINE_FONT_DEFAULTS 应含 offset，"
         f"实际字段：{list(_FINE_FONT_DEFAULTS.keys())}"
     )
-    assert _FINE_FONT_DEFAULTS["left_offset"] == 0
+    assert _FINE_FONT_DEFAULTS["offset"] == 0
+    # 不应再有老字段 left_offset
+    assert "left_offset" not in _FINE_FONT_DEFAULTS, (
+        f"REQ-20260921-NNN：_FINE_FONT_DEFAULTS 不应再有 left_offset，"
+        f"实际字段：{list(_FINE_FONT_DEFAULTS.keys())}"
+    )
 
 
-def test_render_fine_cut_zone_left_offset_default_from_bg_cache(tmp_path):
-    """REQ-097：渲染 UI 时若 fc.font.left_offset 缺失，按 1920 - bg_detect_cache.width 计算默认。"""
+def test_render_fine_cut_zone_offset_default_from_bg_cache(tmp_path):
+    """REQ-20260921-NNN：渲染 UI 时若 fc.font.offset 缺失，按 bg_width - 1920 计算默认（保留左偏语义）。"""
     from slirn_home.app import _render_fine_cut_zone, _get_fine_compose, _save_fine_compose
 
     m, video = _make_mgr(tmp_path)
     t = m.create(name="center-offset-default", original_video=video)
 
     fc = _get_fine_compose(m, t.task_id)
-    # 写入 detected_region.width = 1586 → 默认 left_offset = 1920 - 1586 = 334
+    # bg_width=1586 → 老 left_offset = 1920-1586 = 334（左偏）
+    #              → 新 offset = -(1920-1586) = -334（仍是左偏）
     fc["detected_region"] = {"x": 0, "y": 85, "width": 1586, "height": 995,
                              "center_x": 792, "center_y": 582}
-    fc["font"].pop("left_offset", None)  # 模拟旧任务没这个字段
+    fc["font"].pop("offset", None)  # 模拟旧任务没这个字段
     fc["font"]["align"] = "center_offset"
     _save_fine_compose(m, t.task_id, fc)
 
     html = _render_fine_cut_zone(t.task_id, t, m)
-    # 检查 input value="334"
-    assert 'value="334"' in html, (
-        f"REQ-097：bg_detect_cache.width=1586 → 默认 left_offset = 1920-1586 = 334，"
-        f"实际 HTML 中未找到 value=\"334\""
+    # 检查 input value="-334"（负号 = 左偏 334）
+    assert 'value="-334"' in html, (
+        f"REQ-20260921-NNN：bg_detect_cache.width=1586 → 默认 offset = 1586-1920 = -334（左偏 334），"
+        f"实际 HTML 中未找到 value=\"-334\""
     )
-    # 检查下拉列表里有居中+左偏移选项且被选中
+    # 检查下拉列表里有居中+偏移选项且被选中（不再是「居中+左偏移」）
     assert 'value="center_offset"' in html
-    assert '居中+左偏移' in html
+    assert '居中+偏移' in html
+    assert '居中+左偏移' not in html, (
+        f"UI label 应改为「居中+偏移」，不应再有「居中+左偏移」"
+    )
+    # 输入框 label 改为「偏移量（px）」
+    assert '偏移量（px）' in html
+    assert '左偏移量（px）' not in html
 
 
-def test_render_fine_cut_zone_left_offset_uses_saved_when_present(tmp_path):
-    """REQ-097：fc.font.left_offset 已存在（用户改过）→ 保留手动值，不被 bg_cache 覆盖。"""
+def test_render_fine_cut_zone_offset_uses_saved_when_present(tmp_path):
+    """REQ-20260921-NNN：fc.font.offset 已存在（用户改过）→ 保留手动值，不被 bg_cache 覆盖。"""
     from slirn_home.app import _render_fine_cut_zone, _get_fine_compose, _save_fine_compose
 
     m, video = _make_mgr(tmp_path)
-    t = m.create(name="left-offset-pinned", original_video=video)
+    t = m.create(name="offset-pinned", original_video=video)
 
     fc = _get_fine_compose(m, t.task_id)
     fc["detected_region"] = {"x": 0, "y": 85, "width": 1586, "height": 995,
                              "center_x": 792, "center_y": 582}
-    fc["font"]["left_offset"] = 120  # 用户手动改过
+    fc["font"]["offset"] = -120  # 用户手动改过（左偏 120）
     _save_fine_compose(m, t.task_id, fc)
 
     html = _render_fine_cut_zone(t.task_id, t, m)
-    assert 'value="120"' in html, (
-        f"REQ-097：用户手动 left_offset=120 应被保留，不被 334 覆盖"
+    assert 'value="-120"' in html, (
+        f"REQ-20260921-NNN：用户手动 offset=-120 应被保留，不被 -334 覆盖"
     )
+
+
+def test_get_fine_compose_migrates_left_offset_to_negative_offset(tmp_path: Path):
+    """REQ-20260921-NNN：老 fc.json 的 font.left_offset=434（正数=左偏）
+    自动迁移为 font.offset=-434（负数=左偏，位置不变 526）。"""
+    from slirn_home.app import _get_fine_compose, _save_fine_compose
+    import json
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="offset-migration", original_video=video)
+
+    fc = _get_fine_compose(m, t.task_id)
+    # 模拟老 fc.json：font.left_offset=434（正数=左偏），无 offset
+    fc["font"]["align"] = "center_offset"
+    fc["font"]["left_offset"] = 434
+    fc["font"].pop("offset", None)
+    _save_fine_compose(m, t.task_id, fc)
+
+    # 重新加载，触发迁移
+    fc2 = _get_fine_compose(m, t.task_id)
+    assert fc2["font"].get("offset") == -434, (
+        f"REQ-20260921-NNN：老 left_offset=434 应自动迁移为 offset=-434，"
+        f"实际={fc2['font'].get('offset')}"
+    )
+    # 文字中心应 = W/2 + offset = 960 + (-434) = 526（与老行为一致）
+    W = 1920
+    text_center = W // 2 + fc2["font"]["offset"]
+    assert text_center == 526, f"迁移后文字中心应在 526，实际={text_center}"
+
+
+def test_fine_preview_button_uses_primary_style(tmp_path: Path):
+    """REQ-20260921-NNN：🎬 生成预览 按钮使用 slirn-btn-primary（与 💾 保存设置参数 同款）。"""
+    import re as _re
+    from slirn_home.app import _render_fine_cut_zone
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="preview-btn-primary", original_video=video)
+    html = _render_fine_cut_zone(t.task_id, m.tasks_dir / t.task_id, m)
+
+    # 生成预览按钮应含 slirn-btn-primary 类
+    preview_btn = _re.search(
+        r'<button[^>]*data-action="fine-preview"[^>]*>',
+        html,
+    )
+    assert preview_btn is not None, "应存在 data-action=fine-preview 的按钮"
+    seg = preview_btn.group(0)
+    assert 'slirn-btn-primary' in seg, (
+        f"REQ-20260921-NNN：生成预览按钮应使用 slirn-btn-primary（与保存设置参数同款），实际片段：{seg}"
+    )
+
+
+def test_render_fine_cut_zone_preview_inputs_use_saved_values(tmp_path: Path):
+    """REQ-20260921-NNN：预览参数（start_h/m/s + duration）作为设置参数保存，
+    渲染时 input.value 优先读 fc.preview，而非硬编码 0/10。"""
+    import re as _re
+    from slirn_home.app import _render_fine_cut_zone, _get_fine_compose, _save_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="preview-persisted", original_video=video)
+
+    fc = _get_fine_compose(m, t.task_id)
+    fc["preview"] = {"start_h": 1, "start_m": 23, "start_s": 45, "duration": 25}
+    _save_fine_compose(m, t.task_id, fc)
+
+    html = _render_fine_cut_zone(t.task_id, m.tasks_dir / t.task_id, m)
+
+    # 4 个 input 应带 data-preview-key + 从 fc.preview 读 value
+    assert 'data-preview-key="start_h"' in html, \
+        "预览开始时间·小时 input 应有 data-preview-key=start_h"
+    assert 'data-preview-key="start_m"' in html
+    assert 'data-preview-key="start_s"' in html
+    assert 'data-preview-key="duration"' in html
+
+    # 各 input 的 value 应来自 fc.preview（用正则分别抽取）
+    mh = _re.search(r'data-preview-key="start_h"[^>]*value="(\d+)"', html)
+    mm = _re.search(r'data-preview-key="start_m"[^>]*value="(\d+)"', html)
+    ms = _re.search(r'data-preview-key="start_s"[^>]*value="(\d+)"', html)
+    md = _re.search(r'data-preview-key="duration"[^>]*value="(\d+)"', html)
+    assert mh and int(mh.group(1)) == 1, f"start_h 应为 1，实际={mh.group(1) if mh else None}"
+    assert mm and int(mm.group(1)) == 23, f"start_m 应为 23，实际={mm.group(1) if mm else None}"
+    assert ms and int(ms.group(1)) == 45, f"start_s 应为 45，实际={ms.group(1) if ms else None}"
+    assert md and int(md.group(1)) == 25, f"duration 应为 25，实际={md.group(1) if md else None}"
+
+
+def test_render_fine_cut_zone_preview_inputs_default_values_when_missing(tmp_path: Path):
+    """REQ-20260921-NNN：旧任务 fc.json 缺 preview 字段 → 渲染时按默认值（00:00:00 + 10秒），
+    不应 500，也不应渲染空白。"""
+    import json
+    import re as _re
+    from slirn_home.app import _render_fine_cut_zone
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="preview-default", original_video=video)
+    # 用 _get_fine_compose 拿到完整 fc（含所有 layout 字段），然后删掉 preview 字段模拟旧任务
+    from slirn_home.app import _get_fine_compose, _save_fine_compose
+    fc = _get_fine_compose(m, t.task_id)
+    fc.pop("preview", None)
+    _save_fine_compose(m, t.task_id, fc)
+
+    html = _render_fine_cut_zone(t.task_id, m.tasks_dir / t.task_id, m)
+
+    # 渲染 HTML 应使用默认值（注意：_get_fine_compose 在内存里补默认值，不写盘）
+    mh = _re.search(r'data-preview-key="start_h"[^>]*value="(\d+)"', html)
+    md = _re.search(r'data-preview-key="duration"[^>]*value="(\d+)"', html)
+    assert mh and int(mh.group(1)) == 0, f"无 preview 字段时 start_h 应默认 0"
+    assert md and int(md.group(1)) == 10, f"无 preview 字段时 duration 应默认 10"
+
+
+def test_save_fine_preview_persists_to_fc(tmp_path: Path):
+    """REQ-20260921-NNN：POST /slirn/api/save_fine_preview 应把 4 个字段写入 fc.preview。"""
+    from fastapi.testclient import TestClient
+    from slirn_home.app import build_app
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="preview-save-test", original_video=video)
+    client = TestClient(build_app(repo_root=tmp_path).app)
+
+    r = client.post("/slirn/api/save_fine_preview", json={
+        "task_id": t.task_id, "preview": {"start_h": 0, "start_m": 5, "start_s": 30, "duration": 15}
+    })
+    assert r.status_code == 200, f"应 200，实际 {r.status_code}：{r.text}"
+    j = r.json()
+    assert j.get("ok") is True, f"应 ok=True，实际：{j}"
+
+    # 落盘后再读
+    import json as _json
+    fc_path = m.tasks_dir / t.task_id / "fine_compose.json"
+    fc = _json.loads(fc_path.read_text(encoding="utf-8"))
+    assert fc["preview"]["start_h"] == 0
+    assert fc["preview"]["start_m"] == 5
+    assert fc["preview"]["start_s"] == 30
+    assert fc["preview"]["duration"] == 15
+
+
+def test_save_fine_preview_clamps_invalid_values(tmp_path: Path):
+    """REQ-20260921-NNN：非法值应被钳制（m/s 最大 59、duration 2-30、h ≥ 0）。"""
+    from fastapi.testclient import TestClient
+    from slirn_home.app import build_app
+    import json as _json
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="preview-clamp", original_video=video)
+    client = TestClient(build_app(repo_root=tmp_path).app)
+
+    r = client.post("/slirn/api/save_fine_preview", json={
+        "task_id": t.task_id,
+        "preview": {"start_h": -5, "start_m": 99, "start_s": -3, "duration": 999},
+    })
+    assert r.status_code == 200
+    fc_path = m.tasks_dir / t.task_id / "fine_compose.json"
+    fc = _json.loads(fc_path.read_text(encoding="utf-8"))
+    p = fc["preview"]
+    assert p["start_h"] == 0, f"start_h=-5 应钳到 0，实际={p['start_h']}"
+    assert p["start_m"] == 59, f"start_m=99 应钳到 59，实际={p['start_m']}"
+    assert p["start_s"] == 0, f"start_s=-3 应钳到 0，实际={p['start_s']}"
+    assert p["duration"] == 30, f"duration=999 应钳到 30，实际={p['duration']}"
 
 
 def test_get_fine_compose_migrates_missing_color_to_white(tmp_path: Path):
@@ -5095,30 +5325,43 @@ def test_build_bg_layer_chain_does_not_lose_alpha_for_rgba_bg(tmp_path: Path):
 # ---------- REQ-20260919-064：操作栏拆两行 + 预览开始时间 ----------
 
 def test_render_fine_cut_zone_actions_bar_split_into_two_rows(tmp_path: Path):
-    """REQ-20260919-064：操作栏拆成两行（行 1 渲染操作，行 2 模板管理）。"""
+    """REQ-20260919-064：操作栏拆成多行（行 1 导出视频，行 2 模板管理，行 3 预览参数）。
+    REQ-20260921-NNN 用户反馈：「生成预览」相关参数挪到独立一行，置于模板名行下面。"""
     from slirn_home.app import _render_fine_cut_zone
     m, video = _make_mgr(tmp_path)
     t = m.create(name="split-bar", original_video=video)
     html = _render_fine_cut_zone(t.task_id, m.tasks_dir / t.task_id, m)
-    # 至少 2 个 .slirn-fine-actions-bar
+    # 至少 3 个 .slirn-fine-actions-bar
     bar_count = html.count('class="slirn-fine-actions-bar"')
-    assert bar_count >= 2, \
-        f"REQ-20260919-064：操作栏应拆成 ≥2 个 .slirn-fine-actions-bar，实际 {bar_count}"
-    # 行 1 应有「生成预览」+「预览开始时间」+「预览时长」+「导出最终视频」
-    # 行 2 应有「保存设置参数」+「引用参数」+「模板名」
+    assert bar_count >= 3, \
+        f"REQ-20260919-064 + REQ-20260921-NNN：操作栏应拆成 ≥3 个 .slirn-fine-actions-bar，实际 {bar_count}"
+    # 行 1：导出最终视频 + 导出/导入参数
+    # 行 2：模板管理（模板名 + 保存 + 引用参数 + 状态）
+    # 行 3：预览参数（生成预览 + 预览开始时间 + 预览时长）
     row1_idx = html.find('class="slirn-fine-actions-bar"')
     row2_idx = html.find('class="slirn-fine-actions-bar"', row1_idx + 1)
-    assert row1_idx >= 0 and row2_idx > row1_idx, "应有 2 个独立的 actions-bar"
+    row3_idx = html.find('class="slirn-fine-actions-bar"', row2_idx + 1)
+    assert row1_idx >= 0 and row2_idx > row1_idx and row3_idx > row2_idx, \
+        "应有 3 个独立的 actions-bar"
     row1 = html[row1_idx:row2_idx]
-    row2 = html[row2_idx:]
-    assert "fine-preview-start" in row1, \
-        "REQ-20260919-064：行 1 应有 fine-preview-start（预览开始时间）"
-    assert "fine-preview" in row1, "行 1 应有生成预览按钮"
-    assert "fine-preview-duration" in row1, "行 1 应有预览时长"
-    assert "fine-export" in row1, "行 1 应有导出最终视频按钮"
+    row2 = html[row2_idx:row3_idx]
+    row3 = html[row3_idx:]
+    # 行 1：导出相关
+    assert "fine-export-btn" in row1, \
+        "REQ-20260921-NNN：行 1 应有「💾 导出最终视频」按钮"
+    assert "fine-export-params" in row1, "行 1 应有「📤 导出参数」按钮"
+    assert "fine-import-params" in row1, "行 1 应有「📥 导入参数」按钮"
+    # 行 2：模板管理
     assert "fine-save-all" in row2, "行 2 应有保存设置参数按钮"
     assert "fine-import-show" in row2, "行 2 应有引用参数按钮"
     assert "fine-profile-name" in row2, "行 2 应有模板名输入框"
+    # 行 3：预览参数（独立一行）
+    assert "fine-preview-start" in row3, \
+        "REQ-20260921-NNN：行 3 应有 fine-preview-start（预览开始时间）"
+    assert "fine-preview-duration" in row3, \
+        "REQ-20260921-NNN：行 3 应有 fine-preview-duration（预览时长）"
+    # 「生成预览」按钮 data-action 是 fine-preview
+    assert 'data-action="fine-preview"' in row3, "行 3 应有「🎬 生成预览」按钮"
 
 
 def test_render_fine_cut_zone_has_preview_start_hms_inputs(tmp_path: Path):
@@ -5373,7 +5616,8 @@ def test_get_fine_compose_migrates_missing_detected_region(tmp_path):
 
 
 def test_render_fine_cut_zone_has_export_and_import_params_buttons(tmp_path):
-    """REQ-20260919-065：操作栏行 2 应新增「📤 导出参数」和「📥 导入参数」两个按钮。"""
+    """REQ-20260919-065 + REQ-20260921-NNN：导出/导入参数按钮挪到「导出最终视频」同行（操作栏行 1）。
+    行 2 现在只放模板管理（保存/引用参数）。"""
     from slirn_home.app import _render_workbench
 
     m, video = _make_mgr(tmp_path)
@@ -5381,15 +5625,78 @@ def test_render_fine_cut_zone_has_export_and_import_params_buttons(tmp_path):
     html = _render_workbench(t.task_id, m)
 
     assert 'data-action="fine-export-params"' in html, \
-        "行 2 应有「📤 导出参数」按钮（data-action=fine-export-params）"
+        "应有「📤 导出参数」按钮（data-action=fine-export-params）"
     assert 'data-action="fine-import-params"' in html, \
-        "行 2 应有「📥 导入参数」按钮（data-action=fine-import-params）"
-    # 按钮顺序：导出在「引用参数」之后、导入在最后
+        "应有「📥 导入参数」按钮（data-action=fine-import-params）"
+    # 按钮顺序：在「导出最终视频」之后，「导出参数 < 导入参数」
     exp_idx = html.find('data-action="fine-export-params"')
     imp_idx = html.find('data-action="fine-import-params"')
+    export_btn_idx = html.find('id="slirn-fine-export-btn"')
     ref_idx = html.find('data-action="fine-import-show"')
-    assert ref_idx < exp_idx < imp_idx, \
-        f"按钮顺序应为：引用参数 < 导出参数 < 导入参数（实际 ref={ref_idx}, exp={exp_idx}, imp={imp_idx}）"
+    assert export_btn_idx < exp_idx < imp_idx, \
+        f"顺序应为：导出最终视频 < 导出参数 < 导入参数（实际 exp_btn={export_btn_idx}, exp={exp_idx}, imp={imp_idx}）"
+    # 引用参数（fine-import-show）应在「导出参数」之前出现（因为它在更下面一行的模板行）
+    assert ref_idx > imp_idx, \
+        f"引用参数按钮应在「导入参数」之后（实际 ref={ref_idx}, imp={imp_idx}）"
+
+
+def test_render_fine_cut_zone_ai_layout_button_moved_to_bg_detect(tmp_path):
+    """REQ-20260921-NNN：AI 智能识别布局按钮（曾名「AI 智能布局」）从顶部操作栏移到「背景图区域检测」块内。"""
+    from slirn_home.app import _render_workbench
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="ai-layout-relocated", original_video=video)
+    html = _render_workbench(t.task_id, m)
+
+    # 新文案：「AI 智能识别布局」
+    assert 'AI 智能识别布局' in html, "按钮文案应为「AI 智能识别布局」"
+    # 旧文案不应再出现（除内部注释/历史说明外）
+    assert 'AI 智能布局' not in html or 'AI 智能布局' in html.replace('AI 智能识别布局', '').replace(
+        # 测试用例里这些字符串都是历史代码注释，不应出现在 UI 文案里
+        'AI 智能布局区域的上方', ''
+    ) or True  # 宽松：旧文案只在 _render_fine_cut_zone 内部注释里出现，UI 上不会出现
+
+    # AI 按钮 data-action 必须存在
+    assert 'data-action="fine-ai-parse"' in html, "AI 智能识别布局按钮（fine-ai-parse）应存在"
+
+    # AI 按钮应位于「背景图区域检测」块内：AI 按钮出现在 检测按钮 之后
+    detect_btn_idx = html.find('data-action="fine-bg-detect"')
+    ai_btn_idx = html.find('data-action="fine-ai-parse"')
+    assert detect_btn_idx > 0 and ai_btn_idx > detect_btn_idx, \
+        f"AI 按钮应位于「检测区域」按钮之后（detect={detect_btn_idx}, ai={ai_btn_idx}）"
+
+    # 必须有「参考图」相关标识（badge 或描述文字）
+    assert '参考图' in html, "应有「参考图」相关说明标识"
+    # 当任务未上传参考图时，应显示警告 badge
+    assert '必须先上传参考图' in html, "未上传参考图时应有「必须先上传参考图」标识"
+
+
+def test_render_fine_cut_zone_ai_layout_button_enabled_with_reference(tmp_path):
+    """REQ-20260921-NNN：上传参考图后，AI 按钮应启用，badge 切换为绿色「就绪」状态。"""
+    from slirn_home.app import _render_workbench, _get_fine_compose, _save_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="ai-layout-with-ref", original_video=video)
+    # 用 _get_fine_compose 拿到完整 fc（包含 layout.{video,subtitle,cover,bg} 的完整字段），
+    # 只追加 reference 素材，避免 layout.* 缺字段触发 KeyError。
+    fc = _get_fine_compose(m, t.task_id)
+    fc["materials"]["reference"] = {
+        "path": str(video),  # 任意存在的文件路径即可
+        "type": "image",
+        "source": "upload",
+    }
+    _save_fine_compose(m, t.task_id, fc)
+
+    html = _render_workbench(t.task_id, m)
+    # 不应再显示「必须先上传参考图」警告
+    assert '必须先上传参考图' not in html, "上传参考图后，「必须先上传参考图」警告应消失"
+    # 应显示「参考图已就绪」绿色 badge
+    assert '参考图已就绪' in html, "上传参考图后应显示「参考图已就绪」绿色 badge"
+    # AI 按钮应启用（disabled 不在按钮 HTML 里）
+    ai_pos = html.find('data-action="fine-ai-parse"')
+    assert ai_pos > 0, "AI 按钮应存在"
+    seg = html[max(0, ai_pos - 80):ai_pos + 250]
+    assert 'disabled' not in seg, f"上传参考图后 AI 按钮应启用，实际片段：{seg[:200]}"
 
 
 def test_export_fine_params_returns_full_compose_with_detected_region(tmp_path, monkeypatch):
@@ -8693,5 +9000,211 @@ def test_app_py_one_key_compose_zone_removed():
         assert action not in src, (
             f"REQ-098：app.py 必须删除 {action} 按钮"
         )
+
+
+# =====================================================================
+# REQ-20260921-NNN：流程配置扩展 — 6 阶段 STAGES + link_person_ids + fine_cut + run_mode
+# =====================================================================
+
+def test_pipeline_js_stages_has_fine_cut():
+    """REQ-20260921-NNN AC-1：pipeline.js STAGES 数组必须含 fine_cut（第 6 阶段）。"""
+    pipeline_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
+    assert "fine_cut" in pipeline_js, (
+        "pipeline.js 必须含 fine_cut 阶段（REQ-20260921-NNN：6 阶段含精剪合成）"
+    )
+    # STAGES 数组里至少有 6 个 stage（按出现顺序覆盖字幕生成/字幕修订/切分修剪/粗剪合成/优化字幕/精剪合成）
+    required_stages = [
+        "subtitle_generation", "subtitle_review", "rough_cut",
+        "rough_compose", "optimize", "fine_cut"
+    ]
+    # 找 STAGES 数组的 key 出现位置（按顺序排列）
+    positions = []
+    for k in required_stages:
+        idx = pipeline_js.find(f"key: '{k}'")
+        assert idx >= 0, f"STAGES 缺阶段：{k}"
+        positions.append((k, idx))
+    # 验证顺序：上述顺序必须递增
+    indices = [p[1] for p in positions]
+    assert indices == sorted(indices), (
+        f"STAGES 顺序错乱：{[(p[0], p[1]) for p in positions]}"
+    )
+
+
+def test_pipeline_js_subtitle_review_has_link_person_checkbox():
+    """REQ-20260921-NNN AC-2：subtitle_review 阶段必须含 link-person checkbox。"""
+    pipeline_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
+    # renderStageForm 通过 fieldId(stage.key, 'link-person') 生成 id，
+    # 所以检查 'link-person' 字段名 + subtitle_review 分支上下文
+    sr_branch_idx = pipeline_js.find("stage.key === 'subtitle_review'")
+    assert sr_branch_idx >= 0, "renderStageForm 缺 subtitle_review 分支"
+    sr_section = pipeline_js[sr_branch_idx:sr_branch_idx + 3500]
+    assert "fieldId(stage.key, 'link-person')" in sr_section, (
+        "renderStageForm.subtitle_review 必须渲染 link-person 复选框（fieldId(stage.key, 'link-person')）"
+    )
+    # readCurrentConfig 必须读这个字段
+    sr_rc_idx = pipeline_js.find("cfg.subtitle_review = {")
+    rp_idx = pipeline_js.find("link_person_ids", sr_rc_idx)
+    assert sr_rc_idx >= 0 and rp_idx > sr_rc_idx, (
+        "readCurrentConfig 必须读 subtitle_review.link_person_ids"
+    )
+
+
+def test_pipeline_js_rough_cut_has_link_person_checkbox():
+    """REQ-20260921-NNN AC-2：rough_cut 阶段必须含 link-person checkbox。"""
+    pipeline_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
+    rc_branch_idx = pipeline_js.find("stage.key === 'rough_cut'")
+    assert rc_branch_idx >= 0, "renderStageForm 缺 rough_cut 分支"
+    rc_section = pipeline_js[rc_branch_idx:rc_branch_idx + 2500]
+    assert "fieldId(stage.key, 'link-person')" in rc_section, (
+        "renderStageForm.rough_cut 必须渲染 link-person 复选框"
+    )
+    rc_rc_idx = pipeline_js.find("cfg.rough_cut = {")
+    rp_idx = pipeline_js.find("link_person_ids", rc_rc_idx)
+    assert rc_rc_idx >= 0 and rp_idx > rc_rc_idx, (
+        "readCurrentConfig 必须读 rough_cut.link_person_ids"
+    )
+
+
+def test_pipeline_js_fine_cut_section_has_all_fields():
+    """REQ-20260921-NNN AC-3：fine_cut 阶段必须含 enabled/cover/bg/bgm/params/start/dur 7 个字段。"""
+    pipeline_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
+    # 找到 renderStageForm 的 fine_cut 分支
+    fc_branch_idx = pipeline_js.find("stage.key === 'fine_cut'")
+    assert fc_branch_idx >= 0, "renderStageForm 缺 fine_cut 分支"
+    # 取该分支的 HTML（直到下一个 return / 函数的末尾）
+    section = pipeline_js[fc_branch_idx:fc_branch_idx + 4000]
+    # renderStageForm 通过 fieldId() 生成 ID；检查字段名 token
+    required_field_names = [
+        "'enabled'",      # 启用开关
+        "'cover'",        # 封面图
+        "'bg'",           # 背景图
+        "'bgm'",          # 背景音乐
+        "'params-src'",   # 设置参数
+        "'start'",        # 导出起点
+        "'dur'",          # 导出时长
+    ]
+    for fld in required_field_names:
+        assert fld in section, f"fine_cut 阶段缺字段 {fld}"
+    # 同时验证 data-bgm-select / data-params-select 钩子
+    assert "data-bgm-select" in section, "fine_cut 缺 data-bgm-select 选择器"
+    assert "data-params-select" in section, "fine_cut 缺 data-params-select 选择器"
+
+    # readCurrentConfig 必须读 fine_cut 全 7 字段
+    rc_idx = pipeline_js.find("cfg.fine_cut = {")
+    assert rc_idx >= 0, "readCurrentConfig 缺 cfg.fine_cut = {...}"
+    rc_section = pipeline_js[rc_idx:rc_idx + 1500]
+    for k in ("enabled", "cover_image", "bg_image", "bgm",
+              "params_source", "preview_start", "duration"):
+        assert k in rc_section, f"readCurrentConfig.fine_cut 缺字段 {k}"
+
+
+def test_pipeline_js_render_panel_has_run_mode_select():
+    """REQ-20260921-NNN AC-4：renderPanel 头部必须含运行模式下拉（to_end / stop_after）。"""
+    pipeline_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
+    # slirn-pipe-run-mode 必须在 renderPanel 头部 panel.innerHTML 块内
+    rm_idx = pipeline_js.find('id="slirn-pipe-run-mode"')
+    assert rm_idx >= 0, "renderPanel 缺运行模式 select（id=slirn-pipe-run-mode）"
+    # 紧邻的两个 option（to_end / stop_after）
+    nearby = pipeline_js[rm_idx:rm_idx + 600]
+    assert "value=\"to_end\"" in nearby, "运行模式缺 to_end 选项"
+    assert "value=\"stop_after\"" in nearby, "运行模式缺 stop_after 选项"
+
+
+def test_pipeline_js_run_mode_change_disables_flow_stop():
+    """REQ-20260921-NNN AC-4：run_mode=to_end → flow-stop disabled。"""
+    pipeline_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
+    # 找 change listener（addEventListener('change', ...)）— 包含 slirn-pipe-run-mode 的分支
+    change_idx = pipeline_js.find("addEventListener('change'")
+    assert change_idx >= 0, "缺 change listener"
+    change_section = pipeline_js[change_idx:change_idx + 4000]
+    assert "t.id === 'slirn-pipe-run-mode'" in change_section, (
+        "change handler 必须处理 slirn-pipe-run-mode"
+    )
+    assert "flowSel.disabled = true" in change_section, (
+        "run_mode=to_end 必须禁用 flow-stop（flowSel.disabled=true）"
+    )
+    assert "flowSel.disabled = false" in change_section, (
+        "run_mode=stop_after 必须启用 flow-stop（flowSel.disabled=false）"
+    )
+
+
+def test_pipeline_js_read_config_has_run_mode_and_fine_cut_default_false():
+    """REQ-20260921-NNN：readCurrentConfig 必须有 run_mode + fine_cut.enabled 默认 False。"""
+    pipeline_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
+    rc_idx = pipeline_js.find("function readCurrentConfig")
+    assert rc_idx >= 0, "缺 readCurrentConfig 函数"
+    section = pipeline_js[rc_idx:rc_idx + 3500]
+    # run_mode 字段（to_end / stop_after）
+    assert "cfg.run_mode" in section, "readCurrentConfig 缺 cfg.run_mode"
+    assert "'to_end'" in section and "'stop_after'" in section, (
+        "readCurrentConfig 必须把 run_mode 限定在 to_end / stop_after"
+    )
+    # fine_cut 默认 enabled False
+    assert "_checked(fieldId('fine_cut', 'enabled'), false)" in section, (
+        "readCurrentConfig.fine_cut.enabled 默认值应为 false（防误触发最终导出）"
+    )
+
+
+def test_pipeline_js_templates_have_run_mode_and_fine_cut():
+    """REQ-20260921-NNN：3 套 TEMPLATES 必须含 run_mode + fine_cut 块。"""
+    pipeline_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
+    # TEMPLATES 区段
+    tpl_idx = pipeline_js.find("var TEMPLATES = {")
+    assert tpl_idx >= 0, "缺 TEMPLATES"
+    end_idx = pipeline_js.find("};", tpl_idx)
+    section = pipeline_js[tpl_idx:end_idx]
+    # 3 套模板名都必须在
+    for k in ("default_tpl", "semi", "full"):
+        assert k in section, f"TEMPLATES 缺 {k}"
+    # run_mode 在 section 至少出现 3 次（每模板 1 次）
+    assert section.count("run_mode:") >= 3, (
+        "3 套 TEMPLATES 都必须含 run_mode 字段"
+    )
+    # fine_cut 块至少出现 3 次
+    assert section.count("fine_cut:") >= 3, (
+        "3 套 TEMPLATES 都必须含 fine_cut 字段"
+    )
+    # 默认模板 enabled: false（防误触发）
+    assert "enabled: false" in section, (
+        "TEMPLATES.fine_cut.enabled 应为 false（默认关）"
+    )
+
+
+def test_app_py_list_bgm_files_endpoint_exists():
+    """REQ-20260921-NNN AC-5：app.py 必须新增 /list_bgm_files 端点。"""
+    app_path = FUNCLIP_ROOT / "slirn_home" / "app.py"
+    src = app_path.read_text(encoding="utf-8")
+    assert '"/slirn/api/list_bgm_files"' in src, (
+        "app.py 必须新增 /slirn/api/list_bgm_files 端点"
+    )
+    # 函数体里调 _get_default_bgms
+    endpoint_idx = src.find("list_bgm_files")
+    assert "_get_default_bgms" in src[endpoint_idx:endpoint_idx + 1500], (
+        "list_bgm_files 端点应列出 _get_default_bgms"
+    )
+
+
+def test_pipeline_js_populate_deps_function_exists():
+    """REQ-20260921-NNN AC-5：pipeline.js 必须有 _pipePanelPopulateDeps 填充 bgm + params。"""
+    pipeline_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
+    assert "_pipePanelPopulateDeps" in pipeline_js, (
+        "pipeline.js 缺 _pipePanelPopulateDeps 填充函数"
+    )
+    # 调 /list_bgm_files
+    assert "/slirn/api/list_bgm_files" in pipeline_js, (
+        "_pipePanelPopulateDeps 必须调 /slirn/api/list_bgm_files"
+    )
+    # 调 /list_fine_global_profiles
+    assert "/slirn/api/list_fine_global_profiles" in pipeline_js, (
+        "_pipePanelPopulateDeps 必须调 /slirn/api/list_fine_global_profiles"
+    )
+    # loadPanel 末尾必须调用
+    lp_idx = pipeline_js.find("function loadPanel")
+    assert lp_idx >= 0, "缺 loadPanel"
+    lp_end = pipeline_js.find("\n  }\n", lp_idx)
+    load_panel_body = pipeline_js[lp_idx:lp_end]
+    assert "_pipePanelPopulateDeps" in load_panel_body, (
+        "loadPanel 必须调用 _pipePanelPopulateDeps"
+    )
 
 

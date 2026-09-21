@@ -16,29 +16,34 @@
   var SLIRN_API = '/slirn/api';
 
   // ---- stage label/cfg schema ----
+  // REQ-20260921-NNN：6 阶段（fine_cut = 精剪合成 / 最终导出视频；assets 不进 pipeline）。
   var STAGES = [
     {key: 'subtitle_generation', label: '字幕生成', desc: 'FunASR 识别视频字幕；勾选「区分说话人」可识别人员编号'},
-    {key: 'subtitle_review', label: '字幕修订', desc: '大模型分析字幕；可设「默认接受所有建议」'},
-    {key: 'rough_cut', label: '切分修剪', desc: '按修订决策带入保留/更正段；可设「删除某些说话人全部记录」'},
+    {key: 'subtitle_review', label: '字幕修订', desc: '大模型分析字幕；可设「自动关联人员ID」「默认接受所有建议」'},
+    {key: 'rough_cut', label: '切分修剪', desc: '按修订决策带入保留/更正段；可设「自动关联人员ID」「删除某些说话人」'},
     {key: 'rough_compose', label: '粗剪合成', desc: '按切分保留区间用上游 VideoClipper 合成粗剪成片（必做）'},
-    {key: 'optimize', label: '优化字幕', desc: '重新识别粗剪成片字幕，提取不明确字词；可设「全部接受替换」'}
+    {key: 'optimize', label: '优化字幕', desc: '重新识别粗剪成片字幕，提取不明确字词；可设「全部接受替换」'},
+    {key: 'fine_cut', label: '精剪合成', desc: '最终导出视频：封面图/背景图/背景音乐（可选）+ 设置参数模板 + 全篇或区间'}
   ];
   var STAGE_KEYS = STAGES.map(function(s) { return s.key; });
   var STAGE_LABELS = {};
   STAGES.forEach(function(s) { STAGE_LABELS[s.key] = s.label; });
 
-  // ---- 3 套内置模板（v4：顶层 stop_after 字符串；null = 跑到底）----
+  // ---- 3 套内置模板（v5：顶层 run_mode + stop_after；null = 跑到底）----
   // REQ-20260918-049：subtitle_review 加 rigor 字段
+  // REQ-20260921-NNN：加 run_mode + fine_cut（默认 enabled=false）+ link_person_ids
   var TEMPLATES = {
     // 人工全审：字幕修订后停（让用户审 LLM 建议；默认严谨性 = medium）
     default_tpl: {
       label: '人工全审（字幕修订后停）',
       config: {
         subtitle_generation: {speaker_diarization: false},
-        subtitle_review: {accept_all_suggestions: false, skip_categories: [], rigor: 'medium'},
-        rough_cut: {delete_speakers: [], default_decision: 'keep'},
+        subtitle_review: {accept_all_suggestions: false, skip_categories: [], rigor: 'medium', link_person_ids: false},
+        rough_cut: {delete_speakers: [], default_decision: 'keep', link_person_ids: false},
         rough_compose: {},
         optimize: {accept_all_replacements: false},
+        fine_cut: {enabled: false, cover_image: '', bg_image: '', bgm: '', params_source: 'current', preview_start: 0.0, duration: null},
+        run_mode: 'stop_after',
         stop_after: 'subtitle_review'
       }
     },
@@ -47,10 +52,12 @@
       label: '半自动（粗剪合成后停）',
       config: {
         subtitle_generation: {speaker_diarization: false},
-        subtitle_review: {accept_all_suggestions: true, skip_categories: [], rigor: 'medium'},
-        rough_cut: {delete_speakers: [], default_decision: 'keep'},
+        subtitle_review: {accept_all_suggestions: true, skip_categories: [], rigor: 'medium', link_person_ids: true},
+        rough_cut: {delete_speakers: [], default_decision: 'keep', link_person_ids: true},
         rough_compose: {},
         optimize: {accept_all_replacements: false},
+        fine_cut: {enabled: false, cover_image: '', bg_image: '', bgm: '', params_source: 'current', preview_start: 0.0, duration: null},
+        run_mode: 'stop_after',
         stop_after: 'rough_compose'
       }
     },
@@ -59,10 +66,12 @@
       label: '全自动（跑到底）',
       config: {
         subtitle_generation: {speaker_diarization: false},
-        subtitle_review: {accept_all_suggestions: true, skip_categories: [], rigor: 'medium'},
-        rough_cut: {delete_speakers: [], default_decision: 'keep'},
+        subtitle_review: {accept_all_suggestions: true, skip_categories: [], rigor: 'medium', link_person_ids: true},
+        rough_cut: {delete_speakers: [], default_decision: 'keep', link_person_ids: true},
         rough_compose: {},
         optimize: {accept_all_replacements: true},
+        fine_cut: {enabled: false, cover_image: '', bg_image: '', bgm: '', params_source: 'current', preview_start: 0.0, duration: null},
+        run_mode: 'to_end',
         stop_after: null
       }
     }
@@ -103,7 +112,8 @@
     return opts;
   }
 
-  // ---- 单个 stage 的表单（v4：不再有 stop_after 字段）----
+  // ---- 单个 stage 的表单（v5：加 link_person_ids / fine_cut 配置）----
+  // REQ-20260921-NNN：fine_cut 是新增的第 6 阶段
   function renderStageForm(stage, stageCfg) {
     if (stage.key === 'subtitle_generation') {
       var sdOn = stageCfg.speaker_diarization ? ' checked' : '';
@@ -117,6 +127,7 @@
     if (stage.key === 'subtitle_review') {
       var aa = stageCfg.accept_all_suggestions ? ' checked' : '';
       var skip = (stageCfg.skip_categories || []).join(',');
+      var lp = stageCfg.link_person_ids ? ' checked' : '';
       // REQ-20260918-049：4 卡 rigor picker（与工作台 _render_rigor_picker 同源；
       // pipe 通道对 custom 档降级为 medium，desc 标注清楚避免误导）
       var rigorVal = stageCfg.rigor || 'medium';
@@ -148,6 +159,10 @@
         + '<label class="slirn-pipe-field">'
         + '<input type="checkbox" id="' + fieldId(stage.key, 'accept-all') + '"' + aa + '> 默认接受所有建议（跑完后自动 save_revision 全量 accept）'
         + '</label>'
+        // REQ-20260921-NNN：自动关联人员ID（调 /rev_speaker_link；不依赖 save_revision 全接受）
+        + '<label class="slirn-pipe-field">'
+        + '<input type="checkbox" id="' + fieldId(stage.key, 'link-person') + '"' + lp + '> 自动关联人员ID（调 /rev_speaker_link — 字幕生成时需开启「区分说话人」）'
+        + '</label>'
         + '<label class="slirn-pipe-field"><span>跳过建议类别（逗号分隔，空 = 全接受）：</span>'
         + '<input type="text" id="' + fieldId(stage.key, 'skip-cats') + '" value="' + escapeHtml(skip) + '" placeholder="delete,review">'
         + '</label>'
@@ -156,6 +171,7 @@
     if (stage.key === 'rough_cut') {
       var delSpk = (stageCfg.delete_speakers || []).join(',');
       var defDec = stageCfg.default_decision || 'keep';
+      var lp2 = stageCfg.link_person_ids ? ' checked' : '';
       return '<div class="slirn-pipe-form">'
         + '<div class="slirn-pipe-desc">' + escapeHtml(stage.desc) + '</div>'
         + '<label class="slirn-pipe-field"><span>删除某些说话人全部记录（逗号分隔的人员 ID）：</span>'
@@ -166,6 +182,10 @@
         + '<option value="keep"' + (defDec === 'keep' ? ' selected' : '') + '>保留</option>'
         + '<option value="delete"' + (defDec === 'delete' ? ' selected' : '') + '>删除</option>'
         + '</select></label>'
+        // REQ-20260921-NNN：自动关联人员ID（仅在 delete_speakers 为空时单独生效）
+        + '<label class="slirn-pipe-field">'
+        + '<input type="checkbox" id="' + fieldId(stage.key, 'link-person') + '"' + lp2 + '> 自动关联人员ID（仅当上面「删除说话人」为空时生效 — 调 /cut_speaker_link）'
+        + '</label>'
         + '</div>';
     }
     if (stage.key === 'rough_compose') {
@@ -181,6 +201,51 @@
         + '<label class="slirn-pipe-field">'
         + '<input type="checkbox" id="' + fieldId(stage.key, 'accept-rep') + '"' + aaR + '> 默认接受所有替换（跑完后自动 save_optimize_subtitle 全量 applied）'
         + '</label>'
+        + '</div>';
+    }
+    // REQ-20260921-NNN：精剪合成（最终导出视频）— 6 阶段最后一站
+    if (stage.key === 'fine_cut') {
+      var fc0 = stageCfg || {};
+      var enabledOn = fc0.enabled ? ' checked' : '';
+      var cover = fc0.cover_image || '';
+      var bgImg = fc0.bg_image || '';
+      var bgmSel = fc0.bgm || '';
+      var paramsSrc = fc0.params_source || 'current';
+      var startV = (fc0.preview_start != null) ? fc0.preview_start : 0;
+      var durV = (fc0.duration != null) ? fc0.duration : '';
+      return '<div class="slirn-pipe-form">'
+        + '<div class="slirn-pipe-desc">' + escapeHtml(stage.desc) + '</div>'
+        // 启用开关（默认关，防误跑几小时重编码）
+        + '<label class="slirn-pipe-field">'
+        + '<input type="checkbox" id="' + fieldId(stage.key, 'enabled') + '"' + enabledOn + '> 启用自动最终导出（默认关 — 启用会触发几小时重编码）'
+        + '</label>'
+        // 封面图（手动路径；空=用任务现有）
+        + '<label class="slirn-pipe-field"><span>封面图片路径（空=用任务现有）：</span>'
+        + '<input type="text" id="' + fieldId(stage.key, 'cover') + '" value="' + escapeHtml(cover) + '" placeholder="封面.jpg">'
+        + '</label>'
+        // 背景图
+        + '<label class="slirn-pipe-field"><span>背景图片路径（空=用任务现有）：</span>'
+        + '<input type="text" id="' + fieldId(stage.key, 'bg') + '" value="' + escapeHtml(bgImg) + '" placeholder="背景.jpg">'
+        + '</label>'
+        // 背景音乐（下拉，loadPanel 时填充）
+        + '<label class="slirn-pipe-field"><span>背景音乐（可选；空=不配）：</span>'
+        + '<select id="' + fieldId(stage.key, 'bgm') + '" data-bgm-select>'
+        + '<option value="">— 不配 —</option>'
+        + '<option value="' + escapeHtml(bgmSel) + '" selected>' + escapeHtml(bgmSel || '(已选)') + '</option>'
+        + '</select></label>'
+        // 设置参数模板（下拉，loadPanel 时填充）
+        + '<label class="slirn-pipe-field"><span>设置参数（=精剪面板保存的全局模板）：</span>'
+        + '<select id="' + fieldId(stage.key, 'params-src') + '" data-params-select>'
+        + '<option value="current"' + (paramsSrc === 'current' ? ' selected' : '') + '>当前参数</option>'
+        + '</select></label>'
+        // 导出区间（秒）
+        + '<label class="slirn-pipe-field"><span>导出起点（秒，0=全篇）：</span>'
+        + '<input type="number" id="' + fieldId(stage.key, 'start') + '" min="0" step="0.1" value="' + Number(startV) + '">'
+        + '</label>'
+        + '<label class="slirn-pipe-field"><span>导出时长（秒，空=全篇）：</span>'
+        + '<input type="number" id="' + fieldId(stage.key, 'dur') + '" min="0" step="0.1" value="' + escapeHtml(String(durV)) + '" placeholder="留空=全篇">'
+        + '</label>'
+        + '<div class="slirn-pipe-hint">⚠ 启用后会自动调 /export_fine_video，输出 fine_export.mp4。默认关。</div>'
         + '</div>';
     }
     return '<div class="slirn-pipe-form"></div>';
@@ -233,9 +298,19 @@
       + (updatedAt ? '最近保存：' + escapeHtml(updatedAt) : '尚未保存')
       + '</span>'
       + '<span class="slirn-pipe-head-acts">'
+      // REQ-20260921-NNN：run_mode 顶层下拉（to_end / stop_after）
+      // - to_end 模式：flow-stop 下拉禁用（强制跑完所有阶段）
+      // - stop_after 模式：flow-stop 下拉启用（用户选择停在哪）
+      + '<label class="slirn-pipe-run-mode-label">'
+      + '运行模式：'
+      + '<select class="slirn-pipe-run-mode" id="slirn-pipe-run-mode" data-pipe-action="run-mode">'
+      + '<option value="stop_after"' + (cfg.run_mode !== 'to_end' ? ' selected' : '') + '>停在指定阶段</option>'
+      + '<option value="to_end"' + (cfg.run_mode === 'to_end' ? ' selected' : '') + '>一键跑到底</option>'
+      + '</select>'
+      + '</label>'
       + '<label class="slirn-pipe-flow-stop-label">'
       + '完成到哪个阶段停：'
-      + '<select class="slirn-pipe-flow-stop" id="slirn-pipe-flow-stop">'
+      + '<select class="slirn-pipe-flow-stop" id="slirn-pipe-flow-stop"' + (cfg.run_mode === 'to_end' ? ' disabled' : '') + '>'
       + renderFlowStopOptions(flowStopValue)
       + '</select>'
       + '</label>'
@@ -272,6 +347,67 @@
     return cfg;
   }
 
+  // ---- REQ-20260921-NNN：填充 fine_cut 下拉（背景音乐 + 设置参数模板）----
+  // loadPanel 末尾调用，调用 _pipePanelPopulateDeps(taskId)。
+  // - bgm：从 /list_bgm_files 拿默认 + 上传；保留面板当前选中
+  // - params：从 /list_fine_global_profiles 拿模板；追加「当前参数」/「导入 JSON」选项
+  var _pipePanelPopulateDeps = async function(taskId) {
+    var bgmSel = document.querySelector('select[data-bgm-select]');
+    var paramSel = document.querySelector('select[data-params-select]');
+    if (bgmSel) {
+      // 读出当前选中（若存在），加载完后恢复
+      var curBgm = bgmSel.value || '';
+      try {
+        var r = await fetch('/slirn/api/list_bgm_files', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({task_id: taskId || ''})
+        });
+        var j = await r.json();
+        bgmSel.innerHTML = '';
+        var noneOpt = document.createElement('option');
+        noneOpt.value = ''; noneOpt.textContent = '— 不配 —';
+        bgmSel.appendChild(noneOpt);
+        var files = (j && j.ok && j.files) ? j.files : [];
+        files.forEach(function(f) {
+          var opt = document.createElement('option');
+          opt.value = f.name || f.path || '';
+          opt.textContent = (f.kind === 'uploaded' ? '📁 ' : '🎵 ') + (f.label || f.name || '');
+          if ((f.name || f.path) === curBgm) opt.selected = true;
+          bgmSel.appendChild(opt);
+        });
+        if (!curBgm) bgmSel.value = '';
+      } catch (e) { console.warn('[pipe-bgm-load]', e); }
+    }
+    if (paramSel) {
+      var curParam = paramSel.value || 'current';
+      try {
+        var r2 = await fetch('/slirn/api/list_fine_global_profiles', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({})
+        });
+        var j2 = await r2.json();
+        paramSel.innerHTML = '';
+        var curOpt = document.createElement('option');
+        curOpt.value = 'current'; curOpt.textContent = '当前参数（用面板保存的）';
+        if (curParam === 'current') curOpt.selected = true;
+        paramSel.appendChild(curOpt);
+        var profs = (j2 && j2.profiles) ? j2.profiles : [];
+        profs.forEach(function(p) {
+          var opt = document.createElement('option');
+          var id = p.id || p.name || '';
+          opt.value = 'template:' + id;
+          opt.textContent = '📋 模板：' + (p.name || id);
+          if (curParam === 'template:' + id) opt.selected = true;
+          paramSel.appendChild(opt);
+        });
+        var importOpt = document.createElement('option');
+        importOpt.value = 'import'; importOpt.textContent = '📥 导入 JSON（手动）';
+        if (curParam === 'import') importOpt.selected = true;
+        paramSel.appendChild(importOpt);
+      } catch (e) { console.warn('[pipe-params-load]', e); }
+    }
+  };
+
   // ---- 表单 → config ----
   function _val(id, fallback) {
     var el = document.getElementById(id);
@@ -290,6 +426,8 @@
     };
     cfg.subtitle_review = {
       accept_all_suggestions: _checked(fieldId('subtitle_review', 'accept-all'), false),
+      // REQ-20260921-NNN：自动关联人员ID（后端 handler_subtitle_review 末尾触发 /rev_speaker_link）
+      link_person_ids: _checked(fieldId('subtitle_review', 'link-person'), false),
       skip_categories: _val(fieldId('subtitle_review', 'skip-cats'), '').split(',').map(function(x){return x.trim();}).filter(Boolean),
       // REQ-20260918-049：从 radio cards 读 rigor（pipe 通道对 custom 档降级为 medium，
       // 与后端 handler_subtitle_review 校验一致）
@@ -301,13 +439,36 @@
     };
     cfg.rough_cut = {
       delete_speakers: _val(fieldId('rough_cut', 'del-spk'), '').split(',').map(function(x){return parseInt(x.trim(), 10);}).filter(function(x){return !isNaN(x);}),
-      default_decision: _val(fieldId('rough_cut', 'def-dec'), 'keep') || 'keep'
+      default_decision: _val(fieldId('rough_cut', 'def-dec'), 'keep') || 'keep',
+      // REQ-20260921-NNN：自动关联人员ID（与 delete_speakers 互斥，handler 优先 delete_speakers）
+      link_person_ids: _checked(fieldId('rough_cut', 'link-person'), false)
     };
     cfg.rough_compose = {};
     cfg.optimize = {
       accept_all_replacements: _checked(fieldId('optimize', 'accept-rep'), false)
     };
-    // v4 顶层 stop_after："" → null；其他保留原值
+    // REQ-20260921-NNN：精剪合成（最终导出视频）— 默认 enabled=False 防误触发
+    var fcEnabled = _checked(fieldId('fine_cut', 'enabled'), false);
+    var fcBgm = _val(fieldId('fine_cut', 'bgm'), '') || '';
+    var fcParams = _val(fieldId('fine_cut', 'params-src'), 'current') || 'current';
+    var fcStartRaw = _val(fieldId('fine_cut', 'start'), '0');
+    var fcDurRaw = _val(fieldId('fine_cut', 'dur'), '');
+    var fcStart = parseFloat(fcStartRaw);
+    var fcDur = fcDurRaw === '' ? null : parseFloat(fcDurRaw);
+    cfg.fine_cut = {
+      enabled: fcEnabled,
+      cover_image: _val(fieldId('fine_cut', 'cover'), '') || '',
+      bg_image: _val(fieldId('fine_cut', 'bg'), '') || '',
+      bgm: fcBgm,
+      params_source: fcParams,
+      preview_start: isNaN(fcStart) ? 0 : fcStart,
+      duration: (fcDur === null || isNaN(fcDur)) ? null : fcDur
+    };
+    // v5 顶层 run_mode + stop_after：
+    // - run_mode="to_end" → 服务端 validate_config 强制 stop_after=None
+    // - run_mode="stop_after" → stop_after 由用户选（"" → null = 跑到结尾但不停）
+    var runMode = _val('slirn-pipe-run-mode', 'stop_after');
+    cfg.run_mode = (runMode === 'to_end' || runMode === 'stop_after') ? runMode : 'stop_after';
     var flowStop = _val('slirn-pipe-flow-stop', '');
     cfg.stop_after = flowStop || null;
     return cfg;
@@ -634,6 +795,8 @@
       if (typeof window.fineDefaultBgmLoad === 'function') {
         try { window.fineDefaultBgmLoad(); } catch (e) { console.warn('[bgm-load]', e); }
       }
+      // REQ-20260921-NNN：填充 fine_cut 阶段的背景音乐 + 设置参数模板下拉
+      try { _pipePanelPopulateDeps(taskId); } catch (e) { console.warn('[pipe-deps-load]', e); }
       // REQ-20260920-084：检查是否有 in-flight export job，有则挂回进度条
       // （页面刷新 / 服务重启后自动恢复进度显示）
       try {
@@ -762,7 +925,7 @@
     }
   });
 
-  // ---- 模板切换：v4 直接重渲染整个面板 ----
+  // ---- 模板切换 + run_mode 切换：v4/v5 直接重渲染整个面板 ----
   document.addEventListener('change', function(ev) {
     var t = ev.target;
     if (!t || !t.getAttribute) return;
@@ -775,6 +938,20 @@
         var taskId = panel.getAttribute('data-task-id');
         renderPanel(taskId, {config: cfg, updated_at: '模板 ' + TEMPLATES[tplKey].label, _fromTemplate: true});
         toast('已载入模板：' + TEMPLATES[tplKey].label);
+      }
+      return;
+    }
+    // REQ-20260921-NNN：run_mode 切换 — to_end → 禁用 flow-stop；stop_after → 启用
+    if (t.id === 'slirn-pipe-run-mode') {
+      var flowSel = document.getElementById('slirn-pipe-flow-stop');
+      if (!flowSel) return;
+      if (t.value === 'to_end') {
+        flowSel.value = '';  // 强制选「不停（跑到底）」
+        flowSel.disabled = true;
+        toast('已切到「一键跑到底」：流程会跑完全部 6 阶段');
+      } else {
+        flowSel.disabled = false;
+        toast('已切到「停在指定阶段」：从下面下拉选择停在哪个阶段');
       }
     }
   });
