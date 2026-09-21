@@ -2484,8 +2484,13 @@ def _assemble_fine_filter(
     # 导致 t≥1s 后 BGM 整段静音、amix 输出基本只剩 voice（实测 mean_volume -23.3 dB
     # ≈ voice 单跑；BGM 段 1-9s 实测 -91 dB ≈ 数字 0）。
     #
-    # amix=inputs=2:duration=first → 输出时长 = voice 总长 = video[0:a] 在 -ss/-t
-    # 限定下的长度。preview/导出有显式 duration；duration=None（导出完整视频）走 probe。
+    # REQ-20260921-NNN：BGM 实际总时长 = 视频时长 + 片头封面时长。
+    # - amix=inputs=2:duration=first → 输出时长 = voice 总长
+    # - voice = silence(cover_dur) + video[0:a]（有 cover 时，见上面 concat 链）
+    # - 完整导出 duration=None → probe 拿到的是源视频时长，不含 cover_dur
+    # → 加 cover_dur（仅当 cover_input_enabled 时）让 fade_out 起算对齐
+    #   「音频总时长 - fade_out」= cover_dur + video_dur - fade_out。
+    # preview 时 duration 已经是「预览段」秒数（如 10s），与 cover_dur 无关 → 不加。
     audio_total_duration: float | None = duration
     if audio_total_duration is None:
         try:
@@ -2494,6 +2499,16 @@ def _assemble_fine_filter(
                 audio_total_duration = _ms / 1000.0
         except Exception as e:  # noqa: BLE001
             log.warning("REQ-095: probe 源视频时长失败，fade_out 起算退回 st=0: %s", e)
+    # 仅「完整导出 + cover 启用」场景加 cover_dur；预览/区间导出已自带完整长度
+    if cover_input_enabled and duration is None:
+        try:
+            _cover_dur = float(layout["cover"].get("duration", 0.0))
+            if _cover_dur > 0 and audio_total_duration is not None:
+                audio_total_duration += _cover_dur
+                log.info("REQ-20260921-NNN: BGM fade_out 时长含 cover_dur（%ss）→ 总时长 %ss",
+                         _cover_dur, audio_total_duration)
+        except Exception:
+            pass
 
     def _calc_fade_out_st(fade_dur: float) -> float:
         """afade=t=out 的 st 必须靠近流末尾；总时长未知时降级 st=0 但打 warning。"""
@@ -2622,6 +2637,19 @@ def _predict_audio_path(fc: dict, audio_total_duration: float | None = None) -> 
     #    REQ-20260920-095：fade_out 起算必须用「总时长 - fade_out」；
     #    调用方若传入 audio_total_duration，则与实跑路径完全一致；
     #    未传则按 st=0 兜底并在 why_no_bgm 中注明「diagnose-only fallback」。
+    #
+    #    REQ-20260921-NNN：cover 启用时，BGM 总时长 = video_dur + cover_dur。
+    #    诊断器是「完整导出路径」（duration=None）的镜像 → 加 cover_dur；
+    #    预览 / 区间导出是显式 duration，已含完整长度 → 不加（与 assemble 对齐）。
+    effective_audio_total_duration = audio_total_duration
+    if cover_input_enabled and effective_audio_total_duration is not None:
+        try:
+            _cover_dur = float(layout.get("cover", {}).get("duration", 0.0))
+            if _cover_dur > 0:
+                effective_audio_total_duration = float(effective_audio_total_duration) + _cover_dur
+        except Exception:
+            pass
+
     predicted_audio_filters = ""
     if audio_input_enabled and audio_idx >= 0:
         vol = float(audio_cfg.get("volume", 0.4))
@@ -2633,8 +2661,8 @@ def _predict_audio_path(fc: dict, audio_total_duration: float | None = None) -> 
             bgm_chain += f",afade=t=in:st=0:d={fade_in:.2f}"
         if fade_out > 0:
             # REQ-20260920-095：fade_out 起算 = total - fade_out；与 assemble 对齐
-            if audio_total_duration is not None:
-                _fo_st = max(0.0, float(audio_total_duration) - fade_out)
+            if effective_audio_total_duration is not None:
+                _fo_st = max(0.0, float(effective_audio_total_duration) - fade_out)
                 bgm_chain += f",afade=t=out:st={_fo_st:.2f}:d={fade_out:.2f}"
             else:
                 bgm_chain += f",afade=t=out:st=0:d={fade_out:.2f}"

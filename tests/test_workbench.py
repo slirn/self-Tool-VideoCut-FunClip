@@ -9312,3 +9312,137 @@ def test_css_has_reset_block_styling():
     assert "color" in warn_block, "warning 块必须有 color 属性"
 
 
+# =====================================================================
+# REQ-20260921-NNN：BGM 总时长 = 视频时长 + 片头封面时长（fade_out 对齐）
+# =====================================================================
+
+def test_bgm_fade_out_includes_cover_dur_on_full_export(tmp_path, monkeypatch):
+    """REQ-20260921-NNN：完整导出 + cover 启用时，BGM fade_out 起算 = video_dur + cover_dur。
+
+    之前 BGM 总时长只看 video_dur，导致 cover 启用时 fade_out 提前 fade_out 秒数。
+    """
+    from slirn_home.app import (
+        _assemble_fine_filter, _get_fine_compose, _save_fine_compose,
+    )
+
+    mgr, video = _make_mgr(tmp_path)
+    t = mgr.create(name="bgm-cover-dur", original_video=video)
+    upload = tmp_path / "tasks" / t.task_id / "upload"
+    upload.mkdir(parents=True, exist_ok=True)
+    (upload / "cover.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
+    (upload / "bgm.mp3").write_bytes(b"ID3" + b"\x00" * 100)
+
+    fc = _get_fine_compose(mgr, t.task_id)
+    fc["materials"]["video"] = {"path": str(video.relative_to(tmp_path)),
+                                "type": "video", "source": "upload"}
+    fc["materials"]["cover"] = {"path": f"tasks/{t.task_id}/upload/cover.png",
+                                "type": "image", "source": "upload"}
+    fc["materials"]["audio"] = {"path": f"tasks/{t.task_id}/upload/bgm.mp3",
+                                "type": "audio", "source": "upload"}
+    fc["layout"]["cover"]["enabled"] = True
+    fc["layout"]["cover"]["duration"] = 3.0  # 3 秒封面
+    fc["audio"]["enabled"] = True
+    fc["audio"]["volume"] = 0.4
+    fc["audio"]["fade_in"] = 0.0
+    fc["audio"]["fade_out"] = 2.0  # 期望 fade_out st = (video_dur + 3) - 2
+    _save_fine_compose(mgr, t.task_id, fc)
+
+    # mock _probe_video_duration_ms → 返回 video_dur = 60s
+    monkeypatch.setattr(
+        "slirn_home.app._probe_video_duration_ms",
+        lambda *a, **kw: 60_000,
+    )
+
+    # 完整导出：duration=None → probe → audio_total_duration = 60 + 3 = 63
+    asm = _assemble_fine_filter(t.task_id, mgr, duration=None, preview_start=0.0)
+    assert asm.get("ok") is True, asm
+    fc_text = asm["filter_complex"].replace("\n", "")
+
+    # fade_out 应在 st = 63 - 2 = 61 起算（不是 60 - 2 = 58）
+    assert "afade=t=out:st=61.00:d=2.00" in fc_text, (
+        f"REQ-20260921-NNN：BGM fade_out 应在 61s（video 60 + cover 3 - 2）起算；"
+        f"实际 filter_complex: {fc_text}"
+    )
+
+
+def test_bgm_fade_out_no_cover_uses_video_only(tmp_path, monkeypatch):
+    """REQ-20260921-NNN：cover 未启用时，BGM fade_out 起算仍是 video_dur（无 cover_dur）。"""
+    from slirn_home.app import (
+        _assemble_fine_filter, _get_fine_compose, _save_fine_compose,
+    )
+
+    mgr, video = _make_mgr(tmp_path)
+    t = mgr.create(name="bgm-no-cover", original_video=video)
+    upload = tmp_path / "tasks" / t.task_id / "upload"
+    upload.mkdir(parents=True, exist_ok=True)
+    (upload / "bgm.mp3").write_bytes(b"ID3" + b"\x00" * 100)
+
+    fc = _get_fine_compose(mgr, t.task_id)
+    fc["materials"]["video"] = {"path": str(video.relative_to(tmp_path)),
+                                "type": "video", "source": "upload"}
+    fc["materials"]["audio"] = {"path": f"tasks/{t.task_id}/upload/bgm.mp3",
+                                "type": "audio", "source": "upload"}
+    # cover 不启用
+    fc["layout"]["cover"]["enabled"] = False
+    fc["audio"]["enabled"] = True
+    fc["audio"]["volume"] = 0.4
+    fc["audio"]["fade_in"] = 0.0
+    fc["audio"]["fade_out"] = 2.0
+    _save_fine_compose(mgr, t.task_id, fc)
+
+    monkeypatch.setattr(
+        "slirn_home.app._probe_video_duration_ms",
+        lambda *a, **kw: 60_000,
+    )
+
+    asm = _assemble_fine_filter(t.task_id, mgr, duration=None, preview_start=0.0)
+    assert asm.get("ok") is True, asm
+    fc_text = asm["filter_complex"].replace("\n", "")
+
+    # fade_out 应在 st = 60 - 2 = 58 起算（cover 未启用 → 不加 cover_dur）
+    assert "afade=t=out:st=58.00:d=2.00" in fc_text, (
+        f"无 cover 时 fade_out 应在 58s（video 60 - 2）；"
+        f"实际: {fc_text}"
+    )
+
+
+def test_bgm_fade_out_preview_keeps_preview_duration(tmp_path):
+    """REQ-20260921-NNN：预览（显式 duration）不加 cover_dur（preview 自带完整长度）。"""
+    from slirn_home.app import (
+        _assemble_fine_filter, _get_fine_compose, _save_fine_compose,
+    )
+
+    mgr, video = _make_mgr(tmp_path)
+    t = mgr.create(name="bgm-preview", original_video=video)
+    upload = tmp_path / "tasks" / t.task_id / "upload"
+    upload.mkdir(parents=True, exist_ok=True)
+    (upload / "cover.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 100)
+    (upload / "bgm.mp3").write_bytes(b"ID3" + b"\x00" * 100)
+
+    fc = _get_fine_compose(mgr, t.task_id)
+    fc["materials"]["video"] = {"path": str(video.relative_to(tmp_path)),
+                                "type": "video", "source": "upload"}
+    fc["materials"]["cover"] = {"path": f"tasks/{t.task_id}/upload/cover.png",
+                                "type": "image", "source": "upload"}
+    fc["materials"]["audio"] = {"path": f"tasks/{t.task_id}/upload/bgm.mp3",
+                                "type": "audio", "source": "upload"}
+    fc["layout"]["cover"]["enabled"] = True
+    fc["layout"]["cover"]["duration"] = 3.0
+    fc["audio"]["enabled"] = True
+    fc["audio"]["volume"] = 0.4
+    fc["audio"]["fade_in"] = 0.0
+    fc["audio"]["fade_out"] = 2.0
+    _save_fine_compose(mgr, t.task_id, fc)
+
+    # 预览：duration=10s → audio_total_duration = 10（不加 cover_dur）
+    asm = _assemble_fine_filter(t.task_id, mgr, duration=10.0, preview_start=0.0)
+    assert asm.get("ok") is True, asm
+    fc_text = asm["filter_complex"].replace("\n", "")
+
+    # fade_out 应在 st = 10 - 2 = 8 起算（不是 10 + 3 - 2 = 11）
+    assert "afade=t=out:st=8.00:d=2.00" in fc_text, (
+        f"预览时 fade_out 应在 8s（preview_dur 10 - 2），不加 cover_dur；"
+        f"实际: {fc_text}"
+    )
+
+
