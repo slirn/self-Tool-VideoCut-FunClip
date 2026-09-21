@@ -9230,36 +9230,88 @@ def test_pipeline_js_rough_cut_has_link_person_checkbox():
 
 
 def test_pipeline_js_fine_cut_section_has_all_fields():
-    """REQ-20260921-NNN AC-3：fine_cut 阶段必须含 enabled/cover/bg/bgm/params/start/dur 7 个字段。"""
+    """REQ-20260921-NNN AC-3 v2：fine_cut 阶段只含 4 个真正生效字段
+    （enabled / params-src / start / dur）。cover/bg/bgm 是死字段 —— 已在 UI 移除
+    （实际素材在工作台第 6 阶段详情页 fc.json 的 materials.*）。
+
+    v4 AC：start/duration 改 HH:MM:SS UI + 新增 range_enabled checkbox 门控
+    （「按区间导出」），默认 range_enabled=False（全片）。
+    """
     pipeline_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
     # 找到 renderStageForm 的 fine_cut 分支
     fc_branch_idx = pipeline_js.find("stage.key === 'fine_cut'")
     assert fc_branch_idx >= 0, "renderStageForm 缺 fine_cut 分支"
     # 取该分支的 HTML（直到下一个 return / 函数的末尾）
-    section = pipeline_js[fc_branch_idx:fc_branch_idx + 4000]
+    section = pipeline_js[fc_branch_idx:fc_branch_idx + 4500]
     # renderStageForm 通过 fieldId() 生成 ID；检查字段名 token
     required_field_names = [
         "'enabled'",      # 启用开关
-        "'cover'",        # 封面图
-        "'bg'",           # 背景图
-        "'bgm'",          # 背景音乐
         "'params-src'",   # 设置参数
-        "'start'",        # 导出起点
-        "'dur'",          # 导出时长
+        "'start'",        # 导出起点（HH:MM:SS）
+        "'dur'",          # 导出时长（HH:MM:SS）
+        "'range-on'",     # v4：按区间导出 checkbox
     ]
     for fld in required_field_names:
         assert fld in section, f"fine_cut 阶段缺字段 {fld}"
-    # 同时验证 data-bgm-select / data-params-select 钩子
-    assert "data-bgm-select" in section, "fine_cut 缺 data-bgm-select 选择器"
+    # 死字段的 fieldId token 必须不在 section 里
+    for dead in ("'cover'", "'bg'", "'bgm'"):
+        assert dead not in section, (
+            f"fine_cut 不应再含死字段 {dead}（handler 不读，UI 不要画）"
+        )
+    # data-params-select 保留（参数模板选择器）
     assert "data-params-select" in section, "fine_cut 缺 data-params-select 选择器"
+    # data-bgm-select 移除
+    assert "data-bgm-select" not in section, (
+        "fine_cut 不应再有 data-bgm-select 选择器 —— bgm 是死字段，UI 不要画"
+    )
+    # v4 校验：start/duration 改 text input + pattern HH:MM:SS
+    assert 'type="text"' in section, "v4 fine_cut 的 start/dur 应改 text input（HH:MM:SS）"
+    assert "00:00:00" in section, "v4 fine_cut 默认 start 占位符应为 00:00:00"
+    assert "00:10:00" in section, "v4 fine_cut 默认 duration 占位符应为 00:10:00"
+    # range_enabled 字段名出现在 readCurrentConfig
+    assert "data-range-on" in section, "v4 fine_cut 缺 range-on checkbox 的 data-attr"
 
-    # readCurrentConfig 必须读 fine_cut 全 7 字段
+    # readCurrentConfig 必须读 fine_cut 5 个真正生效字段（含 range_enabled）
     rc_idx = pipeline_js.find("cfg.fine_cut = {")
     assert rc_idx >= 0, "readCurrentConfig 缺 cfg.fine_cut = {...}"
-    rc_section = pipeline_js[rc_idx:rc_idx + 1500]
-    for k in ("enabled", "cover_image", "bg_image", "bgm",
-              "params_source", "preview_start", "duration"):
+    rc_section = pipeline_js[rc_idx:rc_idx + 1800]
+    for k in ("enabled", "params_source", "range_enabled", "preview_start", "duration"):
         assert k in rc_section, f"readCurrentConfig.fine_cut 缺字段 {k}"
+    # 死字段必须不出现在 readCurrentConfig 里（避免 UI 又把死字段塞回去）
+    for k in ("cover_image", "bg_image", "bgm"):
+        assert k not in rc_section, (
+            f"readCurrentConfig.fine_cut 不应含死字段 {k}（handler 不读）"
+        )
+
+
+def test_pipeline_js_hms_helpers_present():
+    """v4：HH:MM:SS ↔ 秒 helper 必须存在（secondsToHms / hmsToSeconds）。
+    早期版本用 number input + 人工算秒，UX 差。
+    """
+    pipeline_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
+    # helper 函数定义
+    assert "function secondsToHms(" in pipeline_js, "缺 secondsToHms()"
+    assert "function hmsToSeconds(" in pipeline_js, "缺 hmsToSeconds()"
+    # hmsToSeconds 用正则解析 HH:MM:SS（MM/SS 0-59）
+    import re
+    m = re.search(r"function\s+hmsToSeconds\s*\([^)]*\)\s*\{[^}]*match\([^)]*\\d\{1,3\}", pipeline_js, re.DOTALL)
+    assert m, "hmsToSeconds 应匹配 /^(\\d{1,3}):([0-5]\\d):([0-5]\\d)$/"
+    # hmsToSeconds 必须容错（解析失败返回 null，让调用方兜底）
+
+
+def test_pipeline_js_range_on_checkbox_toggles_inputs_disabled():
+    """v4：勾选「按区间导出」→ start/duration 输入框 disabled=false；不勾 → disabled=true。"""
+    pipeline_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
+    # 定位 listener 块 —— 用 querySelector('[data-range-on]') 这个独有的查询语句，
+    # 避免和 HTML 字符串模板里的 data-range-on 属性混淆。
+    idx = pipeline_js.find("document.querySelector('[data-range-on]')")
+    assert idx >= 0, "缺 range-on 的 element-scoped change listener"
+    nearby = pipeline_js[idx:idx + 600]
+    assert "addEventListener('change'" in nearby, "range-on 必须绑 change 事件"
+    assert "data-range-input" in nearby, "range-on 切换的输入框必须标 data-range-input"
+    assert ".disabled = !rangeCb.checked" in nearby, (
+        "change handler 必须切换 inputs.disabled = !rangeCb.checked"
+    )
 
 
 def test_pipeline_js_render_panel_has_run_mode_select():
@@ -9277,10 +9329,16 @@ def test_pipeline_js_render_panel_has_run_mode_select():
 def test_pipeline_js_run_mode_change_disables_flow_stop():
     """REQ-20260921-NNN AC-4：run_mode=to_end → flow-stop disabled。"""
     pipeline_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
-    # 找 change listener（addEventListener('change', ...)）— 包含 slirn-pipe-run-mode 的分支
-    change_idx = pipeline_js.find("addEventListener('change'")
-    assert change_idx >= 0, "缺 change listener"
-    change_section = pipeline_js[change_idx:change_idx + 4000]
+    # 找外层委托 change listener（在 document 上、含 ev.target 检查的那个）—
+    # 早期版本是第一个 addEventListener('change'，v4 之后第一个是 fine_cut 的
+    # range-on listener（在具体 element 上），run-mode 那个在外层委托（line ~1068）。
+    # 用 ev.target 关键特征定位：
+    delegate_idx = pipeline_js.find("addEventListener('change', function(ev)")
+    if delegate_idx < 0:
+        # 兼容写法
+        delegate_idx = pipeline_js.find("addEventListener('change', function (ev)")
+    assert delegate_idx >= 0, "缺外层委托 change listener（ev.target 路由）"
+    change_section = pipeline_js[delegate_idx:delegate_idx + 4000]
     assert "t.id === 'slirn-pipe-run-mode'" in change_section, (
         "change handler 必须处理 slirn-pipe-run-mode"
     )
@@ -9334,31 +9392,31 @@ def test_pipeline_js_templates_have_run_mode_and_fine_cut():
     )
 
 
-def test_app_py_list_bgm_files_endpoint_exists():
-    """REQ-20260921-NNN AC-5：app.py 必须新增 /list_bgm_files 端点。"""
+def test_app_py_list_bgm_files_endpoint_no_longer_called_by_pipeline_panel():
+    """v2 用户反馈：bgm 是死字段 —— 流程配置面板不再调 /list_bgm_files 填下拉
+    （BGM 由工作台第 6 阶段详情页上传到 fc.json 的 materials.audio.path）。
+    端点保留（_get_default_bgms 列出可被工作台侧引用），但 pipeline.js 必须
+    不再 POST /list_bgm_files —— 否则会发起 dead fetch。
+    """
     app_path = FUNCLIP_ROOT / "slirn_home" / "app.py"
     src = app_path.read_text(encoding="utf-8")
-    assert '"/slirn/api/list_bgm_files"' in src, (
-        "app.py 必须新增 /slirn/api/list_bgm_files 端点"
-    )
-    # 函数体里调 _get_default_bgms
-    endpoint_idx = src.find("list_bgm_files")
-    assert "_get_default_bgms" in src[endpoint_idx:endpoint_idx + 1500], (
-        "list_bgm_files 端点应列出 _get_default_bgms"
+    # 端点可保留（被 workbench 引用），但 pipeline.js 不应再 fetch 它
+    pipeline_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
+    assert "/list_bgm_files" not in pipeline_js, (
+        "pipeline.js 不应再 POST /list_bgm_files —— bgm 已从 cfg.fine_cut 移除，"
+        "面板不再有 bgm 下拉，调用会成 dead fetch"
     )
 
 
 def test_pipeline_js_populate_deps_function_exists():
-    """REQ-20260921-NNN AC-5：pipeline.js 必须有 _pipePanelPopulateDeps 填充 bgm + params。"""
+    """REQ-20260921-NNN AC-5 v2：pipeline.js 必须有 _pipePanelPopulateDeps 填充 params
+    （不再调 /list_bgm_files —— bgm 已从 cfg.fine_cut 移除）。
+    """
     pipeline_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
     assert "_pipePanelPopulateDeps" in pipeline_js, (
         "pipeline.js 缺 _pipePanelPopulateDeps 填充函数"
     )
-    # 调 /list_bgm_files
-    assert "/slirn/api/list_bgm_files" in pipeline_js, (
-        "_pipePanelPopulateDeps 必须调 /slirn/api/list_bgm_files"
-    )
-    # 调 /list_fine_global_profiles
+    # 调 /list_fine_global_profiles（参数模板下拉仍要填）
     assert "/slirn/api/list_fine_global_profiles" in pipeline_js, (
         "_pipePanelPopulateDeps 必须调 /slirn/api/list_fine_global_profiles"
     )
@@ -9913,7 +9971,9 @@ def test_app_py_pipeline_run_skips_preflight_when_stop_after_before_fine_cut(tmp
 def test_app_py_pipeline_run_blocks_when_fine_cut_preflight_fails(tmp_path: Path):
     """REQ-20260921-NNN：fine_cut.enabled=True + 无 fc.json + current → 阻断启动。
 
-    端点返回 ok=False + preflight 详情，让前端 toast。
+    端点返回 ok=True（让前端走 r.preflight 分支显示详情；早期版本 ok=False
+    会让前端走到「!r.ok → 未知错误」分支把 preflight 详情吞掉）+ preflight.ok=False
+    + started=False（不启动守护线程）。
     """
     from fastapi.testclient import TestClient
     from slirn_home import build_app
@@ -9935,8 +9995,8 @@ def test_app_py_pipeline_run_blocks_when_fine_cut_preflight_fails(tmp_path: Path
     r = client.post("/slirn/api/pipeline_run", json={"task_id": t.task_id})
     assert r.status_code == 200
     j = r.json()
-    assert j["ok"] is False, f"参数未就绪应阻断，实际: {j}"
-    assert j.get("started") is False
+    assert j["ok"] is True, f"端点 ok=True（让前端走 r.preflight 分支），实际: {j}"
+    assert j.get("started") is False, f"参数未就绪应不启动守护线程，实际: {j}"
     assert "preflight" in j
     pf = j["preflight"]
     assert pf["ok"] is False
@@ -10013,6 +10073,33 @@ def test_pipeline_js_runPipeline_handles_preflight_response():
     assert "素材" in window
 
 
+def test_pipeline_js_runPipeline_preflight_check_before_ok_check():
+    """REQ-20260921-NNN v2 BUG 修复：preflight 分支必须在 !r.ok 早退之前。
+
+    早期版本：服务端 _ok(ok=False) 没带 error 字段，前端先走 !r.ok 分支
+    显示「启动失败：未知错误」，把 preflight 详情吞掉。
+    """
+    import re
+    js_src = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(
+        encoding="utf-8"
+    )
+    idx = js_src.find("function runPipeline(taskId, since)")
+    assert idx > 0
+    window = js_src[idx:idx + 1500]
+    # r.preflight 检查（用代码行匹配，避免被注释里的「!r.ok」字面量误导）
+    pf_match = re.search(r"if\s*\(\s*r\s*&&\s*r\.preflight", window)
+    assert pf_match, "r.preflight 检查必须存在"
+    pf_pos = pf_match.start()
+    # !r.ok 早退：代码行 if (!r || !r.ok)
+    ok_match = re.search(r"if\s*\(\s*!r\s*\|\|\s*!r\.ok", window)
+    assert ok_match, "!r.ok 早退必须存在"
+    ok_pos = ok_match.start()
+    assert pf_pos < ok_pos, (
+        f"preflight 检查必须在 !r.ok 早退之前（pf_pos={pf_pos} ok_pos={ok_pos}），"
+        f"否则 preflight 详情会被「未知错误」吞掉"
+    )
+
+
 def test_pipeline_js_runPipeline_calls_pipeline_run_in_order():
     """REQ-20260921-NNN：runPipeline 必须按 save → run 顺序调用；
     且 run 后处理 preflight。"""
@@ -10057,5 +10144,123 @@ def test_pipeline_service_fine_cut_preflight_skipped_path():
         # 没有去读 fc.json（即便 fc_root 不存在也不报错）
         assert pre["materials"]["missing"] == []
         assert pre["materials"]["optional_missing"] == []
+
+
+def test_router_js_optInputOverflowCheck_uses_hysteresis_to_break_feedback_loop():
+    """REQ-20260921-NNN-shake-fix：optInputOverflowCheck 加 ±50px 滞回，打破
+    「cw 在 col4=260 / col4=360 间切换 → overflow 重检 → cw 再切换」反馈环。
+
+    原实现用 ±2px 容差：cw 变化 ~100px 时，scrollWidth 落在 (cw+2, cw+102)
+    死区的输入会反复 toggle wrapped → ResizeObserver 又触发再检测 → 滚动条
+    上下抖（用户报「选了一个词后，滚动条一会儿上去一会儿下来」）。
+
+    新实现：wrapped 状态下需要 sw > cw-50 才保留；未 wrapped 状态下需要
+    sw > cw+50 才 wrap。cw 改 100px 后落点必在另一侧 → 状态稳定。
+    """
+    src = (FUNCLIP_ROOT / "slirn_home" / "static" / "router.js").read_text(encoding="utf-8")
+    # 定位 optInputOverflowCheck 函数体
+    func_idx = src.find("function optInputOverflowCheck(")
+    assert func_idx >= 0, "缺 optInputOverflowCheck 函数"
+    next_func_idx = src.find("\n  function ", func_idx + 1)
+    func_body = src[func_idx:next_func_idx if next_func_idx > 0 else func_idx + 1500]
+
+    # 必须读 scrollWidth / clientWidth
+    assert "scrollWidth" in func_body, "optInputOverflowCheck 必须读 scrollWidth"
+    assert "clientWidth" in func_body, "optInputOverflowCheck 必须读 clientWidth"
+    # 必须按当前 wrapped 状态分支判断
+    assert "isWrapped" in func_body, (
+        "optInputOverflowCheck 必须用 isWrapped 分支（hysteresis 需要两边不同的阈值）"
+    )
+    # wrapped 状态下用 cw - 50（更大空余才解 wrap）
+    assert "cw - 50" in func_body, (
+        "wrapped 状态必须用 cw-50 作为 unwrap 阈值（hysteresis 下边带）"
+    )
+    # 未 wrapped 状态下用 cw + 50（更大溢出才 wrap）
+    assert "cw + 50" in func_body, (
+        "未 wrapped 状态必须用 cw+50 作为 wrap 阈值（hysteresis 上边带）"
+    )
+    # 不能再用旧的 ±2px 容差（否则反馈环还在）
+    assert "cw + 2" not in func_body, (
+        "optInputOverflowCheck 不能保留旧的 cw+2 容差（hysteresis 应替换它）"
+    )
+
+
+def test_router_js_optWordFilter_scrollIntoView_drops_smooth_behavior():
+    """REQ-20260921-NNN-shake-fix：optWordFilter 末尾的 scrollIntoView 必须去掉
+    behavior:'smooth'。否则「行隐藏 + 插入 hint → 列表高度突变」期间平滑滚动
+    会被反复打断，视觉上像「滚动条上下抖」（用户反馈的「颤抖」体感）。
+    """
+    src = (FUNCLIP_ROOT / "slirn_home" / "static" / "router.js").read_text(encoding="utf-8")
+    # 定位 optWordFilter 函数末尾的 scrollIntoView 调用
+    func_idx = src.find("function optWordFilter(")
+    assert func_idx >= 0, "缺 optWordFilter 函数"
+    next_func_idx = src.find("\n  function ", func_idx + 1)
+    func_body = src[func_idx:next_func_idx if next_func_idx > 0 else func_idx + 4000]
+    assert "scrollIntoView" in func_body, "optWordFilter 必须调 scrollIntoView"
+    # 取最后一段 scrollIntoView 调用（行内 must 是 {block: 'center'} 即时跳转）
+    # 不能含 behavior:'smooth'
+    assert "behavior: 'smooth'" not in func_body, (
+        "optWordFilter 的 scrollIntoView 不能再用 behavior:'smooth' — "
+        "行隐藏 + 加 hint 期间平滑滚动反复打断会让滚动条看起来在抖"
+    )
+    # 必须还有 block: 'center' 滚到首个出现行（保留原行为）
+    assert "block: 'center'" in func_body, (
+        "optWordFilter 滚到首个出现行的语义要保留（block: 'center'）"
+    )
+
+
+def test_pipeline_js_computeNextSince_respects_last_since_when_skipped():
+    """REQ-20260921-NNN-skip-since：computeNextSince 必须在 last.stages_done 为空
+    但 last.since 指向某阶段时返回 since（典型：fine_cut enabled=False 被跳过
+    → stages_done=[]，但 since=fine_cut；下次点「续跑」应继续从 fine_cut 开始，
+    而不是回退到字幕生成浪费前 4 阶段时间）。
+    """
+    pipeline_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
+    # 定位 computeNextSince 函数体
+    func_idx = pipeline_js.find("function computeNextSince(")
+    assert func_idx >= 0, "缺 computeNextSince 函数"
+    next_func_idx = pipeline_js.find("\n  function ", func_idx + 1)
+    func_body = pipeline_js[func_idx:next_func_idx if next_func_idx > 0 else func_idx + 1200]
+
+    # 必须读 last.since（关键：stages_done 空时回退到 since）
+    assert "last.since" in func_body, (
+        "computeNextSince 必须读 last.since —— 上次显式带 since 但 stages_done "
+        "为空（典型 skip 场景）时应回退到 since，不能回退到 STAGE_KEYS[0]"
+    )
+    # 必须在 STAGE_KEYS 里找 since 的索引（用 indexOf，不能硬编码 'fine_cut'）
+    assert "STAGE_KEYS.indexOf(last.since)" in func_body, (
+        "computeNextSince 必须用 STAGE_KEYS.indexOf(last.since) 查 since 位置"
+    )
+    # 必须在 sinceIdx > lastIdx 时返回 since
+    assert "sinceIdx > lastIdx" in func_body, (
+        "computeNextSince 必须比较 sinceIdx > lastIdx 才返回 since "
+        "(否则 done 末尾在 since 之后会误退)"
+    )
+
+
+def test_pipeline_js_range_on_checkbox_auto_enables_fine_cut():
+    """REQ-20260921-NNN-range-couples-enabled：勾上「按区间导出」必须自动勾上
+    「启用自动最终导出」。用户主动配 start/duration = 明确想导；不让 enabled
+    漏勾导致「cfg.enabled=False → 跳过」反复卡住。
+    反向不解耦：取消 range 不影响 enabled（用户可能仍想导全片）。
+    """
+    pipeline_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
+    # 定位 range_on 的 change listener 块（用 data-range-on querySelector 唯一定位）
+    idx = pipeline_js.find("document.querySelector('[data-range-on]')")
+    assert idx >= 0, "缺 range-on 的 change listener"
+    nearby = pipeline_js[idx:idx + 1500]
+    # 必须监听 change 事件
+    assert "addEventListener('change'" in nearby, "range-on 必须绑 change"
+    # 必须联动启用 fine_cut（按 fieldId('fine_cut', 'enabled') 取 enabled checkbox）
+    assert "fieldId('fine_cut', 'enabled')" in nearby, (
+        "range-on change handler 必须联动启用 fine_cut enabled（用 fieldId 唯一定位）"
+    )
+    # 仅在 rangeCb.checked=true 时启用（不取消 range 时取消 enabled）
+    assert "rangeCb.checked" in nearby, (
+        "联动只在 rangeCb.checked=true 时启用 enabled（不要反向解耦）"
+    )
+    assert "enabledCb.checked = true" in nearby, (
+        "联动效果：enabledCb.checked = true（不反向设为 false）"
+    )
 
 

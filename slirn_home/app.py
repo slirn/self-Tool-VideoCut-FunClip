@@ -8150,7 +8150,11 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             if _will_run_fine_cut:
                 _pre = _fine_cut_preflight(tid, _cfg_full, outputs_dir)
                 if not _pre.get("ok"):
-                    return _ok("", started=False, ok=False,
+                    # REQ-20260921-NNN：ok=True 让前端走 r.preflight 分支显示详细
+                    # 错误（缺哪些素材/参数原因）；started=False 不启动守护线程。
+                    # 早期版本 ok=False → 前端拿到 r.ok=false 走「未知错误」分支
+                    # （preflight 详情被吞掉，用户只看到 toast「未知错误」）。
+                    return _ok("", started=False,
                                preflight=_pre,
                                toast=_pre.get("reason")
                                      or "精剪合成预检失败")

@@ -134,12 +134,17 @@ def default_config() -> dict:
             "accept_all_replacements": False,
         },
         # REQ-20260921-NNN：精剪合成（最终导出视频）配置
+        # v2 用户反馈：cover_image / bg_image / bgm 是死字段 —— handler 不读，
+        # 实际素材路径在 fc.json 的 materials.{cover,bg,audio}.path，由工作台第 6 阶段
+        # 详情页上传写入。流程配置面板只保留「跑不跑」+「跑哪段」+「用哪份参数」3 类决策。
         "fine_cut": {
             "enabled": False,             # 默认关，避免误触发几小时重编码
-            "cover_image": "",            # 封面图片（空 = 用任务现有 / 不传）
-            "bg_image": "",               # 背景图片（空 = 用任务现有 / 不传）
-            "bgm": "",                    # 背景音乐文件名（空 = 不配）
             "params_source": "current",   # "current" | "template:<profile_id>"
+            # REQ-20260921-NNN-v4：range_enabled 门控「区间导出」——
+            # 不勾 = 全片（忽略 preview_start/duration）；勾上 = 按下面两个值导。
+            # 设计动机：HH:MM:SS 输入 + 默认 00:10:00 会让「默认行为」从全片变成
+            # 前 10 分钟，回归太大。加 checkbox 保留「全片」作为默认意图。
+            "range_enabled": False,
             "preview_start": 0.0,         # 导出起点（秒，0 = 全篇）
             "duration": None,             # 导出时长（秒，None = 全篇）
         },
@@ -205,6 +210,9 @@ def validate_config(cfg: dict) -> dict:
     # REQ-20260921-NNN：fine_cut.enabled 必须 bool（脏数据兜底 False — 防误跑）
     if not isinstance(base["fine_cut"].get("enabled"), bool):
         base["fine_cut"]["enabled"] = False
+    # REQ-20260921-NNN-v4：range_enabled 必须 bool（脏数据兜底 False — 默认全片）
+    if not isinstance(base["fine_cut"].get("range_enabled"), bool):
+        base["fine_cut"]["range_enabled"] = False
     # link_person_ids 兜底为 bool（脏数据 → False）
     for sk in ("subtitle_review", "rough_cut"):
         if not isinstance(base[sk].get("link_person_ids"), bool):
@@ -385,6 +393,12 @@ def _poll_status(api: str, status_path: str, tid: str, *,
                  interval: float = 2.0, timeout: float = 24 * 3600.0) -> tuple[str, str]:
     """轮询 status 端点直到 done / error / 超时。
 
+    REQ-20260921-NNN-v3：必须用 POST 调 status 端点。早期版本误用 _http_get，
+    但 /subtitle_status / /revise_status / /compose_rough_status / /optimize_subtitle_status
+    4 个端点都是 @app.app.post(...)（GET 返回 405），导致 _poll_status 永远轮询不到
+    state="done"，handler 永远不返回，主循环永远卡在第一个阶段。
+    /render_status 是 GET，由单独的 _poll_export 处理，不要混用。
+
     返回 (state, error) — state ∈ {done, error, timeout}。
     """
     t0 = time.time()
@@ -393,7 +407,8 @@ def _poll_status(api: str, status_path: str, tid: str, *,
         if _consume_stop(tid + ":poller"):  # 用户中途 stop 也算
             return ("stopped", "用户请求停止")
         try:
-            r = _http_get(api, status_path, {"task_id": tid}, timeout=15.0)
+            # 关键：POST（与 4 个 status 端点签名一致）；不要改成 _http_get
+            r = _http_post(api, status_path, {"task_id": tid}, timeout=15.0)
             job = (r or {}).get("job") or {}
             state = str(job.get("state") or "")
             if state == "done":
@@ -437,10 +452,14 @@ def _check_prereq(outputs_dir: Path, required_files: list[str]) -> tuple[bool, s
 
 # REQ-20260921-NNN：精剪合成（fine_cut）前置物 料预检 helper。
 # 流程跑到 fine_cut 之前必须先确认本任务在精剪合成详情页已维护好所需素材。
-# 规则（与 _render_fine_cut_zone / _FINE_AUTO_KINDS 对齐）：
-#   - video / subtitle：上游产物（auto-fetch），无需用户上传，但 layout.enabled
-#     且 materials.<kind>.path 仍必须存在（auto 抓取后写入 path）。
-#   - cover / bg / reference：用户上传，必须 path 存在。
+# 规则（与 _render_fine_cut_zone / _FINE_AUTO_KINDS 对齐 + REQ-20260921-NNN v2 用户反馈）：
+#   - video：上游产物（auto-fetch from rough_compose.mp4），handler 内 _check_prereq 已把
+#     关，无须在预检里强求 fc.json 的 materials.video.path 存在（用户无法提前提供）。
+#   - subtitle：上游产物（auto-fetch from optimized_subs.srt），同上不预检；
+#     render 时若 path 缺失会自动跳过 burn-in（无字幕也能跑）。
+#   - cover / bg：仅在 layout.{cover,bg}.enabled=True 时要求 materials.<kind>.path 存在；
+#     enabled=False（默认）→ 不阻塞（用户可以跑出"无封面无背景"的精剪视频）。
+#   - reference：仅作 AI 解析辅助用，缺失不阻塞（render 代码只在有 path 时才预缩图）。
 #   - audio（BGM）：可选，缺失不阻塞（why_no_bgm 已有诊断）。
 #
 # 返回 dict：{ok: bool, missing: [{kind, label}], optional_missing: [{kind, label}], reason: str}
@@ -466,7 +485,7 @@ def _check_fine_cut_materials(tid: str, fc_root: Path, fine_cut_cfg: dict) -> di
     if not isinstance(fc, dict):
         return {"ok": True, "missing": [], "optional_missing": [], "reason": ""}
     materials = fc.get("materials") or {}
-    # _FINE_MATERIAL_KINDS 与 _FINE_MATERIAL_LABELS 的本地镜像（label 显示用）
+    layout = fc.get("layout") or {}
     _KIND_LABELS = {
         "video":     "粗剪视频",
         "subtitle":  "字幕文件",
@@ -477,22 +496,34 @@ def _check_fine_cut_materials(tid: str, fc_root: Path, fine_cut_cfg: dict) -> di
     }
     missing: list[dict] = []
     optional_missing: list[dict] = []
-    for kind, label in _KIND_LABELS.items():
+
+    def _has_path(kind: str) -> bool:
         mat = materials.get(kind) or {}
-        path = (mat.get("path") or "").strip()
-        if not path:
-            # audio 是可选（why_no_bgm 已诊断；不阻塞 fine_cut）
-            if kind == "audio":
-                optional_missing.append({"kind": kind, "label": label})
-            else:
-                missing.append({"kind": kind, "label": label})
+        return bool((mat.get("path") or "").strip())
+
+    # video / subtitle：上游产物自动获取，handler 内已做 prereq / render-time 容错，不预检
+    # （用户根本没法提前提供 fc.json 里的 materials.video.path 路径去指向一个尚未产生的文件）
+    # cover：仅当 layout.cover.enabled=True 时要求 path
+    if (layout.get("cover") or {}).get("enabled") and not _has_path("cover"):
+        missing.append({"kind": "cover", "label": _KIND_LABELS["cover"]})
+    # bg：仅当 layout.bg.enabled=True 时要求 path
+    if (layout.get("bg") or {}).get("enabled") and not _has_path("bg"):
+        missing.append({"kind": "bg", "label": _KIND_LABELS["bg"]})
+    # reference：AI 解析辅助，缺失不阻塞
+    if not _has_path("reference"):
+        optional_missing.append({"kind": "reference", "label": _KIND_LABELS["reference"]})
+    # audio：可选
+    if not _has_path("audio"):
+        optional_missing.append({"kind": "audio", "label": _KIND_LABELS["audio"]})
+
     return {
         "ok": len(missing) == 0,
         "missing": missing,
         "optional_missing": optional_missing,
         "reason": "" if not missing else
             "缺少素材：" + "、".join(m["label"] for m in missing)
-            + " — 请到「第 6 阶段 · 精剪合成」详情页上传",
+            + " — 请到「第 6 阶段 · 精剪合成」详情页上传"
+            + "（或在精剪合成页关闭该素材的启用开关）",
     }
 
 
@@ -837,9 +868,32 @@ def handler_optimize(tid: str, cfg: dict, outputs_dir: Path, api: str,
             _result[1] = f"优化字幕{state}：{err}"
             return (False, _result[1])
         if accept_all:
-            _log(job, "optimize", "应用全部替换（accepted all applied=True）")
+            # REQ-20260921-NNN-v3：构造全量 decisions（{occ_id, applied, after, reviewed}），
+            # 而不是发 applied_all=True 标志——save_optimize_subtitle 端点不识别那个标志，
+            # 硬约束是 decisions 必须是数组。
+            from . import optimize_service
+            opt_data = optimize_service.load_optimize(outputs_dir)
+            if not opt_data:
+                _result[0] = False
+                _result[1] = "optimize_subtitle.json 不存在 — 无法构造 decisions"
+                return (False, _result[1])
+            decisions = []
+            for occ in (opt_data.get("occurrences") or []):
+                try:
+                    oid = int(occ.get("occ_id"))
+                except (TypeError, ValueError):
+                    continue
+                # 「全部接受」= applied=True + after 用大模型给的建议值 + reviewed=True
+                decisions.append({
+                    "occ_id": oid,
+                    "applied": True,
+                    "after": str(occ.get("after") or ""),
+                    "reviewed": True,
+                })
+            _log(job, "optimize",
+                 f"应用全部替换（{len(decisions)} 条 decisions，applied=True）")
             r = _http_post(api, "/save_optimize_subtitle",
-                           {"task_id": tid, "applied_all": True},
+                           {"task_id": tid, "decisions": decisions},
                            auto_session_id=job.auto_session_id)
             if not r.get("ok"):
                 _result[0] = False
@@ -929,21 +983,27 @@ def handler_fine_cut(tid: str, cfg: dict, outputs_dir: Path, api: str,
                     return (False, _result[1])
         # 触发导出
         body: dict = {"task_id": tid}
-        ps = cfg.get("preview_start")
-        dur = cfg.get("duration")
-        try:
-            if ps not in (None, "", 0):
-                body["preview_start"] = float(ps)
-            if dur not in (None, ""):
-                body["duration"] = float(dur)
-        except (TypeError, ValueError) as e:
-            _result[0] = False
-            _result[1] = f"preview_start/duration 数值非法: {e}"
-            return (False, _result[1])
+        # REQ-20260921-NNN-v4：range_enabled 门控——
+        # 不勾 = 全片（不传 preview_start/duration，让端点走默认全片导出）；
+        # 勾上 = 按 cfg.preview_start / cfg.duration 传（前端 HH:MM:SS 已转秒）。
+        range_enabled = bool(cfg.get("range_enabled", False))
+        if range_enabled:
+            ps = cfg.get("preview_start")
+            dur = cfg.get("duration")
+            try:
+                if ps not in (None, "", 0):
+                    body["preview_start"] = float(ps)
+                if dur not in (None, ""):
+                    body["duration"] = float(dur)
+            except (TypeError, ValueError) as e:
+                _result[0] = False
+                _result[1] = f"preview_start/duration 数值非法: {e}"
+                return (False, _result[1])
         range_hint = ""
         if body.get("preview_start") or body.get("duration") is not None:
             range_hint = f"（区间 {body.get('preview_start', 0)}s 起, {body.get('duration', '全篇')}）"
-        _log(job, "fine_cut", f"启动最终导出{range_hint}")
+        _log(job, "fine_cut",
+             f"启动最终导出{range_hint}" + ("" if range_enabled else "（全片）"))
         r = _http_post(api, "/export_fine_video", body,
                        auto_session_id=job.auto_session_id)
         if not r.get("ok"):

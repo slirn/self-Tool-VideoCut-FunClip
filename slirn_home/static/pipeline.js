@@ -42,7 +42,7 @@
         rough_cut: {delete_speakers: [], default_decision: 'keep', link_person_ids: false},
         rough_compose: {},
         optimize: {accept_all_replacements: false},
-        fine_cut: {enabled: false, cover_image: '', bg_image: '', bgm: '', params_source: 'current', preview_start: 0.0, duration: null},
+        fine_cut: {enabled: false, params_source: 'current', preview_start: 0.0, duration: null},
         run_mode: 'stop_after',
         stop_after: 'subtitle_review'
       }
@@ -56,7 +56,7 @@
         rough_cut: {delete_speakers: [], default_decision: 'keep', link_person_ids: true},
         rough_compose: {},
         optimize: {accept_all_replacements: false},
-        fine_cut: {enabled: false, cover_image: '', bg_image: '', bgm: '', params_source: 'current', preview_start: 0.0, duration: null},
+        fine_cut: {enabled: false, params_source: 'current', preview_start: 0.0, duration: null},
         run_mode: 'stop_after',
         stop_after: 'rough_compose'
       }
@@ -70,7 +70,7 @@
         rough_cut: {delete_speakers: [], default_decision: 'keep', link_person_ids: true},
         rough_compose: {},
         optimize: {accept_all_replacements: true},
-        fine_cut: {enabled: false, cover_image: '', bg_image: '', bgm: '', params_source: 'current', preview_start: 0.0, duration: null},
+        fine_cut: {enabled: false, params_source: 'current', preview_start: 0.0, duration: null},
         run_mode: 'to_end',
         stop_after: null
       }
@@ -204,15 +204,20 @@
         + '</div>';
     }
     // REQ-20260921-NNN：精剪合成（最终导出视频）— 6 阶段最后一站
+    // v2 用户反馈：去掉 cover_image/bg_image/bgm 输入框（都是死字段 —— handler 不读；
+    // 实际素材路径在 fc.json 的 materials.{cover,bg,audio}.path，由工作台第 6 阶段详情页
+    // 上传写入）。流程配置面板只保留「跑不跑」+「跑哪段」+「用哪份参数」3 类决策。
     if (stage.key === 'fine_cut') {
       var fc0 = stageCfg || {};
       var enabledOn = fc0.enabled ? ' checked' : '';
-      var cover = fc0.cover_image || '';
-      var bgImg = fc0.bg_image || '';
-      var bgmSel = fc0.bgm || '';
+      var rangeOn = fc0.range_enabled ? ' checked' : '';
       var paramsSrc = fc0.params_source || 'current';
-      var startV = (fc0.preview_start != null) ? fc0.preview_start : 0;
-      var durV = (fc0.duration != null) ? fc0.duration : '';
+      // REQ-20260921-NNN-v4：UI 改 HH:MM:SS，内部仍是秒。
+      // 默认 start=00:00:00 / duration=00:10:00；range_enabled=False 时输入框
+      // 显示但 disabled（让用户看到默认「会导 10 分钟」但不会被误触发）。
+      var startStr = secondsToHms(fc0.preview_start != null ? Number(fc0.preview_start) : 0);
+      var durStr   = secondsToHms(fc0.duration != null ? Number(fc0.duration) : 600);
+      var rangeDisabled = fc0.range_enabled ? '' : ' disabled';
       return '<div class="slirn-pipe-form">'
         + '<div class="slirn-pipe-desc">' + escapeHtml(stage.desc) + '</div>'
         // 启用开关（默认关，防误跑几小时重编码）
@@ -224,23 +229,9 @@
         + '<b>📦 素材维护位置：</b>精剪合成的所有素材（封面 / 背景 / 背景音乐 / 视频 / 字幕）都在 '
         + '<b>本任务的「第 6 阶段 · 精剪合成」详情页</b>里维护，不要在这里上传。'
         + '<br>· <b>粗剪视频</b> + <b>字幕文件</b>：自动从上游产物获取，无需上传。'
-        + '<br>· <b>封面图</b> / <b>背景图</b>：若需使用，必须在精剪合成页上传。'
+        + '<br>· <b>封面图</b> / <b>背景图</b>：仅在精剪合成页勾选启用时使用，可选。'
         + '<br>· <b>背景音乐</b>：可选项，可不传。'
         + '</div>'
-        // 封面图（手动路径；空=用任务现有）
-        + '<label class="slirn-pipe-field"><span>封面图片路径（空=用任务现有）：</span>'
-        + '<input type="text" id="' + fieldId(stage.key, 'cover') + '" value="' + escapeHtml(cover) + '" placeholder="封面.jpg">'
-        + '</label>'
-        // 背景图
-        + '<label class="slirn-pipe-field"><span>背景图片路径（空=用任务现有）：</span>'
-        + '<input type="text" id="' + fieldId(stage.key, 'bg') + '" value="' + escapeHtml(bgImg) + '" placeholder="背景.jpg">'
-        + '</label>'
-        // 背景音乐（下拉，loadPanel 时填充）
-        + '<label class="slirn-pipe-field"><span>背景音乐（可选；空=不配）：</span>'
-        + '<select id="' + fieldId(stage.key, 'bgm') + '" data-bgm-select>'
-        + '<option value="">— 不配 —</option>'
-        + '<option value="' + escapeHtml(bgmSel) + '" selected>' + escapeHtml(bgmSel || '(已选)') + '</option>'
-        + '</select></label>'
         // 设置参数模板（下拉，loadPanel 时填充）
         // REQ-20260921-NNN：参数模板选择 — 若本任务已有 fc.json（精剪参数），
         // 可以用「当前参数」；若没有，必须选模板或在精剪合成页「导入参数」。
@@ -252,14 +243,22 @@
         + '<div class="slirn-pipe-hint slirn-pipe-fine-cut-params-note" data-fine-cut-params-note>'
         + '>若本任务已保存过精剪参数（<code>fine_compose.json</code>），可选「当前参数」；'
         + '否则必须选模板，或去精剪合成详情页「导入参数」。</div>'
-        // 导出区间（秒）
-        + '<label class="slirn-pipe-field"><span>导出起点（秒，0=全篇）：</span>'
-        + '<input type="number" id="' + fieldId(stage.key, 'start') + '" min="0" step="0.1" value="' + Number(startV) + '">'
+        // REQ-20260921-NNN-v4：导出区间（HH:MM:SS）+ range_enabled checkbox 门控
+        + '<label class="slirn-pipe-field">'
+        + '<input type="checkbox" id="' + fieldId(stage.key, 'range-on') + '" data-range-on' + rangeOn + '>'
+        + ' 按区间导出（不勾 = 全片；勾上 = 用下面两个时间导）'
         + '</label>'
-        + '<label class="slirn-pipe-field"><span>导出时长（秒，空=全篇）：</span>'
-        + '<input type="number" id="' + fieldId(stage.key, 'dur') + '" min="0" step="0.1" value="' + escapeHtml(String(durV)) + '" placeholder="留空=全篇">'
+        + '<label class="slirn-pipe-field"><span>导出起点（HH:MM:SS，0=全篇）：</span>'
+        + '<input type="text" id="' + fieldId(stage.key, 'start') + '" data-range-input'
+        + ' value="' + escapeHtml(startStr) + '" placeholder="00:00:00"'
+        + ' pattern="^\\d{1,}:[0-5]\\d:[0-5]\\d$"' + rangeDisabled + '>'
         + '</label>'
-        + '<div class="slirn-pipe-hint">⚠ 启用后会自动调 /export_fine_video，输出 fine_export.mp4。默认关。</div>'
+        + '<label class="slirn-pipe-field"><span>导出时长（HH:MM:SS，默认 10 分钟）：</span>'
+        + '<input type="text" id="' + fieldId(stage.key, 'dur') + '" data-range-input'
+        + ' value="' + escapeHtml(durStr) + '" placeholder="00:10:00"'
+        + ' pattern="^\\d{1,}:[0-5]\\d:[0-5]\\d$"' + rangeDisabled + '>'
+        + '</label>'
+        + '<div class="slirn-pipe-hint">⚠ 启用「自动最终导出」+「按区间导出」后，会从起点开始按指定时长导出。视频全长在任务详情里看。</div>'
         + '</div>';
     }
     return '<div class="slirn-pipe-form"></div>';
@@ -375,41 +374,18 @@
     return cfg;
   }
 
-  // ---- REQ-20260921-NNN：填充 fine_cut 下拉（背景音乐 + 设置参数模板）----
-  // loadPanel 末尾调用，调用 _pipePanelPopulateDeps(taskId)。
-  // - bgm：从 /list_bgm_files 拿默认 + 上传；保留面板当前选中
+  // ---- REQ-20260921-NNN v2：填充 fine_cut 下拉（仅设置参数模板）----
+  // loadPanel 末尾调用 _pipePanelPopulateDeps(taskId)。
   // - params：从 /list_fine_global_profiles 拿模板；追加「当前参数」/「导入 JSON」选项
   // REQ-20260921-NNN：当 /pipeline_get 返回 has_fc_json=false 时，「当前参数」禁用
   // （没 fc.json 可用「当前」），并把面板提示文案动态改成「必须选模板或去精剪页导入」。
+  // v2 用户反馈：bgm 是死字段（已从 cfg.fine_cut 移除；BGM 由工作台第 6 阶段
+  // 详情页「🎵 背景音乐」上传到 fc.json 的 materials.audio.path），所以这里
+  // 不再调任何 bgm 端点填下拉 —— 没有 data-bgm-select 元素。
   var _pipePanelPopulateDeps = async function(taskId, hasFcJson) {
-    var bgmSel = document.querySelector('select[data-bgm-select]');
     var paramSel = document.querySelector('select[data-params-select]');
     var fcEnabled = !!document.getElementById(fieldId('fine_cut', 'enabled')) &&
                     !!document.getElementById(fieldId('fine_cut', 'enabled')).checked;
-    if (bgmSel) {
-      // 读出当前选中（若存在），加载完后恢复
-      var curBgm = bgmSel.value || '';
-      try {
-        var r = await fetch('/slirn/api/list_bgm_files', {
-          method: 'POST', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({task_id: taskId || ''})
-        });
-        var j = await r.json();
-        bgmSel.innerHTML = '';
-        var noneOpt = document.createElement('option');
-        noneOpt.value = ''; noneOpt.textContent = '— 不配 —';
-        bgmSel.appendChild(noneOpt);
-        var files = (j && j.ok && j.files) ? j.files : [];
-        files.forEach(function(f) {
-          var opt = document.createElement('option');
-          opt.value = f.name || f.path || '';
-          opt.textContent = (f.kind === 'uploaded' ? '📁 ' : '🎵 ') + (f.label || f.name || '');
-          if ((f.name || f.path) === curBgm) opt.selected = true;
-          bgmSel.appendChild(opt);
-        });
-        if (!curBgm) bgmSel.value = '';
-      } catch (e) { console.warn('[pipe-bgm-load]', e); }
-    }
     if (paramSel) {
       var curParam = paramSel.value || 'current';
       try {
@@ -467,6 +443,23 @@
         paramsNote.style.color = '';
       }
     }
+    // REQ-20260921-NNN-v4：range_on checkbox 切换 HH:MM:SS 输入框 disabled 状态
+    var rangeCb = document.querySelector('[data-range-on]');
+    if (rangeCb) {
+      rangeCb.addEventListener('change', function() {
+        var inputs = document.querySelectorAll('[data-range-input]');
+        inputs.forEach(function(i) { i.disabled = !rangeCb.checked; });
+        // REQ-20260921-NNN-range-couples-enabled：勾上「按区间导出」→ 自动启用
+        // fine_cut（用户主动配 start/duration = 明确要导）。enabled 默认关是
+        // 防误触发几小时重编码，但用户已经表达意图就不该再让 enabled 漏勾导致
+        // 「cfg.enabled=False → 跳过」一直卡住。反向不解耦：用户取消 range 不
+        // 影响 enabled（可能仍想导全片）。
+        if (rangeCb.checked) {
+          var enabledCb = document.getElementById(fieldId('fine_cut', 'enabled'));
+          if (enabledCb && !enabledCb.checked) enabledCb.checked = true;
+        }
+      });
+    }
   };
 
   // ---- 表单 → config ----
@@ -477,6 +470,27 @@
   function _checked(id, fallback) {
     var el = document.getElementById(id);
     return el ? !!el.checked : fallback;
+  }
+  // REQ-20260921-NNN-v4：HH:MM:SS ↔ 秒（双向）。
+  // - secondsToHms(0)    = "00:00:00"
+  // - secondsToHms(600)  = "00:10:00"
+  // - secondsToHms(9669) = "02:41:09"
+  // - hmsToSeconds("00:30:00") = 1800；解析失败返回 null（让调用方决定兜底）
+  function _pad2(n) { return n < 10 ? '0' + n : String(n); }
+  function secondsToHms(sec) {
+    var s = Math.max(0, Math.floor(Number(sec) || 0));
+    var h = Math.floor(s / 3600);
+    var m = Math.floor((s % 3600) / 60);
+    var ss = s % 60;
+    return _pad2(h) + ':' + _pad2(m) + ':' + _pad2(ss);
+  }
+  function hmsToSeconds(str) {
+    if (str == null) return null;
+    var s = String(str).trim();
+    if (!s) return null;
+    var m = s.match(/^(\d{1,3}):([0-5]\d):([0-5]\d)$/);
+    if (!m) return null;
+    return parseInt(m[1], 10) * 3600 + parseInt(m[2], 10) * 60 + parseInt(m[3], 10);
   }
   function readCurrentConfig() {
     var panel = document.getElementById('slirn-pipe-panel');
@@ -509,21 +523,33 @@
       accept_all_replacements: _checked(fieldId('optimize', 'accept-rep'), false)
     };
     // REQ-20260921-NNN：精剪合成（最终导出视频）— 默认 enabled=False 防误触发
+    // v2 用户反馈：去掉 cover_image/bg_image/bgm 输入（死字段，handler 不读），
+    // 只保留 enabled + params_source + preview_start + duration 4 个真正生效的字段。
+    // v4 用户反馈：start/duration 改 HH:MM:SS UI 输入；range_enabled 门控「区间导出」。
     var fcEnabled = _checked(fieldId('fine_cut', 'enabled'), false);
-    var fcBgm = _val(fieldId('fine_cut', 'bgm'), '') || '';
     var fcParams = _val(fieldId('fine_cut', 'params-src'), 'current') || 'current';
-    var fcStartRaw = _val(fieldId('fine_cut', 'start'), '0');
-    var fcDurRaw = _val(fieldId('fine_cut', 'dur'), '');
-    var fcStart = parseFloat(fcStartRaw);
-    var fcDur = fcDurRaw === '' ? null : parseFloat(fcDurRaw);
+    var fcRangeOn = _checked(fieldId('fine_cut', 'range-on'), false);
+    var fcStartRaw = _val(fieldId('fine_cut', 'start'), '00:00:00');
+    var fcDurRaw = _val(fieldId('fine_cut', 'dur'), '00:10:00');
+    var fcStartSec = hmsToSeconds(fcStartRaw);
+    var fcDurSec = hmsToSeconds(fcDurRaw);
+    // HH:MM:SS 解析失败 → 兜底（start=0, duration=600）并 toast 提示
+    if (fcStartSec == null) {
+      fcStartSec = 0;
+      try { window.slirnToast && window.slirnToast('导出起点格式不对（应为 HH:MM:SS），已用 00:00:00 兜底', 'warn'); } catch (e) {}
+    }
+    if (fcDurSec == null) {
+      fcDurSec = 600;  // 10 分钟兜底
+      try { window.slirnToast && window.slirnToast('导出时长格式不对（应为 HH:MM:SS），已用 00:10:00 兜底', 'warn'); } catch (e) {}
+    }
+    // range_enabled=False → 不传 start/duration（保留给 handler 当成「全片」语义）；
+    // 但 preview_start/duration 仍存，让用户再次勾选 checkbox 时不丢值。
     cfg.fine_cut = {
       enabled: fcEnabled,
-      cover_image: _val(fieldId('fine_cut', 'cover'), '') || '',
-      bg_image: _val(fieldId('fine_cut', 'bg'), '') || '',
-      bgm: fcBgm,
       params_source: fcParams,
-      preview_start: isNaN(fcStart) ? 0 : fcStart,
-      duration: (fcDur === null || isNaN(fcDur)) ? null : fcDur
+      range_enabled: fcRangeOn,
+      preview_start: fcStartSec,
+      duration: fcDurSec
     };
     // v5 顶层 run_mode + stop_after：
     // - run_mode="to_end" → 服务端 validate_config 强制 stop_after=None
@@ -551,6 +577,14 @@
     for (var i = 0; i < done.length; i++) {
       var ix = STAGE_KEYS.indexOf(done[i]);
       if (ix > lastIdx) lastIdx = ix;
+    }
+    // v2 REQ-20260921-NNN-skip-since：上次若显式带 since 且 since 比 done 末
+    // 尾还靠后（典型场景：fine_cut enabled=False 被跳过 → stages_done=[]，
+    // 但 since=fine_cut），下一次应继续从 since 处跑。否则按钮变成「从字幕生成开
+    // 始」，误导且每次点都从头跑前 4 阶段浪费时间。
+    if (typeof last.since === 'string' && last.since) {
+      var sinceIdx = STAGE_KEYS.indexOf(last.since);
+      if (sinceIdx >= 0 && sinceIdx > lastIdx) return last.since;
     }
     return STAGE_KEYS[lastIdx + 1] || null;
   }
@@ -909,10 +943,10 @@
       var payload = {task_id: taskId};
       if (since) payload.since = since;
       postJSON(SLIRN_API + '/pipeline_run', payload).then(function(r) {
-        if (!r || !r.ok) { toast('启动失败：' + (r && r.error || '未知错误'), 'error'); return; }
         // REQ-20260921-NNN：精剪合成预检失败 → 服务端返回 started=False + preflight 详情
-        // 提示用户去第 6 阶段详情页补齐（素材/参数），不要硬启动（避免几小时重编码到一半挂）。
-        if (r.preflight && !r.preflight.ok) {
+        // 必须在「!r.ok 早退」之前检查，否则前端只会显示 toast「启动失败：未知错误」
+        // （服务端 _ok(ok=False) 没带 error 字段），预检详情被吞掉。
+        if (r && r.preflight && !r.preflight.ok) {
           var pf = r.preflight || {};
           var matMiss = (pf.materials && pf.materials.missing) || [];
           var par = pf.parameters || {};
@@ -925,6 +959,7 @@
                 'error');
           return;
         }
+        if (!r || !r.ok) { toast('启动失败：' + (r && r.error || '未知错误'), 'error'); return; }
         if (!r.started) {
           toast(r.toast || '已在运行');
           return;

@@ -65,12 +65,17 @@ def test_default_config_fine_cut_enabled_false():
 
 
 def test_default_config_fine_cut_has_required_keys():
-    """v5：fine_cut 必含 cover_image / bg_image / bgm / params_source / preview_start / duration / enabled。"""
+    """v5 + v2 用户反馈：fine_cut 只含 4 个真正生效的字段（enabled / params_source /
+    preview_start / duration）。cover_image / bg_image / bgm 已移除 —— 都是死字段，
+    handler 不读（实际素材在 fc.json 的 materials.{cover,bg,audio}.path）。
+    """
     cfg = P.default_config()
     fc = cfg["fine_cut"]
-    for k in ("enabled", "cover_image", "bg_image", "bgm", "params_source",
-              "preview_start", "duration"):
+    for k in ("enabled", "params_source", "preview_start", "duration"):
         assert k in fc, f"fine_cut 缺 {k}"
+    # 死字段必须不在 default_config 里（防止 UI 误加回来）
+    for k in ("cover_image", "bg_image", "bgm"):
+        assert k not in fc, f"fine_cut 不应含死字段 {k}（handler 不读，UI 不要画）"
 
 
 def test_default_config_subtitle_review_rough_cut_have_link_person_ids():
@@ -210,25 +215,29 @@ def test_validate_config_fine_cut_enabled_non_bool_falls_back_false():
 
 
 def test_validate_config_fine_cut_accepts_full_settings():
-    """v5：fine_cut 全字段被保留。"""
+    """v5：fine_cut 仅 4 个真正生效字段被保留（enabled / params_source / preview_start / duration）。
+    cover_image / bg_image / bgm 是 v1 死字段（handler 不读），validate_config 应该丢弃
+    而非保留（避免旧配置误导 UI）。
+    """
     user = P.default_config()
     user["fine_cut"] = {
         "enabled": True,
-        "cover_image": "cover.jpg",
-        "bg_image": "bg.jpg",
-        "bgm": "song.mp3",
+        "cover_image": "cover.jpg",   # v1 死字段
+        "bg_image": "bg.jpg",         # v1 死字段
+        "bgm": "song.mp3",            # v1 死字段
         "params_source": "template:p_xxx",
         "preview_start": 30.5,
         "duration": 120.0,
     }
     out = P.validate_config(user)
     assert out["fine_cut"]["enabled"] is True
-    assert out["fine_cut"]["cover_image"] == "cover.jpg"
-    assert out["fine_cut"]["bg_image"] == "bg.jpg"
-    assert out["fine_cut"]["bgm"] == "song.mp3"
     assert out["fine_cut"]["params_source"] == "template:p_xxx"
     assert out["fine_cut"]["preview_start"] == 30.5
     assert out["fine_cut"]["duration"] == 120.0
+    # v1 死字段被丢弃（merged[k] = v 仅当 k 在 default_config 里）
+    assert "cover_image" not in out["fine_cut"]
+    assert "bg_image" not in out["fine_cut"]
+    assert "bgm" not in out["fine_cut"]
 
 
 def test_validate_config_link_person_ids_non_bool_falls_back_false():
@@ -679,6 +688,130 @@ def test_handler_fine_cut_applies_template_before_export(monkeypatch, tmp_path: 
     assert ok is True
     # 期望 apply_fine_global_profile 在 export_fine_video 之前
     assert calls.index("/apply_fine_global_profile") < calls.index("/export_fine_video")
+
+
+# =============== REQ-20260921-NNN-v4：range_enabled 门控「区间导出」===============
+# v3 bug：start/duration 用 number 输入（秒），用户要算 10 分钟 = 600 秒嫌麻烦，
+# 改 HH:MM:SS。但默认 00:10:00 + 无门控会让「默认行为」从全片变成前 10 分钟，
+# 是回归。加 range_enabled checkbox（默认 False）保留「全片」为默认意图。
+#
+# 测试钉死：
+# - default_config 有 range_enabled: False
+# - validate_config 兜底（非 bool → False）
+# - handler_fine_cut 在 range_enabled=False 时不发 preview_start/duration（全片）
+# - handler_fine_cut 在 range_enabled=True 时发 preview_start/duration（区间导出）
+
+
+def test_default_config_fine_cut_has_range_enabled_default_false():
+    """v4 默认 range_enabled=False（全片导出）。"""
+    cfg = P.default_config()
+    assert "range_enabled" in cfg["fine_cut"]
+    assert cfg["fine_cut"]["range_enabled"] is False
+
+
+def test_validate_config_fine_cut_range_enabled_non_bool_falls_back_false():
+    """v4 兜底：脏数据（字符串/None/数字）→ False，不抛异常。"""
+    # 字符串 True（用户误填）
+    cfg = P.validate_config({"fine_cut": {"range_enabled": "true"}})
+    assert cfg["fine_cut"]["range_enabled"] is False
+    # None
+    cfg = P.validate_config({"fine_cut": {"range_enabled": None}})
+    assert cfg["fine_cut"]["range_enabled"] is False
+    # 数字 1
+    cfg = P.validate_config({"fine_cut": {"range_enabled": 1}})
+    assert cfg["fine_cut"]["range_enabled"] is False
+    # 缺省
+    cfg = P.validate_config({"fine_cut": {}})
+    assert cfg["fine_cut"]["range_enabled"] is False
+
+
+def test_handler_fine_cut_range_disabled_sends_full_video_body(monkeypatch, tmp_path: Path):
+    """v4：range_enabled=False → /export_fine_video body 只有 task_id（无 preview_start/duration），
+    让端点走默认全片导出。
+    """
+    captured = []
+
+    def fake_http_post(api, path, payload, **kw):
+        captured.append((path, dict(payload)))
+        if path == "/export_fine_video":
+            return {"ok": True, "job_id": "j1"}
+        return {"ok": True}
+
+    monkeypatch.setattr(P, "_http_post", fake_http_post)
+    monkeypatch.setattr(P, "_poll_export", lambda *a, **kw: ("done", ""))
+
+    out = tmp_path / "outputs"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "rough_compose.mp4").write_bytes(b"")
+
+    job = P.PipelineJob()
+    # 即便用户填了 start=600 / duration=600，range_enabled=False 也不应传到 body
+    cfg = {"enabled": True, "range_enabled": False,
+           "preview_start": 600, "duration": 600}
+    ok, msg = P.handler_fine_cut("t-1", cfg, out, "http://x", job)
+    assert ok is True
+
+    body = next(p for path, p in captured if path == "/export_fine_video")
+    assert "preview_start" not in body, f"全片模式不应带 preview_start，body={body}"
+    assert "duration" not in body, f"全片模式不应带 duration，body={body}"
+    assert body["task_id"] == "t-1"
+
+
+def test_handler_fine_cut_range_enabled_sends_start_and_duration(monkeypatch, tmp_path: Path):
+    """v4：range_enabled=True → body 带 preview_start / duration。"""
+    captured = []
+
+    def fake_http_post(api, path, payload, **kw):
+        captured.append((path, dict(payload)))
+        if path == "/export_fine_video":
+            return {"ok": True, "job_id": "j1"}
+        return {"ok": True}
+
+    monkeypatch.setattr(P, "_http_post", fake_http_post)
+    monkeypatch.setattr(P, "_poll_export", lambda *a, **kw: ("done", ""))
+
+    out = tmp_path / "outputs"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "rough_compose.mp4").write_bytes(b"")
+
+    job = P.PipelineJob()
+    # 前端 HH:MM:SS → 秒：00:30:00 = 1800
+    cfg = {"enabled": True, "range_enabled": True,
+           "preview_start": 1800, "duration": 600}
+    ok, msg = P.handler_fine_cut("t-1", cfg, out, "http://x", job)
+    assert ok is True
+
+    body = next(p for path, p in captured if path == "/export_fine_video")
+    assert body["preview_start"] == 1800
+    assert body["duration"] == 600
+
+
+def test_handler_fine_cut_range_enabled_with_zero_start(monkeypatch, tmp_path: Path):
+    """v4 边界：range_enabled=True + preview_start=0 → body 不带 preview_start（端点 0=全篇起点等价），
+    但 duration 仍带。"""
+    captured = []
+
+    def fake_http_post(api, path, payload, **kw):
+        captured.append((path, dict(payload)))
+        if path == "/export_fine_video":
+            return {"ok": True, "job_id": "j1"}
+        return {"ok": True}
+
+    monkeypatch.setattr(P, "_http_post", fake_http_post)
+    monkeypatch.setattr(P, "_poll_export", lambda *a, **kw: ("done", ""))
+
+    out = tmp_path / "outputs"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "rough_compose.mp4").write_bytes(b"")
+
+    job = P.PipelineJob()
+    cfg = {"enabled": True, "range_enabled": True, "preview_start": 0, "duration": 60}
+    ok, msg = P.handler_fine_cut("t-1", cfg, out, "http://x", job)
+    assert ok is True
+    body = next(p for path, p in captured if path == "/export_fine_video")
+    # start=0 被过滤掉（handler 逻辑：ps not in (None, "", 0)），duration 保留
+    assert "preview_start" not in body
+    assert body.get("duration") == 60
 
 
 def test_handler_subtitle_review_calls_rev_speaker_link_when_enabled(monkeypatch, tmp_path: Path):
@@ -1219,14 +1352,24 @@ def test_fine_cut_preflight_params_blocked_when_no_fc_json_and_current(tmp_path:
     assert "第 6 阶段" in pre["reason"]
 
 
-def test_fine_cut_preflight_materials_missing_when_no_upload(tmp_path: Path):
-    """enabled=True + 有 fc.json + 但 materials 全空 → 素材缺失。"""
+def test_fine_cut_preflight_materials_missing_when_cover_bg_enabled_but_no_path(tmp_path: Path):
+    """v2 用户反馈：video/subtitle/reference 由 handler / 上游产物保证，
+    预检只关心「用户在精剪合成页勾选启用但忘了上传」的 cover/bg。
+
+    enabled=True + 有 fc.json + materials 全空 + layout.cover.enabled=True +
+    layout.bg.enabled=True → 缺 cover + bg（user 勾了启用但没上传）→ 阻断。
+    """
     from slirn_home import pipeline_service as P
 
     task_dir, outputs_dir = _make_task_dir(tmp_path)
     _write_fc(task_dir, {
         "materials": {},
-        "layout": {},
+        "layout": {
+            "video": {"enabled": True},
+            "subtitle": {"enabled": True},
+            "cover": {"enabled": True},   # 启用但没 path → 必须阻断
+            "bg": {"enabled": True},       # 启用但没 path → 必须阻断
+        },
         "font": {},
         "output": {},
     })
@@ -1236,21 +1379,54 @@ def test_fine_cut_preflight_materials_missing_when_no_upload(tmp_path: Path):
     pre = P.fine_cut_preflight("t-fc", cfg, outputs_dir)
     assert pre["ok"] is False
     assert pre["has_fc_json"] is True
-    # 5 个必填缺（video / subtitle / cover / bg / reference）audio 是可选
+    # 缺 cover + bg（用户启用但没上传）
     missing_kinds = [m["kind"] for m in pre["materials"]["missing"]]
-    assert "video" in missing_kinds
-    assert "subtitle" in missing_kinds
     assert "cover" in missing_kinds
     assert "bg" in missing_kinds
-    assert "reference" in missing_kinds
-    assert "audio" not in missing_kinds  # BGM 可选
-    # audio 应该出现在 optional_missing
+    # video / subtitle / reference 不应被预检（handler / 上游 / AI 辅助）
+    assert "video" not in missing_kinds
+    assert "subtitle" not in missing_kinds
+    assert "reference" not in missing_kinds
+    # audio + reference 都属于 optional（reference 是 AI 辅助，audio 是 BGM）
     opt_kinds = [m["kind"] for m in pre["materials"]["optional_missing"]]
     assert "audio" in opt_kinds
+    assert "reference" in opt_kinds
+
+
+def test_fine_cut_preflight_materials_ok_when_cover_bg_disabled(tmp_path: Path):
+    """v2 用户反馈：cover/bg 默认 disabled → 不需要 path，预检直接过。
+
+    这场景最常见 —— 用户只用视频 + 字幕（粗剪 + 优化字幕上游产物自动获取），
+    没勾封面 / 没勾背景，预检不应阻塞。
+    """
+    from slirn_home import pipeline_service as P
+
+    task_dir, outputs_dir = _make_task_dir(tmp_path)
+    _write_fc(task_dir, {
+        # materials 全空：用户没上传任何素材
+        "materials": {},
+        # cover/bg 默认 disabled（_FINE_LAYOUT_DEFAULTS）
+        "layout": {
+            "cover": {"enabled": False},
+            "bg": {"enabled": False},
+        },
+        "font": {},
+        "output": {},
+    })
+    cfg = P.default_config()
+    cfg["fine_cut"]["enabled"] = True
+    cfg["fine_cut"]["params_source"] = "current"
+    pre = P.fine_cut_preflight("t-fc", cfg, outputs_dir)
+    assert pre["ok"] is True, f"cover/bg 都 disabled 时不应阻塞，实际: {pre}"
+    assert pre["materials"]["missing"] == []
+    # audio + reference 仍是 optional
+    opt_kinds = [m["kind"] for m in pre["materials"]["optional_missing"]]
+    assert "audio" in opt_kinds
+    assert "reference" in opt_kinds
 
 
 def test_fine_cut_preflight_materials_full_ok(tmp_path: Path):
-    """enabled=True + fc.json 含全部素材 path → 通过。"""
+    """enabled=True + fc.json 含全部素材 path + layout 全 disabled → 通过。"""
     from slirn_home import pipeline_service as P
 
     task_dir, outputs_dir = _make_task_dir(tmp_path)
@@ -1263,7 +1439,10 @@ def test_fine_cut_preflight_materials_full_ok(tmp_path: Path):
             "reference": {"path": "x/ref.png"},
             "audio":     {"path": "x/bgm.mp3"},
         },
-        "layout": {},
+        "layout": {
+            "cover": {"enabled": False},
+            "bg": {"enabled": False},
+        },
         "font": {},
         "output": {},
     })
@@ -1277,7 +1456,7 @@ def test_fine_cut_preflight_materials_full_ok(tmp_path: Path):
 
 
 def test_fine_cut_preflight_only_bgm_missing_is_ok(tmp_path: Path):
-    """enabled=True + 仅有 BGM 缺失 → 仍通过（BGM 可选）。"""
+    """enabled=True + 仅有 BGM 缺失（其他素材都齐 + layout 全 disabled）→ 仍通过（BGM 可选）。"""
     from slirn_home import pipeline_service as P
 
     task_dir, outputs_dir = _make_task_dir(tmp_path)
@@ -1290,7 +1469,10 @@ def test_fine_cut_preflight_only_bgm_missing_is_ok(tmp_path: Path):
             "reference": {"path": "x/ref.png"},
             # audio 没填
         },
-        "layout": {},
+        "layout": {
+            "cover": {"enabled": False},
+            "bg": {"enabled": False},
+        },
         "font": {},
         "output": {},
     })
@@ -1345,3 +1527,181 @@ def test_fine_cut_preflight_import_params_ok(tmp_path: Path):
     cfg["fine_cut"]["params_source"] = "import"
     pre = P.fine_cut_preflight("t-fc", cfg, outputs_dir)
     assert pre["ok"] is True
+
+
+# =============== REQ-20260921-NNN-v3：handler_optimize 必须发 decisions 数组 ===============
+# 早期版本发 {"task_id": tid, "applied_all": True}，但端点硬要求 decisions 是 list；
+# 端点返回 400 「decisions 必须是数组」→ 整个 optimize 阶段失败 → fine_cut 进不去。
+# handler 必须从 optimize_subtitle.json 读 occurrences，构造全量 [{occ_id, applied, after, reviewed}]。
+
+
+def test_handler_optimize_accept_all_sends_decisions_array(monkeypatch, tmp_path: Path):
+    """accept_all_replacements=True → handler_optimize 必须发 decisions 列表，
+    且每条 applied=True + after=大模型建议值 + reviewed=True。
+    """
+    from slirn_home import pipeline_service as P
+
+    captured = []
+
+    def fake_http_post(api, path, payload, **kw):
+        captured.append((path, payload))
+        return {"ok": True}
+
+    def fake_poll_status(api, path, tid, **kw):
+        return ("done", "")
+
+    # 写一份 optimize_subtitle.json 给 handler 读
+    out = tmp_path / "outputs"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "rough_compose.mp4").write_bytes(b"")
+    opt_data = {
+        "version": 1,
+        "occurrences": [
+            {"occ_id": 0, "seg": 5, "pos": 0, "before": "测似", "after": "测试",
+             "reason": "形近字", "applied": True, "reviewed": False},
+            {"occ_id": 1, "seg": 12, "pos": 1, "before": "功击", "after": "攻击",
+             "reason": "形近字", "applied": True, "reviewed": False},
+            {"occ_id": 2, "seg": 18, "pos": 0, "before": "机气", "after": "机器",
+             "reason": "同音字", "applied": True, "reviewed": False},
+        ],
+    }
+    (out / "optimize_subtitle.json").write_text(
+        json.dumps(opt_data, ensure_ascii=False), encoding="utf-8"
+    )
+
+    monkeypatch.setattr(P, "_http_post", fake_http_post)
+    monkeypatch.setattr(P, "_poll_status", fake_poll_status)
+
+    job = P.PipelineJob()
+    cfg = {"accept_all_replacements": True}
+    ok, msg = P.handler_optimize("t-opt", cfg, out, "http://x", job)
+    assert ok is True, f"handler_optimize 失败：{msg}"
+
+    # 找到 save_optimize_subtitle 调用
+    save_payloads = [p for path, p in captured if path == "/save_optimize_subtitle"]
+    assert len(save_payloads) == 1, f"应只调一次 save_optimize_subtitle，实际：{captured}"
+    payload = save_payloads[0]
+    # 关键契约：decisions 必须是 list
+    assert "decisions" in payload, f"payload 缺 decisions：{payload}"
+    assert isinstance(payload["decisions"], list), f"decisions 不是 list：{payload}"
+    assert len(payload["decisions"]) == 3
+    # 每条 applied=True + after 是大模型建议 + reviewed=True
+    for d in payload["decisions"]:
+        assert d["applied"] is True
+        assert d["reviewed"] is True
+        assert d["after"]  # 非空
+    # 顺序按 occ_id 排
+    assert [d["occ_id"] for d in payload["decisions"]] == [0, 1, 2]
+    # after 正确（不是空字符串、不是 before 原值）
+    by_occ = {d["occ_id"]: d["after"] for d in payload["decisions"]}
+    assert by_occ[0] == "测试"
+    assert by_occ[1] == "攻击"
+    assert by_occ[2] == "机器"
+
+
+def test_handler_optimize_accept_all_skips_save_when_disabled(monkeypatch, tmp_path: Path):
+    """accept_all_replacements=False → 不发 save_optimize_subtitle，等人工。"""
+    from slirn_home import pipeline_service as P
+
+    captured = []
+
+    def fake_http_post(api, path, payload, **kw):
+        captured.append(path)
+        return {"ok": True}
+
+    monkeypatch.setattr(P, "_http_post", fake_http_post)
+    monkeypatch.setattr(P, "_poll_status", lambda *a, **kw: ("done", ""))
+
+    out = tmp_path / "outputs"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "rough_compose.mp4").write_bytes(b"")
+
+    job = P.PipelineJob()
+    cfg = {"accept_all_replacements": False}
+    ok, msg = P.handler_optimize("t-opt", cfg, out, "http://x", job)
+    assert ok is True
+    assert "/save_optimize_subtitle" not in captured, \
+        f"accept_all=False 时不应调 save_optimize_subtitle，实际：{captured}"
+
+
+def test_handler_optimize_fails_when_optimize_json_missing(monkeypatch, tmp_path: Path):
+    """accept_all=True 但 optimize_subtitle.json 不存在 → handler 报错（不静默）。"""
+    from slirn_home import pipeline_service as P
+
+    monkeypatch.setattr(P, "_http_post", lambda *a, **kw: {"ok": True})
+    monkeypatch.setattr(P, "_poll_status", lambda *a, **kw: ("done", ""))
+
+    out = tmp_path / "outputs"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "rough_compose.mp4").write_bytes(b"")
+    # 注意：不写 optimize_subtitle.json
+
+    job = P.PipelineJob()
+    cfg = {"accept_all_replacements": True}
+    ok, msg = P.handler_optimize("t-opt", cfg, out, "http://x", job)
+    assert ok is False
+    assert "optimize_subtitle.json" in msg or "不存在" in msg
+
+
+# =============== REQ-20260921-NNN-v3：_poll_status 必须用 POST ===============
+# 早期版本用 _http_get 调 POST 端点 → 永远 405 → handler 永远不返回 → 主循环
+# 卡死。这两个测试钉死契约：_poll_status 必须 POST，且必须识别 done/error。
+
+
+def test_poll_status_uses_post_not_get(monkeypatch):
+    """回归测试：_poll_status 必须调 _http_post（不是 _http_get），
+    否则 4 个 status 端点（POST）会 405，pipeline 永远卡在第一个阶段。
+    """
+    from slirn_home import pipeline_service as P
+
+    called_post = []
+    called_get = []
+
+    def fake_http_post(api, path, payload, **kw):
+        called_post.append((path, payload))
+        return {"ok": True, "job": {"state": "done"}}
+
+    def fake_http_get(api, path, payload=None, **kw):
+        called_get.append((path, payload))
+        return {"ok": True, "job": {"state": "done"}}
+
+    monkeypatch.setattr(P, "_http_post", fake_http_post)
+    monkeypatch.setattr(P, "_http_get", fake_http_get)
+    state, err = P._poll_status("http://x", "/subtitle_status", "t-poll",
+                                interval=0.01, timeout=5.0)
+    assert state == "done"
+    assert err == ""
+    assert "/subtitle_status" in [p for p, _ in called_post], \
+        f"_poll_status 应该调 _http_post('/subtitle_status', ...)，实际调了: {called_post}"
+    assert called_get == [], f"_poll_status 不应该调 _http_get，实际调了: {called_get}"
+
+
+def test_poll_status_returns_done_on_post_response(monkeypatch):
+    """_poll_status 调 POST，POST 返回 {state:done} → 立即返回 ('done', '')。"""
+    from slirn_home import pipeline_service as P
+
+    responses = iter([
+        {"ok": True, "job": {"state": "running"}},
+        {"ok": True, "job": {"state": "done"}},
+    ])
+
+    def fake_http_post(api, path, payload, **kw):
+        return next(responses)
+
+    monkeypatch.setattr(P, "_http_post", fake_http_post)
+    state, err = P._poll_status("http://x", "/revise_status", "t-poll",
+                                interval=0.001, timeout=10.0)
+    assert state == "done"
+    assert err == ""
+
+
+def test_poll_status_returns_error_on_post_response(monkeypatch):
+    """POST 返回 {state:error} → 返回 ('error', <err>)，不是 timeout。"""
+    from slirn_home import pipeline_service as P
+
+    monkeypatch.setattr(P, "_http_post",
+                        lambda *a, **kw: {"ok": True, "job": {"state": "error", "error": "识别失败"}})
+    state, err = P._poll_status("http://x", "/subtitle_status", "t-poll",
+                                interval=0.001, timeout=10.0)
+    assert state == "error"
+    assert "识别失败" in err

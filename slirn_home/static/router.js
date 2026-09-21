@@ -2643,8 +2643,10 @@
       list.parentNode.insertBefore(hint, list);
     }
 
-    // 滚到第一个出现处（保留原行为）
-    if (firstHit) try { firstHit.scrollIntoView({block: 'center', behavior: 'smooth'}); } catch (err) {}
+    // 滚到第一个出现处（保留原行为 — REQ-20260921-NNN-shake-fix：去掉 smooth，
+    // 否则「行隐藏 + 加 hint → 列表高度突变」期间平滑滚动可能被反复打断，
+    // 视觉上像「滚动条上下抖」。即时滚动一次到位更稳）
+    if (firstHit) try { firstHit.scrollIntoView({block: 'center'}); } catch (err) {}
   }
   function optWordFilterBtn(btn) {  // REQ-038：词列表按处理状态过滤（全部/未完成/已完成）
     var mode = btn.getAttribute('data-mode') || 'all';
@@ -4577,11 +4579,22 @@
     if (!input) return;
     var occ = input.closest('.slirn-opt-occ');
     if (!occ) return;
-    // 短文字 → 移除 wrapped（确保 wrap 后再变短能恢复横排）
-    // 长文字 → 添加 wrapped
-    // 容差 +2px（防浏览器子像素 rounding）
-    var overflow = (input.scrollWidth || 0) > (input.clientWidth || 0) + 2;
-    occ.classList.toggle('wrapped', overflow);
+    var sw = input.scrollWidth || 0;
+    var cw = input.clientWidth || 0;
+    var isWrapped = occ.classList.contains('wrapped');
+    // REQ-20260921-NNN-shake-fix：±50px 滞回（hysteresis）打破反馈环
+    // 原来用 ±2px 容差时，`:has(.wrapped)` 把第 4 列从 260px 切到 minmax(360,1fr)，
+    // cw 跨度 ~100px；内容宽度落在 (cw+2, cw+102) 这段死区时，wrapped 类会
+    // 在「内容>当前 cw」/「内容<新 cw」之间反复切 → grid 列宽不停变 →
+    // ResizeObserver 又触发再检测 → 滚动条上下抖。
+    // 50px 滞回让 wrap 触发 cw 涨 100px 后，落点必在 unwrap 阈值另一侧，状态稳定。
+    if (isWrapped) {
+      // 当前 wrapped → 仅显著不溢出才解除（需要 cw-50 以上的空余）
+      occ.classList.toggle('wrapped', sw > cw - 50);
+    } else {
+      // 当前未 wrapped → 显著溢出才标记（需要 cw+50 以上的溢出）
+      occ.classList.toggle('wrapped', sw > cw + 50);
+    }
   }
   function optInputOverflowInit() {  // wb 重渲后调一次：检测 + 绑 input 事件
     var list = document.getElementById('slirn-opt-list');
