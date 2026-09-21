@@ -4224,8 +4224,10 @@ def _render_workbench(task_id: str, mgr: TaskManager) -> str:
     stage_items = ""
     for i, (key, _st, title, icon, desc) in enumerate(_WB_STAGES):
         state = states[i]
-        # REQ-20260921-NNN：阶段序号从 0 开始（assets=0、精剪合成=6）
-        mark = "✓" if state == "done" else ("▶" if state == "current" else str(i))
+        # REQ-20260921-NNN：阶段序号从 0 开始（assets=0、精剪合成=6）。
+        # mark 规则：done → ✓ 覆盖序号；current/pending → 显示序号（不要让
+        # ▶ 进度图标把序号盖掉 —— 用户希望序号一直可见，只在完成后才被 ✓ 替换）
+        mark = "✓" if state == "done" else str(i)
         opt_chip = ""  # REQ-20260918-045：粗剪合成由可选改为必做，不再显示「可选」徽章
         stage_items += (
             f'<div class="slirn-wb-stage {state}{" active" if i == focus else ""}" '

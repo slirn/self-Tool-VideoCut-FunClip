@@ -227,9 +227,12 @@ def test_render_workbench_stage_marks_start_at_zero(tmp_path: Path):
     0-based 习惯对齐，让序号看起来更自然。
 
     mark 规则（app.py:_render_workbench）：
-      - state == "done" → ✓
-      - state == "current" → ▶
-      - state == "pending" → str(i)（i 是该阶段在 _WB_STAGES 里的下标）
+      - state == "done" → ✓（完成态覆盖序号）
+      - state == "current" → str(i)（显示序号，不让 ▶ 盖掉）
+      - state == "pending" → str(i)（显示序号）
+
+    用户进一步要求：current（进行中）不要用 ▶ 覆盖序号 —— 序号一直展示，
+    只在阶段完成时才被 ✓ 覆盖。
 
     7 个阶段下标：assets=0、字幕生成=1、字幕修订=2、切分修剪=3、
     粗剪合成=4、优化字幕=5、精剪合成=6。
@@ -253,9 +256,13 @@ def test_render_workbench_stage_marks_start_at_zero(tmp_path: Path):
     assert len(marks) == 8, f"应渲染 8 个 mark，实际 {len(marks)}：{marks}"
     # assets (i=0) 是 done → ✓
     assert marks[0] == "✓", f"assets（原视频存在）应 done → ✓，实际 {marks[0]!r}"
-    # 字幕生成 (i=1) 是首个 pending → current → ▶
-    assert marks[1] == "▶", f"字幕生成（首个 pending）应 current → ▶，实际 {marks[1]!r}"
-    # 后续 5 个 pending：i=2..6 → 数字 2..6（用户要求从 0 开始，所以 i 直接用）
+    # 字幕生成 (i=1) 是首个 pending → current —— 但 mark 仍是数字 1
+    # （current 不要让 ▶ 覆盖序号）
+    assert marks[1] == "1", (
+        f"字幕生成（首个 pending / current）应显示序号 1（不应用 ▶ 覆盖），"
+        f"实际 {marks[1]!r}"
+    )
+    # 后续 5 个 pending：i=2..6 → 数字 2..6
     assert marks[2:7] == ["2", "3", "4", "5", "6"], (
         f"剩下 5 个 pending 应是 2..6（i 直接用），实际 {marks[2:7]}"
     )
