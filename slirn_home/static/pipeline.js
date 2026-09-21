@@ -393,9 +393,15 @@
       + '<details class="slirn-pipe-outputs-panel" data-pipe-outputs-panel open>'
       + '<summary class="slirn-pipe-outputs-summary">📦 产物浏览器（视频 / 字幕 / JSON / 音频）</summary>'
       + '<div class="slirn-pipe-outputs-body" data-pipe-outputs-body>'
+      + '<div class="slirn-pipe-outputs-toolbar">'
       + '<button type="button" class="slirn-btn slirn-btn-sm slirn-pipe-outputs-refresh"'
       + ' data-action="pipe-outputs-refresh" title="调用 /slirn/api/list_outputs 重新列出本任务所有产物">'
       + '🔄 刷新产物列表</button>'
+      // REQ-20260921-NNN-outputs-browser-v2：按类别筛选 chip 行（默认「全部」）。
+      // chip 行由 _renderOutputsList 在拿到 items 后动态填充（按数据里出现的 kind 生成），
+      // 这样空 chip 不会出现误导用户。
+      + '<div class="slirn-pipe-outputs-filter" data-pipe-outputs-filter hidden></div>'
+      + '</div>'
       + '<div class="slirn-pipe-outputs-list" data-pipe-outputs-list>'
       + '<div class="slirn-pipe-outputs-empty">点击「🔄 刷新产物列表」查看本任务 outputs/ 下的所有产物。</div>'
       + '</div>'
@@ -899,12 +905,14 @@
     } else if (item.kind === 'image' && item.previewable) {
       previewHtml = '<img class="slirn-pipe-outputs-img" src="' + escapeHtml(item.url) + '" alt="">';
     }
+    var mtimeText = item.mtime ? _formatMtime(item.mtime) : '';
     return '<div class="slirn-pipe-outputs-item" data-pipe-outputs-item '
       + 'data-kind="' + escapeHtml(item.kind) + '">'
       + '<div class="slirn-pipe-outputs-item-head">'
       + '<span class="slirn-pipe-outputs-emoji">' + kindEmoji + '</span>'
       + '<span class="slirn-pipe-outputs-label">' + escapeHtml(item.label) + '</span>'
       + '<span class="slirn-pipe-outputs-name">' + escapeHtml(item.name) + scopeTag + '</span>'
+      + (mtimeText ? '<span class="slirn-pipe-outputs-mtime" title="文件最后修改时间">🕒 ' + mtimeText + '</span>' : '')
       + '<span class="slirn-pipe-outputs-size">' + sizeText + '</span>'
       + '<a class="slirn-btn slirn-btn-sm slirn-pipe-outputs-dl" '
       + 'href="' + escapeHtml(item.url) + '" download="' + escapeHtml(item.name) + '">⬇ 下载</a>'
@@ -913,18 +921,68 @@
       + '</div>';
   }
 
+  // REQ-20260921-NNN-outputs-browser-v2：缓存全量 items + 当前筛选条件。
+  // 切 chip 不重新拉接口，只是从 _outputsAllItems 过滤后重新渲染。
+  var _outputsAllItems = [];
+  var _outputsCurrentFilter = '__all__';
+  var _KIND_LABELS = {
+    video: '🎬 视频',
+    subtitle: '📝 字幕',
+    audio: '🎵 音频',
+    image: '🖼 图片',
+    json: '📋 JSON',
+    log: '📜 日志',
+    other: '📄 其他',
+  };
   // 把 list_outputs 返回的 items 渲染到列表区
   function _renderOutputsList(items) {
     var box = document.querySelector('[data-pipe-outputs-list]');
+    var filterBox = document.querySelector('[data-pipe-outputs-filter]');
     if (!box) return;
-    if (!items || !items.length) {
+    _outputsAllItems = items || [];
+    if (!_outputsAllItems.length) {
+      if (filterBox) { filterBox.hidden = true; filterBox.innerHTML = ''; }
+      _outputsCurrentFilter = '__all__';
       box.innerHTML = '<div class="slirn-pipe-outputs-empty">'
         + '该任务还没有任何产物（先跑流程或单独执行各阶段）。</div>';
       return;
     }
+    // 统计每个 kind 的数量（chip 上展示）
+    var counts = {video: 0, subtitle: 0, audio: 0, image: 0, json: 0, log: 0, other: 0};
+    _outputsAllItems.forEach(function(it) {
+      var k = counts[it.kind] != null ? it.kind : 'other';
+      counts[k] += 1;
+    });
+    // 渲染 chip 行（全部 + 每个有产物的 kind）
+    if (filterBox) {
+      var chipHtml = '';
+      chipHtml += '<button type="button" class="slirn-pipe-outputs-chip" '
+        + 'data-action="pipe-outputs-filter" data-pipe-outputs-chip="__all__" '
+        + 'data-filter="__all__" '
+        + (_outputsCurrentFilter === '__all__' ? 'data-active="1"' : '') + '>'
+        + '📦 全部（' + _outputsAllItems.length + '）</button>';
+      Object.keys(_KIND_LABELS).forEach(function(kind) {
+        if (!counts[kind]) return;  // 空 kind 不出 chip（避免误点空筛）
+        chipHtml += '<button type="button" class="slirn-pipe-outputs-chip" '
+          + 'data-action="pipe-outputs-filter" data-pipe-outputs-chip="' + kind + '" '
+          + 'data-filter="' + kind + '" '
+          + (_outputsCurrentFilter === kind ? 'data-active="1"' : '') + '>'
+          + _KIND_LABELS[kind] + '（' + counts[kind] + '）</button>';
+      });
+      filterBox.innerHTML = chipHtml;
+      filterBox.hidden = false;
+    }
+    // 切到当前激活 kind 的 items
+    var visible = _outputsCurrentFilter === '__all__'
+      ? _outputsAllItems.slice()
+      : _outputsAllItems.filter(function(it) { return it.kind === _outputsCurrentFilter; });
+    if (!visible.length) {
+      box.innerHTML = '<div class="slirn-pipe-outputs-empty">该类别下没有产物。</div>';
+      return;
+    }
     // 按 kind 分组显示（视频 / 字幕 / 音频 / JSON / 其他）
     var groups = {video: [], subtitle: [], audio: [], json: [], image: [], log: [], other: []};
-    items.forEach(function(it) {
+    visible.forEach(function(it) {
       var k = groups[it.kind] ? it.kind : 'other';
       groups[k].push(it);
     });
@@ -995,6 +1053,19 @@
         }).catch(function(e) { pre.textContent = '加载失败: ' + e; });
       });
     });
+  }
+  // 应用筛选（仅切 chip，不需要重新拉接口）
+  function _applyOutputsFilter(kind) {
+    _outputsCurrentFilter = kind || '__all__';
+    _renderOutputsList(_outputsAllItems);
+  }
+  // 把 mtime（epoch 秒）格式化为「YYYY-MM-DD HH:MM」本地时间
+  function _formatMtime(epoch) {
+    if (!epoch || isNaN(epoch)) return '';
+    var d = new Date(epoch * 1000);
+    var pad = function(n) { return n < 10 ? '0' + n : '' + n; };
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate())
+      + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
   }
 
   // 点击「🔄 刷新产物列表」时调 /slirn/api/list_outputs
@@ -1367,6 +1438,12 @@
     if (action === 'pipe-outputs-refresh') {
       ev.preventDefault();
       refreshOutputsList();
+      return;
+    }
+    // REQ-20260921-NNN-outputs-browser-v2：按 kind 筛选（chip 行）
+    if (action === 'pipe-outputs-filter') {
+      ev.preventDefault();
+      _applyOutputsFilter(t.getAttribute('data-filter'));
       return;
     }
   });

@@ -4073,8 +4073,82 @@ input[type="checkbox"]:focus-visible {
 }
 .slirn-pipe-outputs-panel[open] .slirn-pipe-outputs-summary::before { content: '▾ '; }
 .slirn-pipe-outputs-body { padding: 10px 0 0; display: flex; flex-direction: column; gap: 10px; }
+.slirn-pipe-outputs-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
 .slirn-pipe-outputs-refresh { align-self: flex-start; }
-.slirn-pipe-outputs-list { display: flex; flex-direction: column; gap: 14px; }
+/* REQ-20260921-NNN-outputs-browser-v2：按 kind 筛选的 chip 行。
+   - 圆角小药丸，hover/active 有颜色区分
+   - active 用 primary 色块 + 白字（高对比）
+   - 不空筛选：_renderOutputsList 按数据里有产物的 kind 才渲染 chip，避免误导
+*/
+.slirn-pipe-outputs-filter {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex: 1 1 auto;
+}
+.slirn-pipe-outputs-chip {
+  font-size: 12px;
+  padding: 3px 10px;
+  border: 1px solid var(--border-color, rgba(148, 163, 184, 0.35));
+  border-radius: 999px;
+  background: var(--surface-soft, rgba(255, 255, 255, 0.5));
+  color: var(--text-secondary, #475569);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+  line-height: 1.4;
+}
+.slirn-pipe-outputs-chip:hover {
+  background: var(--surface-hover, rgba(99, 102, 241, 0.08));
+  border-color: var(--border-color-hover, rgba(99, 102, 241, 0.4));
+}
+.slirn-pipe-outputs-chip[data-active="1"] {
+  background: var(--primary-color, #6366f1);
+  color: #fff;
+  border-color: var(--primary-color, #6366f1);
+  font-weight: 600;
+}
+:root[data-theme="dark"] .slirn-pipe-outputs-chip {
+  background: rgba(30, 41, 59, 0.5);
+  color: #cbd5e1;
+}
+:root[data-theme="dark"] .slirn-pipe-outputs-chip[data-active="1"] {
+  background: #6366f1;
+  color: #fff;
+}
+/* REQ-20260921-NNN-outputs-browser-v2：列表区固定高度（≈ 3 个视频 item），
+   内容超出滚动。视频 max-height 360px + item padding/border ≈ 240px/项，
+   取 720px ≈ 3 个视频的高度上限。min-height 100px 让空状态不显空荡。 */
+.slirn-pipe-outputs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-height: 720px;
+  min-height: 100px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 4px 4px 4px 0;
+  scrollbar-gutter: stable;
+  border: 1px dashed var(--border-color, rgba(148, 163, 184, 0.2));
+  border-radius: 6px;
+  background: var(--surface-list, rgba(248, 250, 252, 0.4));
+}
+:root[data-theme="dark"] .slirn-pipe-outputs-list {
+  background: rgba(15, 23, 42, 0.3);
+}
+/* 窄滚动条（WebKit），避免视频预览区被原生滚动条挤窄 */
+.slirn-pipe-outputs-list::-webkit-scrollbar { width: 8px; }
+.slirn-pipe-outputs-list::-webkit-scrollbar-thumb {
+  background: var(--border-color, rgba(148, 163, 184, 0.35));
+  border-radius: 4px;
+}
+.slirn-pipe-outputs-list::-webkit-scrollbar-thumb:hover {
+  background: var(--text-tertiary, #94a3b8);
+}
 .slirn-pipe-outputs-empty {
   padding: 20px;
   text-align: center;
@@ -4130,6 +4204,14 @@ input[type="checkbox"]:focus-visible {
   font-size: 11px;
   color: var(--text-tertiary, #94a3b8);
   margin-left: auto;
+}
+/* REQ-20260921-NNN-outputs-browser-v2：文件 mtime 显示（紧贴 name 后）。
+   用 mono 字体让时间格式对齐；颜色淡一点避免抢主信息。 */
+.slirn-pipe-outputs-mtime {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+  color: var(--text-tertiary, #94a3b8);
+  white-space: nowrap;
 }
 .slirn-pipe-outputs-dl {
   font-size: 12px;

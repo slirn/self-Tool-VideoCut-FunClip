@@ -10992,3 +10992,120 @@ def test_pipeline_js_outputs_autorefresh_on_pipeline_done():
     )
 
 
+# REQ-20260921-NNN-outputs-browser-v2：产物浏览器高度固定 + 类别筛选 + mtime 显示
+
+def test_pipeline_js_outputs_filter_chips_html():
+    """产物浏览器面板必须有 chip 筛选行容器（按 kind 筛选）。"""
+    js_path = Path("slirn_home/static/pipeline.js")
+    if not js_path.exists():
+        import pytest
+        pytest.skip("工作目录不在仓库根")
+    src = js_path.read_text(encoding="utf-8")
+    assert 'data-pipe-outputs-filter' in src, (
+        "产物浏览器必须挂 chip 筛选行容器 data-pipe-outputs-filter"
+    )
+    assert 'data-action="pipe-outputs-filter"' in src, (
+        "chip 按钮必须带 data-action='pipe-outputs-filter' 走事件委托"
+    )
+
+
+def test_pipeline_js_outputs_filter_chips_in_render_outputs():
+    """_renderOutputsList 必须根据数据里出现的 kind 动态生成 chip。"""
+    js_path = Path("slirn_home/static/pipeline.js")
+    if not js_path.exists():
+        import pytest
+        pytest.skip("工作目录不在仓库根")
+    src = js_path.read_text(encoding="utf-8")
+    idx = src.find("function _renderOutputsList")
+    assert idx > 0
+    section = src[idx:idx + 4000]
+    # 必须出现 __all__ + 动态 kind chip 生成
+    assert '__all__' in section, "必须有『全部』chip"
+    assert 'data-pipe-outputs-chip' in section, "每个 chip 必须带 data-pipe-outputs-chip 属性"
+    assert 'data-filter=' in section, "chip 必须带 data-filter 供 click handler 读"
+
+
+def test_pipeline_js_outputs_filter_uses_apply_filter():
+    """点击 chip 必须走 _applyOutputsFilter（不重新拉接口）。"""
+    js_path = Path("slirn_home/static/pipeline.js")
+    if not js_path.exists():
+        import pytest
+        pytest.skip("工作目录不在仓库根")
+    src = js_path.read_text(encoding="utf-8")
+    assert "_applyOutputsFilter" in src, "必须有 _applyOutputsFilter 切 chip 助手函数"
+    # 必须缓存 items 用于无网络过滤
+    assert "_outputsAllItems" in src, "必须缓存 _outputsAllItems 用于切 chip 不过接口"
+    # click handler 路径：找 `action === 'pipe-outputs-filter'` 分支（事件委托里的判别）
+    idx = src.find("action === 'pipe-outputs-filter'")
+    assert idx > 0, "事件委托里必须有 pipe-outputs-filter 分支"
+    section = src[idx:idx + 200]
+    assert "_applyOutputsFilter" in section, (
+        "chip click handler 必须调 _applyOutputsFilter"
+    )
+
+
+def test_pipeline_js_outputs_item_renders_mtime():
+    """每个 item 必须显示文件 mtime（标题 = 文件最后修改时间）。"""
+    js_path = Path("slirn_home/static/pipeline.js")
+    if not js_path.exists():
+        import pytest
+        pytest.skip("工作目录不在仓库根")
+    src = js_path.read_text(encoding="utf-8")
+    idx = src.find("function _renderOutputItem")
+    assert idx > 0
+    section = src[idx:idx + 3000]
+    assert "item.mtime" in section, "_renderOutputItem 必须读 item.mtime"
+    assert "_formatMtime" in section, "_renderOutputItem 必须调 _formatMtime 格式化"
+    assert "slirn-pipe-outputs-mtime" in section, "必须有 slirn-pipe-outputs-mtime 类渲染 mtime"
+
+
+def test_pipeline_js_outputs_has_format_mtime_helper():
+    """必须有 _formatMtime 助手（epoch 秒 → YYYY-MM-DD HH:MM 本地时间）。"""
+    js_path = Path("slirn_home/static/pipeline.js")
+    if not js_path.exists():
+        import pytest
+        pytest.skip("工作目录不在仓库根")
+    src = js_path.read_text(encoding="utf-8")
+    idx = src.find("function _formatMtime")
+    assert idx > 0, "必须有 _formatMtime 助手"
+    body = src[idx:idx + 600]
+    assert "getFullYear" in body, "_formatMtime 必须用 getFullYear 格式化"
+    assert "getMonth" in body, "_formatMtime 必须用 getMonth 格式化"
+
+
+def test_outputs_css_list_has_fixed_max_height():
+    """产物浏览器列表必须有固定 max-height + overflow-y auto（避免 42 个文件爆长）。"""
+    css_path = Path("slirn_home/static/home.css")
+    if not css_path.exists():
+        import pytest
+        pytest.skip("工作目录不在仓库根")
+    src = css_path.read_text(encoding="utf-8")
+    # 找到 .slirn-pipe-outputs-list 规则
+    idx = src.find(".slirn-pipe-outputs-list {")
+    assert idx > 0, "必须有 .slirn-pipe-outputs-list 规则"
+    # 规则必须在第一个 { 后的 600 字符内有 max-height + overflow-y
+    rule_end = src.find("}", idx)
+    rule = src[idx:rule_end]
+    assert "max-height" in rule, "列表必须 max-height 固定（≈ 3 个视频高）"
+    assert "overflow-y: auto" in rule, "列表必须 overflow-y: auto 出滚动条"
+    # 验证 max-height 数值是视频 max-height (360px) 的合理倍数
+    import re as _re
+    m = _re.search(r"max-height:\s*(\d+)px", rule)
+    assert m, "max-height 必须有 px 数值"
+    h = int(m.group(1))
+    assert 500 <= h <= 900, f"max-height {h}px 应在 500-900（≈ 3 个视频 360px），过小/过大都怪"
+
+
+def test_outputs_css_has_chip_and_mtime_styles():
+    """产物浏览器必须有 chip + mtime 样式。"""
+    css_path = Path("slirn_home/static/home.css")
+    if not css_path.exists():
+        import pytest
+        pytest.skip("工作目录不在仓库根")
+    src = css_path.read_text(encoding="utf-8")
+    assert ".slirn-pipe-outputs-chip" in src, "必须有 .slirn-pipe-outputs-chip 样式"
+    assert "[data-active" in src, "chip 必须有 data-active 选中态样式"
+    assert ".slirn-pipe-outputs-mtime" in src, "必须有 .slirn-pipe-outputs-mtime 样式"
+    assert ".slirn-pipe-outputs-filter" in src, "必须有 .slirn-pipe-outputs-filter 容器样式"
+
+
