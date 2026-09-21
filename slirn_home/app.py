@@ -4294,8 +4294,8 @@ def _render_workbench(task_id: str, mgr: TaskManager) -> str:
             <div class="slirn-wb-stages-head"><span class="slirn-wb-stages-title">🧭 阶段</span>
                 <button class="slirn-btn-mini" data-action="wb-toggle-stages"
                         title="收起阶段列表，加宽右侧工作区">« 收起</button></div>
-            <label class="slirn-wb-autonext" title="开启后：当前阶段的工作完成（识别/保存/合成完成）时，自动切换到下一阶段页面">
-                <input type="checkbox" id="slirn-wb-autonext"> 完成后自动进下一阶段
+            <label class="slirn-wb-autonext" title="勾选后：当前阶段的工作完成（识别/保存/合成完成）时，自动打开下一阶段的页面。不勾选则保持在原页面，由用户手动切到下一阶段。">
+                <input type="checkbox" id="slirn-wb-autonext"> 完成后，自动打开下一阶段界面
             </label>
             {stage_items}
         </div>

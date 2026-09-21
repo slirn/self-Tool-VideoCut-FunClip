@@ -780,9 +780,10 @@
     host.classList.toggle('wb-stages-collapsed', collapsed === '1');
   }
 
-  // ===== 完成后自动进下一阶段（REQ-20260918-046）=====
-  // 阶段条上方的开关（localStorage 记忆，默认关）。开启后：工作台刷新时若
-  // 「用户当前所在阶段」刚变为完成 → 自动切到下一阶段并提示。关着时行为不变。
+  // ===== 完成后自动打开下一阶段界面（REQ-20260918-046 / REQ-20260921-NNN）=====
+  // 阶段条上方的开关（localStorage 记忆，默认关）。
+  // - 勾选：当前阶段完成时 → 自动切到下一阶段并提示
+  // - 不勾选：当前阶段完成时 → 保持在原页面（用户可手动切下一阶段）
   function wbAutoNextOn() {
     try { return localStorage.getItem('slirnWbAutoNext') === '1'; } catch (err) { return false; }
   }
@@ -795,11 +796,12 @@
       try {
         localStorage.setItem('slirnWbAutoNext', e.target.checked ? '1' : '');
       } catch (err) {}
-      toast(e.target.checked ? '✅ 已开启：当前阶段完成后自动进入下一阶段'
-                             : '↩️ 已关闭自动进入下一阶段');
+      toast(e.target.checked ? '✅ 已开启：当前阶段完成后自动打开下一阶段界面'
+                             : '↩️ 已关闭：阶段完成后保持在原页面（需手动切下一阶段）');
     }
   });
   function wbAutoNextMaybe(prevDone, hadWb, prevActive) {
+    // 三重门：刷新过 wb + 用户开启开关 + 用户当前在某个阶段面板
     if (!hadWb || !wbAutoNextOn() || !prevActive) return;
     // REQ-20260918-053：仅迭代真正的流水线阶段（排除「执行日志」等视图阶段）
     var stages = [];
@@ -813,9 +815,18 @@
     });
     if (!justDone) return;
     var idx = stages.indexOf(justDone);
-    if (idx < 0 || idx + 1 >= stages.length) return;  // 最后一个阶段：没有下一阶段
+    if (idx < 0 || idx + 1 >= stages.length) {
+      // 最后一个阶段完成 → 即使勾选也不切（已经到底了）
+      return;
+    }
     switchWbPane(stages[idx + 1]);
-    toast('✅ 本阶段完成 — 已自动进入下一阶段（可在阶段上方关闭自动跳转）');
+    var stageLabel = justDone;
+    var stageEl = document.querySelector('#slirn-tab-workbench .slirn-wb-stage[data-pane="' + justDone + '"]');
+    if (stageEl) {
+      var titleEl = stageEl.querySelector('.slirn-wb-stage-title') || stageEl;
+      stageLabel = (titleEl.textContent || '').trim() || justDone;
+    }
+    toast('✅ 「' + stageLabel + '」完成 — 已自动打开下一阶段界面（可关掉阶段上方的「完成后自动打开下一阶段界面」开关改为手动切）');
   }
 
   // ===== 严谨性级别：上次选择预填（不发起新分析也可见 — REQ-20260916-003）=====
@@ -2875,6 +2886,22 @@
         }).then(function(r) { return r.json(); })
       );
     }
+    // REQ-20260921-NNN：生成预览参数（start_h/m/s + duration）作为「设置参数」保存
+    // （与 layout/font/output/audio 同级，刷新工作台不丢；用户改完点 💾 即可）。
+    var preview = {};
+    document.querySelectorAll('[data-preview-key]').forEach(function(el) {
+      var k = el.getAttribute('data-preview-key');
+      var n = parseInt(el.value, 10);
+      if (!isNaN(n)) preview[k] = n;
+    });
+    if (Object.keys(preview).length > 0) {
+      promises.push(
+        fetch('/slirn/api/save_fine_preview?task_id=' + encodeURIComponent(tid), {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ task_id: tid, preview: preview })
+        }).then(function(r) { return r.json(); })
+      );
+    }
     Promise.all(promises).then(function(results) {
       // REQ-20260919-061 用户反馈：「保存全部」一直报错的根因 — 后端用 `{"ok":true}` 而不是
       // `{"code":0}`，原版写 `r.code !== 0` 会让每个成功响应都被判失败。改成按 `ok` 字段判定，
@@ -3755,15 +3782,14 @@
       btn.textContent = state === 'cancelling' ? '⏹ 取消中…' : '⏳ 导出中…';
       btn.onclick = null;
     } else if (state === 'done') {
+      // REQ-20260921-NNN 用户反馈：导出完成后没法重新导出（点按钮只下载）。
+      //   改：按钮文本「🔄 重新导出」→ 不挂 onclick，让 action 委托 handler
+      //   重新触发 fine-export 流程。下载入口改成点右侧的 status 元素（✅ 已完成 · 下载）。
       btn.disabled = false;
-      btn.textContent = '✅ 已导出 · 下载';
-      btn.setAttribute('data-output-url', outputUrl || '');
-      btn.onclick = function(e) {
-        e.stopPropagation();
-        e.preventDefault();
-        if (outputUrl) window.open(outputUrl, '_blank');
-        return false;
-      };
+      btn.textContent = '🔄 重新导出';
+      btn.removeAttribute('data-output-url');
+      btn.removeAttribute('data-error');
+      btn.onclick = null;  // 复用原 action handler 委托 → 重新走 export_fine_video
     } else if (state === 'failed') {
       btn.disabled = false;
       btn.textContent = '❌ 失败 · 重试';
