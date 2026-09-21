@@ -46,7 +46,9 @@ PROFILE_PARAM_KEYS = ("layout", "font", "output", "audio")
 #   因为它是任务背景图强相关的 4 角点坐标，跨任务复用没意义）。
 # - SAVE_PARAM_KEYS 是「保存到模板时保留哪些字段」白名单（detected_region 也存下来，
 #   这样导出 JSON 与任务级 export 同口径；旧版模板可能没有这个字段，导出时 .get() 返回 None）。
-SAVE_PARAM_KEYS = PROFILE_PARAM_KEYS + ("detected_region",)
+#   REQ-20260921-NNN-preview-export：与任务级 export_fine_params (v4) 对齐，加 preview
+#   （生成预览参数 start_h/m/s + duration），让全局模板的 params 字段集合与任务级保持一致。
+SAVE_PARAM_KEYS = PROFILE_PARAM_KEYS + ("detected_region", "preview")
 
 
 def _path(repo_root: Path | str) -> Path:

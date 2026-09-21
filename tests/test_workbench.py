@@ -4628,7 +4628,8 @@ def test_import_fine_params_restores_all_checkbox_states(tmp_path: Path):
     client = TestClient(build_app(repo_root=tmp_path).test_app if hasattr(build_app(repo_root=tmp_path), "test_app") else build_app(repo_root=tmp_path).app)
 
     payload = {
-        "_schema": 3,
+        # REQ-20260921-NNN-preview-export：v3 → v4（加 preview 字段）
+        "_schema": 4,
         "_exported_at": "2026-09-21T00:00:00",
         "_source_task_id": t.task_id,
         "materials": {},
@@ -4648,6 +4649,7 @@ def test_import_fine_params_restores_all_checkbox_states(tmp_path: Path):
         "output": {"resolution": "1080p", "codec": "h264"},
         "audio":  {"enabled": True, "volume": 0.3, "fade_in": 0.5, "fade_out": 1.5},
         "detected_region": None,
+        "preview": {"start_h": 1, "start_m": 2, "start_s": 3, "duration": 20},
     }
 
     r = client.post(
@@ -5874,9 +5876,9 @@ def test_render_fine_cut_zone_ai_layout_button_enabled_with_reference(tmp_path):
 
 
 def test_export_fine_params_returns_full_compose_with_detected_region(tmp_path, monkeypatch):
-    """REQ-20260919-065 + REQ-20260919-073：export_fine_params 应返回
-    {filename, content, mime}，content 是合法 JSON：
-    - 含 _schema=3 + detected_region + layout/font/output/audio
+    """REQ-20260919-065 + REQ-20260919-073 + REQ-20260921-NNN-preview-export：
+    export_fine_params 应返回 {filename, content, mime}，content 是合法 JSON：
+    - 含 _schema=4 + detected_region + layout/font/output/audio + preview
     - materials == {}（REQ-20260919-073：素材路径不是设置参数，不导出；
       与全局模板 export_fine_global_profile 同口径）
     """
@@ -5922,7 +5924,7 @@ def test_export_fine_params_returns_full_compose_with_detected_region(tmp_path, 
     assert body["mime"] == "application/json"
     # 解析 content
     payload = json.loads(body["content"])
-    assert payload["_schema"] == 3, f"_schema 应为 3，实际：{payload.get('_schema')}"
+    assert payload["_schema"] == 4, f"_schema 应为 4（v4 加 preview），实际：{payload.get('_schema')}"
     assert payload["_source_task_id"] == t.task_id
     assert payload["detected_region"] is not None
     assert payload["detected_region"]["algorithm"] == "ai_color"
@@ -5952,9 +5954,9 @@ def test_import_fine_params_overwrites_fields_keeps_materials(tmp_path):
     from slirn_home.app import _save_fine_compose
     _save_fine_compose(m, t.task_id, fc)
 
-    # 构造一个 v3 导入 payload
+    # 构造一个 v4 导入 payload（含 preview 字段 → REQ-20260921-NNN-preview-export）
     new_payload = {
-        "_schema": 3,
+        "_schema": 4,
         "_exported_at": "2026-09-19T12:00:00",
         "layout": {"video": {"x": 999, "y": 888, "scale": 0.5}},
         "font": {"size": 88, "color": "#FF0000"},
@@ -5962,6 +5964,7 @@ def test_import_fine_params_overwrites_fields_keeps_materials(tmp_path):
         "audio": {"enabled": True, "volume": 0.9},
         "detected_region": {"x": 100, "y": 200, "width": 1500, "height": 700,
                             "algorithm": "pixel", "threshold": 250},
+        "preview": {"start_h": 0, "start_m": 5, "start_s": 30, "duration": 15},
     }
     content = json.dumps(new_payload, ensure_ascii=False)
 
@@ -5972,10 +5975,11 @@ def test_import_fine_params_overwrites_fields_keeps_materials(tmp_path):
     assert resp.status_code == 200, f"HTTP {resp.status_code}: {resp.text[:200]}"
     body = resp.json()
     assert body["ok"] is True, f"导入应成功：{body}"
-    assert len(body["applied_fields"]) == 5, \
-        f"应应用 5 个字段，实际：{body['applied_fields']}"
+    assert len(body["applied_fields"]) == 6, \
+        f"应应用 6 个字段（含 preview），实际：{body['applied_fields']}"
+    assert "preview" in body["applied_fields"], "applied_fields 必须含 preview"
 
-    # 验证：layout/font/output/audio/detected_region 被覆盖，materials 保持不变
+    # 验证：layout/font/output/audio/detected_region/preview 被覆盖，materials 保持不变
     fc2 = _get_fine_compose(m, t.task_id)
     assert fc2["layout"]["video"]["x"] == 999, "layout.video.x 应被覆盖"
     assert fc2["font"]["size"] == 88, "font.size 应被覆盖"
@@ -5983,9 +5987,207 @@ def test_import_fine_params_overwrites_fields_keeps_materials(tmp_path):
     assert fc2["audio"]["volume"] == 0.9, "audio.volume 应被覆盖"
     assert fc2["detected_region"]["algorithm"] == "pixel", \
         "detected_region 应被覆盖"
+    # REQ-20260921-NNN-preview-export：preview 也应被覆盖
+    assert fc2["preview"]["start_m"] == 5, "preview.start_m 应被覆盖"
+    assert fc2["preview"]["duration"] == 15, "preview.duration 应被覆盖"
     # materials 必须保持不变
     assert fc2["materials"]["video"]["path"] == "tasks/" + t.task_id + "/upload/video_local.mp4", \
         f"materials.video.path 应保持不变，实际：{fc2['materials']}"
+
+
+# ---------- REQ-20260921-NNN-preview-export：导出/导入参数含预览参数 ----------
+
+def test_export_fine_params_includes_preview(tmp_path):
+    """REQ-20260921-NNN-preview-export：export_fine_params 应把 fc.preview 写入 JSON，_schema=4。"""
+    import json as _json
+    from slirn_home.app import build_app, _get_fine_compose, _save_fine_compose
+    from fastapi.testclient import TestClient
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="export-preview", original_video=video)
+    # 写一个有代表性的 fc.preview（与 UI 实际控件口径一致）
+    fc = _get_fine_compose(m, t.task_id)
+    fc["preview"] = {"start_h": 0, "start_m": 5, "start_s": 30, "duration": 15}
+    _save_fine_compose(m, t.task_id, fc)
+
+    built = build_app(tmp_path)
+    client = TestClient(built.app)
+    resp = client.post("/slirn/api/export_fine_params", json={"task_id": t.task_id})
+    assert resp.status_code == 200, f"HTTP {resp.status_code}: {resp.text[:200]}"
+    body = resp.json()
+    assert body["ok"] is True, f"导出应成功：{body}"
+    payload = _json.loads(body["content"])
+    assert payload["_schema"] == 4, f"_schema 应升到 4，实际：{payload.get('_schema')}"
+    assert "preview" in payload, f"导出应含 preview 顶层字段，keys={list(payload.keys())}"
+    assert payload["preview"] == {"start_h": 0, "start_m": 5, "start_s": 30, "duration": 15}, \
+        f"preview 值应与 fc.preview 一致，实际：{payload['preview']}"
+
+
+def test_import_fine_params_applies_preview(tmp_path):
+    """REQ-20260921-NNN-preview-export：import_fine_params v4 应把 preview 写回 fc.preview。"""
+    import json as _json
+    from slirn_home.app import build_app, _get_fine_compose
+    from fastapi.testclient import TestClient
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="import-preview", original_video=video)
+
+    new_payload = {
+        "_schema": 4,
+        "layout": {"video": {"x": 100}},
+        "font": {"size": 36},
+        "output": {"resolution": "1080p"},
+        "audio": {"enabled": False, "volume": 0.4},
+        "detected_region": None,
+        "preview": {"start_h": 1, "start_m": 2, "start_s": 3, "duration": 20},
+    }
+    built = build_app(tmp_path)
+    client = TestClient(built.app)
+    resp = client.post("/slirn/api/import_fine_params",
+                       json={"task_id": t.task_id, "content": _json.dumps(new_payload)})
+    body = resp.json()
+    assert body["ok"] is True, f"导入应成功：{body}"
+    assert "preview" in body["applied_fields"], \
+        f"applied_fields 必须含 preview，实际：{body['applied_fields']}"
+    assert len(body["applied_fields"]) == 6, \
+        f"应应用 6 个字段（layout/font/output/audio/detected_region/preview），实际：{body['applied_fields']}"
+
+    fc = _get_fine_compose(m, t.task_id)
+    p = fc["preview"]
+    assert p["start_h"] == 1 and p["start_m"] == 2 and p["start_s"] == 3 and p["duration"] == 20, \
+        f"preview 应被覆盖，实际：{p}"
+
+
+def test_import_fine_params_clamps_preview_values(tmp_path):
+    """REQ-20260921-NNN-preview-export：非法 preview 字段应被钳制（参照 save_fine_preview 逻辑）。
+    - start_h=-5 → 0
+    - start_m=99 → 59
+    - start_s=-3 → 0
+    - duration=999 → 30
+    - 非整数字段（如 "abc"）跳过该项
+    - 未知字段（不在 _FINE_PREVIEW_DEFAULTS 里）不进入 fc.preview
+    """
+    import json as _json
+    from slirn_home.app import build_app, _get_fine_compose, _save_fine_compose
+    from fastapi.testclient import TestClient
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="import-preview-clamp", original_video=video)
+    # 给 fc.preview 一个不同的基线值，验证钳制是「按字段覆盖」而不是「整体替换」
+    fc = _get_fine_compose(m, t.task_id)
+    fc["preview"] = {"start_h": 99, "start_m": 7, "start_s": 7, "duration": 25}
+    _save_fine_compose(m, t.task_id, fc)
+
+    payload = {
+        "_schema": 4,
+        "preview": {
+            "start_h": -5,        # 钳到 0
+            "start_m": 99,        # 钳到 59
+            "start_s": -3,        # 钳到 0
+            "duration": 999,      # 钳到 30
+            "start_m2": "abc",    # 非整数 → 跳过（且本来就不在白名单）
+            "evil_field": 123,    # 未知字段 → 不进入 fc.preview
+        },
+    }
+    built = build_app(tmp_path)
+    client = TestClient(built.app)
+    resp = client.post("/slirn/api/import_fine_params",
+                       json={"task_id": t.task_id, "content": _json.dumps(payload)})
+    body = resp.json()
+    assert body["ok"] is True, f"导入应成功（非法值被钳制）：{body}"
+
+    fc2 = _get_fine_compose(m, t.task_id)
+    p = fc2["preview"]
+    assert p["start_h"] == 0, f"start_h 应被钳到 0，实际：{p.get('start_h')}"
+    assert p["start_m"] == 59, f"start_m 应被钳到 59，实际：{p.get('start_m')}"
+    assert p["start_s"] == 0, f"start_s 应被钳到 0，实际：{p.get('start_s')}"
+    assert p["duration"] == 30, f"duration 应被钳到 30，实际：{p.get('duration')}"
+    # 未知字段不能写进 fc.preview
+    assert "evil_field" not in p, f"未知字段不应进 fc.preview，实际：{p}"
+    assert "start_m2" not in p, f"非 _FINE_PREVIEW_DEFAULTS 字段不应进 fc.preview，实际：{p}"
+
+
+def test_import_fine_params_v3_schema_ignores_missing_preview(tmp_path):
+    """REQ-20260921-NNN-preview-export：导入 v3 文件（无 preview 字段）→ fc.preview 保持原值。"""
+    import json as _json
+    from slirn_home.app import build_app, _get_fine_compose, _save_fine_compose
+    from fastapi.testclient import TestClient
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="import-v3-no-preview", original_video=video)
+    fc = _get_fine_compose(m, t.task_id)
+    fc["preview"] = {"start_h": 11, "start_m": 22, "start_s": 33, "duration": 7}
+    _save_fine_compose(m, t.task_id, fc)
+
+    v3_payload = {
+        "_schema": 3,
+        "layout": {"video": {"x": 1}},
+        "font": {"size": 36},
+        # 注意：没有 preview 字段
+    }
+    built = build_app(tmp_path)
+    client = TestClient(built.app)
+    resp = client.post("/slirn/api/import_fine_params",
+                       json={"task_id": t.task_id, "content": _json.dumps(v3_payload)})
+    body = resp.json()
+    assert body["ok"] is True, f"v3 schema 导入应兼容：{body}"
+    # applied 不应含 preview（payload 没带 preview 字段）
+    assert "preview" not in body["applied_fields"], \
+        f"v3 文件导入时 applied 不应含 preview，实际：{body['applied_fields']}"
+
+    fc2 = _get_fine_compose(m, t.task_id)
+    # fc.preview 应保持原值
+    assert fc2["preview"]["start_h"] == 11
+    assert fc2["preview"]["start_m"] == 22
+    assert fc2["preview"]["duration"] == 7
+
+
+def test_import_fine_params_rejects_bad_preview_type(tmp_path):
+    """REQ-20260921-NNN-preview-export：preview 不是 dict → 应返回 ok=False。"""
+    import json as _json
+    from slirn_home.app import build_app
+    from fastapi.testclient import TestClient
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="import-preview-bad-type", original_video=video)
+    payload = {"_schema": 4, "preview": "not a dict"}
+    built = build_app(tmp_path)
+    client = TestClient(built.app)
+    resp = client.post("/slirn/api/import_fine_params",
+                       json={"task_id": t.task_id, "content": _json.dumps(payload)})
+    body = resp.json()
+    assert body["ok"] is False, f"preview 非 dict 应被拒绝：{body}"
+    assert "preview" in body["error"], f"错误信息应提到 preview，实际：{body['error']}"
+
+
+def test_save_fine_global_profile_includes_preview(tmp_path):
+    """REQ-20260921-NNN-preview-export：save_fine_global_profile 应把 fc.preview 写入模板 params。"""
+    from tasklib import TaskManager
+    from slirn_home import fine_profiles as fp
+    from slirn_home.app import build_app, _get_fine_compose, _save_fine_compose
+    from fastapi.testclient import TestClient
+
+    video = tmp_path / "test.mp4"
+    video.write_bytes(b"fake-video")
+    mgr = TaskManager(tmp_path)
+    t = mgr.create(name="profile-preview", original_video=video)
+    fc = _get_fine_compose(mgr, t.task_id)
+    fc["preview"] = {"start_h": 0, "start_m": 1, "start_s": 2, "duration": 8}
+    _save_fine_compose(mgr, t.task_id, fc)
+
+    built = build_app(tmp_path)
+    client = TestClient(built.app)
+    resp = client.post("/slirn/api/save_fine_global_profile",
+                       json={"task_id": t.task_id, "name": "含预览模板"})
+    body = resp.json()
+    assert body["ok"] is True, f"保存全局模板应成功：{body}"
+
+    prof_loaded = fp.get_profile(tmp_path, body["profile"]["id"])
+    assert prof_loaded is not None, f"应能从磁盘读回 profile，id={body['profile']['id']}"
+    assert "preview" in prof_loaded["params"], \
+        f"模板 params 必须含 preview 字段，实际 keys：{list(prof_loaded['params'].keys())}"
+    assert prof_loaded["params"]["preview"] == {"start_h": 0, "start_m": 1, "start_s": 2, "duration": 8}, \
+        f"模板 params.preview 应等于 fc.preview，实际：{prof_loaded['params']['preview']}"
 
 
 # ---------- REQ-20260919-074：精剪·导出异步化 ----------
@@ -6983,6 +7185,9 @@ def test_import_fine_params_accepts_v2_schema(tmp_path):
                        json={"task_id": t.task_id, "content": content})
     body = resp.json()
     assert body["ok"] is True, f"v2 schema 应兼容：{body}"
+    # REQ-20260921-NNN-preview-export：v2 schema 不带 preview → applied 不含 preview
+    assert "preview" not in body["applied_fields"], \
+        f"v2 schema 导入时 preview 不应被 apply，实际 applied={body['applied_fields']}"
     fc = _get_fine_compose(m, t.task_id)
     assert fc["layout"]["video"]["x"] == 111
     # v2 没有 detected_region → 保持 None（不被覆盖）

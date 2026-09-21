@@ -1600,9 +1600,12 @@ _FINE_OUTPUT_DEFAULTS = {
 
 
 # REQ-20260920-078：系统默认 BGM 备选列表（绝对路径硬编码，不动态扫描）。
-# 来源目录：D:\tmp\tttttt\（用户给的固定路径，不进 git）。
-# 启动时校验 available；缺失则 UI 灰显，不报错。
-_DEFAULT_BGMS_DIR = Path(r"D:\tmp\tttttt")
+# REQ-20260921-NNN-bgm-in-repo：5 个 mp3 已入库 slirn_home/assets/default_bgms/。
+#   优先从仓库内读（clone 后即可用）；缺失则 fallback 到原外部路径 D:\tmp\tttttt\（用户本机缓存）。
+#   启动时校验 available；缺失则 UI 灰显，不报错。
+_ASSETS_BGMS_DIR = Path(__file__).resolve().parent / "assets" / "default_bgms"
+_EXTERNAL_BGMS_DIR = Path(r"D:\tmp\tttttt")
+_DEFAULT_BGMS_DIR = _ASSETS_BGMS_DIR if _ASSETS_BGMS_DIR.exists() else _EXTERNAL_BGMS_DIR
 _DEFAULT_BGMS = [
     {"id": "lofi_beat_1",    "name": "Pretty John — Lo-Fi Beat",
      "filename": "prettyjohn1-lo-fi-beat-580021.mp3"},
@@ -6499,6 +6502,9 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             # REQ-20260920-076：把背景图检测结果也存进模板（与任务级 export 同口径），
             # 旧模板（无 detected_region 字段）→ get() 返回 None，应用时不动目标任务的。
             "detected_region": fc.get("detected_region"),
+            # REQ-20260921-NNN-preview-export：生成预览参数也存进模板
+            # （与 SAVE_PARAM_KEYS 含 preview 配对，端点实际传值才生效）
+            "preview": fc.get("preview"),
         }
         profile = _fine_profiles.save_profile(repo_root, name, params, task_id_origin=tid)
         return _ok(
@@ -6924,7 +6930,10 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             return _err(f"任务不存在: {e}")
         fc = _get_fine_compose(mgr, tid)
         payload = {
-            "_schema": 3,
+            # REQ-20260921-NNN-preview-export：v3 → v4 加 preview 字段
+            # （「生成预览」开始时间 HH:MM:SS + 预览时长）。
+            # v3 文件仍可被 import_fine_params 接受（preview 缺省即不写回）。
+            "_schema": 4,
             "_exported_at": datetime.now().isoformat(timespec="seconds"),
             "_source_task_id": tid,
             "materials": {},    # REQ-20260919-073：素材路径不是设置参数，不导出
@@ -6933,6 +6942,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             "output": fc.get("output"),
             "audio": fc.get("audio"),
             "detected_region": fc.get("detected_region"),
+            "preview": fc.get("preview"),    # v4 新增：start_h/m/s + duration
         }
         filename = f"fine_params_{tid}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
         try:
@@ -6967,12 +6977,13 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         if not isinstance(payload, dict):
             return _err("JSON 顶层必须是对象")
         schema = payload.get("_schema")
-        if schema not in (2, 3):
+        if schema not in (2, 3, 4):
             return _err(
-                f"参数文件 _schema 不兼容（当前仅支持 2/3，文件为 {schema}）"
+                # REQ-20260921-NNN-preview-export：v4 加 preview
+                f"参数文件 _schema 不兼容（当前仅支持 2/3/4，文件为 {schema}）"
             )
-        # 校验 5 个字段类型（必须 dict 或 null/缺省）
-        for key in ("layout", "font", "output", "audio", "detected_region"):
+        # 校验 6 个字段类型（必须 dict 或 null/缺省）
+        for key in ("layout", "font", "output", "audio", "detected_region", "preview"):
             v = payload.get(key)
             if v is not None and not isinstance(v, dict):
                 return _err(f"{key} 必须是 dict 或 null")
@@ -6982,6 +6993,32 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             if key in payload:
                 fc[key] = payload[key]
                 applied.append(key)
+        # REQ-20260921-NNN-preview-export：preview 字段级钳制（参照 save_fine_preview 同口径）
+        # start_h ≥ 0；start_m/start_s ∈ [0, 59]；duration ∈ [2, 30]
+        # 非整数 → 跳过该项；只接受 _FINE_PREVIEW_DEFAULTS 内的字段（未知字段丢弃）
+        # 合并到 fc["preview"]，未提供的字段保留原值（不强制重置）
+        if "preview" in payload:
+            raw = payload["preview"]
+            if isinstance(raw, dict):
+                clamped: dict = {}
+                for pk in _FINE_PREVIEW_DEFAULTS.keys():
+                    if pk not in raw:
+                        continue
+                    try:
+                        n = int(raw[pk])
+                    except (TypeError, ValueError):
+                        continue
+                    if pk in ("start_m", "start_s"):
+                        n = max(0, min(59, n))
+                    elif pk == "start_h":
+                        n = max(0, n)
+                    elif pk == "duration":
+                        n = max(2, min(30, n))
+                    clamped[pk] = n
+                if clamped:
+                    base = fc.get("preview") or dict(_FINE_PREVIEW_DEFAULTS)
+                    fc["preview"] = {**base, **clamped}
+                    applied.append("preview")
         try:
             _save_fine_compose(mgr, tid, fc)
         except Exception as e:  # noqa: BLE001
