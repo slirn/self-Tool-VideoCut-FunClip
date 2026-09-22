@@ -1381,7 +1381,8 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
         <div class="slirn-form-hint">行内 <s class="slirn-opt-before">删除线</s> = 疑似误识别原文，旁边输入框 = 替换值（可直接编辑）；
         <b>✓</b> 采纳 / <b>✕</b> 不采纳（逐处切换）。点词筛选出现行，点行按成片时间跳播核对。
         行首 <b>✏️</b> = 整句替换（直接改写整行文本，覆盖本行局部替换）；
-        <b>🗑️</b> = 标记删除整行（保存后从成片剪除该行时间段并前移后续字幕）。</div>
+        <b>🗑️</b> = 标记删除整行（保存后从成片剪除该行时间段并前移后续字幕；
+        播放时也会自动跳过已标记删除的片段 = 成片效果预览）。</div>
         <div class="slirn-opt-kbhint" id="slirn-opt-kbhint"></div>
         <div class="slirn-task-actions" style="margin-top:10px;">
             <button class="slirn-btn" data-action="opt-filter" data-shown="1"

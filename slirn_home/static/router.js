@@ -4703,6 +4703,47 @@
     }
     optLineAfterEdit(row);  // 复用整句替换的自动保存锁（REQ-20260918-056）
   }
+  // ========== REQ-20260922-NNN 播放跳过：标记删除的行区间不播出（成片效果预览） ==========
+  // 与切分修剪「保留内容跳播」同口径（见 cutKeepAllFrom）：播放 rough_compose 时
+  // currentTime 落进任一已删除行区间 → 跳到该块末尾。每次 timeupdate 现读 DOM —
+  // 播放中翻转 🗑️/✚ 即时生效；筛选（只看不明确行）不影响跳播集合（行仍在其位）。
+  function optDeletedIntervals() {  // 已删除行 [start,end] 升序 + 相邻/重叠合并
+    var list = revVis('slirn-opt-list');
+    if (!list) return [];
+    var ivs = [];
+    list.querySelectorAll('.slirn-opt-row[data-deleted="1"][data-start-ms]').forEach(function(row) {
+      var s = parseInt(row.getAttribute('data-start-ms'), 10) || 0;
+      var e = parseInt(row.getAttribute('data-end-ms'), 10) || 0;
+      if (e > s) ivs.push([s, e]);
+    });
+    ivs.sort(function(a, b) { return a[0] - b[0]; });
+    var out = [];
+    ivs.forEach(function(iv) {  // 块间距 ≤1ms 视为连块（跳播一次跨过）
+      if (out.length && iv[0] <= out[out.length - 1][1] + 1) {
+        out[out.length - 1][1] = Math.max(out[out.length - 1][1], iv[1]);
+      } else out.push([iv[0], iv[1]]);
+    });
+    return out;
+  }
+  function optSkipPastDeleted(ms) {  // 起点推进：落在删除块内 → 块尾后 1ms
+    var ivs = optDeletedIntervals();
+    for (var i = 0; i < ivs.length; i++) {
+      if (ms >= ivs[i][0] && ms < ivs[i][1]) return ivs[i][1] + 1;
+    }
+    return ms;
+  }
+  function optSkipDeletedOnTick(v) {  // 播放中跳块（暂停不跳 — 用户可停在删除段内查看）
+    if (!v || v.paused) return;
+    var ivs = optDeletedIntervals();
+    if (!ivs.length) return;
+    var tms = (v.currentTime || 0) * 1000;
+    for (var i = 0; i < ivs.length; i++) {
+      if (tms >= ivs[i][0] && tms < ivs[i][1]) {
+        try { v.currentTime = (ivs[i][1] + 1) / 1000; } catch (err) {}
+        return;
+      }
+    }
+  }
   var optCutPollTimer = null;
   function startOptCutPolling(tid) {  // 优化成片剪辑轮询：done → 刷新工作台（含产物提示条）
     if (optCutPollTimer) { clearInterval(optCutPollTimer); optCutPollTimer = null; }
@@ -4775,7 +4816,9 @@
     // REQ-20260918-054：首次绑定 timeupdate + seeked 跟高亮（幂等）
     bindOptPlayerHighlight();
     var goO = function() {
-      try { v.currentTime = (startMs || 0) / 1000; } catch (err) {}
+      // REQ-20260922-NNN：起点若落在已删除块内 → 推进到块尾后（点删除行 =
+      // 从其后内容播起，与切分修剪「点删除内容播下一个保留区间」同口径）
+      try { v.currentTime = optSkipPastDeleted(startMs || 0) / 1000; } catch (err) {}
       // REQ-20260918-054：跳转后立即按 currentTime 重算（不等首个 timeupdate）
       optPlayerHighlight(v);
       var p = v.play();
@@ -4819,6 +4862,8 @@
     v.dataset.optHLBound = '1';
     v.addEventListener('timeupdate', function() { optPlayerHighlight(v); });
     v.addEventListener('seeked',    function() { optPlayerHighlight(v); });
+    // REQ-20260922-NNN：同一绑定点挂删除块跳播（幂等随 optHLBound 一起）
+    v.addEventListener('timeupdate', function() { optSkipDeletedOnTick(v); });
   }
   function bindOptRows(tid) {  // 行点击定位播放（输入框/按钮自身不触发）
     var list = revVis('slirn-opt-list');
@@ -4827,6 +4872,10 @@
       row.addEventListener('click', function(ev) {
         // REQ-20260922-NNN：textarea（整句编辑框）也让位
         if (ev.target && ev.target.closest('button,input,textarea')) return;
+        // REQ-20260922-NNN：点已删除行 → 起播点自动推进到其后（成片效果），提示一句
+        if (row.getAttribute('data-deleted') === '1') {
+          toast('🗑️ 本行已标记删除 — 从其后内容播起（成片效果）');
+        }
         playOptAt(tid, parseInt(row.getAttribute('data-start-ms'), 10) || 0);
       });
     });

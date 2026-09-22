@@ -11733,3 +11733,36 @@ def test_opt_delete_css_styles():
     assert ".slirn-opt-cut-status[data-state=\"error\"]" in css, (
         "剪辑状态条必须有 error 态样式")
     assert ".slirn-opt-cut-status[data-state=\"done\"]" in css
+
+
+def test_opt_play_skip_deleted_js():
+    """播放跳过：已删除块不播出（成片效果）— 区间收集/合并 + 起点推进 + tick 跳块。"""
+    src = _router_src()
+    # 区间收集器：data-deleted="1" 行 → [start,end] 升序 + 相邻合并
+    i = src.find("function optDeletedIntervals")
+    assert i > 0, "必须有 optDeletedIntervals 收集器"
+    body = src[i:src.find("\n  }\n", i)]
+    assert 'data-deleted="1"' in body and "data-start-ms" in body \
+        and "data-end-ms" in body
+    assert "sort" in body, "区间必须按 start 升序"
+    assert "Math.max" in body, "相邻/重叠区间必须合并成块"
+    # 起点推进：落在块内 → 块尾 +1ms
+    j = src.find("function optSkipPastDeleted")
+    assert j > 0, "必须有 optSkipPastDeleted 起点推进"
+    body2 = src[j:src.find("\n  }\n", j)]
+    assert "ivs[i][1] + 1" in body2, "推进目标 = 块尾后 1ms（防浮点落回块内）"
+    # tick 跳块：暂停不跳（用户可停在删除段内查看），播放中 currentTime 进块即跳块尾
+    k = src.find("function optSkipDeletedOnTick")
+    assert k > 0, "必须有 optSkipDeletedOnTick"
+    body3 = src[k:src.find("\n  }\n", k)]
+    assert "v.paused" in body3, "暂停时不得抢跳（允许查看删除段）"
+    assert "v.currentTime = (ivs[i][1] + 1) / 1000" in body3
+    # 接线三处：playOptAt 起点推进 / 播放器 timeupdate 挂跳块 / 点删除行提示
+    p = src.find("function playOptAt")
+    play = src[p:src.find("\n  }\n", p)]
+    assert "optSkipPastDeleted(startMs || 0)" in play, (
+        "起播 seek 必须经 optSkipPastDeleted 推进（点删除行从其后播起）")
+    b = src.find("function bindOptPlayerHighlight")
+    bind = src[b:src.find("\n  }\n", b)]
+    assert "optSkipDeletedOnTick(v)" in bind, "timeupdate 必须挂删除块跳播"
+    assert "从其后内容播起" in src, "点已删除行必须提示从其后播起"

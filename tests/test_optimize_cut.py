@@ -302,8 +302,21 @@ def test_render_optimize_zone_marks_ui(tmp_path):
     _mk_cut_artifacts(outputs, [2])
     html2 = _render_optimize_zone(t.task_id, m.get(t.task_id), m)
     assert 'data-state="done"' in html2 and "优化成片已生成" in html2
-    # 无标记 → 无状态条 + 无删除徽章
+    # 无标记 → 无状态条 + 无删除徽章（hint 常驻文案含「已标记删除」字样，
+    # 故断言徽章容器而非裸子串）
     _write_optimize(outputs, marks=[])
     html3 = _render_optimize_zone(t.task_id, m.get(t.task_id), m)
     assert "slirn-opt-cut-status" not in html3
-    assert "已标记删除" not in html3
+    assert 'slirn-opt-line-badge del' not in html3
+
+
+def test_render_optimize_zone_play_skip_hint(tmp_path):
+    """播放跳过提示：hint 说明播放自动跳过已标记删除片段（成片效果预览）。"""
+    from slirn_home.app import _render_optimize_zone
+
+    m, t, outputs = _make_task(tmp_path)
+    _mk_rough(outputs)
+    _write_optimize(outputs, saved=True, marks=[2])
+    html = _render_optimize_zone(t.task_id, m.get(t.task_id), m)
+    assert "播放时也会自动跳过已标记删除的片段" in html, (
+        "hint 必须说明播放自动跳过删除片段")
