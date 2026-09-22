@@ -1,7 +1,8 @@
 """REQ-20260922-NNN 标记删除行 → 优化成片剪辑 — 端点与接线测试。
 
 覆盖：
-- /save_optimize_subtitle 保存钩子（kick 剪辑 / running 不二启 / 空标记清产物）
+- /save_optimize_subtitle 保存（手动触发语义：不启动剪辑 / running 续报 / 空标记清产物）
+- /optimize_cut_rekick「🎬 重新优化粗剪视频」按钮（剪辑的唯一触发入口）
 - /optimize_cut_status 服务重启后的磁盘兜底
 - /optimized_srt base=rough|cut 两种时间基
 - _fine_upstream_path / _effective_fine_video_path：优化成片优先 + 失效回退
@@ -145,20 +146,23 @@ def _client(tmp_path):
     return TestClient(built.app)
 
 
-def test_save_kicks_cut_when_marks_present(tmp_path, monkeypatch):
+def test_save_does_not_auto_kick_cut(tmp_path, monkeypatch):
+    """手动触发语义：保存（含标记非空）只落盘，不启动剪辑 —
+    剪辑只由「🎬 重新优化粗剪视频」(/optimize_cut_rekick) 显式触发。"""
     m, t, outputs = _make_task(tmp_path)
     _mk_rough(outputs)
     _write_optimize(outputs, saved=False)
-    calls = []
-    monkeypatch.setattr(compose_service, "start_optimize_cut",
-                        lambda *a, **k: calls.append(a) or True)
+
+    def _boom(*a, **k):
+        raise AssertionError("保存不得自动触发优化成片剪辑")
+
+    monkeypatch.setattr(compose_service, "start_optimize_cut", _boom)
     c = _client(tmp_path)
     r = c.post("/slirn/api/save_optimize_subtitle",
                json={"task_id": t.task_id, "decisions": [],
                      "line_marks": [1, 2]}).json()
     assert r["ok"] is True, r
-    assert r["cut"]["state"] == "started" and r["cut"]["marks"] == [1, 2]
-    assert len(calls) == 1 and calls[0][0] == t.task_id
+    assert r["cut"]["state"] == "none" and r["cut"]["marks"] == [1, 2]
     # 落盘核对
     assert json.loads((outputs / optimize_service.OPTIMIZE_JSON).read_text(
         encoding="utf-8"))["line_marks"] == [1, 2]
@@ -172,7 +176,10 @@ def test_save_reports_running_when_job_busy(tmp_path, monkeypatch):
         "state": "running", "progress": 5.0, "stage": "剪辑中", "error": None,
         "started_at": 0.0, "finished_at": None, "result": None}
     try:
-        monkeypatch.setattr(compose_service, "start_optimize_cut", lambda *a, **k: False)
+        def _boom(*a, **k):
+            raise AssertionError("剪辑在跑时保存也不得二启")
+
+        monkeypatch.setattr(compose_service, "start_optimize_cut", _boom)
         c = _client(tmp_path)
         r = c.post("/slirn/api/save_optimize_subtitle",
                    json={"task_id": t.task_id, "decisions": [],
@@ -228,7 +235,7 @@ def test_save_clears_artifacts_after_done_job_lingers(tmp_path):
         compose_service._OPT_CUT_JOBS.pop(t.task_id, None)
 
 
-# ---------- /optimize_cut_rekick 显式触发（🎬 重新剪辑成片按钮） ----------
+# ---------- /optimize_cut_rekick 显式触发（🎬 重新优化粗剪视频按钮） ----------
 
 def test_rekick_requires_optimize_data(tmp_path):
     m, t, outputs = _make_task(tmp_path)
@@ -398,8 +405,8 @@ def test_render_optimize_zone_marks_ui(tmp_path):
     # 统计 + 剪辑状态条（有标记无产物 → pending 提示重存）
     assert "标记删除 <b>1</b> 行" in html
     assert 'id="slirn-opt-cut-status"' in html and 'data-state="pending"' in html
-    assert "重新剪辑成片" in html  # pending 提示应指向显式按钮
-    # 🎬 重新剪辑成片按钮（常驻动作行 — 无标记也可点，端点负责提示/清产物）
+    assert "重新优化粗剪视频" in html  # pending 提示应指向显式按钮
+    # 🎬 重新优化粗剪视频按钮（常驻动作行 — 无标记也可点，端点负责提示/清产物）
     assert 'data-action="opt-cut-rekick"' in html
     # 产物就绪 → done 状态条（含保留秒数）
     _mk_cut_artifacts(outputs, [2])

@@ -1210,7 +1210,7 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
     elif cut_job and cut_job.get("state") == "error":
         cut_state = "error"
         cut_text = (f'⚠️ 优化成片剪辑失败：{cut_job.get("error") or "未知错误"}'
-                    ' — 点「🎬 重新剪辑成片」或重新「确认保存」可再次触发')
+                    ' — 点「🎬 重新优化粗剪视频」可再次触发')
     elif marks_set and cut_ready is not None:
         cut_state = "done"
         cut_text = (f'🎬 优化成片已生成：剪除 {len(cut_ready.get("marks") or [])} 行 · '
@@ -1218,8 +1218,8 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
                     ' — 精剪合成将自动使用 optimize_compose.mp4')
     elif marks_set:
         cut_state = "pending"
-        cut_text = ("⚠️ 有标记删除行但优化成片未生成 — 点下方「🎬 重新剪辑成片」"
-                    "或重新「确认保存」触发剪辑")
+        cut_text = ("⚠️ 有标记删除行但优化成片未生成 — 点下方「🎬 重新优化粗剪视频」"
+                    "按钮触发剪辑（保存不会自动剪辑）")
     cut_bar = (f'<div id="slirn-opt-cut-status" class="slirn-status-msg slirn-opt-cut-status" '
                f'data-task-id="{_esc(task_id)}" data-state="{_esc(cut_state)}">{_esc(cut_text)}</div>'
                ) if cut_state else ""
@@ -1396,7 +1396,7 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
         <div class="slirn-form-hint">行内 <s class="slirn-opt-before">删除线</s> = 疑似误识别原文，旁边输入框 = 替换值（可直接编辑）；
         <b>✓</b> 采纳 / <b>✕</b> 不采纳（逐处切换）。点词筛选出现行，点行按成片时间跳播核对。
         行首 <b>✏️</b> = 整句替换（直接改写整行文本，覆盖本行局部替换）；
-        <b>🗑️</b> = 标记删除整行（保存后从成片剪除该行时间段并前移后续字幕；
+        <b>🗑️</b> = 标记删除整行（点「🎬 重新优化粗剪视频」后从成片剪除该行时间段并前移后续字幕；
         播放时也会自动跳过已标记删除的片段 = 成片效果预览）。</div>
         <div class="slirn-opt-kbhint" id="slirn-opt-kbhint"></div>
         <div class="slirn-task-actions" style="margin-top:10px;">
@@ -1418,9 +1418,9 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
             <button class="slirn-btn" data-action="opt-final-view" data-task-id="{_esc(task_id)}"
                     {"" if confirmed else 'disabled title="确认保存后可查看"'}>📄 查看最终字幕</button>
             <button class="slirn-btn" data-action="opt-cut-rekick" data-task-id="{_esc(task_id)}"
-                    title="按当前 🗑️ 标记删除行，对粗剪成片做剪除+拼接，生成 optimize_compose.mp4（精剪合成自动优先使用）">🎬 重新剪辑成片</button>
+                    title="按当前 🗑️ 标记删除行，对粗剪成片做剪除+拼接，生成 optimize_compose.mp4（精剪合成自动优先使用）">🎬 重新优化粗剪视频</button>
             <button class="slirn-btn" data-action="optimize-start" data-task-id="{_esc(task_id)}"
-                    data-has="1">🔄 重新优化</button>
+                    data-has="1">🔄 重新优化字幕</button>
         </div>
         <div id="slirn-opt-status" class="slirn-status-msg" style="{'display:none;' if job_state != 'running' else ''};"
              data-task-id="{_esc(task_id)}" data-state="{_esc(job_state)}">{running_html}</div>
@@ -8912,28 +8912,20 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         est = optimize_service.effective_stats(data)
         mgr.update_status(tid, TaskStatus.FINE_SUBTITLE_REVIEWED)  # 幂等：结果在盘即完成
 
-        # REQ-20260922-NNN 标记删除行：保存后 kick 优化成片剪辑（R1 — 端点只
-        # 触发，线程内自带复核重跑；marks 非空且粗剪在 → 剪辑，marks 空 → 自清产物）
+        # REQ-20260922-NNN 标记删除行（手动触发语义）：保存只落盘标记，**不触发
+        # 剪辑** — 剪辑由「🎬 重新优化粗剪视频」按钮显式触发（/optimize_cut_rekick）。
+        # 这里只做状态同步：在跑 → running（线程 R1 复核自清），标记清空 → 清产物
         cut_state = "none"
         marks_now = data.get("line_marks") or []
         from slirn_home import compose_service
 
-        rough = compose_service.rough_compose_path(outputs_dir)
-        if marks_now and rough.exists():
-            started_cut = compose_service.start_optimize_cut(
-                tid, outputs_dir, rough, auto=_auto, auto_session_id=_auto_session_id)
-            cut_state = "started" if started_cut else "running"
-        else:
-            # done/error 条目会常驻内存（job 字典完成后不 pop）→ 不能拿「有无
-            # 条目」当运行判据，否则剪辑完成后再清空标记永远走不到清理分支，
-            # 旧优化成片变孤儿一直躺在磁盘上
-            job_st = compose_service.opt_cut_job_status(tid)
-            if job_st and job_st.get("state") == "running":
-                cut_state = "running"  # 剪辑在跑，取消标记由线程 R1 复核自清
-            elif not marks_now:
-                # 标记已全部取消且无剪辑在跑 → 清掉旧优化成片（同步、毫秒级）
-                removed = compose_service._delete_cut_artifacts(outputs_dir)
-                cut_state = "cleared" if removed else "none"
+        job_st = compose_service.opt_cut_job_status(tid)
+        if job_st and job_st.get("state") == "running":
+            cut_state = "running"  # 🎬 按钮触发的剪辑在跑，取消标记由线程 R1 复核自清
+        elif not marks_now:
+            # 标记已全部取消且无剪辑在跑 → 清掉旧优化成片（同步、毫秒级）
+            removed = compose_service._delete_cut_artifacts(outputs_dir)
+            cut_state = "cleared" if removed else "none"
 
         n_edits = int(est.get("line_edits") or 0)
         edit_suffix = f" · 整句替换 {n_edits} 行" if n_edits else ""
@@ -8998,11 +8990,10 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
 
     @app.app.post("/slirn/api/optimize_cut_rekick")
     async def optimize_cut_rekick(body: dict = Body(default_factory=dict)):
-        """显式触发优化成片剪辑（REQ-20260922-NNN 优化字幕页「🎬 重新剪辑成片」）。
+        """显式触发优化成片剪辑（REQ-20260922-NNN 优化字幕页「🎬 重新优化粗剪视频」）。
 
-        按当前 🗑️ 标记删除行对粗剪成片做剪除+拼接。与保存钩子同一引擎
-        （start_optimize_cut），供产物失效（rough 重合成 / 轮询中断）/ 想手动
-        触发时使用，不必再走一遍「确认保存」。
+        按当前 🗑️ 标记删除行对粗剪成片做剪除+拼接。剪辑的唯一触发入口（保存
+        不自动触发），供产物失效（rough 重合成 / 轮询中断）/ 想手动触发时使用。
         """
         from slirn_home import compose_service, optimize_service
 
@@ -9036,9 +9027,9 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         started = compose_service.start_optimize_cut(tid, outputs_dir, rough)
         if started:
             return _ok("", cut={"state": "started", "marks": marks},
-                       toast=f"🎬 已开始剪辑优化成片（删除 {len(marks)} 行）— 完成后精剪合成自动使用")
+                       toast=f"🎬 已开始重新优化粗剪视频（剪除 {len(marks)} 行）— 完成后精剪合成自动使用")
         return _ok("", cut={"state": "running", "marks": marks},
-                   toast="🎬 优化成片剪辑正在进行中")
+                   toast="🎬 粗剪视频优化剪辑正在进行中")
 
     @app.app.post("/slirn/api/resplit_segment")
     async def resplit_segment_api(body: dict = Body(default_factory=dict)):

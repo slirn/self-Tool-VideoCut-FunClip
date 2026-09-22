@@ -4629,7 +4629,8 @@
         if (r && r.ok) {
           toast(r.toast || '已确认保存');
           openWorkbench(tid);  // 刷新阶段态（done）+ 统计 + 对应关系
-          // REQ-20260922-NNN 标记删除行：保存触发了优化成片剪辑 → 轮询到完成
+          // REQ-20260922-NNN 标记删除行（手动触发）：保存不触发剪辑 — 仅当
+          // 🎬 按钮触发的剪辑恰在跑时续上轮询到完成
           if (r.cut && (r.cut.state === 'started' || r.cut.state === 'running')) {
             startOptCutPolling(tid);
           }
@@ -4746,7 +4747,7 @@
     var del = row.getAttribute('data-deleted') === '1';
     return del
       ? '<button class="slirn-btn slirn-btn-xs slirn-opt-line-btn slirn-opt-del-btn" data-action="opt-line-delete" data-deleted="1" title="取消删除标记：本行恢复保留">✚</button>'
-      : '<button class="slirn-btn slirn-btn-xs slirn-opt-line-btn slirn-opt-del-btn" data-action="opt-line-delete" data-deleted="0" title="标记删除：保存后本行时间段将从粗剪成片剪除，字幕时间轴自动前移">🗑️</button>';
+      : '<button class="slirn-btn slirn-btn-xs slirn-opt-line-btn slirn-opt-del-btn" data-action="opt-line-delete" data-deleted="0" title="标记删除：点「🎬 重新优化粗剪视频」后本行时间段将从粗剪成片剪除，字幕时间轴自动前移">🗑️</button>';
   }
   function optLineDelete(row) {  // 🗑️ 标记 / ✚ 取消 + 行样式 + 徽章 + 自动保存
     if (!row) return;
@@ -4761,7 +4762,7 @@
         btn.setAttribute('data-deleted', to ? '1' : '0');
         btn.innerHTML = to ? '✚' : '🗑️';
         btn.title = to ? '取消删除标记：本行恢复保留'
-          : '标记删除：保存后本行时间段将从粗剪成片剪除，字幕时间轴自动前移';
+          : '标记删除：点「🎬 重新优化粗剪视频」后本行时间段将从粗剪成片剪除，字幕时间轴自动前移';
       }
       var badge = textCol.querySelector('.slirn-opt-line-badge.del');
       if (to && !badge) {
@@ -4779,7 +4780,7 @@
     if (to) {
       var s = ((parseInt(row.getAttribute('data-end-ms'), 10) || 0)
         - (parseInt(row.getAttribute('data-start-ms'), 10) || 0)) / 1000;
-      toast('🗑️ 已标记删除 — 保存后从成片剪除该行（约 ' + s.toFixed(1) + 's，字幕自动前移）');
+      toast('🗑️ 已标记删除 — 点「🎬 重新优化粗剪视频」从成片剪除该行（约 ' + s.toFixed(1) + 's，字幕自动前移）');
     } else {
       toast('✚ 已取消删除标记', 'success');
     }
@@ -4857,7 +4858,7 @@
             if (el) {
               el.dataset.state = 'error';
               el.innerHTML = '⚠️ 优化成片剪辑失败：' + escapeHtml(j.error || '未知错误')
-                + ' — 点「🎬 重新剪辑成片」或重新「确认保存」可再次触发';
+                + ' — 点「🎬 重新优化粗剪视频」可再次触发';
             }
             toast('❌ 优化成片剪辑失败（精剪合成将回退使用粗剪成片）', 'error');
           }
@@ -4867,7 +4868,7 @@
     update();
     optCutPollTimer = setInterval(update, 2000);
   }
-  function optCutRekick(btn) {  // 🎬 重新剪辑成片：按当前 🗑️ 标记手动触发（不必再走「确认保存」）
+  function optCutRekick(btn) {  // 🎬 重新优化粗剪视频：按当前 🗑️ 标记手动触发（唯一剪辑入口）
     var tid = btn.getAttribute('data-task-id') || '';
     if (!tid) return;
     btn.disabled = true;
@@ -6314,7 +6315,7 @@
       optLineDelete(target.closest('.slirn-opt-row'));
     }
     else if (action === 'opt-cut-rekick') {
-      // REQ-20260922-NNN 🎬 重新剪辑成片：按当前标记手动触发优化成片剪辑
+      // REQ-20260922-NNN 🎬 重新优化粗剪视频：按当前标记手动触发优化成片剪辑
       optCutRekick(target);
     }
     else if (action === 'opt-line-apply') {

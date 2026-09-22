@@ -925,8 +925,9 @@ def handler_optimize(tid: str, cfg: dict, outputs_dir: Path, api: str,
                 _result[0] = False
                 _result[1] = f"save_optimize_subtitle 失败：{r.get('error')}"
                 return (False, _result[1])
-            # REQ-20260922-NNN 标记删除行：保存时若带标记（触发优化成片剪辑）
-            # → 等剪辑完成再进精剪；失败只 warn（精剪自动回退粗剪成片，阶段不算失败）
+            # REQ-20260922-NNN 标记删除行（手动触发语义）：保存不触发剪辑 — 仅当
+            # 「🎬 重新优化粗剪视频」触发的剪辑恰在跑时等它完成再进精剪；失败只
+            # warn（精剪自动回退粗剪成片，阶段不算失败）
             cut = (r.get("cut") or {})
             if cut.get("state") in ("started", "running"):
                 _log(job, "optimize",
