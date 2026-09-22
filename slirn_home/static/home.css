@@ -2290,6 +2290,11 @@ input[type="checkbox"]:focus-visible {
 .slirn-opt-occ-override-hint {
   font-size: 11.5px; color: var(--text-muted); line-height: 1.6;
 }
+/* 快捷键提示条（对齐 .slirn-rev-kbhint，复用其 kbd 样式） */
+.slirn-opt-kbhint {
+  margin-top: 6px; font-size: 12px; line-height: 2;
+  color: var(--text-secondary);
+}
 @media (max-width: 720px) {
   .slirn-opt-row { grid-template-columns: 36px 1fr; }
   .slirn-opt-row .slirn-fw-time { display: none; }

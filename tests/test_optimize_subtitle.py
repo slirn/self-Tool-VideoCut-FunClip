@@ -510,5 +510,6 @@ def test_render_zone_line_edit_full_edit_row(tmp_path, monkeypatch):
     assert 'data-orig-text="今天讲一下神精网络"' in html
     assert 'data-full-edit="1"' in html and 'data-full-edit="0"' in html
     assert 'data-full-text="今天我们来讲一下神经网络"' in html
-    # 头部统计
+    # 头部统计 + 快捷键提示条容器
     assert "整句替换 <b>1</b> 行" in html
+    assert 'class="slirn-opt-kbhint" id="slirn-opt-kbhint"' in html

@@ -11480,6 +11480,22 @@ def test_opt_line_edit_js_actions_and_collect():
     assert "optLineApply(row)" in src and "optLineCancel(row)" in src
 
 
+def test_opt_play_stop_shortcut_js():
+    """REQ-20260922-NNN：播放/暂停 + 停止两键 — REV_KEY_ACTIONS 有 stop、
+    handler 只匹配 km.play/km.stop、提示条渲染函数。"""
+    src = _router_src()
+    assert "{ id: 'stop'" in src and "def: 'x'" in src, "REV_KEY_ACTIONS 必须含 stop 动作"
+    assert "function optTogglePlay" in src, "必须有 optTogglePlay"
+    assert "function optStopPlay" in src, "必须有 optStopPlay"
+    # handler 只匹配两键（其他键不劫持）
+    assert "k !== km.play && k !== km.stop" in src, (
+        "优化字幕 keydown handler 必须只匹配 km.play/km.stop")
+    # 提示条 + 三处跟随调用
+    assert "function applyOptKeysState" in src
+    assert src.count("applyOptKeysState();") >= 3, (
+        "wb 渲染 / 键位改绑 / 恢复默认三处都应刷新优化字幕提示条")
+
+
 def test_opt_line_edit_css_styles():
     """REQ-20260922-NNN：整句替换 + 覆盖置灰 + 提示条样式。"""
     p = FUNCLIP_ROOT / "slirn_home" / "static" / "home.css"
@@ -11487,4 +11503,5 @@ def test_opt_line_edit_css_styles():
     assert ".slirn-opt-row.full-edit {" in css, "必须有整句行样式（青色条 + 淡青底）"
     assert ".slirn-opt-occ.overridden" in css, "occ 被覆盖必须置灰"
     assert ".slirn-opt-line-badge" in css and ".slirn-opt-line-input" in css
+    assert ".slirn-opt-kbhint" in css, "必须有快捷键提示条样式"
     assert ".slirn-opt-occ-override-hint" in css

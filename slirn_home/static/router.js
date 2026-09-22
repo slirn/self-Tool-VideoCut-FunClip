@@ -4683,6 +4683,40 @@
       });
     });
   }
+  // REQ-20260922-NNN 播放暂停/停止快捷键（仅优化字幕面板）
+  function optActiveRow() {  // 当前高亮行（无高亮回退首行）
+    var list = revVis('slirn-opt-list');
+    if (!list) return null;
+    return list.querySelector('.slirn-opt-row.active') ||
+           list.querySelector('.slirn-opt-row[data-start-ms]');
+  }
+  function optTogglePlay() {  // 播放/暂停切换：无 src 时从当前行（否则首行）起播
+    var v = revVis('slirn-opt-player');
+    if (!v) { toast('❌ 播放器未就绪', 'error'); return; }
+    if (v.paused) {
+      if (!v.src) {
+        var inner = document.getElementById('slirn-tab-workbench-inner');
+        var tid = inner ? (inner.getAttribute('data-task-id') || '') : '';
+        if (!tid) return;
+        var row = optActiveRow();
+        playOptAt(tid, row ? (parseInt(row.getAttribute('data-start-ms'), 10) || 0) : 0);
+        return;  // playOptAt 内部已 play
+      }
+      var p = v.play();
+      if (p && p.catch) p.catch(function() {});
+    } else {
+      v.pause();
+    }
+  }
+  function optStopPlay() {  // 停止：暂停 + 回到当前高亮行开头（无高亮回 0）
+    var v = revVis('slirn-opt-player');
+    if (!v) return;
+    v.pause();
+    var row = optActiveRow();
+    var startMs = row ? (parseInt(row.getAttribute('data-start-ms'), 10) || 0) : 0;
+    try { v.currentTime = startMs / 1000; } catch (err) {}
+    optPlayerHighlight(v);
+  }
   // REQ-20260918-050：词频列表分页（每页 20 条 = 每行 2 条 × 10 行）
   var OPT_WORDS_PAGE_SIZE = 20;
   var optWordsCurrentPage = 1;
@@ -4941,6 +4975,7 @@
     var st = document.getElementById('slirn-rev-status');
     if (st && st.dataset.taskId && st.dataset.state === 'running') startRevPolling(st.dataset.taskId);
     applyRevKeysState();  // 提示条跟随自定义键位（localStorage — REQ-20260916-005）
+    applyOptKeysState();  // 优化字幕提示条（REQ-20260922-NNN）
     revFilterSync();  // 过滤条：渲染 chips 计数 + 应用上次筛选（localStorage — REQ-20260916-010）
   }
 
@@ -5302,7 +5337,9 @@
     { id: 'keep',   name: '保留（标记后自动下一条）',   def: 'k' },
     { id: 'del',    name: '删除（标记后自动下一条）',   def: 'd' },
     { id: 'split',  name: '切分（展开详情并聚焦内容）', def: 's' },
-    { id: 'esc',    name: '退出说明输入框',             def: 'escape' }
+    { id: 'esc',    name: '退出说明输入框',             def: 'escape' },
+    // REQ-20260922-NNN：优化字幕专用（修订/切分 handler 反查到 stop 无分支 → no-op）
+    { id: 'stop',   name: '停止（优化字幕：暂停并回到本行开头）', def: 'x' }
   ];
   var REV_KEY_ALLOWED = ['arrowup', 'arrowdown', 'arrowleft', 'arrowright', 'escape',
     'enter', 'backspace', 'delete', 'home', 'end', 'pageup', 'pagedown'];  // 单字符键另判
@@ -5358,6 +5395,15 @@
         + '</kbd> 删除（标记后自动下一条）· <kbd>' + revKeyLabel(km.split)
         + '</kbd> 切分（展开详情聚焦内容） · <kbd>' + revKeyLabel(km.esc)
         + '</kbd> 退出输入框'
+        + ' · <span class="slirn-revkeys-open" data-action="revkeys-open" role="button" tabindex="0">⚙ 自定义</span>';
+    });
+  }
+  // REQ-20260922-NNN：优化字幕提示条（只引入 播放/暂停 + 停止 两键，键位跟随自定义）
+  function applyOptKeysState() {
+    var km = revKeysLoad();
+    document.querySelectorAll('.slirn-opt-kbhint').forEach(function(el) {
+      el.innerHTML = '⌨ 快捷键：<kbd>' + revKeyLabel(km.play) + '</kbd> 播放 / 暂停 · <kbd>'
+        + revKeyLabel(km.stop) + '</kbd> 停止（暂停并回到本行开头）'
         + ' · <span class="slirn-revkeys-open" data-action="revkeys-open" role="button" tabindex="0">⚙ 自定义</span>';
     });
   }
@@ -5471,6 +5517,7 @@
     revKeysRenderRows();
     revKeysRenderVideo(k);  // 对照表同步「已绑」标记
     applyRevKeysState();
+    applyOptKeysState();  // 优化字幕提示条跟随（REQ-20260922-NNN）
     // REQ-20260918-042：与视频播放键重叠 → 提醒（允许绑定；列表可见时应用键优先）
     if (REV_VIDEO_KEYS[k]) {
       toast('⚠️ 「' + revKeyLabel(k) + '」是视频播放快捷键（' + REV_VIDEO_KEYS[k]
@@ -5552,6 +5599,26 @@
     else if (act === 'keep') { cutApplyDecision('keep'); }
     else if (act === 'del') { cutApplyDecision('delete'); }
     else if (act === 'split') { cutApplyDecision('split'); }
+  });
+
+  // ===== 优化字幕快捷键（REQ-20260922-NNN）：只引入 播放/暂停 + 停止 两键 =====
+  // 复用修订/切分的自定义键位体系（slirnRevKeys + ⚙ 弹窗），其余动作
+  // （↑↓/r/k/d/s）在本面板不劫持。修订/切分面板可见时对应 handler 接管，
+  // 本 handler 的 opt-list 可见性检查互不抢键。
+  document.addEventListener('keydown', function(e) {
+    if (revKeysModalOpen()) return;  // 键位自定义弹窗打开 → 录制监听器接管
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    var t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
+    var optList = revVis('slirn-opt-list');
+    if (!optList || !optList.offsetParent) return;  // 优化面板不可见 → 不生效
+    var k = (e.key || '').toLowerCase();
+    var km = revKeysLoad();
+    if (!k || (k !== km.play && k !== km.stop)) return;  // 只匹配两键
+    e.preventDefault();
+    if (e.repeat && k === km.stop) return;  // 长按 stop 无意义
+    if (k === km.play) { optTogglePlay(); }
+    else { optStopPlay(); }
   });
 
   // REQ-20260918-055：优化字幕·替换值输入框回车 → 标记完成（采纳 + reviewed）
@@ -5753,6 +5820,7 @@
       revKeysRenderRows();
       revKeysRenderVideo();
       applyRevKeysState();
+      applyOptKeysState();  // 优化字幕提示条恢复默认（REQ-20260922-NNN）
       toast('↩️ 快捷键已恢复默认键位');
       return;
     }
