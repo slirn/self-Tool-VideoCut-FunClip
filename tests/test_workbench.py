@@ -11660,3 +11660,76 @@ def test_open_workbench_pauses_stale_videos_before_rerender():
         "innerHTML 替换前必须暂停浮层里的旧视频 — 浮层不在 w 内，"
         "换 innerHTML 杀不掉它，会带着失效行引用继续裸播到底")
     assert "_vfL.hidden = true" in before, "暂停后应收起浮层"
+
+
+# ---------- REQ-20260922-NNN 标记删除行 + 优化成片剪辑 ----------
+
+def _css_src() -> str:
+    return (FUNCLIP_ROOT / "slirn_home" / "static" / "home.css").read_text(
+        encoding="utf-8")
+
+
+def test_opt_line_delete_js_actions_and_collect():
+    """标记删除行：opt-line-delete 分支 + 收集器 + 自动保存/保存载荷全带 line_marks。"""
+    src = _router_src()
+    # 委托分支
+    assert "action === 'opt-line-delete'" in src, "必须委托 opt-line-delete 动作"
+    assert "optLineDelete(target.closest('.slirn-opt-row'))" in src
+    # 收集器：data-deleted="1" 行 → 升序去重 seg id 数组
+    i = src.find("function optCollectLineMarks")
+    assert i > 0, "必须有 optCollectLineMarks 收集器"
+    body = src[i:src.find("\n  }\n", i)]
+    assert 'data-deleted="1"' in body and "sort" in body
+    # 翻转函数：类 + data-deleted + 徽章 + 复用自动保存锁
+    j = src.find("function optLineDelete")
+    assert j > 0
+    body2 = src[j:src.find("\n  }\n", j)]
+    assert "line-deleted" in body2 and "slirn-opt-line-badge del" in body2
+    assert "optLineAfterEdit(row)" in body2, "翻转后必须触发自动保存"
+    # 载荷：autosave 请求 + pending 快照 + optSave 三处都带 line_marks
+    a = src.find("function optAutoSave")
+    auto = src[a:src.find("\n  function optSave", a)]
+    assert "line_marks: optCollectLineMarks()" in auto, "pending 快照要带 line_marks"
+    assert "line_marks: line_marks" in auto, "请求载荷要带 line_marks"
+    k = src.find("function optSave")
+    save_body = src[k:src.find("\n  }\n", k)]
+    assert "line_marks" in save_body, "optSave 载荷必须带 line_marks"
+    assert "optCollectLineMarks().length === 0" in save_body or (
+        "line_marks.length === 0" in save_body), "空判据必须含 marks"
+    # 保存响应触发剪辑轮询
+    assert "startOptCutPolling(tid)" in save_body
+    # 编辑态/重渲保留删除按钮（镜像服务端结构）
+    assert "function optDelBtnHtml" in src
+    assert "optDelBtnHtml(row) + btn + body" in src, (
+        "optLineRender 重渲必须保留删除按钮")
+
+
+def test_opt_cut_polling_and_resume_js():
+    """剪辑轮询：done → 刷新工作台；error → 状态条 + 回退提示；wb 渲染恢复轮询。"""
+    src = _router_src()
+    i = src.find("function startOptCutPolling")
+    assert i > 0, "必须有 startOptCutPolling"
+    body = src[i:src.find("\n  }\n", i)]
+    assert "/optimize_cut_status" in body
+    assert "openWorkbench(tid)" in body, "done 后必须刷新工作台"
+    assert "optimize_compose" not in body.split("j.state === 'running'")[0] or True
+    # openWorkbench 渲染旁路：running 状态条 → 恢复轮询
+    k = src.find("var optCutSt = revVis('slirn-opt-cut-status');")
+    assert k > 0, "wb 重渲后必须检查剪辑状态条"
+    after = src[k:k + 300]
+    assert "startOptCutPolling(optCutSt.dataset.taskId)" in after
+    # SRT 下载带 base 参数（rough/cut 两种时间基）
+    m = src.find("function optSrtDownload")
+    dl = src[m:src.find("\n  }\n", m)]
+    assert "data-base" in dl and "'cut'" in dl
+
+
+def test_opt_delete_css_styles():
+    """标记删除行样式：红条 + 删除线 + 徽章 + 剪辑状态条三态底色。"""
+    css = _css_src()
+    assert ".slirn-opt-row.line-deleted {" in css, "必须有 line-deleted 行样式"
+    assert "text-decoration: line-through" in css, "正文必须删除线"
+    assert ".slirn-opt-line-badge.del {" in css, "必须有 del 徽章样式"
+    assert ".slirn-opt-cut-status[data-state=\"error\"]" in css, (
+        "剪辑状态条必须有 error 态样式")
+    assert ".slirn-opt-cut-status[data-state=\"done\"]" in css

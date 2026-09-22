@@ -1735,3 +1735,94 @@ def test_poll_status_returns_error_on_post_response(monkeypatch):
                                 interval=0.001, timeout=10.0)
     assert state == "error"
     assert "识别失败" in err
+
+
+# =============== REQ-20260922-NNN：标记删除行 → 优化成片剪辑轮询 ===============
+
+def test_handler_optimize_polls_cut_after_save(monkeypatch, tmp_path: Path):
+    """save 响应带 cut.state=started → handler 轮询 /optimize_cut_status 到完成。"""
+    from slirn_home import pipeline_service as P
+
+    polled = []
+
+    def fake_http_post(api, path, payload, **kw):
+        if path == "/save_optimize_subtitle":
+            return {"ok": True, "cut": {"state": "started", "marks": [1, 2]}}
+        return {"ok": True}
+
+    def fake_poll_status(api, path, tid, **kw):
+        polled.append(path)
+        return ("done", "")
+
+    out = tmp_path / "outputs"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "rough_compose.mp4").write_bytes(b"")
+    (out / "optimize_subtitle.json").write_text(
+        json.dumps({"version": 1, "occurrences": []}, ensure_ascii=False),
+        encoding="utf-8")
+
+    monkeypatch.setattr(P, "_http_post", fake_http_post)
+    monkeypatch.setattr(P, "_poll_status", fake_poll_status)
+
+    job = P.PipelineJob()
+    ok, msg = P.handler_optimize("t-cut", {"accept_all_replacements": True},
+                                 out, "http://x", job)
+    assert ok is True, f"剪辑轮询不应让阶段失败：{msg}"
+    assert "/optimize_cut_status" in polled, (
+        f"save 触发剪辑后必须轮询 /optimize_cut_status，实际轮询了：{polled}")
+
+
+def test_handler_optimize_cut_error_only_warns(monkeypatch, tmp_path: Path):
+    """剪辑失败只 warn 不失败（精剪自动回退粗剪成片，阶段照常完成）。"""
+    from slirn_home import pipeline_service as P
+
+    def fake_http_post(api, path, payload, **kw):
+        if path == "/save_optimize_subtitle":
+            return {"ok": True, "cut": {"state": "started", "marks": [3]}}
+        return {"ok": True}
+
+    def fake_poll_status(api, path, tid, **kw):
+        # 仅剪辑轮询失败；优化字幕本体轮询照常 done
+        if path == "/optimize_cut_status":
+            return ("error", "ffmpeg 剪辑失败（退出码 1）")
+        return ("done", "")
+
+    out = tmp_path / "outputs"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "rough_compose.mp4").write_bytes(b"")
+    (out / "optimize_subtitle.json").write_text(
+        json.dumps({"version": 1, "occurrences": []}, ensure_ascii=False),
+        encoding="utf-8")
+
+    monkeypatch.setattr(P, "_http_post", fake_http_post)
+    monkeypatch.setattr(P, "_poll_status", fake_poll_status)
+    job = P.PipelineJob()
+    ok, msg = P.handler_optimize("t-cut2", {"accept_all_replacements": True},
+                                 out, "http://x", job)
+    assert ok is True, f"剪辑失败只 warn：{msg}"
+    # _log 的日志字段是 msg（不是 message）
+    assert any(e.get("level") == "warn" and "优化成片剪辑" in str(e.get("msg", ""))
+               for e in job.history), f"应留 warn 日志说明回退，实际：{job.history}"
+
+
+def test_handler_optimize_no_cut_no_poll(monkeypatch, tmp_path: Path):
+    """save 无 cut 字段（未触发剪辑）→ 不轮询 optimize_cut_status。"""
+    from slirn_home import pipeline_service as P
+
+    polled = []
+    monkeypatch.setattr(P, "_http_post", lambda *a, **kw: {"ok": True})
+    monkeypatch.setattr(P, "_poll_status",
+                        lambda api, path, tid, **kw: polled.append(path) or ("done", ""))
+
+    out = tmp_path / "outputs"
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "rough_compose.mp4").write_bytes(b"")
+    (out / "optimize_subtitle.json").write_text(
+        json.dumps({"version": 1, "occurrences": []}, ensure_ascii=False),
+        encoding="utf-8")
+
+    job = P.PipelineJob()
+    ok, _ = P.handler_optimize("t-cut3", {"accept_all_replacements": True},
+                               out, "http://x", job)
+    assert ok is True
+    assert "/optimize_cut_status" not in polled

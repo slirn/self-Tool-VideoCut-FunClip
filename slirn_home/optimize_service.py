@@ -228,19 +228,110 @@ def apply_to_segments(
     return out
 
 
-def build_srt(segments: list[dict]) -> str:
-    """优化后行集 → 标准 SRT（new_text 优先；与 subtitle.srt 同构）。"""
+# ---- 标记删除行（REQ-20260922-NNN）----
+
+def deleted_intervals_ms(
+    segments: list[dict], line_marks: list[int] | None,
+) -> list[list[int]]:
+    """标记删除行 → 合并后的毫秒区间（升序，缝隙 <1ms 合并 — 同粗剪口径）。
+
+    优化成片剪辑据此从 rough_compose.mp4 剪除这些区间；时间戳平移据此累计。
+    """
+    if not line_marks:
+        return []
+    from slirn_home import compose_service
+
+    marks = set()
+    for m in line_marks:
+        try:
+            marks.add(int(m))
+        except (TypeError, ValueError):
+            continue
+    spans: list[tuple[int, int]] = []
+    for s in segments or []:
+        try:
+            if int(s.get("i", -1)) in marks:
+                spans.append((int(s["start_ms"]), int(s["end_ms"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return compose_service.merge_intervals_ms(spans)
+
+
+def shift_ms(t: int, intervals_ms: list[list[int]] | None) -> int:
+    """时间戳 t 前移：减去 [0, t] 与删除区间的重叠总时长（毫秒）。
+
+    半开语义：区间端点本身不被算作删除时长（与 ffmpeg trim 的 [start, end) 一致）。
+    """
+    moved = 0
+    for s, e in intervals_ms or []:
+        if s >= t:
+            break  # 区间升序，后面都在 t 之后
+        moved += max(0, min(e, t) - s)
+    return int(t) - moved
+
+
+def build_srt(segments: list[dict], line_marks: list[int] | None = None,
+              *, shift: bool = False) -> str:
+    """优化后行集 → 标准 SRT（new_text 优先；与 subtitle.srt 同构）。
+
+    REQ-20260922-NNN 标记删除行：line_marks 命中的行不进 SRT；shift=True 时
+    保留行时间戳按删除区间累计前移（优化成片 optimize_compose.mp4 时间基）。
+    """
     from slirn_home import asr_service
 
-    norm = [{"i": s["i"], "start": s["start"], "end": s["end"],
-             "text": str(s.get("new_text") or s.get("text", ""))}
-            for s in segments]
+    marks = set()
+    for m in line_marks or []:
+        try:
+            marks.add(int(m))
+        except (TypeError, ValueError):
+            continue
+    del_ms = deleted_intervals_ms(segments, line_marks)
+    norm = []
+    for s in segments:
+        if int(s.get("i", -1)) in marks:
+            continue
+        item = {"i": s["i"], "start": s["start"], "end": s["end"],
+                "text": str(s.get("new_text") or s.get("text", ""))}
+        if shift and del_ms:
+            from slirn_home import compose_service
+
+            item["start"] = compose_service._ms_to_srt_time(
+                shift_ms(int(s["start_ms"]), del_ms))
+            item["end"] = compose_service._ms_to_srt_time(
+                shift_ms(int(s["end_ms"]), del_ms))
+        norm.append(item)
     return asr_service.segments_to_srt(norm)
+
+
+def srt_entries(segments: list[dict], line_marks: list[int] | None = None,
+                *, shift: bool = False) -> list[dict]:
+    """优化后行集 → [{"start_ms", "end_ms", "text"}]（排除删除行；shift 同 build_srt）。
+
+    精剪合成字幕素材 auto 来源的内存直供数据 — 不落共享 tmp 文件，避免与
+    下载端点/其他素材写同一个 tmp/optimized_subs.srt 产生竞态。
+    """
+    marks = set()
+    for m in line_marks or []:
+        try:
+            marks.add(int(m))
+        except (TypeError, ValueError):
+            continue
+    del_ms = deleted_intervals_ms(segments, line_marks)
+    out: list[dict] = []
+    for s in segments:
+        if int(s.get("i", -1)) in marks:
+            continue
+        sm, em = int(s["start_ms"]), int(s["end_ms"])
+        if shift and del_ms:
+            sm, em = shift_ms(sm, del_ms), shift_ms(em, del_ms)
+        out.append({"start_ms": sm, "end_ms": em,
+                    "text": str(s.get("new_text") or s.get("text", ""))})
+    return out
 
 
 def effective_stats(data: dict) -> dict:
     """生效统计：识别行数 / 提取出现数 / 生效替换数 / 未采纳数 / 涉及词数 /
-    整句替换行数（REQ-20260922-NNN，与局部替换正交单列）。"""
+    整句替换行数（REQ-20260922-NNN，与局部替换正交单列）/ 标记删除行数。"""
     occs = data.get("occurrences") or []
     live = [o for o in occs if o.get("applied", True)]
     return {
@@ -250,6 +341,7 @@ def effective_stats(data: dict) -> dict:
         "skipped": len(occs) - len(live),
         "words": len(aggregate_words(occs)),
         "line_edits": len(data.get("line_edits") or []),
+        "line_marks": len(data.get("line_marks") or []),
     }
 
 
@@ -462,6 +554,7 @@ def save_decisions(
     outputs_dir: Path,
     decisions: list[dict],
     line_edits: list[dict] | None = None,
+    line_marks: list[int] | None = None,
 ) -> tuple[dict, int]:
     """把人工决定合并落盘。返回 (data, 生效条数)。
 
@@ -474,6 +567,11 @@ def save_decisions(
     全量口径 — 不传（None/[]）= 清空已有整句替换。校验：非 dict / 非法 seg /
     未知 seg / 空白文本 / 与原文相同 → 丢弃。整句行跳过局部替换（见
     apply_to_segments）。
+
+    REQ-20260922-NNN 标记删除行：line_marks [seg id, …]，全量口径 — 不传
+    （None/[]）= 清空。校验：非法 int / 未知 seg → 丢弃；去重升序。保存后有
+    标记行的剪辑由 /save_optimize_subtitle 端点 kick（见 compose_service.
+    start_optimize_cut）。
     """
     data = load_optimize(outputs_dir)
     if data is None:
@@ -513,6 +611,16 @@ def save_decisions(
         edits.append({"seg": int(seg_key), "text": text})
     edits.sort(key=lambda x: x["seg"])
     data["line_edits"] = edits
+    # 标记删除行：全量快照校验 + 去重升序
+    marks: set[int] = set()
+    for m in line_marks or []:
+        try:
+            key = str(int(m))
+        except (TypeError, ValueError):
+            continue
+        if key in seg_texts:
+            marks.add(int(key))
+    data["line_marks"] = sorted(marks)
     data["segments"] = apply_to_segments(data.get("segments") or [], data["occurrences"], edits)
     data["words"] = aggregate_words(data["occurrences"])
     data["mapping"] = build_mapping(data["occurrences"])

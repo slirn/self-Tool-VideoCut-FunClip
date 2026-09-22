@@ -737,6 +737,10 @@
         var optSt = revVis('slirn-opt-status');  // 优化 job 还在跑 → 恢复轮询
         if (optSt && optSt.dataset.taskId && optSt.dataset.state === 'running')
           startOptPolling(optSt.dataset.taskId);
+        // REQ-20260922-NNN 标记删除行：优化成片剪辑还在跑 → 恢复轮询
+        var optCutSt = revVis('slirn-opt-cut-status');
+        if (optCutSt && optCutSt.dataset.taskId && optCutSt.dataset.state === 'running')
+          startOptCutPolling(optCutSt.dataset.taskId);
         applyWbStagesState();  // 恢复上次收起/展开（跨刷新保持 — REQ-20260916-002）
         applyRevRigorState();  // 上次选过的严谨性级别预填（REQ-20260916-003）
         applyWbAutoNextState();  // 自动进下一阶段开关回填（REQ-20260918-046）
@@ -4480,6 +4484,19 @@
     });
     return edits;
   }
+  // REQ-20260922-NNN 标记删除行：收集 data-deleted="1" 行 → [seg id]（升序去重）。
+  // 保存后服务端据此把标记行时间段从粗剪成片剪除 → optimize_compose.mp4
+  function optCollectLineMarks() {
+    var list = revVis('slirn-opt-list');
+    if (!list) return [];
+    var seen = {};
+    var marks = [];
+    list.querySelectorAll('.slirn-opt-row[data-deleted="1"]').forEach(function(row) {
+      var id = parseInt(row.getAttribute('data-id'), 10);
+      if (!isNaN(id) && !seen[id]) { seen[id] = 1; marks.push(id); }
+    });
+    return marks.sort(function(a, b) { return a - b; });
+  }
   // REQ-20260918-056：回车后自动保存 — 含并发锁（连续 Enter 合并到 pending）
   var _optSaveInFlight = null;
   var _optSavePending = null;
@@ -4488,13 +4505,15 @@
     if (_optSaveInFlight) {
       // 已有请求在跑 → 把当前快照记为"完成后立即再发一次"
       _optSavePending = {tid: tid, decisions: optCollectDecisions(),
-                         line_edits: optCollectLineEdits()};
+                         line_edits: optCollectLineEdits(),
+                         line_marks: optCollectLineMarks()};
       return;
     }
     var decisions = optCollectDecisions();
     var line_edits = optCollectLineEdits();
+    var line_marks = optCollectLineMarks();
     _optSaveInFlight = postJSON(SLIRN_API + '/save_optimize_subtitle',
-      {task_id: tid, decisions: decisions, line_edits: line_edits})
+      {task_id: tid, decisions: decisions, line_edits: line_edits, line_marks: line_marks})
       .then(function(r) {
         if (r && r.ok) {
           toast('✅ 已自动保存', 'success');
@@ -4518,15 +4537,20 @@
     var tid = btn.getAttribute('data-task-id') || '';
     var decisions = optCollectDecisions();
     var line_edits = optCollectLineEdits();
-    if (decisions.length === 0 && line_edits.length === 0) {
+    var line_marks = optCollectLineMarks();
+    if (decisions.length === 0 && line_edits.length === 0 && line_marks.length === 0) {
       toast('❌ 无优化结果列表', 'error'); return;
     }
     postJSON(SLIRN_API + '/save_optimize_subtitle',
-      {task_id: tid, decisions: decisions, line_edits: line_edits})
+      {task_id: tid, decisions: decisions, line_edits: line_edits, line_marks: line_marks})
       .then(function(r) {
         if (r && r.ok) {
           toast(r.toast || '已确认保存');
           openWorkbench(tid);  // 刷新阶段态（done）+ 统计 + 对应关系
+          // REQ-20260922-NNN 标记删除行：保存触发了优化成片剪辑 → 轮询到完成
+          if (r.cut && (r.cut.state === 'started' || r.cut.state === 'running')) {
+            startOptCutPolling(tid);
+          }
         } else if (r && r.error) {
           toast('❌ ' + r.error, 'error');
         }
@@ -4543,6 +4567,7 @@
     // 编辑态预填：当前生效文本（保存过的整句/局部替换结果，无则原文）
     var prefill = row.getAttribute('data-eff-text') || row.getAttribute('data-orig-text') || '';
     textCol.innerHTML =
+      optDelBtnHtml(row) +
       '<button class="slirn-btn slirn-btn-xs slirn-opt-line-btn" data-action="opt-line-edit" ' +
       'title="整句替换：直接改写整行文本，覆盖本行局部替换">✏️</button>' +
       '<span class="slirn-opt-line-editbox">' +
@@ -4589,18 +4614,20 @@
     if (!textCol) return;
     var rid = row.getAttribute('data-id') || '';
     var orig = row.getAttribute('data-orig-text') || '';
+    var del = row.getAttribute('data-deleted') === '1';
     var btn = hasFull
       ? '<button class="slirn-btn slirn-btn-xs slirn-opt-line-btn" data-action="opt-line-edit" title="取消整句替换，恢复局部替换">↩️</button>'
       : '<button class="slirn-btn slirn-btn-xs slirn-opt-line-btn" data-action="opt-line-edit" title="整句替换：直接改写整行文本，覆盖本行局部替换">✏️</button>';
+    var delBadge = del ? '<span class="slirn-opt-line-badge del">🗑️ 已标记删除</span>' : '';
     var body;
     if (hasFull) {
-      body = '<span class="slirn-opt-line-badge">✏️ 整句替换</span>' +
+      body = delBadge + '<span class="slirn-opt-line-badge">✏️ 整句替换</span>' +
         '<span class="slirn-opt-line-new"></span>' +
         '<span class="slirn-opt-line-orig" title="原文"></span>';
     } else {
-      body = '<span class="slirn-fw-rawtext"></span>';
+      body = delBadge + '<span class="slirn-fw-rawtext"></span>';
     }
-    textCol.innerHTML = btn + body;
+    textCol.innerHTML = optDelBtnHtml(row) + btn + body;
     // textContent 赋值 = 天然转义（不用 innerHTML 拼用户文本）
     if (hasFull) {
       textCol.querySelector('.slirn-opt-line-new').textContent = fullText;
@@ -4632,9 +4659,95 @@
     var tid = inner ? (inner.getAttribute('data-task-id') || '') : '';
     if (tid) optAutoSave(tid);
   }
-  function optSrtDownload(btn) {  // 下载优化后成片字幕 SRT（粗剪成片时间基）
+  // ========== REQ-20260922-NNN 标记删除行：🗑️/✚ 翻转 + 优化成片剪辑轮询 ==========
+  function optDelBtnHtml(row) {  // 行首删除按钮镜像（编辑态/重渲正文列时保留）
+    var del = row.getAttribute('data-deleted') === '1';
+    return del
+      ? '<button class="slirn-btn slirn-btn-xs slirn-opt-line-btn slirn-opt-del-btn" data-action="opt-line-delete" data-deleted="1" title="取消删除标记：本行恢复保留">✚</button>'
+      : '<button class="slirn-btn slirn-btn-xs slirn-opt-line-btn slirn-opt-del-btn" data-action="opt-line-delete" data-deleted="0" title="标记删除：保存后本行时间段将从粗剪成片剪除，字幕时间轴自动前移">🗑️</button>';
+  }
+  function optLineDelete(row) {  // 🗑️ 标记 / ✚ 取消 + 行样式 + 徽章 + 自动保存
+    if (!row) return;
+    if (row.classList.contains('editing')) return;  // 整句编辑态不抢操作
+    var to = row.getAttribute('data-deleted') !== '1';
+    row.setAttribute('data-deleted', to ? '1' : '0');
+    row.classList.toggle('line-deleted', to);
+    var textCol = row.querySelector('.slirn-fw-text');
+    if (textCol) {
+      var btn = textCol.querySelector('.slirn-opt-del-btn');
+      if (btn) {
+        btn.setAttribute('data-deleted', to ? '1' : '0');
+        btn.innerHTML = to ? '✚' : '🗑️';
+        btn.title = to ? '取消删除标记：本行恢复保留'
+          : '标记删除：保存后本行时间段将从粗剪成片剪除，字幕时间轴自动前移';
+      }
+      var badge = textCol.querySelector('.slirn-opt-line-badge.del');
+      if (to && !badge) {
+        badge = document.createElement('span');
+        badge.className = 'slirn-opt-line-badge del';
+        badge.textContent = '🗑️ 已标记删除';
+        // 放在正文最前（✏️ 整句替换徽章之前 — 与服务端 _line_html 同构）
+        var firstText = textCol.querySelector(
+          '.slirn-opt-line-badge:not(.del), .slirn-fw-rawtext, .slirn-opt-line-new');
+        textCol.insertBefore(badge, firstText || null);
+      } else if (!to && badge) {
+        badge.parentNode.removeChild(badge);
+      }
+    }
+    if (to) {
+      var s = ((parseInt(row.getAttribute('data-end-ms'), 10) || 0)
+        - (parseInt(row.getAttribute('data-start-ms'), 10) || 0)) / 1000;
+      toast('🗑️ 已标记删除 — 保存后从成片剪除该行（约 ' + s.toFixed(1) + 's，字幕自动前移）');
+    } else {
+      toast('✚ 已取消删除标记', 'success');
+    }
+    optLineAfterEdit(row);  // 复用整句替换的自动保存锁（REQ-20260918-056）
+  }
+  var optCutPollTimer = null;
+  function startOptCutPolling(tid) {  // 优化成片剪辑轮询：done → 刷新工作台（含产物提示条）
+    if (optCutPollTimer) { clearInterval(optCutPollTimer); optCutPollTimer = null; }
+    var update = function() {
+      postJSON(SLIRN_API + '/optimize_cut_status', {task_id: tid}).then(function(r) {
+        if (!r || !r.ok) return;
+        var j = r.job || {};
+        var el = revVis('slirn-opt-cut-status');
+        if (j.state === 'running') {
+          if (el) {
+            el.dataset.state = 'running';
+            el.innerHTML = '⏳ 优化成片剪辑中'
+              + (j.progress ? ' · ' + Math.round(j.progress) + '%' : '')
+              + (j.stage ? ' · ' + escapeHtml(j.stage) : '')
+              + ' — 完成后精剪合成自动使用新视频';
+          }
+        } else {
+          if (optCutPollTimer) { clearInterval(optCutPollTimer); optCutPollTimer = null; }
+          if (j.state === 'done') {
+            var res = j.result || {};
+            if (res.cleared) {
+              toast('🧹 标记删除行已全部取消，优化成片产物已清理');
+            } else if (!res.already) {
+              toast('🎬 优化成片已生成：删 ' + (res.deleted_sec || 0)
+                + 's · 保留 ' + (res.kept_sec || 0) + 's — 精剪合成将自动使用');
+            }
+            openWorkbench(tid);  // 刷新统计 + 剪辑状态条 + 精剪素材上游
+          } else if (j.state === 'error') {
+            if (el) {
+              el.dataset.state = 'error';
+              el.innerHTML = '⚠️ 优化成片剪辑失败：' + escapeHtml(j.error || '未知错误')
+                + ' — 重新「确认保存」可再次触发';
+            }
+            toast('❌ 优化成片剪辑失败（精剪合成将回退使用粗剪成片）', 'error');
+          }
+        }
+      });
+    };
+    update();
+    optCutPollTimer = setInterval(update, 2000);
+  }
+  function optSrtDownload(btn) {  // 下载优化字幕 SRT（base=rough 粗剪时间基 / cut 优化成片时间基）
     var tid = btn.getAttribute('data-task-id') || '';
-    postJSON(SLIRN_API + '/optimized_srt', {task_id: tid}).then(function(r) {
+    var base = btn.getAttribute('data-base') || 'rough';
+    postJSON(SLIRN_API + '/optimized_srt', {task_id: tid, base: base}).then(function(r) {
       if (!r || !r.ok || !r.srt) {
         toast('❌ ' + (r && r.error ? r.error : '获取 SRT 失败'), 'error');
         return;
@@ -4642,10 +4755,12 @@
       var blob = new Blob([r.srt], {type: 'text/plain;charset=utf-8'});
       var url = URL.createObjectURL(blob);
       var a = document.createElement('a');
-      a.href = url; a.download = 'optimized_subs_' + tid + '.srt';
+      a.href = url;
+      a.download = (base === 'cut' ? 'optimize_compose_subs_' : 'optimized_subs_') + tid + '.srt';
       document.body.appendChild(a); a.click();
       setTimeout(function() { URL.revokeObjectURL(url); document.body.removeChild(a); }, 100);
-      toast('⬇️ 已下载 ' + (r.lines || 0) + ' 行 SRT');
+      toast('⬇️ 已下载 ' + (r.lines || 0) + ' 行 SRT'
+        + (base === 'cut' ? '（优化成片时间基）' : ''));
     });
   }
   function playOptAt(tid, startMs) {  // 行定位播放（成片时间基 — ?src=rough_compose 源）
@@ -6043,6 +6158,10 @@
     else if (action === 'opt-line-edit') {
       // REQ-20260922-NNN 整句替换：✏️ 进入编辑态；↩️（已有整句）= 取消整句
       optLineEdit(target.closest('.slirn-opt-row'));
+    }
+    else if (action === 'opt-line-delete') {
+      // REQ-20260922-NNN 标记删除行：🗑️ 标记 / ✚ 取消（保存后剪除出优化成片）
+      optLineDelete(target.closest('.slirn-opt-row'));
     }
     else if (action === 'opt-line-apply') {
       optLineApply(target.closest('.slirn-opt-row'));

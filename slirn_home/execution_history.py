@@ -37,6 +37,7 @@ KIND_ROUGH_CUT_LINK_PERSON = "rough_cut_link_person"
 KIND_ROUGH_COMPOSE = "rough_compose"
 KIND_ROUGH_COMPOSE_DELETE = "rough_compose_delete"
 KIND_OPTIMIZE = "optimize"
+KIND_OPTIMIZE_CUT = "optimize_cut"
 KIND_FINE_AI_LAYOUT = "fine_ai_layout"
 KIND_FINE_BG_DETECT = "fine_bg_detect"
 KIND_FINE_PREVIEW = "fine_preview"
@@ -51,6 +52,7 @@ KIND_LABELS: dict[str, str] = {
     KIND_ROUGH_COMPOSE: "合成初剪视频",
     KIND_ROUGH_COMPOSE_DELETE: "删除粗剪成品",
     KIND_OPTIMIZE: "确认保存",
+    KIND_OPTIMIZE_CUT: "优化成片剪辑",
     KIND_FINE_AI_LAYOUT: "AI智能布局",
     KIND_FINE_BG_DETECT: "检测区域",
     KIND_FINE_PREVIEW: "生成预览",
@@ -66,6 +68,7 @@ KIND_TO_STAGE: dict[str, str] = {
     KIND_ROUGH_COMPOSE: "rough_compose",
     KIND_ROUGH_COMPOSE_DELETE: "rough_compose",
     KIND_OPTIMIZE: "fine_review",
+    KIND_OPTIMIZE_CUT: "fine_review",
     KIND_FINE_AI_LAYOUT: "fine_cut",
     KIND_FINE_BG_DETECT: "fine_cut",
     KIND_FINE_PREVIEW: "fine_cut",
@@ -81,6 +84,7 @@ DEFAULT_DESCRIPTIONS: dict[str, str] = {
     KIND_ROUGH_COMPOSE: "ffmpeg 拼接片段，输出初剪视频（含随片字幕）",
     KIND_ROUGH_COMPOSE_DELETE: "删除上一轮粗剪成品（mp4 + srt 副产物）",
     KIND_OPTIMIZE: "优化字幕保存：识别成片 + 大模型提取不明确字词",
+    KIND_OPTIMIZE_CUT: "把标记删除行的时间区间从粗剪成片剪除，输出优化成片（字幕时间轴随片前移）",
     KIND_FINE_AI_LAYOUT: "LLM 分析视频画面，生成精剪布局建议",
     KIND_FINE_BG_DETECT: "检测视频主体区域，记录到 detected_region",
     KIND_FINE_PREVIEW: "生成精剪预览切片（可调起止时间）",
@@ -91,8 +95,8 @@ DEFAULT_DESCRIPTIONS: dict[str, str] = {
 ALL_KINDS = {KIND_SUBTITLE_GENERATION, KIND_SUBTITLE_REVIEW,
              KIND_ROUGH_CUT, KIND_ROUGH_CUT_LINK_PERSON,
              KIND_ROUGH_COMPOSE, KIND_ROUGH_COMPOSE_DELETE,
-             KIND_OPTIMIZE, KIND_FINE_AI_LAYOUT, KIND_FINE_BG_DETECT,
-             KIND_FINE_PREVIEW, KIND_FINE_EXPORT}
+             KIND_OPTIMIZE, KIND_OPTIMIZE_CUT, KIND_FINE_AI_LAYOUT,
+             KIND_FINE_BG_DETECT, KIND_FINE_PREVIEW, KIND_FINE_EXPORT}
 
 
 def _now_iso(ts: float) -> str:

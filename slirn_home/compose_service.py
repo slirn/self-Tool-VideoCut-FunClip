@@ -22,6 +22,7 @@ funclip/videoclipper.py VideoClipper.video_clip 的 timestamp_list 分支）：
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -495,4 +496,329 @@ def start_compose(task_id: str, video_path: Path, intervals_ms: list[tuple[int, 
             execution_history.record_finish(outputs_dir, exec_id, success=False, error=str(e))
 
     threading.Thread(target=_run, name=f"rough-compose-{task_id}", daemon=True).start()
+    return True
+
+
+# =============== 优化成片剪辑（REQ-20260922-NNN 标记删除行） ===============
+#
+# 优化字幕阶段人工标记删除行 → 保存后把删除行的时间区间从 rough_compose.mp4
+# 剪除，产出 optimize_compose.mp4（精剪合成阶段自动优先用它）。删除量通常
+# 很少，直接 ffmpeg 单趟重编码远快于重跑粗剪合成（moviepy 全片重编码 +
+# 重识别 + LLM）。字幕时间轴按剪除量前移（deleted_intervals_ms / shift_ms
+# 在 optimize_service，纯函数可单测）。
+
+OPTIMIZE_COMPOSE_NAME = "optimize_compose.mp4"
+OPTIMIZE_COMPOSE_TMP_NAME = "optimize_compose.tmp.mp4"
+OPTIMIZE_CUT_JSON = "optimize_cut.json"
+
+
+def optimize_compose_path(outputs_dir: Path) -> Path:
+    """优化成片固定产物路径 outputs/optimize_compose.mp4。"""
+    return Path(outputs_dir) / OPTIMIZE_COMPOSE_NAME
+
+
+def complement_intervals_ms(del_ms: list[list[int]], total_ms: int) -> list[list[int]]:
+    """删除区间的补集 = 保留区间（[0, total_ms] 内，clamp + 丢 <1ms 碎片）。
+
+    与 merge_intervals_ms 同口径：缝隙不足 1ms 的保留段视为不存在（ffmpeg
+    trim 也不会产出有效帧）。
+    """
+    total = int(total_ms)
+    keep: list[list[int]] = []
+    cursor = 0
+    for s, e in sorted(del_ms or []):
+        s, e = max(0, min(total, int(s))), max(0, min(total, int(e)))
+        if e <= s:
+            continue
+        if s - cursor >= 1:
+            keep.append([cursor, s])
+        cursor = max(cursor, e)
+    if total - cursor >= 1:
+        keep.append([cursor, total])
+    return keep
+
+
+def build_optimize_cut_cmd(src: Path, dst: Path, keep_ms: list[list[int]],
+                           *, has_audio: bool = True) -> list[str]:
+    """优化成片剪辑的 ffmpeg argv（单趟精确重编码，纯函数可单测）。
+
+    每段 [0:v]trim+setpts（有音轨再 [0:a]atrim+asetpts）→ concat 拼接。
+    不用 -c copy 流复制：关键帧对齐会把被删语音漏回成片且累积字幕失步 —
+    本阶段的意义就是精确剪除。
+    """
+    parts: list[str] = []
+    labels: list[str] = []
+    for k, (s, e) in enumerate(keep_ms):
+        ss, se = f"{s / 1000:.3f}", f"{e / 1000:.3f}"
+        parts.append(f"[0:v]trim=start={ss}:end={se},setpts=PTS-STARTPTS[v{k}]")
+        if has_audio:
+            parts.append(f"[0:a]atrim=start={ss}:end={se},asetpts=PTS-STARTPTS[a{k}]")
+            labels.extend((f"[v{k}]", f"[a{k}]"))
+        else:
+            labels.append(f"[v{k}]")
+    n = len(keep_ms)
+    if has_audio:
+        parts.append(f"{''.join(labels)}concat=n={n}:v=1:a=1[vout][aout]")
+    else:
+        parts.append(f"{''.join(labels)}concat=n={n}:v=1:a=0[vout]")
+    cmd = ["ffmpeg", "-y", "-i", str(src),
+           "-filter_complex", ";".join(parts)]
+    if has_audio:
+        cmd += ["-map", "[vout]", "-map", "[aout]", "-c:a", "aac", "-b:a", "128k"]
+    else:
+        cmd += ["-map", "[vout]"]
+    cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-movflags", "+faststart",
+            "-progress", "pipe:1", "-nostats", str(dst)]
+    return cmd
+
+
+def _delete_cut_artifacts(outputs_dir: Path) -> list[str]:
+    """删优化成片三件产物 + tmp 半成品（逐个 try，返回实际删掉的文件名）。"""
+    out_dir = Path(outputs_dir)
+    removed: list[str] = []
+    for name in (OPTIMIZE_COMPOSE_NAME, "optimize_compose.srt",
+                 OPTIMIZE_CUT_JSON, OPTIMIZE_COMPOSE_TMP_NAME):
+        p = out_dir / name
+        if p.exists():
+            try:
+                p.unlink()
+                removed.append(name)
+            except OSError as e:
+                log.warning("[opt-cut] 删除失败 %s: %s", p, e)
+    return removed
+
+
+def optimize_cut_ready(outputs_dir: Path, line_marks: list[int] | None) -> dict | None:
+    """优化成片是否「就绪」（与当前 marks 匹配且不旧于粗剪成片）。不就绪 → None。
+
+    判据：mp4 + sidecar 都在、sidecar.marks == 当前 line_marks（R2 — 单靠
+    mtime 判新鲜度会被「marks 只翻转了一行」绕过）、且 optimize_compose.mp4
+    不旧于 rough_compose.mp4（rough 重合成后自动失效，精剪回退用 rough）。
+    """
+    out_dir = Path(outputs_dir)
+    mp4 = optimize_compose_path(out_dir)
+    sidecar = out_dir / OPTIMIZE_CUT_JSON
+    rough = rough_compose_path(out_dir)
+    if not (mp4.exists() and sidecar.exists() and rough.exists()):
+        return None
+    try:
+        meta = json.loads(sidecar.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001
+        log.warning("[opt-cut] sidecar 损坏: %s", e)
+        return None
+    want = sorted({int(m) for m in line_marks or []})
+    have = sorted({int(m) for m in meta.get("marks") or []})
+    if want != have:
+        return None
+    if mp4.stat().st_mtime < rough.stat().st_mtime:
+        return None
+    return meta
+
+
+# job 表结构：{"state": "running|done|error", "progress": 0-100, "stage": str,
+#             "error": str|None, "started_at", "finished_at", "result": dict|None}
+_OPT_CUT_JOBS: dict[str, dict] = {}
+_OPT_CUT_JOBS_LOCK = threading.Lock()
+
+
+def opt_cut_job_status(task_id: str) -> dict | None:
+    with _OPT_CUT_JOBS_LOCK:
+        j = _OPT_CUT_JOBS.get(task_id)
+        return dict(j) if j else None
+
+
+def opt_cut_status(task_id: str, outputs_dir: Path,
+                   line_marks: list[int] | None = None) -> dict:
+    """剪辑状态：内存 job 优先，服务重启后按磁盘兜底。
+
+    兜底口径：sidecar 与当前 marks 匹配且不旧于 rough → done；只剩 tmp 半成品
+    → error（提示重存触发）；否则 idle。"""
+    job = opt_cut_job_status(task_id)
+    if job:
+        return job
+    ready = optimize_cut_ready(outputs_dir, line_marks)
+    if ready is not None:
+        return {"state": "done", "progress": 100.0, "stage": "完成",
+                "error": None, "result": ready}
+    if (Path(outputs_dir) / OPTIMIZE_COMPOSE_TMP_NAME).exists():
+        return {"state": "error", "progress": 0.0, "stage": "失败",
+                "error": "上次剪辑未完成（服务重启？）— 重新保存优化字幕可再次触发",
+                "result": None}
+    return {"state": "idle", "progress": 0.0, "stage": "", "error": None, "result": None}
+
+
+def start_optimize_cut(task_id: str, outputs_dir: Path, src: Path, *,
+                       auto: bool = False, auto_session_id: str = "") -> bool:
+    """启动优化成片剪辑线程。已在跑 → False（不重复起）。
+
+    R1（autosave 竞态）：编码耗时分钟级，期间用户可能继续翻转标记 → 每轮
+    编码完成后重读 optimize_subtitle.json 复核 marks；不一致删 tmp 重跑
+    （≤3 次）；marks 变空 → 线程自清产物直接完成。保存端点只 kick。
+    R3（crash-safe）：先写 optimize_compose.tmp.mp4，成功后 os.replace —
+    optimize_compose.mp4 永无半截态。
+    """
+    with _OPT_CUT_JOBS_LOCK:
+        existing = _OPT_CUT_JOBS.get(task_id)
+        if existing and existing.get("state") == "running":
+            return False
+        _OPT_CUT_JOBS[task_id] = {
+            "state": "running", "progress": 0.0, "stage": "准备", "error": None,
+            "started_at": time.time(), "finished_at": None, "result": None,
+        }
+
+    from slirn_home import optimize_service
+
+    outputs_dir = Path(outputs_dir)
+    src = Path(src)
+    exec_id = execution_history.record_start(
+        outputs_dir, execution_history.KIND_OPTIMIZE_CUT,
+        extra={"src": src.name}, auto=auto, auto_session_id=auto_session_id)
+
+    def _run():
+        import io
+
+        from slirn_home import asr_service
+
+        job = _OPT_CUT_JOBS[task_id]
+        t0 = time.time()
+        try:
+            for attempt in range(3):
+                data = optimize_service.load_optimize(outputs_dir)
+                if data is None:
+                    raise RuntimeError("optimize_subtitle.json 不存在")
+                marks = sorted({int(m) for m in data.get("line_marks") or []})
+                if not marks:
+                    # marks 已被清空（保存时全部取消）→ 自清产物，直接完成
+                    removed = _delete_cut_artifacts(outputs_dir)
+                    job.update({"state": "done", "progress": 100.0, "stage": "无需剪辑",
+                                "finished_at": time.time(),
+                                "result": {"cleared": True, "removed": removed}})
+                    log.info("[opt-cut][%s] 标记已清空，清理产物: %s", task_id, removed)
+                    execution_history.patch_fields(outputs_dir, exec_id, {
+                        "description": "标记删除行已全部取消，清理优化成片产物（无剪辑）"})
+                    execution_history.record_finish(outputs_dir, exec_id, success=True, error="")
+                    return
+                # 已就绪且与当前 marks 一致 → 幂等直接完成（防重复 kick 白编）
+                ready = optimize_cut_ready(outputs_dir, marks)
+                if ready is not None:
+                    job.update({"state": "done", "progress": 100.0, "stage": "完成",
+                                "finished_at": time.time(),
+                                "result": {**ready, "already": True}})
+                    execution_history.record_finish(outputs_dir, exec_id, success=True, error="")
+                    return
+
+                segments = data.get("segments") or []
+                del_ms = optimize_service.deleted_intervals_ms(segments, marks)
+                if not del_ms:
+                    raise RuntimeError("标记删除行没有对应的有效时间段")
+                job["stage"] = "读取源视频"
+                dur = _probe_duration(src)
+                if not dur:
+                    raise RuntimeError(f"读不到源视频时长: {src}")
+                total_ms = int(dur * 1000)
+                keep_ms = complement_intervals_ms(del_ms, total_ms)
+                if not keep_ms:
+                    raise RuntimeError("全部内容都被标记删除 — 请至少保留一行字幕")
+                total_keep_ms = sum(e - s for s, e in keep_ms)
+                deleted_ms = total_ms - total_keep_ms
+
+                job["stage"] = "剪辑中"
+                has_audio = asr_service.has_audio_track(src)
+                dst_tmp = outputs_dir / OPTIMIZE_COMPOSE_TMP_NAME
+                cmd = build_optimize_cut_cmd(src, dst_tmp, keep_ms, has_audio=has_audio)
+                log.info("[opt-cut][%s] 第 %d 次剪辑：删 %d 区间 %.1fs → 保留 %.1fs",
+                         task_id, attempt + 1, len(del_ms),
+                         deleted_ms / 1000, total_keep_ms / 1000)
+                # 进度解析照搬 app.py 精剪导出（Windows 8KB 缓冲 + stderr 死锁教训）
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
+                proc.stdout = io.TextIOWrapper(
+                    proc.stdout, encoding="utf-8", newline="\n", line_buffering=True)
+                while True:
+                    line = proc.stdout.readline()
+                    if not line:
+                        if proc.poll() is not None:
+                            break
+                        continue
+                    line = line.strip()
+                    if "=" not in line:
+                        continue
+                    key, _, val = line.partition("=")
+                    if key in ("out_time_ms", "out_time_us"):
+                        try:
+                            t = int(val) if key == "out_time_ms" else int(val) // 1000
+                        except ValueError:
+                            continue
+                        # 输出时间轴总长 = 保留时长（concat 后重置）
+                        job["progress"] = round(
+                            5.0 + min(1.0, t / max(1, total_keep_ms)) * 93.0, 1)
+                rc = proc.wait()
+                if rc != 0:
+                    try:
+                        dst_tmp.unlink()
+                    except OSError:
+                        pass
+                    raise RuntimeError(f"ffmpeg 剪辑失败（退出码 {rc}）")
+
+                # R1 复核：编码期间 marks 可能又变了（autosave 不经过保存端点）
+                data2 = optimize_service.load_optimize(outputs_dir)
+                marks2 = sorted({int(m) for m in (data2 or {}).get("line_marks") or []})
+                if marks2 != marks:
+                    log.info("[opt-cut][%s] 剪辑期间标记已变化 %s → %s，重跑",
+                             task_id, marks, marks2)
+                    try:
+                        dst_tmp.unlink()
+                    except OSError:
+                        pass
+                    continue  # attempt 下一轮（≤3）
+
+                # R3：原子落盘 + 随片字幕（时间轴前移）+ sidecar
+                final = optimize_compose_path(outputs_dir)
+                os.replace(dst_tmp, final)
+                segs_now = (data2 or {}).get("segments") or segments
+                final.with_suffix(".srt").write_text(
+                    optimize_service.build_srt(segs_now, marks, shift=True),
+                    encoding="utf-8")
+                meta = {
+                    "marks": marks,
+                    "intervals": len(del_ms),
+                    "deleted_ms": deleted_ms,
+                    "deleted_sec": round(deleted_ms / 1000.0, 1),
+                    "kept_sec": round(total_keep_ms / 1000.0, 1),
+                    "src": src.name,
+                    "src_mtime": src.stat().st_mtime,
+                    "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "elapsed": round(time.time() - t0, 1),
+                }
+                (outputs_dir / OPTIMIZE_CUT_JSON).write_text(
+                    json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+                dur2 = _probe_duration(final)
+                result = {**meta, "duration": dur2,
+                          "size_mb": round(final.stat().st_size / 1024 / 1024, 1)}
+                job.update({"state": "done", "progress": 100.0, "stage": "完成",
+                            "finished_at": time.time(), "result": result})
+                log.info("[opt-cut][%s] 完成：删 %.1fs 保留 %.1fs → %s（%.1fs）",
+                         task_id, deleted_ms / 1000, total_keep_ms / 1000,
+                         final.name, result["elapsed"])
+                execution_history.patch_extra(outputs_dir, exec_id, {
+                    "lines": len(marks), "deleted_sec": meta["deleted_sec"],
+                    "output": final.name})
+                execution_history.patch_fields(outputs_dir, exec_id, {
+                    "description": (f"剪除 {len(marks)} 行（{meta['deleted_sec']}s），"
+                                    f"输出优化成片 {final.name}（{meta['kept_sec']}s）")})
+                execution_history.record_finish(outputs_dir, exec_id, success=True, error="")
+                return
+            # 3 轮 marks 都在变（用户持续编辑中）→ 提示稳定后再保存
+            raise RuntimeError("剪辑期间标记删除行持续变化（已重试 3 次）— "
+                               "标记稳定后请再次保存触发剪辑")
+        except Exception as e:  # noqa: BLE001 — 后台线程必须全兜底
+            job["state"] = "error"
+            job["error"] = str(e)
+            job["stage"] = "失败"
+            job["finished_at"] = time.time()
+            log.exception("[opt-cut][%s] 剪辑失败", task_id)
+            execution_history.record_finish(outputs_dir, exec_id, success=False, error=str(e))
+
+    threading.Thread(target=_run, name=f"optimize-cut-{task_id}", daemon=True).start()
     return True

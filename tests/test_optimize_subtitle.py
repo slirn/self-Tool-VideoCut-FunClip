@@ -176,7 +176,7 @@ def test_effective_stats():
     data = {"segments": SEGS, "occurrences": _occs(**{"1": False})}
     est = osvc.effective_stats(data)
     assert est == {"lines": 3, "occurrences": 3, "applied": 2, "skipped": 1,
-                   "words": 1, "line_edits": 0}
+                   "words": 1, "line_edits": 0, "line_marks": 0}
 
 
 def test_effective_stats_with_line_edits():
@@ -513,3 +513,76 @@ def test_render_zone_line_edit_full_edit_row(tmp_path, monkeypatch):
     # 头部统计 + 快捷键提示条容器
     assert "整句替换 <b>1</b> 行" in html
     assert 'class="slirn-opt-kbhint" id="slirn-opt-kbhint"' in html
+
+
+# =============== REQ-20260922-NNN 标记删除行 ===============
+
+def test_deleted_intervals_ms():
+    """标记行 → 合并毫秒区间；相邻（<1ms 缝）合并，无标记 → []。"""
+    assert osvc.deleted_intervals_ms(SEGS, None) == []
+    assert osvc.deleted_intervals_ms(SEGS, []) == []
+    assert osvc.deleted_intervals_ms(SEGS, [2]) == [[3000, 5000]]
+    # 行 2 + 行 3 缝隙 1000ms > 1ms → 不合并
+    assert osvc.deleted_intervals_ms(SEGS, [2, 3]) == [[3000, 5000], [6000, 8000]]
+    # 相邻无缝行（1: 0-2000, 补一行 2000-2600）→ 合并成一段
+    segs = SEGS + [{"i": 4, "start_ms": 2000, "end_ms": 2600,
+                    "start": "00:00:02,000", "end": "00:00:02,600", "text": "接缝行"}]
+    assert osvc.deleted_intervals_ms(segs, [1, 4]) == [[0, 2600]]
+    # 非法/未知标记静默忽略
+    assert osvc.deleted_intervals_ms(SEGS, ["x", 99, None, 1]) == [[0, 2000]]
+
+
+def test_shift_ms():
+    """t 前移 = 减去 [0, t) 与删除区间的重叠；端点半开。"""
+    iv = [[2000, 4000], [6000, 8000]]
+    assert osvc.shift_ms(0, iv) == 0
+    assert osvc.shift_ms(2000, iv) == 2000  # 端点不算已删
+    assert osvc.shift_ms(3000, iv) == 2000  # 删 1000
+    assert osvc.shift_ms(4000, iv) == 2000  # 累计删 2000
+    assert osvc.shift_ms(6000, iv) == 4000  # 6000-2000
+    assert osvc.shift_ms(9000, iv) == 5000  # 9000-4000
+    assert osvc.shift_ms(12345, None) == 12345
+
+
+def test_build_srt_with_marks():
+    """line_marks：标记行不进 SRT；shift=True 时其余行时间轴前移。"""
+    segs = osvc.apply_to_segments(SEGS, _occs())
+    # rough 基：排除标记行但时间戳保持
+    srt = osvc.build_srt(segs, [1])
+    assert "今天讲一下神经网络" not in srt  # 标记行剔除
+    assert "00:00:03,000 --> 00:00:05,000" in srt  # 时间不动
+    assert "00:00:06,000 --> 00:00:08,000" in srt
+    # cut 基：行 1 删掉 0-2000ms → 后续行各前移 2000ms
+    srt2 = osvc.build_srt(segs, [1], shift=True)
+    assert "00:00:01,000 --> 00:00:03,000" in srt2  # 3s/5s - 2s
+    assert "00:00:04,000 --> 00:00:06,000" in srt2  # 6s/8s - 2s
+
+
+def test_srt_entries_shift():
+    """内存直供 entries：排除标记行 + shift 平移（供精剪字幕素材）。"""
+    ents = osvc.srt_entries(SEGS, [2], shift=True)  # 删 3-5s → 行 3 前移 2000
+    assert [e["text"] for e in ents] == [SEGS[0]["text"], SEGS[2]["text"]]
+    assert ents[0]["start_ms"] == 0 and ents[0]["end_ms"] == 2000  # 删除段之前不动
+    assert ents[1]["start_ms"] == 4000 and ents[1]["end_ms"] == 6000  # 6/8 - 2
+    # 不 shift：只排除
+    ents2 = osvc.srt_entries(SEGS, [2])
+    assert ents2[1]["start_ms"] == 6000
+
+
+def test_save_decisions_line_marks_roundtrip(tmp_path):
+    """line_marks 往返：非法/未知丢弃 + 去重升序 + stats 计数。"""
+    _write_opt(tmp_path)
+    data, _ = osvc.save_decisions(tmp_path, [], line_marks=[3, "x", 1, 3, 99, None, 2])
+    assert data["line_marks"] == [1, 2, 3]
+    assert data["stats"]["line_marks"] == 3
+    assert data["saved_at"]
+
+
+def test_save_decisions_line_marks_absent_clears(tmp_path):
+    """全量口径：不传 line_marks = 清空已有标记。"""
+    p = _write_opt(tmp_path)
+    data = json.loads(p.read_text(encoding="utf-8"))
+    data["line_marks"] = [1, 2]
+    p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    data, _ = osvc.save_decisions(tmp_path, [])
+    assert data["line_marks"] == []

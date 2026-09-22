@@ -1197,6 +1197,30 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
     for e in data.get("line_edits") or []:
         if isinstance(e, dict) and e.get("text"):
             edits_by_seg[str(e.get("seg"))] = str(e["text"])
+    # REQ-20260922-NNN 标记删除行：标记集 + 优化成片剪辑状态条
+    marks_set = {str(m) for m in data.get("line_marks") or []}
+    cut_job = compose_service.opt_cut_job_status(task_id)
+    cut_ready = compose_service.optimize_cut_ready(outputs_dir, sorted(int(m) for m in marks_set))
+    cut_state, cut_text = "", ""
+    if cut_job and cut_job.get("state") == "running":
+        cut_state = "running"
+        cut_text = (f'⏳ 优化成片剪辑中 · {cut_job.get("progress") or 0:.0f}% · '
+                    f'{cut_job.get("stage") or ""} — 完成后精剪合成自动使用新视频')
+    elif cut_job and cut_job.get("state") == "error":
+        cut_state = "error"
+        cut_text = (f'⚠️ 优化成片剪辑失败：{cut_job.get("error") or "未知错误"}'
+                    ' — 重新「确认保存」可再次触发')
+    elif marks_set and cut_ready is not None:
+        cut_state = "done"
+        cut_text = (f'🎬 优化成片已生成：剪除 {len(cut_ready.get("marks") or [])} 行 · '
+                    f'删 {cut_ready.get("deleted_sec", "?")}s · 保留 {cut_ready.get("kept_sec", "?")}s'
+                    ' — 精剪合成将自动使用 optimize_compose.mp4')
+    elif marks_set:
+        cut_state = "pending"
+        cut_text = "⚠️ 有标记删除行但优化成片未生成 — 请重新「确认保存」触发剪辑"
+    cut_bar = (f'<div id="slirn-opt-cut-status" class="slirn-status-msg slirn-opt-cut-status" '
+               f'data-task-id="{_esc(task_id)}" data-state="{_esc(cut_state)}">{_esc(cut_text)}</div>'
+               ) if cut_state else ""
     confirmed = bool(data.get("saved_at"))
     running_html = ""
     if job_state == "running":
@@ -1259,13 +1283,19 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
         # REQ-20260922-NNN 整句替换：full_edit 行整行改写（覆盖本行局部替换）
         full_edit = edits_by_seg.get(rid)
         eff_text = str(seg.get("new_text") or raw)  # 保存后回显的最终文本（预填用）
+        # REQ-20260922-NNN 标记删除行：🗑️ 标记后保存 → 本行时间段从粗剪成片剪除
+        deleted = rid in marks_set
         parts = [_esc(raw)]
+        if deleted:
+            parts.insert(0, '<span class="slirn-opt-line-badge del">🗑️ 已标记删除</span>')
         if full_edit is not None:
             parts = [
                 '<span class="slirn-opt-line-badge">✏️ 整句替换</span>',
                 f'<span class="slirn-opt-line-new">{_esc(full_edit)}</span>',
                 f'<span class="slirn-opt-line-orig" title="原文">{_esc(raw)}</span>',
             ]
+            if deleted:
+                parts.insert(0, '<span class="slirn-opt-line-badge del">🗑️ 已标记删除</span>')
         occ_chips = []
         for o in occs:
             applied = 1 if o.get("applied", True) else 0
@@ -1298,17 +1328,28 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
             f'<button class="slirn-btn slirn-btn-xs slirn-opt-line-btn" data-action="opt-line-edit" '
             f'title="取消整句替换，恢复局部替换">↩️</button>'
         )
+        del_btn = (
+            f'<button class="slirn-btn slirn-btn-xs slirn-opt-line-btn slirn-opt-del-btn" '
+            f'data-action="opt-line-delete" data-deleted="1" '
+            f'title="取消删除标记：本行恢复保留">✚</button>'
+            if deleted else
+            f'<button class="slirn-btn slirn-btn-xs slirn-opt-line-btn slirn-opt-del-btn" '
+            f'data-action="opt-line-delete" data-deleted="0" '
+            f'title="标记删除：保存后本行时间段将从粗剪成片剪除，字幕时间轴自动前移">🗑️</button>'
+        )
+        del_row_cls = " line-deleted" if deleted else ""
         # REQ-20260918-054：补 data-end-ms，前端 timeupdate 按 [start,end) 命中行
-        return (f'<div class="slirn-opt-row{has_occ}{full_cls}" data-id="{_esc(rid)}" '
+        return (f'<div class="slirn-opt-row{has_occ}{full_cls}{del_row_cls}" data-id="{_esc(rid)}" '
                 f'data-start-ms="{int(seg.get("start_ms", 0))}" '
                 f'data-end-ms="{int(seg.get("end_ms", 0))}"'
                 f' data-words="{_esc(chr(10).join(row_words))}"'
                 f' data-orig-text="{_esc(raw)}" data-eff-text="{_esc(eff_text)}"'
                 f' data-full-edit="{1 if full_edit is not None else 0}"'
-                f' data-full-text="{_esc(full_edit or "")}">'
+                f' data-full-text="{_esc(full_edit or "")}"'
+                f' data-deleted="{1 if deleted else 0}">'
                 f'<span class="slirn-sub-idx">{_esc(rid)}</span>'
                 f'<span class="slirn-fw-time">{_esc(str(seg.get("start") or ""))}</span>'
-                f'<div class="slirn-fw-text">{edit_btn}{"".join(parts)}</div>'
+                f'<div class="slirn-fw-text">{del_btn}{edit_btn}{"".join(parts)}</div>'
                 f'{occ_col}</div>')
 
     rows = "".join(_line_html(s) for s in (data.get("segments") or []))
@@ -1317,20 +1358,30 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
     n_lines = est["lines"]
     n_edits = int(est.get("line_edits") or 0)
     edit_stat = f" · 整句替换 <b>{n_edits}</b> 行" if n_edits else ""
+    n_marks = int(est.get("line_marks") or 0)
+    mark_stat = f" · 标记删除 <b>{n_marks}</b> 行" if n_marks else ""
     model_disp = _esc(data.get("model") or "")
+    # 优化成片就绪时多给一个「优化成片时间基」的 SRT 下载（时间轴已前移）
+    cut_srt_btn = (
+        f'<button class="slirn-btn" data-action="opt-srt-download" data-task-id="{_esc(task_id)}" '
+        f'data-base="cut">⬇️ 下载优化成片字幕 SRT</button>'
+        if cut_ready is not None else ""
+    )
     return f'''<div class="slirn-card" style="margin-top:16px;">
         <div class="slirn-panel-header"><div class="slirn-panel-title">✨ 优化字幕 · 不明确字词</div></div>
         <div class="slirn-sub-meta">识别 {n_lines} 行 · 不明确 {est["occurrences"]} 处（{est["words"]} 个词）
-        · 生效替换 <b>{est["applied"]}</b> 处 · 未采纳 {est["skipped"]} 处{edit_stat} · 模型 {model_disp}
+        · 生效替换 <b>{est["applied"]}</b> 处 · 未采纳 {est["skipped"]} 处{edit_stat}{mark_stat} · 模型 {model_disp}
         {" · ✅ 已确认" if confirmed else ""}</div>
         {stale_note}
+        {cut_bar}
         <div class="slirn-form-hint" style="margin-top:10px;"><b>不明确字词频次</b>（按替换目标词分组；
         出现处切换过 ✓/✕ 或编辑过替换值即计「已处理」，全部处理完 → ✅）：</div>
         {word_filter_html}
         <div class="slirn-fw-stats" id="slirn-opt-words">{words_html}</div>
         <div class="slirn-form-hint">行内 <s class="slirn-opt-before">删除线</s> = 疑似误识别原文，旁边输入框 = 替换值（可直接编辑）；
         <b>✓</b> 采纳 / <b>✕</b> 不采纳（逐处切换）。点词筛选出现行，点行按成片时间跳播核对。
-        行首 <b>✏️</b> = 整句替换（直接改写整行文本，覆盖本行局部替换）。</div>
+        行首 <b>✏️</b> = 整句替换（直接改写整行文本，覆盖本行局部替换）；
+        <b>🗑️</b> = 标记删除整行（保存后从成片剪除该行时间段并前移后续字幕）。</div>
         <div class="slirn-opt-kbhint" id="slirn-opt-kbhint"></div>
         <div class="slirn-task-actions" style="margin-top:10px;">
             <button class="slirn-btn" data-action="opt-filter" data-shown="1"
@@ -1344,7 +1395,9 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
             <button class="slirn-btn slirn-btn-primary" data-action="save-optimize"
                     data-task-id="{_esc(task_id)}">{save_label}</button>
             <button class="slirn-btn" data-action="opt-srt-download" data-task-id="{_esc(task_id)}"
+                    data-base="rough"
                     {"" if confirmed else 'disabled title="确认保存后可下载"'}>⬇️ 下载优化字幕 SRT</button>
+            {cut_srt_btn}
             <button class="slirn-btn" data-action="optimize-start" data-task-id="{_esc(task_id)}"
                     data-has="1">🔄 重新优化</button>
         </div>
@@ -1674,21 +1727,29 @@ _FINE_AUTO_KINDS = frozenset({"video", "subtitle"})
 def _fine_upstream_path(task_id: str, kind: str, mgr) -> Path | None:
     """返回上游产物绝对路径（None = 无上游或不支持 auto）。
 
-    - video → tasks/{tid}/outputs/rough_compose.mp4（粗剪合成阶段产物）
+    - video → 优化成片优先（REQ-20260922-NNN：优化字幕阶段标记删除行生成的
+      optimize_compose.mp4，须与当前 marks 匹配且不旧于粗剪 — 见
+      compose_service.optimize_cut_ready），否则 rough_compose.mp4
     - subtitle → optimize_subtitle.json → 落盘到 tmp/optimized_subs.srt
+      （时间基跟随上面的视频选择：优化成片 → 排除标记行 + 时间轴前移）
     """
+    from slirn_home import compose_service, optimize_service
+
+    outputs_dir = mgr.tasks_dir / task_id / "outputs"
+    data = optimize_service.load_optimize(outputs_dir)
+    marks = (data or {}).get("line_marks") or []
+    ready = compose_service.optimize_cut_ready(outputs_dir, marks)
     if kind == "video":
-        from slirn_home.compose_service import rough_compose_path
-        p = rough_compose_path(mgr.tasks_dir / task_id / "outputs")
+        if ready is not None:
+            return compose_service.optimize_compose_path(outputs_dir)
+        p = compose_service.rough_compose_path(outputs_dir)
         return p if p.exists() else None
     if kind == "subtitle":
-        from slirn_home import optimize_service
-        outputs_dir = mgr.tasks_dir / task_id / "outputs"
-        data = optimize_service.load_optimize(outputs_dir)
         if not data or not data.get("saved_at"):
             return None
         segments = data.get("segments") or []
-        srt_text = optimize_service.build_srt(segments)
+        srt_text = optimize_service.build_srt(
+            segments, marks, shift=(ready is not None))
         tmp_dir = mgr.tasks_dir / task_id / "tmp"
         tmp_dir.mkdir(parents=True, exist_ok=True)
         out = tmp_dir / "optimized_subs.srt"
@@ -1701,6 +1762,27 @@ def _fine_upstream_label(task_id: str, kind: str, mgr) -> str:
     """上游产物的可读文件名（用于 UI 显示）。"""
     p = _fine_upstream_path(task_id, kind, mgr)
     return p.name if p else ""
+
+
+def _effective_fine_video_path(mgr, task_id: str, materials: dict | None = None) -> Path | None:
+    """精剪合成实际生效的视频路径（REQ-20260922-NNN 标记删除行）。
+
+    - 传 materials 且 video 素材是 auto 来源 → 实时取上游（优化成片
+      optimize_compose.mp4 优先于 rough_compose.mp4，新鲜度见
+      compose_service.optimize_cut_ready）
+    - 传 materials 且手动上传 → _resolve_mat_abs 原样解析（用户显式上传优先）
+    - 不传 materials → 纯上游口径（_probe_video_duration_ms 等探测用）
+
+    自动获取的素材路径是挑选那一刻的快照 — 优化字幕阶段重存后上游可能已
+    从 rough 换成 optimize_compose（或反向），每次组装/探测都实时重解析。
+    """
+    if materials is not None:
+        mat = materials.get("video") or {}
+        if mat.get("source") == "auto":
+            p = _fine_upstream_path(task_id, "video", mgr)
+            return p if p and p.exists() else None
+        return _resolve_mat_abs(mgr, task_id, materials, "video")
+    return _fine_upstream_path(task_id, "video", mgr)
 
 
 def _resolve_mat_abs(mgr, task_id: str, materials: dict, kind: str) -> Path | None:
@@ -2282,7 +2364,8 @@ def _assemble_fine_filter(
     output_cfg = fc["output"]
 
     # 1. 校验视频素材存在
-    video_path = _resolve_mat_abs(mgr, task_id, materials, "video")
+    # REQ-20260922-NNN：auto 来源实时取上游（优化成片优先），手动上传不动
+    video_path = _effective_fine_video_path(mgr, task_id, materials)
     if not video_path or not video_path.exists():
         return {"ok": False, "error": "缺少视频素材，请上传或自动获取粗剪视频"}
 
@@ -2429,6 +2512,27 @@ def _assemble_fine_filter(
     sub_input_tmp: Path | None = None
     if layout["subtitle"]["enabled"] and sub_mat.get("path"):
         sub_path = _resolve_mat_abs(mgr, task_id, materials, "subtitle")
+        # REQ-20260922-NNN 标记删除行（R4）：auto 字幕素材内存直供 — 不读共享
+        # tmp/optimized_subs.srt（那是「自动获取」那一刻的快照，可能与上面
+        # 实时解析出来的视频不同基）。时间基跟随本次实际视频：
+        # optimize_compose.mp4 → 排除标记行 + 时间轴前移；rough → 只排除标记行。
+        if sub_mat.get("source") == "auto":
+            from slirn_home import optimize_service
+
+            _od = optimize_service.load_optimize(mgr.tasks_dir / task_id / "outputs")
+            if _od and _od.get("saved_at"):
+                _shift = video_path is not None and video_path.name == "optimize_compose.mp4"
+                _srt = optimize_service.build_srt(
+                    _od.get("segments") or [], _od.get("line_marks") or [],
+                    shift=_shift)
+                if _srt:
+                    _tfh_srt = _tf.NamedTemporaryFile(
+                        mode="w", suffix=".srt", encoding="utf-8",
+                        delete=False, prefix="slirn_fine_subs_")
+                    _tfh_srt.write(_srt)
+                    _tfh_srt.close()
+                    sub_path = Path(_tfh_srt.name)
+                    image_tmp_paths.append(sub_path)  # 随调用方 finally 统一清理
         if sub_path and sub_path.exists():
             # REQ-20260920-099 Phase C：直接生成 ASS 字符串 + 写临时文件，
             # 用 ``ass=`` 滤镜而非 ``subtitles=`` 滤镜。理由：
@@ -2929,10 +3033,14 @@ def _kill_proc_with_grace(proc, grace_sec: float = 5.0) -> None:
 
 
 def _probe_video_duration_ms(mgr, tid: str) -> int:
-    """ffprobe 拿源视频时长（毫秒）。失败返回 0。"""
+    """ffprobe 拿源视频时长（毫秒）。失败返回 0。
+
+    REQ-20260922-NNN：走 _effective_fine_video_path（auto 来源实时解析 —
+    优化成片优先），与 _assemble_fine_filter 实际用的视频保持同一个文件。
+    """
     try:
         fc = _get_fine_compose(mgr, tid)
-        vp = _resolve_mat_abs(mgr, tid, fc["materials"], "video")
+        vp = _effective_fine_video_path(mgr, tid, fc["materials"])
         if not vp or not Path(vp).exists():
             return 0
         pr = subprocess.run(
@@ -7232,6 +7340,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         KNOWN_FILES = {
             # 视频产物（按文件名 pattern，因为区间导出每次文件名都变）
             "rough_compose.mp4": ("粗剪成片", "video", True),
+            "optimize_compose.mp4": ("优化成片（标记删除行已剪除）", "video", True),
             "fine_export.mp4": ("最终导出视频（全片）", "video", True),
             "fine_preview.mp4": ("精剪预览（全片）", "video", True),
             # 字幕产物
@@ -7239,6 +7348,9 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             "subtitle.srt": ("原始字幕 SRT", "subtitle", True),
             "optimize.json": ("优化字幕 JSON", "json", False),
             "optimize.srt": ("优化字幕 SRT", "subtitle", True),
+            "optimize_subtitle.json": ("优化字幕 JSON", "json", False),
+            "optimize_compose.srt": ("优化成片字幕 SRT（时间轴已前移）", "subtitle", True),
+            "optimize_cut.json": ("优化成片剪辑记录 JSON", "json", False),
             "revision.json": ("逐条决策结果 JSON", "json", False),
             "cutlist.json": ("切分清单 JSON", "json", False),
             "speaker_link.json": ("说话人归并 JSON", "json", False),
@@ -8232,6 +8344,12 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         outputs_dir = mgr.tasks_dir / tid / "outputs"
         res = compose_service.delete_rough_compose(outputs_dir, auto=_auto,
                                                   auto_session_id=_auto_session_id)
+        # REQ-20260922-NNN 标记删除行：粗剪成片是优化成片的源 — 源删了，
+        # 优化成片三件产物一并清理（精剪自动回退也就无优化成片可用）
+        cut_removed = compose_service._delete_cut_artifacts(outputs_dir)
+        if cut_removed:
+            res["removed"] = list(res["removed"]) + cut_removed
+            res["message"] += " + " + " + ".join(cut_removed)
         return _ok("", deleted=res["deleted"],
                    toast="🗑️ " + res["message"] if res["deleted"] else None,
                    removed=res["removed"], remaining=res["remaining"],
@@ -8507,8 +8625,9 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
 
         删除范围：outputs/ 下 subtitle.json / revision.json /
         rev_speaker_link.json / cutlist.json / cut_speaker_link.json /
-        rough_compose.mp4 / optimize_subtitle.json / fine_revision.json
-        （旧流程）/ fine_export*.mp4 / fine_preview*.mp4 +
+        rough_compose.mp4 / optimize_subtitle.json / optimize_compose.mp4（+
+        .srt / optimize_cut.json，REQ-20260922-NNN 标记删除行产物）/
+        fine_revision.json（旧流程）/ fine_export*.mp4 / fine_preview*.mp4 +
         任务根目录下 fine_compose.json（精剪参数）。
         保留：原视频 / 时间截取 / 热词 / 任务 metadata / materials/。
         清理后 t.status 降回 DRAFT（让工作台顶部绿色对号也清空）。
@@ -8553,6 +8672,9 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
                 "rough_compose.mp4", "rough_compose.json",
                 # 优化字幕（REQ-20260917-030 新流程 + REQ-20260917-029 旧流程）
                 "optimize_subtitle.json",  # 新流程实际文件名
+                # REQ-20260922-NNN 标记删除行：优化成片三件产物 + tmp 半成品
+                "optimize_compose.mp4", "optimize_compose.srt",
+                "optimize_cut.json", "optimize_compose.tmp.mp4",
                 "fine_revision.json",       # 旧流程（fine_service 写），兼容删除
                 # fine_export 全篇 + 区间导出（REQ-20260919-061）
                 "fine_export.mp4",
@@ -8630,6 +8752,10 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             return _err("缺少粗剪成片 — 请先在「粗剪合成」阶段合成")
         if optimize_service.load_optimize(outputs_dir) and not body.get("force"):
             return _err("已存在优化结果 — 重新优化将覆盖并重置全部采纳决定，请确认后重试")
+        # REQ-20260922-NNN 标记删除行：重优化会重置全部决定（含标记）→
+        # 旧优化成片立即失效，force 启动前先清产物（精剪自动回退 rough）
+        if body.get("force"):
+            compose_service._delete_cut_artifacts(outputs_dir)
         hotwords: list[str] = []
         try:
             if t.hotwords_path.exists():
@@ -8704,6 +8830,11 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         line_edits = body.get("line_edits")
         if line_edits is not None and not isinstance(line_edits, list):
             return _err("line_edits 必须是数组")
+        # REQ-20260922-NNN 标记删除行：可选 line_marks [seg id]（全量口径，
+        # 不传 = 清空）；标记行会在保存后从粗剪成片剪除出优化成片
+        line_marks = body.get("line_marks")
+        if line_marks is not None and not isinstance(line_marks, list):
+            return _err("line_marks 必须是数组")
         outputs_dir = mgr.tasks_dir / tid / "outputs"
         # REQ-20260919-075：开始记录 — 确认保存
         exec_id = execution_history.record_start(
@@ -8713,38 +8844,92 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             auto_session_id=_auto_session_id,
         )
         try:
-            data, applied_n = optimize_service.save_decisions(outputs_dir, decisions, line_edits)
+            data, applied_n = optimize_service.save_decisions(
+                outputs_dir, decisions, line_edits, line_marks)
         except Exception as e:  # noqa: BLE001
             execution_history.record_finish(outputs_dir, exec_id, success=False, error=str(e))
             return _err(f"保存失败: {e}")
         est = optimize_service.effective_stats(data)
         mgr.update_status(tid, TaskStatus.FINE_SUBTITLE_REVIEWED)  # 幂等：结果在盘即完成
+
+        # REQ-20260922-NNN 标记删除行：保存后 kick 优化成片剪辑（R1 — 端点只
+        # 触发，线程内自带复核重跑；marks 非空且粗剪在 → 剪辑，marks 空 → 自清产物）
+        cut_state = "none"
+        marks_now = data.get("line_marks") or []
+        from slirn_home import compose_service
+
+        rough = compose_service.rough_compose_path(outputs_dir)
+        if marks_now and rough.exists():
+            started_cut = compose_service.start_optimize_cut(
+                tid, outputs_dir, rough, auto=_auto, auto_session_id=_auto_session_id)
+            cut_state = "started" if started_cut else "running"
+        elif not marks_now and compose_service.opt_cut_job_status(tid) is None:
+            # 标记已全部取消且无剪辑在跑 → 清掉旧优化成片（同步、毫秒级）
+            removed = compose_service._delete_cut_artifacts(outputs_dir)
+            cut_state = "cleared" if removed else "none"
+        elif compose_service.opt_cut_job_status(tid) is not None:
+            cut_state = "running"  # 剪辑在跑，取消标记由线程 R1 复核自清
+
         n_edits = int(est.get("line_edits") or 0)
         edit_suffix = f" · 整句替换 {n_edits} 行" if n_edits else ""
+        n_marks = int(est.get("line_marks") or 0)
+        mark_suffix = f" · 标记删除 {n_marks} 行" if n_marks else ""
         # REQ-20260919-075：完成时回填具体执行情况
         execution_history.patch_fields(outputs_dir, exec_id, {
             "description": (f"优化字幕保存：{len(decisions)} 条人工决定，生效 {applied_n} 处"
-                            f"（未采纳 {est.get('skipped', 0)} 处）{edit_suffix}")
+                            f"（未采纳 {est.get('skipped', 0)} 处）{edit_suffix}{mark_suffix}")
         })
         execution_history.record_finish(outputs_dir, exec_id, success=True, error="")
         return _ok("", toast=(f"✅ 已保存替换对应关系：生效 {applied_n} 处"
-                              f"（未采纳 {est['skipped']} 处）{edit_suffix}"), stats=est)
+                              f"（未采纳 {est['skipped']} 处）{edit_suffix}{mark_suffix}"),
+                   stats=est, cut={"state": cut_state, "marks": marks_now})
 
     @app.app.post("/slirn/api/optimized_srt")
     async def optimized_srt(body: dict = Body(default_factory=dict)):
-        """下载优化后成片字幕 SRT（REQ-20260917-030，时间基 = 粗剪成片）。"""
+        """下载优化后成片字幕 SRT（REQ-20260917-030）。
+
+        REQ-20260922-NNN 标记删除行：base="cut" → 优化成片时间基（排除标记行
+        + 时间轴前移，配合 optimize_compose.mp4）；默认 "rough" → 粗剪成片时间基
+        （排除标记行但不平移）。两者都排除标记删除行 — 被删的行不该出现在字幕里。
+        """
         from slirn_home import optimize_service
 
         tid = (body.get("task_id") or "").strip()
         if not tid:
             return _err("缺少 task_id")
+        base = body.get("base") or "rough"
+        if base not in ("rough", "cut"):
+            return _err("base 只支持 rough / cut")
         data = optimize_service.load_optimize(mgr.tasks_dir / tid / "outputs")
         if data is None:
             return _err("还没有优化结果 — 请先执行「开始优化字幕」")
         if not data.get("saved_at"):
             return _err("尚未确认保存 — 请先「确认替换并保存」")
         segments = data.get("segments") or []
-        return _ok("", srt=optimize_service.build_srt(segments), lines=len(segments))
+        marks = data.get("line_marks") or []
+        srt = optimize_service.build_srt(segments, marks, shift=(base == "cut"))
+        return _ok("", srt=srt, lines=len(segments), base=base)
+
+    @app.app.post("/slirn/api/optimize_cut_status")
+    async def optimize_cut_status(body: dict = Body(default_factory=dict)):
+        """优化成片剪辑进度轮询（REQ-20260922-NNN 标记删除行）。
+
+        内存 job 优先；服务重启后按磁盘兜底（sidecar 与当前 marks 匹配 = done /
+        只剩 tmp 半成品 = error / 否则 idle — 见 compose_service.opt_cut_status）。
+        """
+        from slirn_home import compose_service, optimize_service
+
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        outputs_dir = mgr.tasks_dir / tid / "outputs"
+        data = optimize_service.load_optimize(outputs_dir)
+        marks = (data or {}).get("line_marks") or []
+        st = compose_service.opt_cut_status(tid, outputs_dir, marks)
+        ready = compose_service.optimize_cut_ready(outputs_dir, marks)
+        return _ok("", job=st,
+                   ready={"exists": ready is not None,
+                          "path": compose_service.OPTIMIZE_COMPOSE_NAME if ready else ""})
 
     @app.app.post("/slirn/api/resplit_segment")
     async def resplit_segment_api(body: dict = Body(default_factory=dict)):

@@ -925,6 +925,16 @@ def handler_optimize(tid: str, cfg: dict, outputs_dir: Path, api: str,
                 _result[0] = False
                 _result[1] = f"save_optimize_subtitle 失败：{r.get('error')}"
                 return (False, _result[1])
+            # REQ-20260922-NNN 标记删除行：保存时若带标记（触发优化成片剪辑）
+            # → 等剪辑完成再进精剪；失败只 warn（精剪自动回退粗剪成片，阶段不算失败）
+            cut = (r.get("cut") or {})
+            if cut.get("state") in ("started", "running"):
+                _log(job, "optimize",
+                     f"标记删除 {len(cut.get('marks') or [])} 行 → 优化成片剪辑中…")
+                st, cerr = _poll_status(api, "/optimize_cut_status", tid, timeout=3600.0)
+                if st != "done":
+                    _log(job, "optimize",
+                         f"优化成片剪辑{st}：{cerr}（精剪合成将回退使用粗剪成片）", "warn")
         _log(job, "optimize", "✅ 优化字幕完成", "ok")
         _result[0] = True
         _result[1] = ""

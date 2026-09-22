@@ -2304,6 +2304,38 @@ input[type="checkbox"]:focus-visible {
   .slirn-opt-occ { flex-wrap: wrap; }
 }
 
+/* ============ REQ-20260922-NNN 标记删除行 + 优化成片剪辑 ============ */
+/* 标记删除行：左侧红条 + 淡红底 + 正文删除线（镜像切分阶段 mark-delete 的
+   语义 — 持久落盘状态，红 > 青，排在 full-edit 之后让其边条胜出） */
+.slirn-opt-row.line-deleted {
+  background: rgba(220, 38, 38, 0.08);
+  border-left: 3px solid #dc2626;
+  padding-left: 7px;  /* 抵消 border-left 3px，保持网格对齐 */
+}
+.slirn-opt-row.line-deleted .slirn-sub-idx { color: #b91c1c; font-weight: 600; }
+.slirn-opt-row.line-deleted .slirn-fw-rawtext {
+  text-decoration: line-through; opacity: 0.6;
+}
+/* active（播放高亮）压过 line-deleted（同 full-edit.active 约定） */
+.slirn-opt-row.line-deleted.active {
+  background: linear-gradient(90deg, rgba(49, 120, 198, 0.16) 0%, rgba(49, 120, 198, 0.06) 100%);
+  border-left-color: var(--accent, #3178c6);
+}
+/* 🗑️ 已标记删除徽章（红系，区别于 ✏️ 整句替换青徽章） */
+.slirn-opt-line-badge.del {
+  background: rgba(220, 38, 38, 0.16); color: #b91c1c;
+}
+/* 行首 🗑️/✚ 按钮：hover 显红（区别于 ✏️ 的青） */
+.slirn-opt-del-btn:hover { opacity: 1; background: rgba(220, 38, 38, 0.15); }
+/* 优化成片剪辑状态条（running/error/done 通用容器，文字由 JS 注入） */
+.slirn-opt-cut-status {
+  margin-top: 8px; font-size: 12.5px; line-height: 1.7;
+  padding: 6px 10px; border-radius: 6px;
+  background: rgba(49, 120, 198, 0.08);
+}
+.slirn-opt-cut-status[data-state="error"] { background: rgba(220, 38, 38, 0.08); }
+.slirn-opt-cut-status[data-state="done"] { background: rgba(22, 163, 74, 0.08); }
+
 /* ============ 粗剪合成 · 有效字幕 SRT 预览（REQ-20260916-019） ============ */
 .slirn-rc-subs {
   border: 1px solid var(--border, rgba(255,255,255,0.12));

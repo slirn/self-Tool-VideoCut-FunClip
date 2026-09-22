@@ -231,3 +231,126 @@ def test_parse_srt_hours_and_short_millis():
         ((1 * 3600 + 2 * 60 + 3) * 1000 + 456, (1 * 3600 + 2 * 60 + 4) * 1000 + 700),
     ]
     assert out[1]["text"] == "文本A"
+
+
+# ---- REQ-20260922-NNN 标记删除行 → 优化成片剪辑 ----
+
+def test_complement_intervals_ms():
+    """删除区间的补集 = 保留区间：clamp / 碎片丢弃 / 全删 / 头尾触界。"""
+    # 删中段
+    assert compose_service.complement_intervals_ms([[2000, 4000]], 8000) == [
+        [0, 2000], [4000, 8000]]
+    # 删头 / 删尾
+    assert compose_service.complement_intervals_ms([[0, 1000]], 8000) == [[1000, 8000]]
+    assert compose_service.complement_intervals_ms([[7000, 8000]], 8000) == [[0, 7000]]
+    # 多段删除 + 乱序输入
+    assert compose_service.complement_intervals_ms(
+        [[6000, 7000], [2000, 3000]], 8000) == [[0, 2000], [3000, 6000], [7000, 8000]]
+    # 越界 clamp + 全删光
+    assert compose_service.complement_intervals_ms([[-500, 1000]], 8000) == [[1000, 8000]]
+    assert compose_service.complement_intervals_ms([[0, 9000]], 8000) == []
+    # 空/零长删除段 → 整片保留
+    assert compose_service.complement_intervals_ms([], 8000) == [[0, 8000]]
+    assert compose_service.complement_intervals_ms([[3000, 3000]], 8000) == [[0, 8000]]
+
+
+def test_build_optimize_cut_cmd_audio():
+    """有音轨：每段 v+a trim/setpts + concat a=1 + 重编码参数 + progress。"""
+    cmd = compose_service.build_optimize_cut_cmd(
+        Path("in.mp4"), Path("out.mp4"), [[0, 2000], [4000, 8000]], has_audio=True)
+    joined = " ".join(cmd)
+    assert cmd[:4] == ["ffmpeg", "-y", "-i", "in.mp4"]
+    fc = cmd[cmd.index("-filter_complex") + 1]
+    assert "[0:v]trim=start=0.000:end=2.000,setpts=PTS-STARTPTS[v0]" in fc
+    assert "[0:a]atrim=start=4.000:end=8.000,asetpts=PTS-STARTPTS[a1]" in fc
+    assert "concat=n=2:v=1:a=1[vout][aout]" in fc
+    assert "[vout]" in cmd and "[aout]" in cmd and cmd.count("-map") == 2
+    assert "-c:v" in cmd and "libx264" in cmd and "veryfast" in cmd
+    assert "-progress pipe:1" in joined and "out.mp4" in cmd[-1]
+
+
+def test_build_optimize_cut_cmd_no_audio():
+    """无音轨：只有视频链 + concat a=0，无 -map [aout]/音频编码参数。"""
+    cmd = compose_service.build_optimize_cut_cmd(
+        Path("in.mp4"), Path("out.mp4"), [[1000, 3000]], has_audio=False)
+    fc = cmd[cmd.index("-filter_complex") + 1]
+    assert fc == ("[0:v]trim=start=1.000:end=3.000,setpts=PTS-STARTPTS[v0];"
+                  "[v0]concat=n=1:v=1:a=0[vout]")
+    assert "[0:a]" not in fc
+    assert "[aout]" not in cmd and "aac" not in cmd
+
+
+def test_optimize_cut_ready_matrix(tmp_path):
+    """就绪判据：三件产物 + sidecar.marks 一致 + mp4 不旧于 rough。"""
+    import json
+    import os
+
+    def _mk(marks=(1, 2), mp4_newer=True):
+        compose_service._delete_cut_artifacts(tmp_path)
+        rough = compose_service.rough_compose_path(tmp_path)
+        rough.write_bytes(b"r")
+        mp4 = compose_service.optimize_compose_path(tmp_path)
+        mp4.write_bytes(b"v")
+        (tmp_path / "optimize_compose.srt").write_text("1\nx", encoding="utf-8")
+        (tmp_path / compose_service.OPTIMIZE_CUT_JSON).write_text(json.dumps(
+            {"marks": list(marks), "deleted_ms": 1, "kept_sec": 1.0}), encoding="utf-8")
+        t0 = rough.stat().st_mtime
+        os.utime(rough, (t0, t0))
+        os.utime(mp4, (t0, t0 + (10 if mp4_newer else -10)))
+        return t0
+
+    _mk(marks=(1, 2), mp4_newer=True)
+    assert compose_service.optimize_cut_ready(tmp_path, [2, 1]) is not None  # 顺序无关
+    # marks 不一致 → 失效
+    assert compose_service.optimize_cut_ready(tmp_path, [1]) is None
+    # rough 重合成（更新）→ 失效
+    _mk(marks=(1, 2), mp4_newer=False)
+    assert compose_service.optimize_cut_ready(tmp_path, [1, 2]) is None
+    # 产物缺失 → 失效
+    _mk(marks=(1, 2), mp4_newer=True)
+    compose_service.optimize_compose_path(tmp_path).unlink()
+    assert compose_service.optimize_cut_ready(tmp_path, [1, 2]) is None
+    # sidecar 损坏 → 失效
+    _mk(marks=(1, 2), mp4_newer=True)
+    (tmp_path / compose_service.OPTIMIZE_CUT_JSON).write_text("{broken", encoding="utf-8")
+    assert compose_service.optimize_cut_ready(tmp_path, [1, 2]) is None
+
+
+def test_opt_cut_status_disk_fallback(tmp_path):
+    """服务重启兜底：无内存 job → done（sidecar 新鲜）/ error（tmp 半成品）/ idle。"""
+    st = compose_service.opt_cut_status("no-job", tmp_path, [])
+    assert st["state"] == "idle"
+    (tmp_path / compose_service.OPTIMIZE_COMPOSE_TMP_NAME).write_bytes(b"half")
+    st2 = compose_service.opt_cut_status("no-job", tmp_path, [])
+    assert st2["state"] == "error" and "重新保存" in st2["error"]
+
+
+def test_start_optimize_cut_marks_empty_cleans(tmp_path, monkeypatch):
+    """marks 为空 → 线程自清产物直接 done（result.cleared）。"""
+    import json
+
+    from slirn_home import optimize_service as osvc
+
+    (tmp_path / osvc.OPTIMIZE_JSON).write_text(json.dumps(
+        {"segments": [], "occurrences": [], "line_marks": []}), encoding="utf-8")
+    for name in ("optimize_compose.mp4", "optimize_compose.srt",
+                 compose_service.OPTIMIZE_CUT_JSON):
+        (tmp_path / name).write_text("stale", encoding="utf-8")
+    assert compose_service.start_optimize_cut("tc-1", tmp_path, tmp_path / "rough.mp4")
+    import time as _t
+    for _ in range(100):
+        j = compose_service.opt_cut_job_status("tc-1")
+        if j and j["state"] in ("done", "error"):
+            break
+        _t.sleep(0.05)
+    assert j["state"] == "done" and j["result"]["cleared"] is True
+    assert not (tmp_path / "optimize_compose.mp4").exists()
+
+
+def test_start_optimize_cut_no_double_start():
+    """job 在跑 → start 返回 False（保存端点 kick 幂等）。"""
+    compose_service._OPT_CUT_JOBS["tc-busy"] = {
+        "state": "running", "progress": 1.0, "stage": "剪辑中", "error": None,
+        "started_at": 0.0, "finished_at": None, "result": None}
+    assert compose_service.start_optimize_cut(
+        "tc-busy", Path("."), Path("rough.mp4")) is False
