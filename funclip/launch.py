@@ -78,6 +78,16 @@ if __name__ == "__main__":
             _mgr = _TM(_find_root())
             _register_slirn_api(slirn_app, _mgr, _find_root())
             print(f"[slirn] custom /slirn/api/* routes re-registered on live app", flush=True)
+            # REQ-20260922-NNN-b：把 launch() 实际解析出的端口回写给 pipeline 调度器。
+            # Gradio 在 server_port 被占用时会自动 +1（7861 被旧实例占用 → 新实例
+            # 落 7862）；不回写的话调度器仍按 7861 自调 → WinError 10061 连接拒绝。
+            # setdefault：用户显式设置的 SLIRN_API_BASE 优先。
+            _live_port = getattr(slirn_app, "server_port", None)
+            if _live_port:
+                import os as _os
+                _os.environ.setdefault(
+                    "SLIRN_API_BASE", f"http://127.0.0.1:{_live_port}/slirn/api")
+                print(f"[slirn] pipeline scheduler → 127.0.0.1:{_live_port}/slirn/api", flush=True)
             import time
             while True:
                 time.sleep(3600)
@@ -90,6 +100,13 @@ if __name__ == "__main__":
                 _mgr = _TM(_find_root())
                 _register_slirn_api(slirn_app, _mgr, _find_root())
                 print(f"[slirn] custom /slirn/api/* routes re-registered (recovery path)", flush=True)
+                # REQ-20260922-NNN-b：恢复路径同样回写实际端口（见上方成功路径注释）
+                _live_port = getattr(slirn_app, "server_port", None)
+                if _live_port:
+                    import os as _os
+                    _os.environ.setdefault(
+                        "SLIRN_API_BASE", f"http://127.0.0.1:{_live_port}/slirn/api")
+                    print(f"[slirn] pipeline scheduler → 127.0.0.1:{_live_port}/slirn/api", flush=True)
             except Exception as e2:
                 print(f"[slirn] re-register failed: {e2}", flush=True)
             import time

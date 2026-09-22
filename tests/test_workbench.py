@@ -10224,6 +10224,83 @@ def test_app_py_pipeline_run_calls_fine_cut_preflight():
     assert "preflight" in ep_window
 
 
+def test_app_py_pipeline_run_uses_blocks_server_port():
+    """REQ-20260922-NNN-b：/pipeline_run 的 base url 必须读 Blocks.server_port。
+
+    早期版本 getattr(app.app, "port", 7861)：app.app 是 FastAPI 对象，永远没有
+    .port 属性 → 恒回退 7861。7861 被占用时 Gradio 自动 +1 换端口（新实例落
+    7862），调度器仍打 7861 → 「连接失败: [WinError 10061] 积极拒绝」→ 流程
+    所有阶段启动失败。修复后读 Blocks 的 server_port（launch() 解析出的实际端口）。
+    """
+    app_src = (FUNCLIP_ROOT / "slirn_home" / "app.py").read_text(encoding="utf-8")
+    ep_idx = app_src.find('"/slirn/api/pipeline_run"')
+    assert ep_idx > 0
+    ep_window = app_src[ep_idx:ep_idx + 5000]
+    assert 'getattr(app, "server_port", None)' in ep_window
+    assert 'getattr(app.app, "port"' not in ep_window
+    # launch.py 启动时把实际端口回写成 SLIRN_API_BASE（setdefault：用户显式设置优先）
+    launch_src = (FUNCLIP_ROOT / "funclip" / "launch.py").read_text(encoding="utf-8")
+    assert "SLIRN_API_BASE" in launch_src and "setdefault" in launch_src
+    assert "server_port" in launch_src
+
+
+def test_pipeline_run_base_url_follows_blocks_server_port(tmp_path: Path, monkeypatch):
+    """REQ-20260922-NNN-b：Blocks.server_port=7862 → run_pipeline 收到 :7862 base。
+
+    端到端：伪造 launch() 已解析出非默认端口（模拟 7861 被占用 → Gradio 落
+    7862），mock run_pipeline 捕获 api 参数（不真启动守护线程）。
+    """
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+    from slirn_home import pipeline_service as P
+
+    monkeypatch.delenv("SLIRN_API_BASE", raising=False)
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="port-follow", original_video=video)
+    blocks = build_app(repo_root=tmp_path)
+    blocks.server_port = 7862  # 模拟 launch() 实际解析出的端口
+    captured: dict = {}
+    monkeypatch.setattr(
+        P, "run_pipeline",
+        lambda tid, api, outputs_dir, since=None: captured.update(api=api) or True)
+    client = TestClient(blocks.app)
+
+    outputs_dir = tmp_path / "tasks" / t.task_id / "outputs"
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    P.save_pipeline(outputs_dir, P.default_config())
+
+    r = client.post("/slirn/api/pipeline_run", json={"task_id": t.task_id})
+    assert r.status_code == 200
+    assert r.json().get("started") is True, r.json()
+    assert captured["api"] == "http://127.0.0.1:7862/slirn/api"
+
+
+def test_pipeline_run_base_url_env_override_wins(tmp_path: Path, monkeypatch):
+    """SLIRN_API_BASE 显式设置 → 优先于 server_port（launch.py setdefault 同语义）。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+    from slirn_home import pipeline_service as P
+
+    monkeypatch.setenv("SLIRN_API_BASE", "http://10.0.0.5:9999/slirn/api")
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="env-override", original_video=video)
+    blocks = build_app(repo_root=tmp_path)
+    blocks.server_port = 7862
+    captured: dict = {}
+    monkeypatch.setattr(
+        P, "run_pipeline",
+        lambda tid, api, outputs_dir, since=None: captured.update(api=api) or True)
+    client = TestClient(blocks.app)
+
+    outputs_dir = tmp_path / "tasks" / t.task_id / "outputs"
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    P.save_pipeline(outputs_dir, P.default_config())
+
+    r = client.post("/slirn/api/pipeline_run", json={"task_id": t.task_id})
+    assert r.status_code == 200
+    assert captured["api"] == "http://10.0.0.5:9999/slirn/api"
+
+
 def test_app_py_pipeline_run_skips_preflight_when_stop_after_before_fine_cut(tmp_path: Path):
     """REQ-20260921-NNN：stop_after 在 fine_cut 之前 → 不做严格 preflight。
 

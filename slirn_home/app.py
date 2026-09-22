@@ -8455,13 +8455,14 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         # base url：调度器走 in-process HTTP client（同进程同端口）。
         # 包含 /slirn/api 前缀 — pipeline_service._http_post(api, "/gen_subtitle")
         # 直接拼接 base + path，所以 base 必须含 API 前缀，否则 404。
+        # REQ-20260922-NNN-b：端口取 Blocks 的 server_port — launch() 解析出的
+        # 实际端口（7861 被占用时 Gradio 自动 +1 换端口）。早期版本读
+        # app.app.port：app.app 是 FastAPI 对象，永远没有该属性 → 恒回退 7861，
+        # 服务实际跑在别的端口时流程所有阶段报「连接失败: [WinError 10061]」。
         base_url = _os.environ.get("SLIRN_API_BASE") or ""
         if not base_url:
-            try:
-                port = getattr(app.app, "port", 7861)
-                base_url = f"http://127.0.0.1:{port}/slirn/api"
-            except Exception:  # noqa: BLE001 — 兜底走默认端口
-                base_url = "http://127.0.0.1:7861/slirn/api"
+            port = getattr(app, "server_port", None) or 7861
+            base_url = f"http://127.0.0.1:{port}/slirn/api"
         started = pipeline_service.run_pipeline(tid, base_url, outputs_dir, since=since)
         if not started:
             return _ok("", started=False,
