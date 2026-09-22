@@ -2546,8 +2546,16 @@ def _assemble_fine_filter(
             f"crop=iw*{vc['crop_w']}/{_FINE_DESIGN_W}:ih*{vc['crop_h']}/{_FINE_DESIGN_H}:"
             f"iw*{vc['crop_x']}/{_FINE_DESIGN_W}:ih*{vc['crop_y']}/{_FINE_DESIGN_H}"
         )
+        # REQ-20260923-NNN：视频层显示尺寸保持「视频源裁剪」的宽高比，不再强制 16:9。
+        # 旧实现 scale={W*scale}:{H*scale} 恒为 16:9 —— 非 16:9 裁剪区（如 1580×990）
+        # 在成片里被拉伸变形。新公式与「🎯 按裁剪宽度」按钮、v15 scale=crop_w/1920
+        # 自动重算、「占背景图百分比」同一语义：
+        #   显示宽 = W × scale（占输出画布宽的百分比），显示高 = 显示宽 × crop_h/crop_w
+        # 16:9 裁剪（含全幅 1920×1080）时与旧行为逐像素一致（向后兼容）。
+        _cw = max(1, int(vc["crop_w"]))
+        _ch = max(1, int(vc["crop_h"]))
         sw = max(1, int(round(W * vc["scale"])))
-        sh = max(1, int(round(H * vc["scale"])))
+        sh = max(1, int(round(sw * _ch / _cw)))
         chain.append(
             f"[0:v]{crop_expr},scale={sw}:{sh}:flags=lanczos,setsar=1[v]"
         )
@@ -3519,13 +3527,14 @@ def _clamp_video_to_viewport(vc: dict) -> None:
     """REQ-20260919-062 v5 用户反馈：把视频展示区域限定在所检测区域之内。
 
     若 vc 含 viewport（设计空间像素 {x,y,width,height}），则把 x/y/scale
-    夹紧到 viewport 内，使得 video 的显示矩形（x, y, x+crop_w*scale, y+crop_h*scale）
-    完全落在 viewport 内。直接修改入参 dict。
+    夹紧到 viewport 内，使得 video 的显示矩形（x, y, x+disp_w, y+disp_h）
+    完全落在 viewport 内（disp 公式见 REQ-20260923-NNN，与渲染 filter 一致）。
+    直接修改入参 dict。
 
     - viewport 缺失/None/非法 → 不做任何修改
     - crop_w/h 或 viewport.width/height ≤ 0 → 不做任何修改（避免除零/反向夹紧）
-    - scale 上限 = min(viewport.w / crop_w, viewport.h / crop_h)，再和 _fine_scale_max
-      取小，保证不会因为 viewport 很小就把视频压成 0
+    - scale 上限 = min(viewport.w / 1920, viewport.h × crop_w / (1920 × crop_h))，
+      再和 _fine_scale_max 取小，保证不会因为 viewport 很小就把视频压成 0
     """
     vp = vc.get("viewport") if isinstance(vc, dict) else None
     if not isinstance(vp, dict):
@@ -3543,15 +3552,20 @@ def _clamp_video_to_viewport(vc: dict) -> None:
     except (TypeError, ValueError):
         return
 
+    # REQ-20260923-NNN：显示矩形与渲染 filter / 显示尺寸读数同一公式 —
+    #   disp_w = 1920 × scale（设计空间宽），disp_h = disp_w × crop_h/crop_w
+    # （16:9 裁剪时与旧公式 crop_w×scale / crop_h×scale 数值一致）。
     # scale 上限：display 完全放进 viewport；同时不超过滑块本身的 max=2.0
-    max_scale = min(rw / crop_w, rh / crop_h, 2.0)
+    max_scale = min(rw / _FINE_DESIGN_W,
+                    rh * crop_w / (_FINE_DESIGN_W * crop_h),
+                    2.0)
     if scale > max_scale:
         scale = max_scale
     vc["scale"] = scale
 
-    # 夹紧 x/y：display 矩形 (x, y) → (x + crop_w*scale, y + crop_h*scale) 必须 ⊂ viewport
-    disp_w = crop_w * scale
-    disp_h = crop_h * scale
+    # 夹紧 x/y：display 矩形 (x, y) → (x + disp_w, y + disp_h) 必须 ⊂ viewport
+    disp_w = int(round(_FINE_DESIGN_W * scale))
+    disp_h = int(round(disp_w * crop_h / crop_w))
     max_x = rx + max(0, rw - disp_w)
     max_y = ry + max(0, rh - disp_h)
     try:
@@ -3810,17 +3824,20 @@ def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
             + '</div>'
         )
         # REQ-20260919-062 v7 用户反馈：给视频添加宽高信息。
-        # 仅 video 块附一个只读"显示尺寸"行，由前端 JS 根据 crop_w/h + scale 实时计算。
+        # 仅 video 块附一个只读"显示尺寸"行，由前端 JS 实时计算。
         # v10 用户反馈：「视频播放时的宽度百分比为视频原裁剪的宽度除以背景图片整个区域的宽度」。
         # 背景图整个区域 = 设计空间 1920×1080；视频裁剪宽度 = crop_w；所以
         # 宽度百分比 = crop_w / 1920 × 100%。同时显示高同理（crop_h / 1080）。
+        # REQ-20260923-NNN：显示尺寸与渲染 filter 同一公式 —
+        #   显示宽 = 1920 × scale，显示高 = 显示宽 × crop_h / crop_w（保持裁剪比例）。
+        # 旧读数 crop_w×scale / crop_h×scale 与实际渲染不一致（非 16:9 裁剪时偏差明显）。
         info_html = ""
         if mat_key == "video":
             try:
-                _disp_w = int(round(int(lc["crop_w"]) * float(lc["scale"])))
-                _disp_h = int(round(int(lc["crop_h"]) * float(lc["scale"])))
                 _crop_w = int(lc["crop_w"])
                 _crop_h = int(lc["crop_h"])
+                _disp_w = int(round(_FINE_DESIGN_W * float(lc["scale"])))
+                _disp_h = int(round(_disp_w * _crop_h / _crop_w)) if _crop_w > 0 else 0
             except (TypeError, ValueError):
                 _disp_w, _disp_h, _crop_w, _crop_h = 0, 0, 0, 0
             _scale_pct = round(float(lc["scale"]) * 100, 4)

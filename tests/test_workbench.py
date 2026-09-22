@@ -5126,6 +5126,160 @@ def test_assemble_fine_filter_subtitle_position(tmp_path: Path):
     )
 
 
+def test_assemble_fine_filter_keeps_crop_aspect_ratio(tmp_path: Path):
+    """REQ-20260923-NNN：视频层 scale 必须保持「视频源裁剪」宽高比，不再强制 16:9。
+
+    旧实现 scale={W*scale}:{H*scale} 恒为 16:9 —— 用户裁剪 1580×990（约 1.596:1）
+    后成片里视频层被横向拉伸成 1580×889。新公式：显示宽 = W×scale，
+    显示高 = 显示宽 × crop_h/crop_w。
+    """
+    from slirn_home.app import (
+        _assemble_fine_filter, _get_fine_compose, _save_fine_compose,
+    )
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="crop-aspect", original_video=video)
+    fc = _get_fine_compose(m, t.task_id)
+    fc["materials"]["video"] = {
+        "path": str(video.relative_to(m.repo_root)),
+        "type": "video",
+        "source": "upload",
+    }
+    # 模拟 20260921-001 实际参数：crop 1580×990 + 「按裁剪宽度」scale=0.8229
+    fc["layout"]["video"]["crop_w"] = 1580
+    fc["layout"]["video"]["crop_h"] = 990
+    fc["layout"]["video"]["scale"] = 0.8229
+    _save_fine_compose(m, t.task_id, fc)
+
+    asm = _assemble_fine_filter(t.task_id, m, duration=3.0)
+    assert asm["ok"], asm
+    fc_str = asm["filter_complex"]
+    # sw = round(1920×0.8229) = 1580；sh = round(1580×990/1580) = 990
+    assert "scale=1580:990:flags=lanczos" in fc_str, (
+        f"非 16:9 裁剪区应按裁剪比例缩放（1580×990），实际 filter_complex:\n{fc_str}"
+    )
+    # 旧实现会把同一裁剪强拉成 16:9（1580×889）— 确保不再出现
+    assert "scale=1580:889" not in fc_str, (
+        f"视频层不应再被强制成 16:9（1580×889），实际 filter_complex:\n{fc_str}"
+    )
+
+
+def test_assemble_fine_filter_full_crop_keeps_16x9_compat(tmp_path: Path):
+    """REQ-20260923-NNN 向后兼容：全幅裁剪（1920×1080，16:9）时 scale 尺寸与旧行为一致。"""
+    from slirn_home.app import (
+        _assemble_fine_filter, _get_fine_compose, _save_fine_compose,
+    )
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="crop-full-compat", original_video=video)
+    fc = _get_fine_compose(m, t.task_id)
+    fc["materials"]["video"] = {
+        "path": str(video.relative_to(m.repo_root)),
+        "type": "video",
+        "source": "upload",
+    }
+    fc["layout"]["video"]["crop_w"] = 1920
+    fc["layout"]["video"]["crop_h"] = 1080
+    fc["layout"]["video"]["scale"] = 0.5
+    _save_fine_compose(m, t.task_id, fc)
+
+    asm = _assemble_fine_filter(t.task_id, m, duration=3.0)
+    assert asm["ok"], asm
+    # 旧公式 W×scale : H×scale = 960:540；新公式 sh = 960×1080/1920 = 540 — 相同
+    assert "scale=960:540:flags=lanczos" in asm["filter_complex"], (
+        f"全幅 16:9 裁剪应与旧行为一致（960×540），实际：\n{asm['filter_complex']}"
+    )
+
+
+def test_assemble_fine_filter_crop_aspect_720p_canvas(tmp_path: Path):
+    """REQ-20260923-NNN：720p 输出下同样保持裁剪比例。
+
+    合成在设计空间 1920×1080 内进行（sw = 1920×scale，sh = sw×crop_h/crop_w），
+    末尾再整体等比降到 1280×720（画布本身 16:9，等比降不引入变形）。
+    """
+    from slirn_home.app import (
+        _assemble_fine_filter, _get_fine_compose, _save_fine_compose,
+    )
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="crop-aspect-720p", original_video=video)
+    fc = _get_fine_compose(m, t.task_id)
+    fc["materials"]["video"] = {
+        "path": str(video.relative_to(m.repo_root)),
+        "type": "video",
+        "source": "upload",
+    }
+    fc["output"]["resolution"] = "720p"
+    fc["layout"]["video"]["crop_w"] = 1580
+    fc["layout"]["video"]["crop_h"] = 990
+    fc["layout"]["video"]["scale"] = 1.0
+    _save_fine_compose(m, t.task_id, fc)
+
+    asm = _assemble_fine_filter(t.task_id, m, duration=3.0)
+    assert asm["ok"], asm
+    # 合成层：sw = 1920×1.0；sh = round(1920×990/1580) = 1203（旧实现为 1080）
+    assert "scale=1920:1203:flags=lanczos" in asm["filter_complex"], (
+        f"720p 合成层也应保持裁剪比例（1920×1203），实际：\n{asm['filter_complex']}"
+    )
+    # 末尾整体降分辨率到 1280×720（画布 16:9 等比降）
+    assert "[vout]scale=1280:720:flags=lanczos" in asm["filter_complex"], (
+        f"720p 输出末尾应含整体降采样，实际：\n{asm['filter_complex']}"
+    )
+
+
+def test_clamp_video_to_viewport_non_16x9_crop(tmp_path: Path):
+    """REQ-20260923-NNN：viewport 夹紧用与渲染一致的显示矩形公式（非 16:9 裁剪）。
+
+    crop 1580×990 + viewport 1152×720：max_scale = min(1152/1920,
+    720×1580/(1920×990)) ≈ 0.5985；disp = 1149×720 → x 夹到 387、y 夹到 180。
+    """
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="viewport-clamp-aspect", original_video=video)
+    client = TestClient(build_app(repo_root=tmp_path).app)
+
+    r = client.post(
+        "/slirn/api/save_fine_layout",
+        json={
+            "task_id": t.task_id,
+            "layout": {
+                "video": {
+                    "x": 5000, "y": 5000, "scale": 3.0,
+                    "crop_w": 1580, "crop_h": 990,
+                    "viewport": {"x": 384, "y": 180, "width": 1152, "height": 720},
+                },
+            },
+        },
+    )
+    assert r.status_code == 200
+    v = r.json()["layout"]["video"]
+    # max_scale = min(0.6, 720*1580/(1920*990)=0.59848...) = 0.59848
+    assert abs(v["scale"] - 0.59848) < 0.001, f"scale 应夹紧到 ≈0.5985，实际 {v['scale']}"
+    # disp_w = round(1920×0.59848) = 1149 → max_x = 384 + (1152-1149) = 387
+    assert v["x"] == 387, f"x 应夹紧到 387，实际 {v['x']}"
+    # disp_h = round(1149×990/1580) = 720 → max_y = 180 + (720-720) = 180
+    assert v["y"] == 180, f"y 应夹紧到 180，实际 {v['y']}"
+
+
+def test_update_video_disp_js_matches_render_formula():
+    """REQ-20260923-NNN：前端 updateVideoDisp 与渲染 filter 同一显示尺寸公式。"""
+    js = Path('slirn_home/static/router.js').read_text(encoding='utf-8')
+    start = js.find('function updateVideoDisp()')
+    assert start > 0, "updateVideoDisp 应存在"
+    end = js.find('\n    }\n', start)
+    block = js[start:end]
+    # 显示宽 = 1920 × scale（不再是 crop_w × scale）
+    assert 'Math.round(1920 * s)' in block, (
+        f"updateVideoDisp 应按 1920×scale 计算显示宽，实际：\n{block}"
+    )
+    # 显示高 = 显示宽 × crop_h/crop_w（保持裁剪比例）
+    assert 'dw * h / w' in block, (
+        f"updateVideoDisp 应按 显示宽×crop_h/crop_w 计算显示高，实际：\n{block}"
+    )
+
+
 def test_srt_to_ass_playresx_matches_frame_width():
     """REQ-099 Phase C：_srt_to_ass 写出的 PlayResX/Y 必须等于视频像素 W×H。
 

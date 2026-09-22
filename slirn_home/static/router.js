@@ -3052,8 +3052,11 @@
       var w = parseFloat(cw.value) || 0;
       var h = parseFloat(ch.value) || 0;
       var s = parseFloat(sc.value) || 0;
-      var dw = Math.round(w * s);
-      var dh = Math.round(h * s);
+      // REQ-20260923-NNN：与渲染 filter 同一公式 — 显示宽 = 1920 × scale，
+      // 显示高 = 显示宽 × crop_h/crop_w（保持「视频源裁剪」比例，不再强制 16:9；
+      // 旧读数 crop_w×scale / crop_h×scale 与实际渲染不一致）。
+      var dw = Math.round(1920 * s);
+      var dh = w > 0 ? Math.round(dw * h / w) : 0;
       if (dispW) dispW.textContent = String(dw);
       if (dispH) dispH.textContent = String(dh);
       if (scalePct) scalePct.textContent = (s * 100).toFixed(4);
