@@ -320,3 +320,25 @@ def test_render_optimize_zone_play_skip_hint(tmp_path):
     html = _render_optimize_zone(t.task_id, m.get(t.task_id), m)
     assert "播放时也会自动跳过已标记删除的片段" in html, (
         "hint 必须说明播放自动跳过删除片段")
+
+
+def test_render_optimize_zone_deleted_stats_and_buttons(tmp_path):
+    """删除统计（行数 + 总时长）+ 只看已删除行筛选 + 查看最终字幕按钮。"""
+    from slirn_home.app import _render_optimize_zone
+
+    m, t, outputs = _make_task(tmp_path)
+    _mk_rough(outputs)
+    _write_optimize(outputs, saved=True, marks=[2])  # 行 2：3s-5s = 2.0s
+    html = _render_optimize_zone(t.task_id, m.get(t.task_id), m)
+    # 统计：行数 + 总时长
+    assert "标记删除 <b>1</b> 行 · 共 2.0s" in html, "统计必须含删除行数 + 总时长"
+    # 筛选按钮（有标记才渲染）
+    assert 'data-action="opt-filter-deleted"' in html and "只看已删除的行（1）" in html
+    # 最终字幕按钮（已确认 → 可用；未确认 → disabled）
+    assert 'data-action="opt-final-view"' in html
+    assert 'disabled title="确认保存后可查看"' not in html
+    # 无标记 → 筛选按钮不渲染；未确认 → 最终字幕按钮 disabled
+    _write_optimize(outputs, saved=False, marks=[])
+    html2 = _render_optimize_zone(t.task_id, m.get(t.task_id), m)
+    assert "opt-filter-deleted" not in html2
+    assert 'disabled title="确认保存后可查看"' in html2

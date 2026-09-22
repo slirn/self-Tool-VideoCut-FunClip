@@ -11766,3 +11766,35 @@ def test_opt_play_skip_deleted_js():
     bind = src[b:src.find("\n  }\n", b)]
     assert "optSkipDeletedOnTick(v)" in bind, "timeupdate 必须挂删除块跳播"
     assert "从其后内容播起" in src, "点已删除行必须提示从其后播起"
+
+
+def test_opt_deleted_filter_and_final_view_js():
+    """查找已删除行筛选 + 最终字幕预览弹窗（应用替换 + 去掉删除行）。"""
+    src = _router_src()
+    # 只看已删除行：类切换 + 恢复文案 + 委托分支
+    i = src.find("function optFilterDeletedBtn")
+    assert i > 0, "必须有 optFilterDeletedBtn 筛选函数"
+    body = src[i:src.find("\n  }\n", i)]
+    assert "slirn-opt-only-deleted" in body and "显示全部识别行" in body
+    assert "action === 'opt-filter-deleted'" in src, "必须委托 opt-filter-deleted"
+    assert "optFilterDeletedBtn(target)" in src
+    # 最终字幕预览：拉 /optimized_srt + 弹窗渲染 + 双时间基切换
+    j = src.find("function optFinalView")
+    assert j > 0, "必须有 optFinalView"
+    body2 = src[j:src.find("\n  }\n", j)]
+    assert "/optimized_srt" in body2 and "base: 'rough'" in body2
+    assert '[data-action="opt-srt-download"][data-base="cut"]' in body2, (
+        "cut 时间基可用性要与 SRT 下载按钮同源判断")
+    assert "action === 'opt-final-view'" in src and "optFinalView(target)" in src
+    k = src.find("function _renderOptFinalModal")
+    assert k > 0, "必须有弹窗渲染函数"
+    body3 = src[k:k + 2000]
+    assert "slirn-opt-final-pre" in body3 and "escapeHtml(srt)" in body3, (
+        "SRT 原文必须转义后进 <pre>")
+    assert "data-final-base" in body3 and '"cut"' in body3, "cut 就绪时给双时间基切换"
+    assert "去掉标记删除行" in body3, "弹窗说明必须写明删除行已去掉"
+    # CSS：删除行筛选隐藏规则 + 弹窗 pre 样式
+    css = _css_src()
+    assert ".slirn-opt-list.slirn-opt-only-deleted .slirn-opt-row:not(.line-deleted)" in css, (
+        "必须有只看已删除行的隐藏规则")
+    assert ".slirn-opt-final-pre {" in css, "必须有最终字幕 pre 样式"

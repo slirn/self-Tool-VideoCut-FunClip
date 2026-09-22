@@ -2241,6 +2241,19 @@ input[type="checkbox"]:focus-visible {
 }
 /* 过滤：只看有不明确字词的行 */
 .slirn-opt-list.slirn-opt-only-occ .slirn-opt-row:not(.has-occ) { display: none; }
+/* REQ-20260922-NNN 过滤：只看已删除的行（与 occ 筛选可叠加 = 交集） */
+.slirn-opt-list.slirn-opt-only-deleted .slirn-opt-row:not(.line-deleted) { display: none; }
+
+/* REQ-20260922-NNN 最终字幕预览弹窗：等宽 + 限高滚动（SRT 原文） */
+.slirn-opt-final-card { max-width: 720px; width: 90%; }
+.slirn-opt-final-bases { display: flex; gap: 8px; justify-content: center; margin: 0 0 8px; }
+.slirn-opt-final-pre {
+  text-align: left; font-family: Consolas, Menlo, monospace; font-size: 12px;
+  line-height: 1.6; white-space: pre-wrap; word-break: break-all;
+  max-height: 60vh; overflow: auto; margin: 0 0 10px;
+  padding: 10px 12px; background: rgba(0, 0, 0, 0.04);
+  border-radius: 8px;
+}
 
 /* ============ REQ-20260922-NNN 整句替换 + 播放暂停/停止快捷键 ============ */
 /* 整句替换行：左侧青色条 + 淡青底（弱于 target 黄 / active 蓝的临时态，

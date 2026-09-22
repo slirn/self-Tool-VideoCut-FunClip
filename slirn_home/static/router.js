@@ -4455,6 +4455,88 @@
     btn.textContent = only ? '📋 显示全部识别行'
       : (btn.getAttribute('data-all-text') || '🔍 只看有不明确字词的行');
   }
+  // REQ-20260922-NNN 查找被删除的字幕：只看已删除的行（与 occ 筛选可叠加 = 交集）
+  function optFilterDeletedBtn(btn) {
+    var list = revVis('slirn-opt-list');
+    if (!list) return;
+    var only = list.classList.toggle('slirn-opt-only-deleted');
+    btn.setAttribute('data-shown', only ? '0' : '1');
+    btn.textContent = only ? '📋 显示全部识别行'
+      : (btn.getAttribute('data-all-text') || '🗑️ 只看已删除的行');
+  }
+  // REQ-20260922-NNN 查看最终字幕：应用替换 + 去掉删除行 = 成片将使用的字幕内容。
+  // 默认粗剪时间基（原始时间轴）；优化成片已生成时给「优化成片时间基」切换（已前移）。
+  function optFinalView(btn) {
+    var tid = btn.getAttribute('data-task-id') || '';
+    if (!tid) return;
+    // cut 基是否可用 = 优化成片 SRT 下载按钮在 DOM（与服务端 cut_ready 同源渲染）
+    var hasCutBase = !!document.querySelector(
+      '[data-action="opt-srt-download"][data-base="cut"]');
+    postJSON(SLIRN_API + '/optimized_srt', {task_id: tid, base: 'rough'})
+      .then(function(r) {
+        if (!r || !r.ok) {
+          toast('❌ 获取最终字幕失败: ' + ((r && r.error) || '未知错误'), 'error');
+          return;
+        }
+        _renderOptFinalModal(r.srt || '', r.lines || 0, hasCutBase, tid);
+      });
+  }
+  function _renderOptFinalModal(srt, lines, hasCutBase, tid) {
+    var existing = document.getElementById('slirn-opt-final-overlay');
+    if (existing) existing.remove();
+    var overlay = document.createElement('div');
+    overlay.className = 'slirn-modal-overlay';
+    overlay.id = 'slirn-opt-final-overlay';
+    overlay.innerHTML =
+      '<div class="slirn-modal-card slirn-opt-final-card">' +
+        '<div class="slirn-modal-title">📄 最终字幕 · ' + lines + ' 行</div>' +
+        '<div class="slirn-form-hint" style="margin:0 0 8px;">已应用生效替换并去掉标记删除行 = '
+        + '成片将使用的字幕内容。' + (hasCutBase ? '时间基：' : '时间轴为原始（粗剪）时间基。')
+        + '</div>' +
+        (hasCutBase
+          ? '<div class="slirn-opt-final-bases">'
+            + '<button class="slirn-btn slirn-btn-sm" data-final-base="rough">粗剪时间基</button>'
+            + '<button class="slirn-btn slirn-btn-sm" data-final-base="cut">优化成片时间基（已前移）</button>'
+          + '</div>'
+          : '') +
+        '<pre class="slirn-opt-final-pre">' + escapeHtml(srt) + '</pre>' +
+        '<div style="display:flex; gap:10px; justify-content:center;">'
+          + '<button class="slirn-btn" id="slirn-opt-final-close">❌ 关闭</button></div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+    var close = function() { overlay.remove(); };
+    document.getElementById('slirn-opt-final-close').onclick = close;
+    overlay.addEventListener('click', function(e) {
+      if (e.target === overlay) close();  // 点遮罩关闭
+    });
+    if (hasCutBase) {
+      var pre = overlay.querySelector('.slirn-opt-final-pre');
+      var title = overlay.querySelector('.slirn-modal-title');
+      var mark = function(baseBtn) {
+        overlay.querySelectorAll('[data-final-base]').forEach(function(b) {
+          b.classList.toggle('slirn-btn-primary', b === baseBtn);
+        });
+      };
+      var roughBtn = overlay.querySelector('[data-final-base="rough"]');
+      mark(roughBtn);
+      overlay.querySelectorAll('[data-final-base]').forEach(function(b) {
+        b.onclick = function() {
+          if (b.classList.contains('slirn-btn-primary')) return;
+          mark(b);
+          var base = b.getAttribute('data-final-base');
+          postJSON(SLIRN_API + '/optimized_srt', {task_id: tid, base: base})
+            .then(function(r) {
+              if (!r || !r.ok) {
+                toast('❌ 切换时间基失败: ' + ((r && r.error) || ''), 'error');
+                return;
+              }
+              pre.textContent = r.srt || '';
+              title.textContent = '📄 最终字幕 · ' + (r.lines || 0) + ' 行';
+            });
+        };
+      });
+    }
+  }
   function optCollectDecisions() {  // REQ-20260918-056：共用 decisions 收集（前端 DOM = 磁盘状态镜像）
     var list = revVis('slirn-opt-list');
     if (!list) return [];
@@ -6630,6 +6712,10 @@
     }
     else if (action === 'opt-filter') {
       optFilterBtn(target);
+    } else if (action === 'opt-filter-deleted') {
+      optFilterDeletedBtn(target);
+    } else if (action === 'opt-final-view') {
+      optFinalView(target);
     }
     else if (action === 'save-optimize') {
       optSave(target);

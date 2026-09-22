@@ -1359,13 +1359,26 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
     n_edits = int(est.get("line_edits") or 0)
     edit_stat = f" · 整句替换 <b>{n_edits}</b> 行" if n_edits else ""
     n_marks = int(est.get("line_marks") or 0)
-    mark_stat = f" · 标记删除 <b>{n_marks}</b> 行" if n_marks else ""
+    # 删除统计：行数 + 总时长（REQ-20260922-NNN：统计被删除的记录数和总时长）
+    if n_marks:
+        del_ms = sum(max(0, int(s.get("end_ms") or 0) - int(s.get("start_ms") or 0))
+                     for s in (data.get("segments") or [])
+                     if str(s.get("i")) in marks_set)
+        mark_stat = f" · 标记删除 <b>{n_marks}</b> 行 · 共 {del_ms / 1000:.1f}s"
+    else:
+        mark_stat = ""
     model_disp = _esc(data.get("model") or "")
     # 优化成片就绪时多给一个「优化成片时间基」的 SRT 下载（时间轴已前移）
     cut_srt_btn = (
         f'<button class="slirn-btn" data-action="opt-srt-download" data-task-id="{_esc(task_id)}" '
         f'data-base="cut">⬇️ 下载优化成片字幕 SRT</button>'
         if cut_ready is not None else ""
+    )
+    # REQ-20260922-NNN 查找被删除的字幕：只看已删除行（有标记才渲染）
+    del_filter_btn = (
+        f'<button class="slirn-btn" data-action="opt-filter-deleted" data-shown="0" '
+        f'data-all-text="🗑️ 只看已删除的行（{n_marks}）">🗑️ 只看已删除的行（{n_marks}）</button>'
+        if n_marks else ""
     )
     return f'''<div class="slirn-card" style="margin-top:16px;">
         <div class="slirn-panel-header"><div class="slirn-panel-title">✨ 优化字幕 · 不明确字词</div></div>
@@ -1387,6 +1400,7 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
         <div class="slirn-task-actions" style="margin-top:10px;">
             <button class="slirn-btn" data-action="opt-filter" data-shown="1"
                     data-all-text="🔍 只看有不明确字词的行（{n_occ_rows}/{n_lines}）">🔍 只看有不明确字词的行（{n_occ_rows}/{n_lines}）</button>
+            {del_filter_btn}
         </div>
         <div id="slirn-opt-player-wrap" class="slirn-video-wrap slirn-sub-player-wrap" style="display:none;">
             <video id="slirn-opt-player" controls preload="metadata"></video>
@@ -1399,6 +1413,8 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
                     data-base="rough"
                     {"" if confirmed else 'disabled title="确认保存后可下载"'}>⬇️ 下载优化字幕 SRT</button>
             {cut_srt_btn}
+            <button class="slirn-btn" data-action="opt-final-view" data-task-id="{_esc(task_id)}"
+                    {"" if confirmed else 'disabled title="确认保存后可查看"'}>📄 查看最终字幕</button>
             <button class="slirn-btn" data-action="optimize-start" data-task-id="{_esc(task_id)}"
                     data-has="1">🔄 重新优化</button>
         </div>
