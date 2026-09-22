@@ -4433,6 +4433,20 @@
     });
     return decisions;
   }
+  // REQ-20260922-NNN 整句替换：收集 data-full-edit="1" 行 → [{seg, text}]
+  // （与 decisions 同口径：前端 DOM = 磁盘状态镜像，不传 = 清空）
+  function optCollectLineEdits() {
+    var list = revVis('slirn-opt-list');
+    if (!list) return [];
+    var edits = [];
+    list.querySelectorAll('.slirn-opt-row[data-full-edit="1"]').forEach(function(row) {
+      var text = row.getAttribute('data-full-text') || '';
+      if (text.trim()) {
+        edits.push({seg: parseInt(row.getAttribute('data-id'), 10), text: text});
+      }
+    });
+    return edits;
+  }
   // REQ-20260918-056：回车后自动保存 — 含并发锁（连续 Enter 合并到 pending）
   var _optSaveInFlight = null;
   var _optSavePending = null;
@@ -4440,12 +4454,14 @@
     if (!tid) return;
     if (_optSaveInFlight) {
       // 已有请求在跑 → 把当前快照记为"完成后立即再发一次"
-      _optSavePending = {tid: tid, decisions: optCollectDecisions()};
+      _optSavePending = {tid: tid, decisions: optCollectDecisions(),
+                         line_edits: optCollectLineEdits()};
       return;
     }
     var decisions = optCollectDecisions();
+    var line_edits = optCollectLineEdits();
     _optSaveInFlight = postJSON(SLIRN_API + '/save_optimize_subtitle',
-      {task_id: tid, decisions: decisions})
+      {task_id: tid, decisions: decisions, line_edits: line_edits})
       .then(function(r) {
         if (r && r.ok) {
           toast('✅ 已自动保存', 'success');
@@ -4468,8 +4484,12 @@
   function optSave(btn) {
     var tid = btn.getAttribute('data-task-id') || '';
     var decisions = optCollectDecisions();
-    if (decisions.length === 0) { toast('❌ 无优化结果列表', 'error'); return; }
-    postJSON(SLIRN_API + '/save_optimize_subtitle', {task_id: tid, decisions: decisions})
+    var line_edits = optCollectLineEdits();
+    if (decisions.length === 0 && line_edits.length === 0) {
+      toast('❌ 无优化结果列表', 'error'); return;
+    }
+    postJSON(SLIRN_API + '/save_optimize_subtitle',
+      {task_id: tid, decisions: decisions, line_edits: line_edits})
       .then(function(r) {
         if (r && r.ok) {
           toast(r.toast || '已确认保存');
@@ -4478,6 +4498,106 @@
           toast('❌ ' + r.error, 'error');
         }
       });
+  }
+  // ========== REQ-20260922-NNN 整句替换：行内编辑 ==========
+  function optLineEdit(row) {  // ✏️ 进入编辑态；已有整句（↩️）= 取消整句并自动保存
+    if (!row) return;
+    if (row.classList.contains('editing')) return;
+    if (row.getAttribute('data-full-edit') === '1') { optLineClear(row); return; }
+    var textCol = row.querySelector('.slirn-fw-text');
+    if (!textCol) return;
+    row.classList.add('editing');
+    // 编辑态预填：当前生效文本（保存过的整句/局部替换结果，无则原文）
+    var prefill = row.getAttribute('data-eff-text') || row.getAttribute('data-orig-text') || '';
+    textCol.innerHTML =
+      '<button class="slirn-btn slirn-btn-xs slirn-opt-line-btn" data-action="opt-line-edit" ' +
+      'title="整句替换：直接改写整行文本，覆盖本行局部替换">✏️</button>' +
+      '<span class="slirn-opt-line-editbox">' +
+      '<textarea class="slirn-opt-line-input" rows="2"></textarea>' +
+      '<span class="slirn-opt-line-ops">' +
+      '<button class="slirn-btn slirn-btn-xs slirn-btn-primary" data-action="opt-line-apply">✅ 应用整句</button>' +
+      '<button class="slirn-btn slirn-btn-xs" data-action="opt-line-cancel">取消</button>' +
+      '</span></span>';
+    var ta = textCol.querySelector('textarea.slirn-opt-line-input');
+    if (ta) {
+      ta.value = prefill;
+      ta.focus();
+      try { ta.setSelectionRange(ta.value.length, ta.value.length); } catch (err) {}
+    }
+  }
+  function optLineApply(row) {  // ✅ 应用：空/同原文 = 取消；否则置整句 + 重渲 + 自动保存
+    if (!row || !row.classList.contains('editing')) return;
+    var ta = row.querySelector('textarea.slirn-opt-line-input');
+    var text = ta ? ta.value.trim() : '';
+    var orig = row.getAttribute('data-orig-text') || '';
+    row.classList.remove('editing');
+    if (!text || text === orig) { optLineRender(row, false, ''); optLineAfterEdit(row); return; }
+    row.setAttribute('data-full-edit', '1');
+    row.setAttribute('data-full-text', text);
+    optLineRender(row, true, text);
+    optLineAfterEdit(row);
+  }
+  function optLineCancel(row) {  // 取消编辑态（不动已落盘的整句状态）
+    if (!row || !row.classList.contains('editing')) return;
+    row.classList.remove('editing');
+    var hadFull = row.getAttribute('data-full-edit') === '1';
+    optLineRender(row, hadFull, row.getAttribute('data-full-text') || '');
+  }
+  function optLineClear(row) {  // ↩️ 取消整句：清位 + 恢复原文渲染 + 自动保存
+    row.classList.remove('editing');
+    row.setAttribute('data-full-edit', '0');
+    row.removeAttribute('data-full-text');
+    optLineRender(row, false, '');
+    optLineAfterEdit(row);
+  }
+  function optLineRender(row, hasFull, fullText) {
+    // 按服务端 _line_html 同款结构重渲正文列 + occ 覆盖标注（纯前端镜像）
+    var textCol = row.querySelector('.slirn-fw-text');
+    if (!textCol) return;
+    var rid = row.getAttribute('data-id') || '';
+    var orig = row.getAttribute('data-orig-text') || '';
+    var btn = hasFull
+      ? '<button class="slirn-btn slirn-btn-xs slirn-opt-line-btn" data-action="opt-line-edit" title="取消整句替换，恢复局部替换">↩️</button>'
+      : '<button class="slirn-btn slirn-btn-xs slirn-opt-line-btn" data-action="opt-line-edit" title="整句替换：直接改写整行文本，覆盖本行局部替换">✏️</button>';
+    var body;
+    if (hasFull) {
+      body = '<span class="slirn-opt-line-badge">✏️ 整句替换</span>' +
+        '<span class="slirn-opt-line-new"></span>' +
+        '<span class="slirn-opt-line-orig" title="原文"></span>';
+    } else {
+      body = '<span class="slirn-fw-rawtext"></span>';
+    }
+    textCol.innerHTML = btn + body;
+    // textContent 赋值 = 天然转义（不用 innerHTML 拼用户文本）
+    if (hasFull) {
+      textCol.querySelector('.slirn-opt-line-new').textContent = fullText;
+      textCol.querySelector('.slirn-opt-line-orig').textContent = orig;
+      row.classList.add('full-edit');
+    } else {
+      textCol.querySelector('.slirn-fw-rawtext').textContent = orig;
+      row.classList.remove('full-edit');
+    }
+    // occ chip 覆盖标注（与服务端渲染同款：overridden 类 + 提示行）
+    var occCol = row.querySelector('.slirn-opt-col');
+    if (occCol) {
+      var hint = occCol.querySelector('.slirn-opt-occ-override-hint');
+      if (hasFull && !hint) {
+        hint = document.createElement('span');
+        hint.className = 'slirn-opt-occ-override-hint';
+        hint.textContent = '整句替换已覆盖本行局部替换';
+        occCol.appendChild(hint);
+      } else if (!hasFull && hint) {
+        hint.parentNode.removeChild(hint);
+      }
+      occCol.querySelectorAll('.slirn-opt-occ').forEach(function(occ) {
+        occ.classList.toggle('overridden', hasFull);
+      });
+    }
+  }
+  function optLineAfterEdit(row) {  // 整句状态变更后自动保存（沿用 REQ-20260918-056 锁）
+    var inner = document.getElementById('slirn-tab-workbench-inner');
+    var tid = inner ? (inner.getAttribute('data-task-id') || '') : '';
+    if (tid) optAutoSave(tid);
   }
   function optSrtDownload(btn) {  // 下载优化后成片字幕 SRT（粗剪成片时间基）
     var tid = btn.getAttribute('data-task-id') || '';
@@ -4557,7 +4677,8 @@
     if (!list) return;
     list.querySelectorAll('.slirn-opt-row[data-start-ms]').forEach(function(row) {
       row.addEventListener('click', function(ev) {
-        if (ev.target && ev.target.closest('button,input')) return;
+        // REQ-20260922-NNN：textarea（整句编辑框）也让位
+        if (ev.target && ev.target.closest('button,input,textarea')) return;
         playOptAt(tid, parseInt(row.getAttribute('data-start-ms'), 10) || 0);
       });
     });
@@ -5444,6 +5565,25 @@
     optOccEnterConfirm(ae, e);
   });
 
+  // REQ-20260922-NNN：整句替换编辑框 — Enter 应用 / Esc 取消（Shift+Enter 换行）
+  // document 级委托，同上严格过滤；textarea 内的键不进面板快捷键（INPUT 让位）。
+  document.addEventListener('keydown', function(e) {
+    if (e.key !== 'Enter' && e.key !== 'Escape') return;
+    var ae = e.target;
+    if (!ae || !ae.classList || !ae.classList.contains('slirn-opt-line-input')) return;
+    var row = ae.closest('.slirn-opt-row');
+    if (!row) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      optLineCancel(row);
+      return;
+    }
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.shiftKey) return;  // Shift+Enter = 换行（保留默认行为）
+    e.preventDefault();
+    optLineApply(row);
+  });
+
   function handleResp(resp, refreshCellId) {
     if (!resp) { toast('❌ 无响应', 'error'); return; }
     if (!resp.ok) { toast('❌ ' + (resp.error || '操作失败'), 'error'); return; }
@@ -5775,6 +5915,16 @@
     }
     else if (action === 'opt-occ-toggle') {
       optOccToggle(target);
+    }
+    else if (action === 'opt-line-edit') {
+      // REQ-20260922-NNN 整句替换：✏️ 进入编辑态；↩️（已有整句）= 取消整句
+      optLineEdit(target.closest('.slirn-opt-row'));
+    }
+    else if (action === 'opt-line-apply') {
+      optLineApply(target.closest('.slirn-opt-row'));
+    }
+    else if (action === 'opt-line-cancel') {
+      optLineCancel(target.closest('.slirn-opt-row'));
     }
     else if (action === 'opt-word') {
       optWordFilter(target);

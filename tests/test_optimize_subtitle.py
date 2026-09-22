@@ -128,6 +128,39 @@ def test_apply_to_segments():
     assert "new_text" not in segs2[1]
 
 
+# =============== REQ-20260922-NNN 整句替换 ===============
+
+def test_apply_to_segments_line_edit_overrides():
+    """整句行：new_text 直接用整句文本，跳过该行局部替换；其他行照常。"""
+    segs = osvc.apply_to_segments(SEGS, _occs(), [
+        {"seg": 1, "text": "今天我们来讲一下神经网络的基本概念"},
+    ])
+    assert segs[0]["new_text"] == "今天我们来讲一下神经网络的基本概念"  # 整句优先
+    assert segs[1]["new_text"] == "AI在很多行业都有应用"  # 其他行局部替换不受影响
+    assert segs[2]["new_text"] == "神经网络这个词很形象"
+
+
+def test_apply_to_segments_line_edit_defensive():
+    """非法 seg / 空白文本 / 与原文相同 → 忽略该条（走原局部替换逻辑）。"""
+    segs = osvc.apply_to_segments(SEGS, _occs(), [
+        {"seg": 99, "text": "未知行"},                      # 未知 seg
+        {"seg": "abc", "text": "非法 seg"},                 # 非法 seg
+        {"seg": 1, "text": "   "},                          # 空白
+        {"seg": 1, "text": "今天讲一下神精网络"},            # == 原文
+        {"text": "缺 seg"},                                 # 缺 seg
+        "不是 dict",
+    ])
+    assert segs[0]["new_text"] == "今天讲一下神经网络"  # 回退局部替换
+    assert "new_text" not in segs[1] or segs[1]["new_text"]  # 不抛异常即可
+
+
+def test_apply_to_segments_no_edits_keeps_legacy():
+    """不传 line_edits（None）→ 行为与旧版完全一致。"""
+    segs = osvc.apply_to_segments(SEGS, _occs())
+    segs2 = osvc.apply_to_segments(SEGS, _occs(), None)
+    assert segs == segs2
+
+
 def test_build_srt_prefers_new_text():
     segs = osvc.apply_to_segments(SEGS, _occs(**{"2": False}))
     srt = osvc.build_srt(segs)
@@ -142,12 +175,21 @@ def test_build_srt_prefers_new_text():
 def test_effective_stats():
     data = {"segments": SEGS, "occurrences": _occs(**{"1": False})}
     est = osvc.effective_stats(data)
-    assert est == {"lines": 3, "occurrences": 3, "applied": 2, "skipped": 1, "words": 1}
+    assert est == {"lines": 3, "occurrences": 3, "applied": 2, "skipped": 1,
+                   "words": 1, "line_edits": 0}
+
+
+def test_effective_stats_with_line_edits():
+    """REQ-20260922-NNN：整句替换行数单列（与局部替换口径正交）。"""
+    data = {"segments": SEGS, "occurrences": _occs(),
+            "line_edits": [{"seg": 1, "text": "整句一"}, {"seg": 2, "text": "整句二"}]}
+    est = osvc.effective_stats(data)
+    assert est["line_edits"] == 2 and est["applied"] == 3  # occ 统计不受整句影响
 
 
 # =============== save_decisions ===============
 
-def _write_opt(tmp_path: Path, occs=None) -> Path:
+def _write_opt(tmp_path: Path, occs=None, edits=None) -> Path:
     occs = _occs() if occs is None else occs
     data = {
         "version": 1, "video": "rough_compose.mp4", "model": "m", "provider": "p",
@@ -156,6 +198,8 @@ def _write_opt(tmp_path: Path, occs=None) -> Path:
         "words": osvc.aggregate_words(occs), "mapping": osvc.build_mapping(occs),
         "stats": {"lines": 3, "occurrences": 3},
     }
+    if edits is not None:
+        data["line_edits"] = edits
     p = tmp_path / osvc.OPTIMIZE_JSON
     p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     return p
@@ -196,6 +240,45 @@ def test_save_decisions_edited_after(tmp_path):
 def test_save_decisions_missing_file(tmp_path):
     with pytest.raises(RuntimeError):
         osvc.save_decisions(tmp_path, [])
+
+
+def test_save_decisions_line_edits_roundtrip(tmp_path):
+    """REQ-20260922-NNN：整句替换往返落盘 — 校验过滤 + 按 seg 升序 + 整句行跳过局部替换。"""
+    _write_opt(tmp_path)
+    data, applied = osvc.save_decisions(tmp_path, [
+        {"occ_id": 0, "applied": True, "after": "神经网络"},
+        {"occ_id": 1, "applied": True, "after": "AI"},
+        {"occ_id": 2, "applied": True, "after": "神经网络"},
+    ], line_edits=[
+        {"seg": 3, "text": "神经网络这个词听起来很形象"},
+        {"seg": 1, "text": "今天我们来讲一下神经网络"},   # 乱序 → 落盘按 seg 升序
+        {"seg": 2, "text": "   "},                        # 空白 → 丢弃
+        {"seg": 99, "text": "未知行"},                    # 未知 seg → 丢弃
+        {"seg": 2, "text": "爱在很多行业都有应用"},         # == 原文 → 丢弃
+        "不是 dict",
+    ])
+    assert applied == 3  # occ 生效统计不受整句影响
+    assert data["line_edits"] == [
+        {"seg": 1, "text": "今天我们来讲一下神经网络"},
+        {"seg": 3, "text": "神经网络这个词听起来很形象"},
+    ]
+    assert data["segments"][0]["new_text"] == "今天我们来讲一下神经网络"  # 整句覆盖局部
+    assert data["segments"][1]["new_text"] == "AI在很多行业都有应用"      # 无整句走局部
+    assert data["segments"][2]["new_text"] == "神经网络这个词听起来很形象"
+    assert data["stats"]["line_edits"] == 2
+
+
+def test_save_decisions_line_edits_absent_clears(tmp_path):
+    """全量口径：不传 line_edits = 清空已有整句替换（DOM = 磁盘镜像）。"""
+    _write_opt(tmp_path, edits=[{"seg": 1, "text": "整句旧版"}])
+    data, _ = osvc.save_decisions(tmp_path, [
+        {"occ_id": 0, "applied": True, "after": "神经网络"},
+        {"occ_id": 1, "applied": True, "after": "AI"},
+        {"occ_id": 2, "applied": True, "after": "神经网络"},
+    ])  # 不传 line_edits
+    assert data["line_edits"] == []
+    assert data["segments"][0]["new_text"] == "今天讲一下神经网络"  # 恢复局部替换
+    assert data["stats"]["line_edits"] == 0
 
 
 # =============== start_job（monkeypatch：ASR + LLM 假实现） ===============
@@ -398,3 +481,34 @@ def test_render_zone_word_list_done_flags(tmp_path, monkeypatch):
     # occ 带词归属 + 已处理态（0 已处理 / 2 未处理）
     assert 'data-word="神经网络" data-reviewed="1"' in html
     assert 'data-word="神经网络" data-reviewed="0"' in html
+
+
+def test_render_zone_line_edit_full_edit_row(tmp_path, monkeypatch):
+    """REQ-20260922-NNN：整句替换 — full-edit 行徽章/覆盖标注 + 行首按钮 + 快捷键提示条。"""
+    from slirn_home import llm_config
+    from slirn_home.app import _render_optimize_zone
+
+    m, t = _make_mgr(tmp_path)
+    outputs = tmp_path / "tasks" / t.task_id / "outputs"
+    outputs.mkdir(parents=True, exist_ok=True)
+    (outputs / "rough_compose.mp4").write_bytes(b"fake-mp4")
+    _write_opt(outputs, edits=[{"seg": 1, "text": "今天我们来讲一下神经网络"}])
+    monkeypatch.setattr(llm_config, "get_current_entry",
+                        lambda root: {"id": "qwen-plus", "provider": "dashscope", "protocol": "openai"})
+    html = _render_optimize_zone(t.task_id, m.get(t.task_id), m)
+    # full-edit 行：类 + 徽章 + 新文本 + 删除线原文
+    assert 'class="slirn-opt-row has-occ full-edit" data-id="1"' in html
+    assert '<span class="slirn-opt-line-badge">✏️ 整句替换</span>' in html
+    assert '<span class="slirn-opt-line-new">今天我们来讲一下神经网络</span>' in html
+    assert '<span class="slirn-opt-line-orig" title="原文">今天讲一下神精网络</span>' in html
+    # 整句行 occ chip 覆盖标注 + 提示；其他行正常 ✏️
+    assert 'class="slirn-opt-occ overridden"' in html
+    assert "整句替换已覆盖本行局部替换" in html
+    assert 'data-action="opt-line-edit"' in html  # 无整句行是 ✏️，整句行是 ↩️
+    assert ">✏️</button>" in html and ">↩️</button>" in html
+    # 行 data 属性（前端编辑态/收集用）
+    assert 'data-orig-text="今天讲一下神精网络"' in html
+    assert 'data-full-edit="1"' in html and 'data-full-edit="0"' in html
+    assert 'data-full-text="今天我们来讲一下神经网络"' in html
+    # 头部统计
+    assert "整句替换 <b>1</b> 行" in html

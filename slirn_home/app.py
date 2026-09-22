@@ -1192,6 +1192,11 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
     occs_by_seg: dict[str, list[dict]] = {}
     for o in data.get("occurrences") or []:
         occs_by_seg.setdefault(str(o.get("seg")), []).append(o)
+    # REQ-20260922-NNN 整句替换：行 → 整句文本（跳过该行局部替换）
+    edits_by_seg: dict[str, str] = {}
+    for e in data.get("line_edits") or []:
+        if isinstance(e, dict) and e.get("text"):
+            edits_by_seg[str(e.get("seg"))] = str(e["text"])
     confirmed = bool(data.get("saved_at"))
     running_html = ""
     if job_state == "running":
@@ -1251,7 +1256,16 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
         # REQ-032 修订：替换栏放右侧独立列后，正文流不再插入 chip（避免重复显示），
         # 整段原文连续渲染，删除线 + 箭头 + 输入框全部在替换栏。
         raw = str(seg.get("text", ""))
+        # REQ-20260922-NNN 整句替换：full_edit 行整行改写（覆盖本行局部替换）
+        full_edit = edits_by_seg.get(rid)
+        eff_text = str(seg.get("new_text") or raw)  # 保存后回显的最终文本（预填用）
         parts = [_esc(raw)]
+        if full_edit is not None:
+            parts = [
+                '<span class="slirn-opt-line-badge">✏️ 整句替换</span>',
+                f'<span class="slirn-opt-line-new">{_esc(full_edit)}</span>',
+                f'<span class="slirn-opt-line-orig" title="原文">{_esc(raw)}</span>',
+            ]
         occ_chips = []
         for o in occs:
             applied = 1 if o.get("applied", True) else 0
@@ -1261,8 +1275,9 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
             reason_txt = _esc(str(o.get("reason") or "不明确片段"))
             toggle_title = _esc("已采纳（保存时替换）" if applied else "已不采纳（保留原文）")
             toggle_mark = "✓" if applied else "✕"
+            overridden = " overridden" if full_edit is not None else ""
             occ_chips.append(
-                f'<span class="slirn-opt-occ" data-occ="{occ_id}" data-applied="{applied}"'
+                f'<span class="slirn-opt-occ{overridden}" data-occ="{occ_id}" data-applied="{applied}"'
                 f' data-word="{after_txt}" data-reviewed="{1 if o.get("reviewed") else 0}">'
                 f'<s class="slirn-opt-before" title="{reason_txt}">{before_txt}</s>'
                 f'<span class="slirn-opt-arrow">→</span>'
@@ -1270,28 +1285,43 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
                 f'<button class="slirn-btn slirn-btn-xs slirn-opt-toggle" data-action="opt-occ-toggle" '
                 f'data-occ="{occ_id}" title="{toggle_title}">{toggle_mark}</button></span>'
             )
+        if occ_chips and full_edit is not None:
+            occ_chips.append('<span class="slirn-opt-occ-override-hint">整句替换已覆盖本行局部替换</span>')
         row_words = sorted({str(o["after"]) for o in occs if o.get("applied", True)})
         has_occ = " has-occ" if occs else ""
+        full_cls = " full-edit" if full_edit is not None else ""
         occ_col = f'<div class="slirn-opt-col">{"".join(occ_chips)}</div>' if occ_chips else ''
+        edit_btn = (
+            f'<button class="slirn-btn slirn-btn-xs slirn-opt-line-btn" data-action="opt-line-edit" '
+            f'title="整句替换：直接改写整行文本，覆盖本行局部替换">✏️</button>'
+            if full_edit is None else
+            f'<button class="slirn-btn slirn-btn-xs slirn-opt-line-btn" data-action="opt-line-edit" '
+            f'title="取消整句替换，恢复局部替换">↩️</button>'
+        )
         # REQ-20260918-054：补 data-end-ms，前端 timeupdate 按 [start,end) 命中行
-        return (f'<div class="slirn-opt-row{has_occ}" data-id="{_esc(rid)}" '
+        return (f'<div class="slirn-opt-row{has_occ}{full_cls}" data-id="{_esc(rid)}" '
                 f'data-start-ms="{int(seg.get("start_ms", 0))}" '
                 f'data-end-ms="{int(seg.get("end_ms", 0))}"'
-                f' data-words="{_esc(chr(10).join(row_words))}">'
+                f' data-words="{_esc(chr(10).join(row_words))}"'
+                f' data-orig-text="{_esc(raw)}" data-eff-text="{_esc(eff_text)}"'
+                f' data-full-edit="{1 if full_edit is not None else 0}"'
+                f' data-full-text="{_esc(full_edit or "")}">'
                 f'<span class="slirn-sub-idx">{_esc(rid)}</span>'
                 f'<span class="slirn-fw-time">{_esc(str(seg.get("start") or ""))}</span>'
-                f'<div class="slirn-fw-text">{"".join(parts)}</div>'
+                f'<div class="slirn-fw-text">{edit_btn}{"".join(parts)}</div>'
                 f'{occ_col}</div>')
 
     rows = "".join(_line_html(s) for s in (data.get("segments") or []))
     save_label = "💾 确认替换并保存" if not confirmed else "✅ 已确认 · 再次保存"
     n_occ_rows = len(occs_by_seg)
     n_lines = est["lines"]
+    n_edits = int(est.get("line_edits") or 0)
+    edit_stat = f" · 整句替换 <b>{n_edits}</b> 行" if n_edits else ""
     model_disp = _esc(data.get("model") or "")
     return f'''<div class="slirn-card" style="margin-top:16px;">
         <div class="slirn-panel-header"><div class="slirn-panel-title">✨ 优化字幕 · 不明确字词</div></div>
         <div class="slirn-sub-meta">识别 {n_lines} 行 · 不明确 {est["occurrences"]} 处（{est["words"]} 个词）
-        · 生效替换 <b>{est["applied"]}</b> 处 · 未采纳 {est["skipped"]} 处 · 模型 {model_disp}
+        · 生效替换 <b>{est["applied"]}</b> 处 · 未采纳 {est["skipped"]} 处{edit_stat} · 模型 {model_disp}
         {" · ✅ 已确认" if confirmed else ""}</div>
         {stale_note}
         <div class="slirn-form-hint" style="margin-top:10px;"><b>不明确字词频次</b>（按替换目标词分组；
@@ -1299,7 +1329,8 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
         {word_filter_html}
         <div class="slirn-fw-stats" id="slirn-opt-words">{words_html}</div>
         <div class="slirn-form-hint">行内 <s class="slirn-opt-before">删除线</s> = 疑似误识别原文，旁边输入框 = 替换值（可直接编辑）；
-        <b>✓</b> 采纳 / <b>✕</b> 不采纳（逐处切换）。点词筛选出现行，点行按成片时间跳播核对。</div>
+        <b>✓</b> 采纳 / <b>✕</b> 不采纳（逐处切换）。点词筛选出现行，点行按成片时间跳播核对。
+        行首 <b>✏️</b> = 整句替换（直接改写整行文本，覆盖本行局部替换）。</div>
         <div class="slirn-task-actions" style="margin-top:10px;">
             <button class="slirn-btn" data-action="opt-filter" data-shown="1"
                     data-all-text="🔍 只看有不明确字词的行（{n_occ_rows}/{n_lines}）">🔍 只看有不明确字词的行（{n_occ_rows}/{n_lines}）</button>
@@ -8666,6 +8697,11 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         decisions = body.get("decisions")
         if not isinstance(decisions, list):
             return _err("decisions 必须是数组")
+        # REQ-20260922-NNN 整句替换：可选 line_edits [{seg, text}]（全量口径，
+        # 不传 = 清空；非法项服务端丢弃）
+        line_edits = body.get("line_edits")
+        if line_edits is not None and not isinstance(line_edits, list):
+            return _err("line_edits 必须是数组")
         outputs_dir = mgr.tasks_dir / tid / "outputs"
         # REQ-20260919-075：开始记录 — 确认保存
         exec_id = execution_history.record_start(
@@ -8675,20 +8711,22 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             auto_session_id=_auto_session_id,
         )
         try:
-            data, applied_n = optimize_service.save_decisions(outputs_dir, decisions)
+            data, applied_n = optimize_service.save_decisions(outputs_dir, decisions, line_edits)
         except Exception as e:  # noqa: BLE001
             execution_history.record_finish(outputs_dir, exec_id, success=False, error=str(e))
             return _err(f"保存失败: {e}")
         est = optimize_service.effective_stats(data)
         mgr.update_status(tid, TaskStatus.FINE_SUBTITLE_REVIEWED)  # 幂等：结果在盘即完成
+        n_edits = int(est.get("line_edits") or 0)
+        edit_suffix = f" · 整句替换 {n_edits} 行" if n_edits else ""
         # REQ-20260919-075：完成时回填具体执行情况
         execution_history.patch_fields(outputs_dir, exec_id, {
             "description": (f"优化字幕保存：{len(decisions)} 条人工决定，生效 {applied_n} 处"
-                            f"（未采纳 {est.get('skipped', 0)} 处）")
+                            f"（未采纳 {est.get('skipped', 0)} 处）{edit_suffix}")
         })
         execution_history.record_finish(outputs_dir, exec_id, success=True, error="")
         return _ok("", toast=(f"✅ 已保存替换对应关系：生效 {applied_n} 处"
-                              f"（未采纳 {est['skipped']} 处）"), stats=est)
+                              f"（未采纳 {est['skipped']} 处）{edit_suffix}"), stats=est)
 
     @app.app.post("/slirn/api/optimized_srt")
     async def optimized_srt(body: dict = Body(default_factory=dict)):

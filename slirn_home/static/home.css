@@ -2241,6 +2241,55 @@ input[type="checkbox"]:focus-visible {
 }
 /* 过滤：只看有不明确字词的行 */
 .slirn-opt-list.slirn-opt-only-occ .slirn-opt-row:not(.has-occ) { display: none; }
+
+/* ============ REQ-20260922-NNN 整句替换 + 播放暂停/停止快捷键 ============ */
+/* 整句替换行：左侧青色条 + 淡青底（弱于 target 黄 / active 蓝的临时态，
+   full-edit 是持久落盘状态） */
+.slirn-opt-row.full-edit {
+  background: rgba(20, 184, 166, 0.09);
+  border-left: 3px solid #14b8a6;
+  padding-left: 7px;  /* 抵消 border-left 3px，保持网格对齐 */
+}
+.slirn-opt-row.full-edit .slirn-sub-idx { color: #0f766e; font-weight: 600; }
+/* active（播放高亮）压过 full-edit，同 target∩active 的复合选择器约定 */
+.slirn-opt-row.full-edit.active {
+  background: linear-gradient(90deg, rgba(49, 120, 198, 0.16) 0%, rgba(49, 120, 198, 0.06) 100%);
+  border-left-color: var(--accent, #3178c6);
+}
+/* 行首 ✏️/↩️ 小按钮：不占正文行高，hover 才显色 */
+.slirn-opt-line-btn {
+  margin-right: 6px; padding: 0 4px; font-size: 12px; line-height: 1.6;
+  vertical-align: baseline; border: none; background: transparent;
+  cursor: pointer; opacity: 0.55;
+}
+.slirn-opt-line-btn:hover { opacity: 1; background: rgba(20, 184, 166, 0.15); }
+/* 整句徽章 + 新旧文本展示 */
+.slirn-opt-line-badge {
+  display: inline-block; margin-right: 6px; padding: 0 6px;
+  border-radius: 6px; background: rgba(20, 184, 166, 0.18); color: #0f766e;
+  font-size: 11px; font-weight: 600; vertical-align: baseline;
+}
+.slirn-opt-line-new { font-weight: 600; }
+.slirn-opt-line-orig {
+  display: block; margin-top: 2px; font-size: 12px;
+  color: var(--text-muted); text-decoration: line-through;
+}
+/* 编辑态：正文列换成 textarea + 操作按钮；行底色不变（editing 是临时态） */
+.slirn-opt-row.editing { cursor: default; }
+.slirn-opt-line-editbox { display: block; }
+.slirn-opt-line-input {
+  width: 100%; min-height: 46px; padding: 5px 8px; resize: vertical;
+  font-size: 13.5px; line-height: 1.6;
+  border: 1px solid rgba(20, 184, 166, 0.65); border-radius: 6px;
+  background: var(--input-bg); color: var(--text);
+}
+.slirn-opt-line-input:focus { outline: none; border-color: #14b8a6; }
+.slirn-opt-line-ops { display: inline-flex; gap: 6px; margin-top: 5px; }
+/* occ chip 被整句覆盖：置灰（数据保留，取消整句即恢复） */
+.slirn-opt-occ.overridden { opacity: 0.4; }
+.slirn-opt-occ-override-hint {
+  font-size: 11.5px; color: var(--text-muted); line-height: 1.6;
+}
 @media (max-width: 720px) {
   .slirn-opt-row { grid-template-columns: 36px 1fr; }
   .slirn-opt-row .slirn-fw-time { display: none; }

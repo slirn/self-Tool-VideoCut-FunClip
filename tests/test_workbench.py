@@ -11378,3 +11378,113 @@ def test_outputs_css_has_chip_and_mtime_styles():
     assert ".slirn-pipe-outputs-filter" in src, "必须有 .slirn-pipe-outputs-filter 容器样式"
 
 
+
+
+# ---------- REQ-20260922-NNN 优化字幕：整句替换 + 播放暂停/停止快捷键 ----------
+
+def _write_min_optimize(outputs: Path, segs=None, occs=None):
+    """写最小 optimize_subtitle.json（端点测试前置）。"""
+    from slirn_home import optimize_service as osvc
+
+    if segs is None:
+        segs = [{"i": 1, "start_ms": 0, "end_ms": 2000, "start": "00:00:00,000",
+                 "end": "00:00:02,000", "text": "今天讲一下神精网络"}]
+    if occs is None:
+        occs = [{"occ_id": 0, "seg": 1, "pos": 6, "before": "神精网络",
+                 "after": "神经网络", "reason": "", "applied": True, "reviewed": False}]
+    data = {"version": 1, "video": "rough_compose.mp4", "model": "m", "provider": "p",
+            "protocol": "openai", "created_at": "2026-09-22T10:00:00", "saved_at": None,
+            "hotwords": [], "segments": segs, "occurrences": occs,
+            "words": osvc.aggregate_words(occs), "mapping": osvc.build_mapping(occs),
+            "stats": {"lines": len(segs), "occurrences": len(occs)}}
+    outputs.mkdir(parents=True, exist_ok=True)
+    (outputs / osvc.OPTIMIZE_JSON).write_text(json.dumps(data, ensure_ascii=False),
+                                              encoding="utf-8")
+
+
+def test_save_optimize_subtitle_with_line_edits(tmp_path: Path):
+    """REQ-20260922-NNN：POST save 携带 line_edits → toast 含「整句替换」+
+    stats.line_edits → /optimized_srt 导出的 SRT 含改写文本（不含被覆盖的原文）。"""
+    from slirn_home.app import build_app
+    from fastapi.testclient import TestClient
+
+    m, _ = _make_mgr(tmp_path)
+    t = m.create(name="整句", original_video=tmp_path / "lecture.mp4")
+    outputs = tmp_path / "tasks" / t.task_id / "outputs"
+    _write_min_optimize(outputs)
+
+    client = TestClient(build_app(tmp_path).app)
+    resp = client.post("/slirn/api/save_optimize_subtitle", json={
+        "task_id": t.task_id,
+        "decisions": [{"occ_id": 0, "applied": True, "after": "神经网络", "reviewed": True}],
+        "line_edits": [{"seg": 1, "text": "今天我们来讲一下神经网络"}],
+    })
+    body = resp.json()
+    assert body["ok"] is True, body
+    assert "整句替换 1 行" in body["toast"], body["toast"]
+    assert body["stats"]["line_edits"] == 1
+
+    resp2 = client.post("/slirn/api/optimized_srt", json={"task_id": t.task_id})
+    body2 = resp2.json()
+    assert body2["ok"] is True, body2
+    assert "今天我们来讲一下神经网络" in body2["srt"]
+    assert "神精网络" not in body2["srt"]
+
+
+def test_save_optimize_subtitle_rejects_bad_line_edits(tmp_path: Path):
+    """REQ-20260922-NNN：line_edits 非 list → 显式报错（防类型错乱静默清空）。"""
+    from slirn_home.app import build_app
+    from fastapi.testclient import TestClient
+
+    m, _ = _make_mgr(tmp_path)
+    t = m.create(name="整句2", original_video=tmp_path / "lecture.mp4")
+    outputs = tmp_path / "tasks" / t.task_id / "outputs"
+    _write_min_optimize(outputs)
+
+    client = TestClient(build_app(tmp_path).app)
+    resp = client.post("/slirn/api/save_optimize_subtitle", json={
+        "task_id": t.task_id,
+        "decisions": [{"occ_id": 0, "applied": True, "after": "神经网络", "reviewed": True}],
+        "line_edits": {"seg": 1, "text": "不是数组"},
+    })
+    body = resp.json()
+    assert body["ok"] is False
+    assert "line_edits" in body["error"]
+
+
+def _router_src() -> str:
+    p = FUNCLIP_ROOT / "slirn_home" / "static" / "router.js"
+    if not p.exists():
+        import pytest
+        pytest.skip("router.js 不存在")
+    return p.read_text(encoding="utf-8")
+
+
+def test_opt_line_edit_js_actions_and_collect():
+    """REQ-20260922-NNN：router.js 必须有整句替换三个 action 分支 + 收集函数 +
+    保存 payload 携带 line_edits + 编辑框 Enter/Esc 委托。"""
+    src = _router_src()
+    assert "function optCollectLineEdits" in src, "必须有 optCollectLineEdits 收集函数"
+    assert 'action === \'opt-line-edit\'' in src, "必须有 opt-line-edit 分支（进入编辑/取消整句）"
+    assert 'action === \'opt-line-apply\'' in src, "必须有 opt-line-apply 分支（应用整句）"
+    assert 'action === \'opt-line-cancel\'' in src, "必须有 opt-line-cancel 分支（取消编辑）"
+    assert "function optLineEdit" in src and "function optLineApply" in src
+    assert "function optLineCancel" in src and "function optLineClear" in src
+    # 保存 payload 必须带 line_edits（optSave / optAutoSave / pending 快照三处）
+    assert src.count("optCollectLineEdits()") >= 3, (
+        "optSave + optAutoSave + pending 快照都应收集 line_edits")
+    assert "decisions: decisions, line_edits: line_edits" in src, (
+        "保存请求 payload 必须携带 line_edits")
+    # textarea Enter 应用 / Esc 取消
+    assert "slirn-opt-line-input" in src
+    assert "optLineApply(row)" in src and "optLineCancel(row)" in src
+
+
+def test_opt_line_edit_css_styles():
+    """REQ-20260922-NNN：整句替换 + 覆盖置灰 + 提示条样式。"""
+    p = FUNCLIP_ROOT / "slirn_home" / "static" / "home.css"
+    css = p.read_text(encoding="utf-8")
+    assert ".slirn-opt-row.full-edit {" in css, "必须有整句行样式（青色条 + 淡青底）"
+    assert ".slirn-opt-occ.overridden" in css, "occ 被覆盖必须置灰"
+    assert ".slirn-opt-line-badge" in css and ".slirn-opt-line-input" in css
+    assert ".slirn-opt-occ-override-hint" in css

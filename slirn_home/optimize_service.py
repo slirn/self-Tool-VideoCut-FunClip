@@ -182,8 +182,28 @@ def build_mapping(occurrences: list[dict]) -> list[dict]:
     return out
 
 
-def apply_to_segments(segments: list[dict], occurrences: list[dict]) -> list[dict]:
-    """把生效出现项应用到行集：每段补 new_text（无生效项的段不加该字段）。"""
+def apply_to_segments(
+    segments: list[dict],
+    occurrences: list[dict],
+    line_edits: list[dict] | None = None,
+) -> list[dict]:
+    """把生效出现项应用到行集：每段补 new_text（无生效项的段不加该字段）。
+
+    REQ-20260922-NNN 整句替换：line_edits [{seg, text}] 中的行 **整行改写** —
+    new_text 直接用整句文本，跳过该行的局部替换（整句优先于局部）。
+    防御（纯函数可单测）：非法 seg / 空白文本 / 与原文相同 → 忽略该条。
+    """
+    edits_by_seg: dict[str, str] = {}
+    for e in line_edits or []:
+        if not isinstance(e, dict):
+            continue
+        try:
+            seg_key = str(int(e.get("seg")))
+        except (TypeError, ValueError):
+            continue
+        text = str(e.get("text") or "").strip()
+        if text:
+            edits_by_seg[seg_key] = text
     by_seg: dict[str, list[dict]] = {}
     for o in occurrences or []:
         if o.get("applied", True):
@@ -191,7 +211,13 @@ def apply_to_segments(segments: list[dict], occurrences: list[dict]) -> list[dic
     out = []
     for seg in segments:
         s = dict(seg)
-        occs = by_seg.get(str(s.get("i")))
+        rid = str(s.get("i"))
+        edit = edits_by_seg.get(rid)
+        if edit is not None and edit != str(s.get("text", "")):
+            s["new_text"] = edit  # 整句替换：覆盖本行全部局部替换
+            out.append(s)
+            continue
+        occs = by_seg.get(rid)
         if occs:
             reps = [{"before": o["before"], "after": o["after"]}
                     for o in sorted(occs, key=lambda x: int(x.get("pos", 0)))]
@@ -213,7 +239,8 @@ def build_srt(segments: list[dict]) -> str:
 
 
 def effective_stats(data: dict) -> dict:
-    """生效统计：识别行数 / 提取出现数 / 生效替换数 / 未采纳数 / 涉及词数。"""
+    """生效统计：识别行数 / 提取出现数 / 生效替换数 / 未采纳数 / 涉及词数 /
+    整句替换行数（REQ-20260922-NNN，与局部替换正交单列）。"""
     occs = data.get("occurrences") or []
     live = [o for o in occs if o.get("applied", True)]
     return {
@@ -222,6 +249,7 @@ def effective_stats(data: dict) -> dict:
         "applied": len(live),
         "skipped": len(occs) - len(live),
         "words": len(aggregate_words(occs)),
+        "line_edits": len(data.get("line_edits") or []),
     }
 
 
@@ -430,13 +458,22 @@ def load_optimize(outputs_dir: Path) -> dict | None:
         return None
 
 
-def save_decisions(outputs_dir: Path, decisions: list[dict]) -> tuple[dict, int]:
+def save_decisions(
+    outputs_dir: Path,
+    decisions: list[dict],
+    line_edits: list[dict] | None = None,
+) -> tuple[dict, int]:
     """把人工决定合并落盘。返回 (data, 生效条数)。
 
     decisions：[{"occ_id": int, "applied": bool, "after": str, "reviewed": bool}]
     （全量口径 — 未列出的出现项视为不采纳/未处理）。生效要求 after 非空且
     != before（人工编辑改回原文 = 不采纳，服务端兜底）。保存时重算各行
     new_text、词频与对应关系汇总，saved_at 置当前时间（阶段完成标记）。
+
+    REQ-20260922-NNN 整句替换：line_edits [{"seg": int, "text": str}]，同样
+    全量口径 — 不传（None/[]）= 清空已有整句替换。校验：非 dict / 非法 seg /
+    未知 seg / 空白文本 / 与原文相同 → 丢弃。整句行跳过局部替换（见
+    apply_to_segments）。
     """
     data = load_optimize(outputs_dir)
     if data is None:
@@ -460,7 +497,23 @@ def save_decisions(outputs_dir: Path, decisions: list[dict]) -> tuple[dict, int]
             applied_n += 1
         else:
             occ["applied"] = False
-    data["segments"] = apply_to_segments(data.get("segments") or [], data["occurrences"])
+    # 整句替换：全量快照校验（服务端兜底，前端同款收集但不可信）
+    seg_texts = {str(s.get("i")): str(s.get("text", "")) for s in data.get("segments") or []}
+    edits: list[dict] = []
+    for e in line_edits or []:
+        if not isinstance(e, dict):
+            continue
+        try:
+            seg_key = str(int(e.get("seg")))
+        except (TypeError, ValueError):
+            continue
+        text = str(e.get("text") or "").strip()
+        if not text or seg_key not in seg_texts or text == seg_texts[seg_key]:
+            continue
+        edits.append({"seg": int(seg_key), "text": text})
+    edits.sort(key=lambda x: x["seg"])
+    data["line_edits"] = edits
+    data["segments"] = apply_to_segments(data.get("segments") or [], data["occurrences"], edits)
     data["words"] = aggregate_words(data["occurrences"])
     data["mapping"] = build_mapping(data["occurrences"])
     data["stats"] = effective_stats(data)
