@@ -11582,3 +11582,81 @@ def test_opt_line_edit_css_styles():
     assert ".slirn-opt-line-badge" in css and ".slirn-opt-line-input" in css
     assert ".slirn-opt-kbhint" in css, "必须有快捷键提示条样式"
     assert ".slirn-opt-occ-override-hint" in css
+
+
+# ===== 切分修剪「只播保留内容」裸播路径封堵（REQ-20260922-NNN）=====
+# 用户反馈：行点击连播时整条删除的字幕没跳过、播到列表最后还在继续播完整
+# 视频内容。排查结论：正常跳播链路本来就正确（cutRowKept 读组 data-act），
+# 漏播的是退化到「裸播」（无跳播序列）的三条路径 —
+#   ① cutPreview 点中「其后全删」的行 → 退化定位裸播
+#   ② cutTogglePlay 空格恢复（序列已清）→ 裸播恢复
+#   ③ 工作台重渲染时浮层旧播放器（在 innerHTML 外）继续裸播
+# 三条路径都会把已删除整条 / 列表外无字幕片段原样播出去。
+
+def _router_src() -> str:
+    return (FUNCLIP_ROOT / "slirn_home" / "static" / "router.js").read_text(
+        encoding="utf-8")
+
+
+def test_cut_preview_no_plain_play_when_no_kept():
+    """① 点中「其后全删」的行：不再退化定位裸播（toast + 不播）。"""
+    src = _router_src()
+    i = src.find("function cutPreview")
+    assert i > 0, "必须有 cutPreview"
+    body = src[i:i + 1400]
+    j = body.find("if (!seq.length)")
+    assert j > 0, "cutPreview 必须有空序列分支"
+    k = body.find("return;", j)
+    assert k > 0, "空序列分支必须 return"
+    branch = body[j:k]
+    assert "toast" in branch, "空序列分支必须 toast 说明（不播）"
+    assert "playCutAt" not in branch, (
+        "空序列分支绝不能再调 playCutAt 裸播 — 会播出已删除/列表外内容")
+    assert body.find("playCutAt(tid, seq[0].s)", k) > 0, (
+        "有保留内容时仍应正常跳播开播")
+
+
+def test_cut_toggle_play_resume_never_plain_plays():
+    """② 空格恢复：序列没了必须重建保留序列再播，不允许裸 play()。"""
+    src = _router_src()
+    i = src.find("function cutTogglePlay")
+    assert i > 0, "必须有 cutTogglePlay"
+    body = src[i:src.find("\n  }\n", i)]
+    resume = body[body.find("if (v.paused)"):]
+    assert "cutKeepAllFrom" in resume, (
+        "恢复播放必须用 cutKeepAllFrom 重建跳播序列")
+    assert "cutKeepMode = 'row'" in resume, "重建后必须进入行级连播模式"
+    assert "tmsR >= seqAll[seqAll.length - 1].e" in resume, (
+        "当前位置已到最后一段之后 → 必须提示并不再播")
+    # 裸 play() 只允许出现在序列就绪/重建之后
+    k = resume.find("v.play()")
+    assert k > resume.find("if (!cutKeepSeq)"), (
+        "play() 必须在「无序列则重建」守卫之后，不允许裸播恢复")
+
+
+def test_cut_player_seeked_listener_instant_highlight():
+    """③a seek 落点即时处理：索引绝对重定位 + 高亮即时跟随（抽 cutHL 共用）。"""
+    src = _router_src()
+    i = src.find("function bindCutPlayer")
+    assert i > 0, "必须有 bindCutPlayer"
+    body = src[i:src.find("\n  }\n", i)]
+    assert "var cutHL = function(tms)" in body, (
+        "高亮逻辑必须抽成 cutHL 闭包（timeupdate 与 seeked 共用）")
+    assert body.find("addEventListener('seeked'") > 0, (
+        "必须监听 seeked — 跳播/拖动落点即时高亮与索引重定位")
+    assert "tmsS < cutKeepSeq[0].s - 500" in body, (
+        "落点在首段前 500ms 外必须吸附回首段起点（片头无字幕内容不播）")
+    assert "while (i2 < cutKeepSeq.length - 1 && tmsS >= cutKeepSeq[i2].e - 30) i2++" in body, (
+        "seeked 里必须按落点绝对重定位跳播索引（前拖/后拖/拖进删除洞都收敛）")
+
+
+def test_open_workbench_pauses_stale_videos_before_rerender():
+    """③b 工作台重渲染前必须暂停浮层 + 工作台里的所有视频（防旧播放器裸播）。"""
+    src = _router_src()
+    i = src.find("w.innerHTML = r.html;")  # 带分号防匹配到注释里的同名文字
+    assert i > 0, "openWorkbench 必须重渲染工作台"
+    before = src[max(0, i - 900):i]
+    assert "slirn-video-float" in before and "vd.pause()" in before, (
+        "innerHTML 替换前必须暂停浮层里的旧视频 — 浮层不在 w 内，"
+        "换 innerHTML 杀不掉它，会带着失效行引用继续裸播到底")
+    assert "_vfL.hidden = true" in before, "暂停后应收起浮层"

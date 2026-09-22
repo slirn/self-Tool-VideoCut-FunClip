@@ -700,6 +700,16 @@
         // 3) detach pipe-panel + pipe-status
         if (_pipePanel) _pipePanel.parentNode.removeChild(_pipePanel);
         if (_pipeStatus) _pipeStatus.parentNode.removeChild(_pipeStatus);
+        // 3b) 播放器清理（REQ-20260922-NNN）：浮层里的旧 wrap 不在 w 内，
+        // innerHTML 换不掉它 — 不暂停的话旧视频会带着已失效的行引用/跳播
+        // 序列继续裸播（已删除整条、列表外内容会原样播出去，列表播完也不停）。
+        // 暂停 + 收起浮层；新播放器再播放时 vfShow 自动弹回
+        var _vfL = document.getElementById('slirn-video-float');
+        if (_vfL) {
+          _vfL.querySelectorAll('video').forEach(function(vd) { try { vd.pause(); } catch (err) {} });
+          _vfL.hidden = true;
+        }
+        if (w) w.querySelectorAll('video').forEach(function(vd) { try { vd.pause(); } catch (err) {} });
         w.innerHTML = r.html;
         ALL_TABS.forEach(function(id) { var el = document.getElementById(id); if (el) el.style.display = 'none'; });
         var d = document.getElementById('slirn-tab-detail');
@@ -1780,9 +1790,12 @@
     var tid = row.getAttribute('data-task-id') || '';
     var seq = cutKeepAllFrom(row);
     if (!seq.length) {
-      // 本行起再无保留内容：退化为定位普通播放（至少让用户听到点过的位置）
+      // 本行起再无保留内容：不播（REQ-20260922-NNN）— 原行为是退化为定位裸播，
+      // 会把其后已删除整条、列表外无字幕片段原样播出去，与「只播列表内保留
+      // 内容」的执行口径矛盾（点中尾部已删除区域时用户看到的就是这个 bug）
       cutKeepSeq = null; cutKeepMode = null;
-      playCutAt(tid, parseInt(row.getAttribute('data-start-ms'), 10) || 0);
+      cutAuditionBar(null);
+      toast('这一条起没有保留内容（其后均已删除）— 不播放');
       return;
     }
     cutKeepSeq = seq;
@@ -1809,7 +1822,27 @@
       cutPreview(rows[cutSelIndex(rows)] || rows[0]);
       return;
     }
-    if (v.paused) { var p = v.play(); if (p && p.catch) p.catch(function() {}); }
+    if (v.paused) {
+      // 恢复播放也绝不裸播（REQ-20260922-NNN）：跳播序列没了（自动播完停住/
+      // 组试听暂停退出）时重建全量保留序列，从当前位置所在（或其后第一个）
+      // 保留段继续 — 裸播恢复会把已删除整条与列表外内容原样播出去
+      if (!cutKeepSeq) {
+        var tmsR = v.currentTime * 1000;
+        var seqAll = cutKeepAllFrom(cutRows()[0]);
+        if (!seqAll.length || tmsR >= seqAll[seqAll.length - 1].e) {
+          var kmT = revKeysLoad();
+          toast('后面没有保留内容了 — 用 ' + revKeyLabel(kmT.prev) + ' / '
+            + revKeyLabel(kmT.next) + ' 选择一条再播');
+          return;
+        }
+        cutKeepSeq = seqAll;
+        cutKeepIdx = 0;
+        while (cutKeepIdx < cutKeepSeq.length - 1 && tmsR >= cutKeepSeq[cutKeepIdx].e - 30) cutKeepIdx++;
+        var segR = cutKeepSeq[cutKeepIdx];
+        if (tmsR < segR.s - 500) { try { v.currentTime = segR.s / 1000; } catch (err) {} }
+        cutKeepMode = 'row';
+      }
+      var p = v.play(); if (p && p.catch) p.catch(function() {}); }
     else {
       v.pause();
       if (cutKeepMode === 'group') { cutKeepSeq = null; cutAuditionBar(null); }  // 组试听：手动暂停即退出（REQ-20260916-012）
@@ -4867,6 +4900,27 @@
       v.dataset.bound = '1';
       var rows = Array.prototype.slice.call(list.querySelectorAll('.slirn-cut-row'));
       var lastHit = -1;
+      // ② 高亮跟随（与字幕/修订阶段同款 active：段间缝隙保持前一段亮）—
+      // 抽成闭包供 timeupdate 与 seeked 共用（seek 落点即时高亮，REQ-20260922-NNN）
+      var cutHL = function(tms) {
+        var hit = -1;
+        for (var i = 0; i < rows.length; i++) {
+          var s0 = parseInt(rows[i].getAttribute('data-start-ms'), 10) || 0;
+          var e0 = parseInt(rows[i].getAttribute('data-end-ms'), 10) || 0;
+          if (tms >= s0 && tms < e0) { hit = i; break; }
+          if (s0 > tms) break;
+        }
+        if (hit === -1 && lastHit >= 0) {
+          var eh = parseInt(rows[lastHit].getAttribute('data-end-ms'), 10) || 0;
+          var nh = (lastHit + 1 < rows.length)
+            ? (parseInt(rows[lastHit + 1].getAttribute('data-start-ms'), 10) || 0)
+            : Infinity;
+          if (tms >= eh && tms < nh) hit = lastHit;
+        }
+        lastHit = hit;
+        for (var j = 0; j < rows.length; j++) rows[j].classList.toggle('active', j === hit);
+        if (hit >= 0 && rows[hit] && rows[hit].scrollIntoView) rows[hit].scrollIntoView({block: 'nearest'});
+      };
       v.addEventListener('timeupdate', function() {
         var tms = v.currentTime * 1000;
         // ① 试听跳播（REQ-20260916-012 索引跟踪）：只看当前段 — 播过当前 keep
@@ -4898,24 +4952,26 @@
             if (cutKeepMode === 'group') cutAuditionBar(v);  // 试听时间戳与当前段保持一致
           }
         }
-        // ② 高亮跟随（与字幕/修订阶段同款 active：段间缝隙保持前一段亮）
-        var hit = -1;
-        for (var i = 0; i < rows.length; i++) {
-          var s0 = parseInt(rows[i].getAttribute('data-start-ms'), 10) || 0;
-          var e0 = parseInt(rows[i].getAttribute('data-end-ms'), 10) || 0;
-          if (tms >= s0 && tms < e0) { hit = i; break; }
-          if (s0 > tms) break;
+        cutHL(tms);
+      });
+      // seek 落点即时处理（REQ-20260922-NNN）：跳播的 seek 与用户拖动条落下时
+      // timeupdate 可能滞后一拍 — ① 跳播索引按落点绝对重定位（第一个「末尾在
+      // 落点 30ms 后」的保留段 = 落点所在段或其后第一段；前拖/后拖/拖进删除洞
+      // 都收敛，链式跳播自身触发的 seek 落点即目标段，重定位结果不变）；落点
+      // 在首个保留段前 500ms 以外 → 直接吸到首段（片头无字幕内容不播）；
+      // ② 高亮即时跟随（原实现要等下一个 timeupdate，跳变瞬间亮的是旧行）
+      v.addEventListener('seeked', function() {
+        var tmsS = v.currentTime * 1000;
+        if (cutKeepSeq) {
+          if (tmsS < cutKeepSeq[0].s - 500) {
+            try { v.currentTime = cutKeepSeq[0].s / 1000; } catch (err) {}
+            return;  // 吸附引发的 seeked 再走高亮
+          }
+          var i2 = 0;
+          while (i2 < cutKeepSeq.length - 1 && tmsS >= cutKeepSeq[i2].e - 30) i2++;
+          cutKeepIdx = i2;
         }
-        if (hit === -1 && lastHit >= 0) {
-          var eh = parseInt(rows[lastHit].getAttribute('data-end-ms'), 10) || 0;
-          var nh = (lastHit + 1 < rows.length)
-            ? (parseInt(rows[lastHit + 1].getAttribute('data-start-ms'), 10) || 0)
-            : Infinity;
-          if (tms >= eh && tms < nh) hit = lastHit;
-        }
-        lastHit = hit;
-        for (var j = 0; j < rows.length; j++) rows[j].classList.toggle('active', j === hit);
-        if (hit >= 0 && rows[hit] && rows[hit].scrollIntoView) rows[hit].scrollIntoView({block: 'nearest'});
+        cutHL(tmsS);
       });
     }
   }
