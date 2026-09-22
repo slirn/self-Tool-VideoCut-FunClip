@@ -2701,6 +2701,39 @@ def _assemble_fine_filter(
                 audio_total_duration = _ms / 1000.0
         except Exception as e:  # noqa: BLE001
             log.warning("REQ-095: probe 源视频时长失败，fade_out 起算退回 st=0: %s", e)
+    # REQ-20260923-NNN：预期输出时长（确定性 -t 上界 + 完成后截断校验基准）。
+    # 与实际滤镜图同构：片头 cover（若启用）+ 源贡献段：
+    #   - duration 给定（预览/区间导出）：min(duration, probe - preview_start)
+    #     — start+duration 超源尾时音频分支先结束，不夹紧会在校验时误报「被截断」；
+    #   - duration=None（完整导出）：probe - preview_start。
+    # probe 不可得 → expected_output_sec=None → 渲染退回 -shortest 旧行为并跳过校验。
+    # 注意：此处 audio_total_duration 尚未加 cover_dur（下面才加），duration=None
+    # 时它就是纯 probe 值，可直接复用，避免二次 ffprobe。
+    expected_output_sec: float | None = None
+    _probe_sec: float | None = audio_total_duration if duration is None else None
+    if duration is not None:
+        try:
+            _ms_seg = _probe_video_duration_ms(mgr, task_id)
+            _probe_sec = _ms_seg / 1000.0 if _ms_seg > 0 else None
+        except Exception:
+            _probe_sec = None
+    if duration is not None:
+        _seg_sec = float(duration)
+        if _probe_sec is not None:
+            _seg_sec = min(_seg_sec, max(0.0, _probe_sec - float(preview_start)))
+    elif _probe_sec is not None:
+        _seg_sec = max(0.0, _probe_sec - float(preview_start))
+    else:
+        _seg_sec = None
+    if _seg_sec is not None:
+        if cover_input_enabled:
+            try:
+                _cd = float(layout["cover"].get("duration", 0.0))
+                if _cd > 0:
+                    _seg_sec += _cd
+            except Exception:
+                pass
+        expected_output_sec = round(_seg_sec, 3)
     # 仅「完整导出 + cover 启用」场景加 cover_dur；预览/区间导出已自带完整长度
     if cover_input_enabled and duration is None:
         try:
@@ -2759,6 +2792,8 @@ def _assemble_fine_filter(
         "image_tmp_paths": image_tmp_paths,  # REQ-20260920-079：预缩临时文件
         "out_w": out_w,
         "out_h": out_h,
+        # REQ-20260923-NNN：预期输出秒数（含 cover 前缀；None = 未知）
+        "expected_output_sec": expected_output_sec,
     }
 
 
@@ -2916,6 +2951,11 @@ def _run_fine_render(
     image_tmp_paths = asm.get("image_tmp_paths") or []  # REQ-20260920-079
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    # REQ-20260923-NNN：-t 确定性上界替代 -shortest（根因详见
+    # _run_fine_render_locked 注释：无限视频流 + -shortest 在 I/O 拥塞下被
+    # 静默截断且 exit 0）。expected 未知时退回 -shortest 旧行为。
+    _expected = asm.get("expected_output_sec")
+    _tail_args = ["-t", f"{_expected + 0.05:.3f}"] if _expected else ["-shortest"]
     cmd = [
         "ffmpeg", "-y",
         *asm["input_args"],
@@ -2924,7 +2964,7 @@ def _run_fine_render(
         "-map", "[aout]",
         "-c:v", "libx264", "-preset", "fast", "-crf", "23",
         "-c:a", "aac", "-b:a", "128k",
-        "-shortest",
+        *_tail_args,
         "-movflags", "+faststart",
         str(output_path),
     ]
@@ -2953,6 +2993,12 @@ def _run_fine_render(
         log.error("ffmpeg failed: %s", result.stderr[-2000:])
         return {"ok": False, "error": f"ffmpeg 渲染失败: {(result.stderr or '')[-300:]}"}
 
+    # REQ-20260923-NNN：exit 0 也可能被静默截断（-shortest 陷阱），复核双流时长
+    _trunc = _verify_render_duration(output_path, asm.get("expected_output_sec"))
+    if _trunc:
+        log.error("REQ-20260923: 预览渲染产物被截断: %s", _trunc)
+        return {"ok": False, "error": _trunc}
+
     return {"ok": True, "path": str(output_path.relative_to(mgr.tasks_dir.parent))
             if output_path.is_absolute() else str(output_path)}
 
@@ -2979,6 +3025,7 @@ class _RenderJob:
         eta_sec: 预计剩余秒数（-1 表示未知）
         error: 失败时 stderr 末尾 500 字符
         output_url: 成功时的下载链接
+        stderr_tail: ffmpeg stderr 末尾（REQ-20260923-NNN 诊断截断/失败用）
         proc: subprocess.Popen，用于 cancel
     """
     job_id: str
@@ -2996,12 +3043,20 @@ class _RenderJob:
     eta_sec: float = -1.0
     error: str = ""
     output_url: str = ""
+    stderr_tail: str = ""
     proc: Any = None
 
 
 _JOB_REGISTRY: dict[str, _RenderJob] = {}
 _JOB_LOCK = threading.Lock()
 _JOB_TTL_SEC = 300  # 完成后保留 5 分钟，便于前端最后一次查询拿到结果
+# REQ-20260923-NNN：跨任务精剪导出串行门。
+# 实测（20260916-004 / 20260916-001 双任务并发复现）：两个 ffmpeg x264 同机并发
+# 把彼此拖到 ~1.2x，而「慢速编码 + 输入停摆」正是 -shortest 静默截断的必要条件
+# （详见 _run_fine_render_locked 注释）。串行既防截断，总墙钟也反而更短
+# （2 个串行 @~4x ≈ 33 分钟 vs 并发 @~1.2x ≈ 110 分钟）。排队期间 job.state
+# 保持 "queued"，render_status 照常可查；同任务重复导出仍被端点直接拒绝。
+_FINE_RENDER_GATE = threading.Lock()
 
 
 def _cleanup_stale_jobs(mgr) -> int:
@@ -3111,10 +3166,70 @@ def _probe_video_duration_ms(mgr, tid: str) -> int:
         return 0
 
 
+def _verify_render_duration(out_path: Path, expected_sec: float | None) -> str:
+    """REQ-20260923-NNN：ffprobe 复核产物双流时长 ≥ 预期 98%，防静默截断。
+
+    ffmpeg 对「无限视频流（封面/BG -loop 1）+ 有限音频流」组合在 I/O 拥塞下
+    可能让 -shortest 提前判音频 EOF：exit 0、moov 完整、双流可播，但时长只剩
+    零头（20260916-004 实测 69 分钟源反复只导出 18 分钟，无任何报错）。
+    returncode==0 不可信，必须以实际流时长为准。
+
+    返回空串 = 通过（expected 未知 / 文件缺失 / probe 失败时跳过，只打日志）；
+    非空 = 截断描述（可直接作为 job.error / {"ok": False} 的 error）。
+    """
+    if not expected_sec or expected_sec <= 0:
+        return ""
+    if not out_path.exists():
+        # 文件缺失：真实场景 exit 0 却无产物属于异常，但无法区分（测试桩 /
+        # 网络盘延迟），统一告警跳过，交给上层既有逻辑处理
+        log.warning("REQ-20260923: 渲染产物不存在，跳过时长校验: %s", out_path)
+        return ""
+    try:
+        pr = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type,duration",
+             "-of", "json", str(out_path)],
+            capture_output=True, text=True, timeout=60, encoding="utf-8",
+        )
+        durs: dict[str, float] = {}
+        for s in (json.loads(pr.stdout or "{}").get("streams") or []):
+            try:
+                if s.get("codec_type") and s.get("duration"):
+                    durs[s["codec_type"]] = float(s["duration"])
+            except (TypeError, ValueError):
+                pass
+        thr = float(expected_sec) * 0.98
+        for _kind, _dur in durs.items():
+            if _dur < thr:
+                _kind_cn = {"video": "视频", "audio": "音频"}.get(_kind, _kind)
+                return (f"导出被提前截断：{_kind_cn}流 {_dur:.1f}s < 预期 "
+                        f"{expected_sec:.1f}s（可能因系统负载过高），请重试导出")
+    except Exception as e:  # noqa: BLE001
+        log.warning("REQ-20260923: 输出时长校验失败（跳过）: %s", e)
+    return ""
+
+
 def _run_fine_render_async(job: _RenderJob, tid: str, mgr, out_path: Path,
                           exec_id: str = "", outputs_dir: Path | None = None,
                           preview_start: float = 0.0, duration: float | None = None,
                           *, combo: dict | None = None) -> None:
+    """REQ-20260923-NNN：跨任务串行门 — 同一时刻只允许一个精剪导出编码。
+
+    实测（20260916-004 / -001 并发复现）：两个 ffmpeg x264 同机并发把彼此拖到
+    ~1.2x，慢速编码 + 输入停摆正是 -shortest 静默截断的触发条件（根因详见
+    _run_fine_render_locked 注释）；串行后每个任务回到 ~4x，总墙钟反而大幅缩短。
+    排队期间 job.state 保持 "queued"（render_status 的 elapsed 走 elapsed_sec=0），
+    拿到门后才置 running 并开始计时。预览（_run_fine_render，≤120s）不经过此门。
+    """
+    with _FINE_RENDER_GATE:
+        _run_fine_render_locked(job, tid, mgr, out_path, exec_id=exec_id,
+                                outputs_dir=outputs_dir, preview_start=preview_start,
+                                duration=duration, combo=combo)
+
+
+def _run_fine_render_locked(job: _RenderJob, tid: str, mgr, out_path: Path,
+                            exec_id: str = "", outputs_dir: Path | None = None,
+                            preview_start: float = 0.0, duration: float | None = None,
+                            *, combo: dict | None = None) -> None:
     """REQ-20260919-074：后台 daemon 线程跑 ffmpeg（1-3 小时不再超时）。
 
     写入 job.state/progress_pct/elapsed_sec/speed_x/eta_sec/progress_time_ms/
@@ -3166,6 +3281,18 @@ def _run_fine_render_async(job: _RenderJob, tid: str, mgr, out_path: Path,
     job.total_duration_ms = _probe_video_duration_ms(mgr, tid)
 
     # ffmpeg 命令（关键差异：-progress pipe:1 -nostats）
+    # REQ-20260923-NNN：-t 确定性上界替代 -shortest。
+    # 根因（20260916-004 反复只导出 18 分钟）：滤镜图视频分支无限（封面/背景
+    # 图 -loop 1 + overlay eof_action=pass），音频分支有限（源音轨 → concat 静
+    # 音），输出长度全靠 -shortest 以音频 EOF 收口。并发重编码把速度拖到 ~1.2x
+    # 后输入读在源 ~1086-1091s 处停摆数分钟 → ffmpeg muxer 同步队列防死锁策略
+    # 提前判定 EOF：写出合法 moov、exit 0、双流可播 — 服务据 returncode==0 标
+    # 记成功，实际只剩零头。显式 -t（预期时长 + 50ms）后输出长度不再依赖 EOF
+    # 判定；expected 未知（probe 失败）时退回 -shortest 旧行为。完成后另有
+    # _verify_render_duration 复核双流时长兜底。
+    _expected_sec = asm.get("expected_output_sec")
+    _tail_args = (["-t", f"{_expected_sec + 0.05:.3f}"] if _expected_sec
+                  else ["-shortest"])
     out_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
         "ffmpeg", "-y",
@@ -3175,7 +3302,7 @@ def _run_fine_render_async(job: _RenderJob, tid: str, mgr, out_path: Path,
         "-map", "[aout]",
         "-c:v", "libx264", "-preset", "fast", "-crf", "23",
         "-c:a", "aac", "-b:a", "128k",
-        "-shortest",
+        *_tail_args,
         "-movflags", "+faststart",
         "-progress", "pipe:1",
         "-nostats",
@@ -3190,15 +3317,27 @@ def _run_fine_render_async(job: _RenderJob, tid: str, mgr, out_path: Path,
     # 看似卡住 5-15 秒。改用 `text=False, bufsize=0`（unbuffered 给底层
     # BufferedReader），再手动重包为 `TextIOWrapper(line_buffering=True)`
     # 保证每行立即 flush。
+    # REQ-20260920-089：stderr 不能用 PIPE（主循环只读 stdout，ffmpeg stderr 写满
+    # OS pipe buffer ~64KB 后阻塞 → 永久死锁），REQ-089 曾改为 DEVNULL 砍掉消费端。
+    # REQ-20260923-NNN：DEVNULL 把诊断信息也丢了 — 本次截断事故 exit=0 + stderr
+    # 全空，排查只能黑盒复现。改为写临时文件：既不阻塞（写盘无缓冲上限）也保留
+    # 现场，结束时取末尾 4KB 进 job.stderr_tail，随后删文件。临时文件创建失败时
+    # 退回 DEVNULL（不阻塞导出主流程）。
+    import tempfile as _tempfile
+    _err_file = None
+    _err_path: Path | None = None
     try:
-        # REQ-20260920-089：stderr → DEVNULL 解决死锁
-        # 原因：原 stderr=PIPE 但主循环只读 stdout；ffmpeg stderr 写满 OS pipe buffer
-        # (~64KB Windows) 后阻塞等 stderr 排空 → 主循环永远不退出 → 永久死锁。
-        # 砍 stderr 消费 = 砍死锁。ffmpeg stderr 内容（[Parsed_xxx] 诊断信息）本来
-        # 也不用实时展示给用户，只在失败时用 stderr_tail 末尾 500 字符（DEVNULL 也
-        # 不会让这里报错）。
+        try:
+            _fd, _err_name = _tempfile.mkstemp(prefix="slirn_fine_err_", suffix=".log")
+            os.close(_fd)
+            _err_path = Path(_err_name)
+            _err_file = open(_err_name, "wb")
+        except Exception:
+            _err_file = None
+            _err_path = None
         proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            cmd, stdout=subprocess.PIPE,
+            stderr=_err_file if _err_file is not None else subprocess.DEVNULL,
             bufsize=0,
         )
     except FileNotFoundError:
@@ -3206,6 +3345,13 @@ def _run_fine_render_async(job: _RenderJob, tid: str, mgr, out_path: Path,
         job.error = "系统未安装 ffmpeg，请先安装并加入 PATH"
         job.finished_at = time.monotonic()
         job.wall_finished_at = time.time()
+        # REQ-20260923-NNN：ffmpeg 启动失败也要清理 stderr 临时文件
+        if _err_file is not None:
+            try: _err_file.close()
+            except Exception: pass
+        if _err_path is not None:
+            try: _err_path.unlink(missing_ok=True)
+            except Exception: pass
         if sub_input_tmp:
             try: sub_input_tmp.unlink(missing_ok=True)
             except Exception: pass
@@ -3315,22 +3461,54 @@ def _run_fine_render_async(job: _RenderJob, tid: str, mgr, out_path: Path,
             try: _p.unlink(missing_ok=True)
             except Exception: pass
 
+        # 3.5) REQ-20260923-NNN：提取 stderr 末尾（诊断截断/失败用）后清理临时文件
+        if _err_path is not None:
+            try:
+                if _err_file is not None and not _err_file.closed:
+                    _err_file.close()
+                with open(_err_path, "rb") as _ef:
+                    _ef.seek(0, os.SEEK_END)
+                    _sz = _ef.tell()
+                    _ef.seek(max(0, _sz - 4096))
+                    job.stderr_tail = _ef.read().decode("utf-8", errors="replace")[-2000:]
+            except Exception:
+                pass
+            try:
+                _err_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
         # 4) 推算最终 state（如果主循环因 readline 返回空自然退出但 state 还是 running）
         if job.state == "running":
             if proc.returncode == 0:
-                job.state = "done"
-                job.progress_pct = 100.0
-                # REQ-20260921-NNN-outputs-browser：output_url 必须带实际文件名
-                # （区间导出是 fine_export_t*_d*.mp4，而非 fine_export.mp4）。
-                # 用 out_path.name 透传，前端点 status 直接打开正确文件。
-                job.output_url = (
-                    f"/slirn/api/video/{tid}?src=fine_export&fname={out_path.name}"
-                    f"&t={int(time.time())}"
-                )
+                # REQ-20260923-NNN：exit 0 ≠ 完整。无限视频流 + 有限音频流的组合
+                # 在 I/O 拥塞下 -shortest 会提前判音频 EOF：moov 完整、双流可播、
+                # exit 0，但 69 分钟只剩 18 分钟（20260916-004 实测）。必须 ffprobe
+                # 复核实际流时长 ≥ 预期 98%，不足则按失败处理（见 cmd 处根因注释）。
+                _trunc = _verify_render_duration(out_path, asm.get("expected_output_sec"))
+                if _trunc:
+                    job.state = "failed"
+                    job.error = _trunc
+                else:
+                    job.state = "done"
+                    job.progress_pct = 100.0
+                    # REQ-20260921-NNN-outputs-browser：output_url 必须带实际文件名
+                    # （区间导出是 fine_export_t*_d*.mp4，而非 fine_export.mp4）。
+                    # 用 out_path.name 透传，前端点 status 直接打开正确文件。
+                    job.output_url = (
+                        f"/slirn/api/video/{tid}?src=fine_export&fname={out_path.name}"
+                        f"&t={int(time.time())}"
+                    )
             else:
                 job.state = "failed"
                 if not job.error:
                     job.error = f"ffmpeg 进程异常终止（exit code {proc.returncode}）"
+
+        # 4.5) REQ-20260923-NNN：失败时把 stderr 末尾附到 error（截断/崩溃诊断线索）
+        if job.state == "failed" and job.stderr_tail:
+            _stail = job.stderr_tail[-500:]
+            if _stail not in job.error:
+                job.error = (job.error + f"\nffmpeg stderr 尾部: {_stail}")[:1000]
 
         # 5) 统一 record_finish（所有路径都走这里）
         # REQ-20260920-089：本地 import execution_history（修复 REQ-081 同根 NameError BUG：
@@ -7072,6 +7250,8 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             eta_sec=round(job.eta_sec, 1) if job.eta_sec >= 0 else None,
             error=job.error,
             output_url=job.output_url,
+            # REQ-20260923-NNN：失败/截断诊断用（done 时为空串）
+            stderr_tail=(job.stderr_tail[-1000:] if job.state == "failed" else ""),
         )
 
     @app.app.get("/slirn/api/active_export_for_task")

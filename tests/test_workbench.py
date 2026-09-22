@@ -6662,11 +6662,14 @@ def test_render_async_uses_line_buffered_stdout():
     `io.TextIOWrapper(..., line_buffering=True)` 保证每行立即 flush。
 
     此测试只做源码静态检查（不启动真实 ffmpeg，避免依赖 + 耗时）。
+    REQ-20260923-NNN：渲染主体移入 _run_fine_render_locked（async 外壳只挂
+    跨任务串行门），静态检查合并两函数源码。
     """
     import inspect
     from slirn_home import app as _appmod
 
-    src = inspect.getsource(_appmod._run_fine_render_async)
+    src = (inspect.getsource(_appmod._run_fine_render_async)
+           + inspect.getsource(_appmod._run_fine_render_locked))
     # 1. Popen 调用本身不应再使用 `text=True`（用更精确的检查：找 Popen 后面的 kwargs 区域）
     import re
     popen_match = re.search(r"subprocess\.Popen\(([^)]+)\)", src, flags=re.DOTALL)
@@ -8935,20 +8938,21 @@ def test_mat_detail_modal_close_action_in_router_js():
 # ============================================================
 
 def test_popen_uses_devnull_for_stderr():
-    """REQ-089 AC-1：_run_fine_render_async 的 Popen 必须用 stderr=DEVNULL（不再 PIPE）。
+    """REQ-089 AC-1（REQ-20260923-NNN 修订）：渲染 Popen 的 stderr 严禁 PIPE。
 
     原 BUG：`stderr=subprocess.PIPE` 但主循环只读 stdout，stderr pipe buffer 写满后
-    ffmpeg 阻塞 → 永远死锁 → UI 进度 0% 卡死。
-    修复：`stderr=subprocess.DEVNULL`，ffmpeg 诊断信息直接丢弃，主循环只关心 stdout。
+    ffmpeg 阻塞 → 永远死锁 → UI 进度 0% 卡死。REQ-089 曾改 DEVNULL；REQ-20260923-NNN
+    改为写临时文件（保留截断/失败诊断现场，结束取末尾进 job.stderr_tail），临时文件
+    创建失败时退回 DEVNULL —— 两种形态都不会阻塞，PIPE 死锁永远不允许回归。
     """
     import re
     FUNCLIP_ROOT = Path(__file__).resolve().parent.parent
     app_path = FUNCLIP_ROOT / "slirn_home" / "app.py"
     src = app_path.read_text(encoding="utf-8")
 
-    # 抓取 _run_fine_render_async 函数体（用大括号平衡法）
-    idx = src.find("def _run_fine_render_async")
-    assert idx >= 0, "找不到 _run_fine_render_async 函数"
+    # REQ-20260923-NNN：渲染主体在 _run_fine_render_locked
+    idx = src.find("def _run_fine_render_locked")
+    assert idx >= 0, "找不到 _run_fine_render_locked 函数"
     # 抓第一个 Popen 调用（函数体内第一个）
     body_idx = src.find("subprocess.Popen(", idx)
     assert body_idx >= 0, "找不到 subprocess.Popen 调用"
@@ -8958,9 +8962,10 @@ def test_popen_uses_devnull_for_stderr():
     assert m, "Popen 调用匹配失败"
     popen_call = m.group(1)
 
-    # 核心断言：必须 stderr=subprocess.DEVNULL（不允许再 PIPE）
-    assert "stderr=subprocess.DEVNULL" in popen_call, (
-        "REQ-089 AC-1：Popen 必须 stderr=subprocess.DEVNULL（防死锁），实际:\n"
+    # 核心断言：stderr → 临时文件（失败退回 DEVNULL），严禁 PIPE
+    assert ("stderr=_err_file if _err_file is not None else subprocess.DEVNULL"
+            in popen_call), (
+        "REQ-20260923-NNN：Popen stderr 应写临时文件（退回 DEVNULL），实际:\n"
         + popen_call[:500]
     )
     assert "stderr=subprocess.PIPE" not in popen_call, (
@@ -9136,20 +9141,23 @@ def test_render_async_local_execution_history_import():
     NameError 被 try/except 静默吞掉 → execution_history 永远 running。
 
     修复：finally 块 + 早期 return 分支都加 `from slirn_home import execution_history as _eh`。
+
+    REQ-20260923-NNN：渲染主体移入 _run_fine_render_locked（async 外壳只挂串行门），
+    本检查随之改抓 locked 函数体。
     """
     import re
     FUNCLIP_ROOT = Path(__file__).resolve().parent.parent
     app_path = FUNCLIP_ROOT / "slirn_home" / "app.py"
     src = app_path.read_text(encoding="utf-8")
 
-    # 抓 _run_fine_render_async 函数体
+    # 抓 _run_fine_render_locked 函数体
     lines = src.splitlines()
     def_line = -1
     for i, line in enumerate(lines):
-        if line.startswith("def _run_fine_render_async("):
+        if line.startswith("def _run_fine_render_locked("):
             def_line = i
             break
-    assert def_line >= 0, "找不到 _run_fine_render_async 函数"
+    assert def_line >= 0, "找不到 _run_fine_render_locked 函数"
     body_end = len(lines)
     for i in range(def_line + 1, len(lines)):
         stripped = lines[i].lstrip()
