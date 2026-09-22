@@ -729,7 +729,10 @@ def test_render_fine_cut_zone_includes_cover_duration_slider(tmp_path):
 
 
 def test_render_fine_cut_zone_includes_audio_volume_slider(tmp_path):
-    """背景音乐控制块：启用 checkbox + 音量/淡入/淡出 4 个滑块。"""
+    """背景音乐控制块：启用 checkbox + 音量/淡入/淡出 4 个滑块。
+
+    REQ-20260922-NNN：音量滑块改 dB 衰减刻度（-40 ~ 0，默认 -8 = 旧 0.4）。
+    """
     from slirn_home.app import _render_workbench
 
     m, video = _make_mgr(tmp_path)
@@ -740,14 +743,68 @@ def test_render_fine_cut_zone_includes_audio_volume_slider(tmp_path):
     assert 'data-key="audio"' in html
     # 4 个滑块（独立 selector — 用 data-audio-key 而非 data-key）
     assert 'id="slirn-fine-audio-volume"' in html
-    assert 'data-audio-key="volume"' in html
-    assert 'value="0.40"' in html  # 默认音量
+    assert 'data-audio-key="volume_db"' in html
+    assert 'value="-8"' in html  # 默认音量（dB 衰减，= 旧 0.4 线性）
+    assert 'min="-40"' in html and 'max="0"' in html
     assert 'id="slirn-fine-audio-fade_in"' in html
     assert 'data-audio-key="fade_in"' in html
     assert 'id="slirn-fine-audio-fade_out"' in html
     assert 'data-audio-key="fade_out"' in html
     # 提示文案
     assert "原说话人语音" in html or "原声" in html
+
+
+def test_fine_volume_db_helper_conversions():
+    """REQ-20260922-NNN：_fine_volume_db 统一取 dB 衰减（含旧线性 volume 兜底换算）。"""
+    from slirn_home.app import (
+        _fine_volume_db, _FINE_AUDIO_DEFAULTS,
+        _FINE_VOLUME_DB_MIN, _FINE_VOLUME_DB_MAX,
+    )
+
+    # 新字段直取 + clamp
+    assert _fine_volume_db({"volume_db": -14.0}) == -14.0
+    assert _fine_volume_db({"volume_db": -55.0}) == _FINE_VOLUME_DB_MIN  # clamp -40
+    assert _fine_volume_db({"volume_db": 6.0}) == _FINE_VOLUME_DB_MAX    # clamp 0
+    assert _fine_volume_db({"volume_db": "-18"}) == -18.0  # 字符串数字容忍
+    # 旧线性 volume 换算：20·log10(v)
+    assert abs(_fine_volume_db({"volume": 0.2}) - (-13.98)) < 0.01   # ≈ -14 dB
+    assert abs(_fine_volume_db({"volume": 0.4}) - (-7.96)) < 0.01   # ≈ -8 dB（旧默认）
+    assert abs(_fine_volume_db({"volume": 0.5}) - (-6.02)) < 0.01
+    assert _fine_volume_db({"volume": 0}) == _FINE_VOLUME_DB_MIN      # 旧 0（静音）→ -40
+    assert _fine_volume_db({"volume": 1.0}) == 0.0                    # 1.0 → 0 dB
+    # 新字段优先于旧字段
+    assert _fine_volume_db({"volume_db": -20.0, "volume": 0.9}) == -20.0
+    # 都缺 / 非法 → 默认 -8 dB
+    assert _fine_volume_db({}) == _FINE_AUDIO_DEFAULTS["volume_db"]
+    assert _fine_volume_db({"volume": "abc"}) == _FINE_AUDIO_DEFAULTS["volume_db"]
+
+
+def test_get_fine_compose_migrates_legacy_volume_to_db(tmp_path):
+    """REQ-20260922-NNN：磁盘上的旧 fine_compose.json（线性 volume）加载即迁移为
+    volume_db 并在下次保存落盘，legacy 键清除。"""
+    import json
+    from slirn_home.app import _get_fine_compose, _save_fine_compose
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="legacy-vol", original_video=video)
+    fc_path = mgr_root(tmp_path) / "tasks" / t.task_id / "fine_compose.json"
+    fc_path.parent.mkdir(parents=True, exist_ok=True)
+    # 用户此前存的 volume=0.2（本次需求的实际场景）
+    fc_path.write_text(json.dumps({
+        "materials": {},
+        "audio": {"enabled": True, "volume": 0.2, "fade_in": 0.0, "fade_out": 0.0},
+    }, ensure_ascii=False), encoding="utf-8")
+
+    fc = _get_fine_compose(m, t.task_id)
+    assert "volume" not in fc["audio"], "legacy volume 键应被清除"
+    assert abs(fc["audio"]["volume_db"] - (-13.98)) < 0.01, "0.2 应迁移为 ≈ -14 dB"
+    assert fc["audio"]["enabled"] is True
+
+    # 再保存 → 磁盘是新格式
+    _save_fine_compose(m, t.task_id, fc)
+    on_disk = json.loads(fc_path.read_text(encoding="utf-8"))
+    assert "volume" not in on_disk["audio"]
+    assert abs(on_disk["audio"]["volume_db"] - (-13.98)) < 0.01
 
 
 def test_render_fine_cut_zone_hint_is_at_top(tmp_path):
@@ -967,9 +1024,10 @@ def test_run_fine_render_subtitle_before_cover_concat(tmp_path, monkeypatch):
 
 
 def test_run_fine_render_audio_amix_filter(tmp_path, monkeypatch):
-    """背景音乐启用 + volume=0.3 时 filter_complex 应含 [voice] + [bgm] + amix。
+    """背景音乐启用 + volume_db=-14 时 filter_complex 应含 [voice] + [bgm] + amix。
 
     REQ-20260919-061 扩展：背景音乐与原声混合（amix），保留说话人语音。
+    REQ-20260922-NNN：音量改 dB 衰减刻度（-14 dB ≈ 旧线性 0.2）。
     """
     import json
     from slirn_home.app import _run_fine_render, _save_fine_compose
@@ -989,7 +1047,7 @@ def test_run_fine_render_audio_amix_filter(tmp_path, monkeypatch):
         "layout": {"video": {"x": 0, "y": 0, "scale": 1.0,
                              "crop_x": 0, "crop_y": 0, "crop_w": 1920, "crop_h": 1080,
                              "enabled": True}},
-        "audio": {"enabled": True, "volume": 0.3, "fade_in": 0.0, "fade_out": 0.0},
+        "audio": {"enabled": True, "volume_db": -14.0, "fade_in": 0.0, "fade_out": 0.0},
     }
 
     captured = {}
@@ -1019,7 +1077,7 @@ def test_run_fine_render_audio_amix_filter(tmp_path, monkeypatch):
     assert "[bgm]" in captured["filter"]
     assert "amix=inputs=2:duration=first:normalize=0" in captured["filter"]
     assert "[aout]" in captured["filter"]
-    assert "volume=0.30" in captured["filter"]  # audio volume 衰减
+    assert "volume=-14.0dB" in captured["filter"]  # audio volume dB 衰减（REQ-20260922-NNN）
     assert "volume=1.0" in captured["filter"]    # 原声保持 100%
     # ffmpeg cmd 应 -map [aout]（不再 -map 0:a?）
     assert "[aout]" in captured["cmd"]
@@ -1124,7 +1182,7 @@ def test_fine_profiles_apply_overwrites_task_layout(tmp_path):
                    "bg": {"x": 0, "y": 0, "scale": 1.0, "enabled": False}},
         "font": {"size": 42, "family": "STHeitiMedium"},
         "output": {"resolution": "1080p"},
-        "audio": {"enabled": True, "volume": 0.3, "fade_in": 0.0, "fade_out": 0.0},
+        "audio": {"enabled": True, "volume_db": -10.5, "fade_in": 0.0, "fade_out": 0.0},
     })
     fc_a = _get_fine_compose(m_a, t_a.task_id)
     fp.save_profile(
@@ -1153,7 +1211,7 @@ def test_fine_profiles_apply_overwrites_task_layout(tmp_path):
     assert fc_b_after["layout"]["video"]["x"] == 100
     assert fc_b_after["font"]["size"] == 42
     assert fc_b_after["output"]["resolution"] == "1080p"
-    assert fc_b_after["audio"]["volume"] == 0.3
+    assert fc_b_after["audio"]["volume_db"] == -10.5
     # materials 不动（任务 B 自己的素材路径）
     assert fc_b_after["materials"] == fc_b_materials_before
 
@@ -1615,10 +1673,10 @@ def test_render_fine_cut_zone_renders_number_input_and_stepper_per_slider(tmp_pa
     assert re.search(
         r'data-for="slirn-fine-video-x"', html,
     ), "video.x 应配有 number input + ▲▼"
-    # audio.volume（用 data-audio-key 走 save_fine_audio 端点）
+    # audio.volume_db（用 data-audio-key 走 save_fine_audio 端点）
     assert re.search(
-        r'data-audio-key="volume"[^>]*value="0\.40"', html,
-    ), "audio.volume slider 应保留 0.40 默认值"
+        r'data-audio-key="volume_db"[^>]*value="-8"', html,
+    ), "audio.volume_db slider 应保留 -8 dB 默认值（= 旧 0.4 线性）"
     assert re.search(
         r'data-for="slirn-fine-audio-volume"', html,
     ), "audio.volume 应配有 number input + ▲▼"
@@ -4664,7 +4722,7 @@ def test_save_fine_audio_accepts_enabled_field(tmp_path: Path):
         "/slirn/api/save_fine_audio",
         json={
             "task_id": t.task_id,
-            "audio": {"enabled": True, "volume": 0.4, "fade_in": 1.0, "fade_out": 2.0},
+            "audio": {"enabled": True, "volume_db": -18.0, "fade_in": 1.0, "fade_out": 2.0},
         },
     )
     assert r.status_code == 200
@@ -4672,9 +4730,17 @@ def test_save_fine_audio_accepts_enabled_field(tmp_path: Path):
 
     fc = _get_fine_compose(m, t.task_id)
     assert fc["audio"]["enabled"] is True
-    assert fc["audio"]["volume"] == 0.4
+    assert fc["audio"]["volume_db"] == -18.0
     assert fc["audio"]["fade_in"] == 1.0
     assert fc["audio"]["fade_out"] == 2.0
+    # REQ-20260922-NNN：越界值 clamp 到 [-40, 0]
+    r2 = client.post(
+        "/slirn/api/save_fine_audio",
+        json={"task_id": t.task_id, "audio": {"volume_db": -55.0}},
+    )
+    assert r2.status_code == 200
+    fc2 = _get_fine_compose(m, t.task_id)
+    assert fc2["audio"]["volume_db"] == -40.0
 
 
 def test_import_fine_params_restores_all_checkbox_states(tmp_path: Path):
@@ -4737,7 +4803,9 @@ def test_import_fine_params_restores_all_checkbox_states(tmp_path: Path):
     assert fc["layout"]["video"]["x"] == 100
     assert fc["layout"]["video"]["scale"] == 0.8
     assert fc["audio"]["enabled"] is True
-    assert fc["audio"]["volume"] == 0.3
+    # REQ-20260922-NNN：旧导出里的线性 volume 0.3 → 迁移为 dB（20·log10(0.3)≈-10.46），legacy 键清除
+    assert "volume" not in fc["audio"]
+    assert abs(fc["audio"]["volume_db"] - (-10.46)) < 0.05
 
 
 # ============================================================
@@ -6025,7 +6093,7 @@ def test_import_fine_params_overwrites_fields_keeps_materials(tmp_path):
         "layout": {"video": {"x": 999, "y": 888, "scale": 0.5}},
         "font": {"size": 88, "color": "#FF0000"},
         "output": {"resolution": "720p"},
-        "audio": {"enabled": True, "volume": 0.9},
+        "audio": {"enabled": True, "volume_db": 0.9},
         "detected_region": {"x": 100, "y": 200, "width": 1500, "height": 700,
                             "algorithm": "pixel", "threshold": 250},
         "preview": {"start_h": 0, "start_m": 5, "start_s": 30, "duration": 15},
@@ -6048,7 +6116,7 @@ def test_import_fine_params_overwrites_fields_keeps_materials(tmp_path):
     assert fc2["layout"]["video"]["x"] == 999, "layout.video.x 应被覆盖"
     assert fc2["font"]["size"] == 88, "font.size 应被覆盖"
     assert fc2["output"]["resolution"] == "720p", "output.resolution 应被覆盖"
-    assert fc2["audio"]["volume"] == 0.9, "audio.volume 应被覆盖"
+    assert fc2["audio"]["volume_db"] == 0.9, "audio.volume_db 应被覆盖"
     assert fc2["detected_region"]["algorithm"] == "pixel", \
         "detected_region 应被覆盖"
     # REQ-20260921-NNN-preview-export：preview 也应被覆盖
@@ -7812,7 +7880,7 @@ def test_router_log_kind_labels_includes_all_10_kinds(tmp_path):
 # =====================================================================
 
 def test_upload_audio_material_auto_enables_bgm(tmp_path):
-    """REQ-085：上传 mp3 → fc.audio.enabled 自动变 True；volume 保持默认 0.4。"""
+    """REQ-085：上传 mp3 → fc.audio.enabled 自动变 True；volume_db 保持默认 -8 dB。"""
     import io
     from fastapi.testclient import TestClient
     from slirn_home.app import build_app, _get_fine_compose
@@ -7846,8 +7914,8 @@ def test_upload_audio_material_auto_enables_bgm(tmp_path):
         f"REQ-085：上传 mp3 后 fc.audio.enabled 应自动为 True，"
         f"实际是 {fc_after['audio']['enabled']}（这是 BUG 根因）"
     )
-    # volume 保持默认 0.4（不污染用户已有音量）
-    assert fc_after["audio"]["volume"] == 0.4
+    # volume_db 保持默认 -8 dB（不污染用户已有音量）
+    assert fc_after["audio"]["volume_db"] == -8.0
     # materials.audio.path 必须含 tasks/<tid>/ 前缀（REQ-083 约定）
     audio_path = fc_after["materials"]["audio"]["path"]
     assert audio_path.endswith(".mp3"), f"音频后缀应 .mp3，得到 {audio_path}"
@@ -7878,7 +7946,7 @@ def test_upload_audio_does_not_override_user_disabled(tmp_path):
     # 用户先手动调音量 + 启用
     r0 = client.post(
         "/slirn/api/save_fine_audio",
-        json={"task_id": t.task_id, "audio": {"enabled": True, "volume": 0.7}},
+        json={"task_id": t.task_id, "audio": {"enabled": True, "volume_db": -5.0}},
     )
     assert r0.status_code == 200, r0.text
 
@@ -7896,9 +7964,9 @@ def test_upload_audio_does_not_override_user_disabled(tmp_path):
     fc = _get_fine_compose(mgr, t.task_id)
     # enabled 保持 True（不会变 False）
     assert fc["audio"]["enabled"] is True
-    # 用户手动设的 volume=0.7 不被覆盖（默认 0.4 也不写）
-    assert fc["audio"]["volume"] == 0.7, (
-        f"用户已设 volume=0.7 不会被上传覆盖，得到 {fc['audio']['volume']}"
+    # 用户手动设的 volume_db=-5 不被覆盖（默认 -8 也不写）
+    assert fc["audio"]["volume_db"] == -5.0, (
+        f"用户已设 volume_db=-5 不会被上传覆盖，得到 {fc['audio'].get('volume_db')}"
     )
 
 
@@ -8994,7 +9062,7 @@ def test_diagnose_bgm_endpoint_exists():
     assert r1["inputs_count"] == 1
     assert r1["audio_idx"] == -1
 
-    # case 2: 勾 BGM + 有 audio material
+    # case 2: 勾 BGM + 有 audio material（legacy 线性 volume 直调兜底：0.5 → -6.0dB）
     fc2 = {
         "layout": {"video": {"enabled": True}, "audio": {"enabled": True}},
         "materials": {"video": {"path": "v.mp4"}, "audio": {"path": "a.mp3"}},
@@ -9002,7 +9070,7 @@ def test_diagnose_bgm_endpoint_exists():
     }
     r2 = _predict_audio_path(fc2)
     assert r2["predicted_has_bgm"] is True
-    assert "[1:a]aloop=loop=-1:size=2e9,volume=0.50" in r2["predicted_audio_filters"]
+    assert "[1:a]aloop=loop=-1:size=2e9,volume=-6.0dB" in r2["predicted_audio_filters"]
     assert r2["inputs_count"] == 2  # video + audio
     assert r2["audio_idx"] == 1
 

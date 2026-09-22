@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import html
 import json
+import math
 import os
 import re
 import logging
@@ -1678,13 +1679,41 @@ _FINE_FONT_DEFAULTS = {
     "family":       "STHeitiMedium",
 }
 # REQ-20260919-061 扩展：背景音乐 4 项（启用 + 音量 + 淡入/淡出）
-# volume 默认 0.4 — 不压过说话人语音
+# REQ-20260922-NNN：volume(0-1 线性) → volume_db（dB 衰减，0=原曲，-40≈静音）。
+# 线性刻度不直观且与源文件响度无关（0.2 恒为 -14 dB，响碟轻碟结果差数 dB）；
+# 旧默认 0.4 = 20·log10(0.4) ≈ -8 dB，行为等价迁移（读取端 _fine_volume_db 兜底旧数据）。
 _FINE_AUDIO_DEFAULTS = {
-    "enabled":  False,
-    "volume":   0.4,
-    "fade_in":  0.0,
-    "fade_out": 0.0,
+    "enabled":    False,
+    "volume_db":  -8.0,
+    "fade_in":    0.0,
+    "fade_out":   0.0,
 }
+_FINE_VOLUME_DB_MIN = -40.0
+_FINE_VOLUME_DB_MAX = 0.0
+
+
+def _fine_volume_db(audio_cfg: dict) -> float:
+    """REQ-20260922-NNN：BGM 音量统一取 dB 衰减值（0=原曲，-40≈静音）。
+
+    优先 volume_db；兼容旧数据/旧模板里的线性 volume(0-1)：20·log10(v) 换算
+    （0.2≈-14 dB、0.4≈-8 dB；旧 0 静音 → -40 保持静音），越界 clamp。
+    _get_fine_compose 加载时已迁移落盘，这里兜底直调
+    _assemble_fine_filter / _predict_audio_path 的未迁移 fc。
+    """
+    v = audio_cfg.get("volume_db")
+    if v is not None:
+        try:
+            return max(_FINE_VOLUME_DB_MIN, min(_FINE_VOLUME_DB_MAX, float(v)))
+        except (TypeError, ValueError):
+            pass
+    old = audio_cfg.get("volume")
+    if old is not None:
+        try:
+            old_f = min(max(float(old), 1e-4), 1.0)
+            return max(_FINE_VOLUME_DB_MIN, min(_FINE_VOLUME_DB_MAX, 20.0 * math.log10(old_f)))
+        except (TypeError, ValueError):
+            pass
+    return float(_FINE_AUDIO_DEFAULTS["volume_db"])
 # REQ-20260921-NNN：精剪·生成预览参数（独立于 layout/font/output/audio —
 # 仅控制「生成预览」临时截取的起止区间；不影响导出最终视频）。
 # start_h/m/s 是时:分:秒三段独立输入（前端友好），duration 是秒数（2-30）。
@@ -2690,12 +2719,12 @@ def _assemble_fine_filter(
         return st
 
     if audio_input_enabled and audio_idx >= 0:
-        vol = float(audio_cfg.get("volume", 0.4))
+        vol_db = _fine_volume_db(audio_cfg)  # REQ-20260922-NNN：dB 衰减（兼容旧线性 volume）
         fade_in = float(audio_cfg.get("fade_in", 0.0))
         fade_out = float(audio_cfg.get("fade_out", 0.0))
         # REQ-20260920-080 修复：label [bgm] 必须紧接过滤器链尾部，不能 ",[bgm]"
         # （之前用 list + ",".join 会把 label 当成 filter name → No such filter: ''）
-        bgm_chain = f"[{audio_idx}:a]aloop=loop=-1:size=2e9,volume={vol:.2f}"
+        bgm_chain = f"[{audio_idx}:a]aloop=loop=-1:size=2e9,volume={vol_db:.1f}dB"
         if fade_in > 0:
             bgm_chain += f",afade=t=in:st=0:d={fade_in:.2f}"
         if fade_out > 0:
@@ -2791,7 +2820,7 @@ def _predict_audio_path(fc: dict, audio_total_duration: float | None = None) -> 
             "layout_enabled": bool(audio_cfg.get("enabled", False)),
             "material_path": (materials.get("audio") or {}).get("path", ""),
             "will_render": audio_input_enabled,
-            "volume": float(audio_cfg.get("volume", 0.4)),
+            "volume_db": _fine_volume_db(audio_cfg),
         },
     }
 
@@ -2814,11 +2843,11 @@ def _predict_audio_path(fc: dict, audio_total_duration: float | None = None) -> 
 
     predicted_audio_filters = ""
     if audio_input_enabled and audio_idx >= 0:
-        vol = float(audio_cfg.get("volume", 0.4))
+        vol_db = _fine_volume_db(audio_cfg)  # REQ-20260922-NNN：与 assemble 同源 dB 衰减
         fade_in = float(audio_cfg.get("fade_in", 0.0))
         fade_out = float(audio_cfg.get("fade_out", 0.0))
         # REQ-20260920-080：label [bgm] 必须紧接过滤器链尾部，不能 ",[bgm]"
-        bgm_chain = f"[{audio_idx}:a]aloop=loop=-1:size=2e9,volume={vol:.2f}"
+        bgm_chain = f"[{audio_idx}:a]aloop=loop=-1:size=2e9,volume={vol_db:.1f}dB"
         if fade_in > 0:
             bgm_chain += f",afade=t=in:st=0:d={fade_in:.2f}"
         if fade_out > 0:
@@ -3434,15 +3463,21 @@ def _get_fine_compose(mgr, task_id: str) -> dict:
                     layout[axis] = float(v)
                 except (TypeError, ValueError):
                     pass
-    # REQ-20260919-061 扩展：audio 字段（volume/fade_in/fade_out）字符串 → 数字
+    # REQ-20260919-061 扩展：audio 字段（volume_db/fade_in/fade_out）字符串 → 数字
     _a = fc.get("audio") or {}
-    for ak in ("volume", "fade_in", "fade_out"):
+    for ak in ("volume_db", "fade_in", "fade_out"):
         v = _a.get(ak)
         if isinstance(v, str):
             try:
                 _a[ak] = float(v)
             except (TypeError, ValueError):
                 _a[ak] = 0.0
+    # REQ-20260922-NNN：旧线性 volume(0-1) → volume_db（dB）一次性迁移落盘
+    # （旧任务 fine_compose.json / 旧参数模板 apply 写入的 legacy 字段都走这里）
+    if "volume" in _a:
+        legacy = _a.pop("volume")
+        if "volume_db" not in _a:
+            _a["volume_db"] = _fine_volume_db({"volume": legacy})
 
     # 数据迁移：旧 _schema (None/1) → 2（x/y 与 crop_* 都由 0-1 转像素）
     # 此时所有相关字段已是数字（float 或 int），可直接判定。
@@ -3891,12 +3926,13 @@ def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
         f'<label><input type="checkbox" class="slirn-fine-enabled" data-key="audio" '
         f'{"checked" if audio_cfg["enabled"] else ""}> 启用背景音乐</label>'
         f'<div class="slirn-fine-params">'
-        f'{_fine_param("音量（0–1，0.4 = 不压人声）", "slirn-fine-audio-volume", "volume", float(audio_cfg["volume"]), 0, 1, 0.05, "{:.2f}", data_attr="data-audio-key")}'
+        f'{_fine_param("音量（dB 衰减，0 = 原曲）", "slirn-fine-audio-volume", "volume_db", _fine_volume_db(audio_cfg), -40, 0, 1, "{:.0f}", data_attr="data-audio-key")}'
         f'{_fine_param("淡入（0–5 秒）", "slirn-fine-audio-fade_in", "fade_in", float(audio_cfg["fade_in"]), 0, 5, 0.5, "{:.1f}", data_attr="data-audio-key")}'
         f'{_fine_param("淡出（0–5 秒）", "slirn-fine-audio-fade_out", "fade_out", float(audio_cfg["fade_out"]), 0, 5, 0.5, "{:.1f}", data_attr="data-audio-key")}'
         f'</div>'
         f'<div class="slirn-form-hint">上传 mp3/wav/m4a 文件 → 原说话人语音 + BGM 同时播放；'
-        f'短 BGM 自动循环填充。'
+        f'短 BGM 自动循环填充。音量为相对 BGM 原曲的 dB 衰减'
+        f'（-14 ≈ 旧版 0.2，-8 ≈ 旧版 0.4；曲子偏响建议 -20 左右）。'
         # REQ-20260920-082：系统提供的 BGM 下拉已从参数区迁移到「🎵 背景音乐」素材上传卡内
         # （贴在 audio upload card status 行下方）。下方留 hint 引导用户去上传区选 BGM。
         f'或在上方「🎵 背景音乐」上传卡内点「📦 系统提供的 BGM」选内置 lo-fi mp3。</div>'
@@ -6407,7 +6443,11 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
                 fc["audio"][k] = bool(v)
             else:
                 try:
-                    fc["audio"][k] = float(v)
+                    val = float(v)
+                    # REQ-20260922-NNN：volume_db 限定 [-40, 0]（API 直调防越界）
+                    if k == "volume_db":
+                        val = max(_FINE_VOLUME_DB_MIN, min(_FINE_VOLUME_DB_MAX, val))
+                    fc["audio"][k] = val
                 except (TypeError, ValueError):
                     pass  # 非法值跳过
         _save_fine_compose(mgr, tid, fc)
@@ -7236,7 +7276,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         #   - 全新任务（fc.audio 由 _get_fine_compose 默认填 enabled=False）→ 自动开 ✅
         #   - 用户已 save_fine_audio 设过 enabled=True → 已是 True（再写幂等）✅
         #   - 用户已 save_fine_audio 设过 enabled=False → 保留 False，不强行打开 ✅
-        # volume 已经是 _FINE_AUDIO_DEFAULTS["volume"]=0.4，无需再写。
+        # volume_db 由 _FINE_AUDIO_DEFAULTS 默认 -8 dB 提供，无需再写。
         if kind == "audio":
             audio_block = fc.setdefault("audio", {})
             if audio_block.get("enabled", _FINE_AUDIO_DEFAULTS["enabled"]) == _FINE_AUDIO_DEFAULTS["enabled"]:
