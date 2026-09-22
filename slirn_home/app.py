@@ -1210,7 +1210,7 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
     elif cut_job and cut_job.get("state") == "error":
         cut_state = "error"
         cut_text = (f'⚠️ 优化成片剪辑失败：{cut_job.get("error") or "未知错误"}'
-                    ' — 重新「确认保存」可再次触发')
+                    ' — 点「🎬 重新剪辑成片」或重新「确认保存」可再次触发')
     elif marks_set and cut_ready is not None:
         cut_state = "done"
         cut_text = (f'🎬 优化成片已生成：剪除 {len(cut_ready.get("marks") or [])} 行 · '
@@ -1218,7 +1218,8 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
                     ' — 精剪合成将自动使用 optimize_compose.mp4')
     elif marks_set:
         cut_state = "pending"
-        cut_text = "⚠️ 有标记删除行但优化成片未生成 — 请重新「确认保存」触发剪辑"
+        cut_text = ("⚠️ 有标记删除行但优化成片未生成 — 点下方「🎬 重新剪辑成片」"
+                    "或重新「确认保存」触发剪辑")
     cut_bar = (f'<div id="slirn-opt-cut-status" class="slirn-status-msg slirn-opt-cut-status" '
                f'data-task-id="{_esc(task_id)}" data-state="{_esc(cut_state)}">{_esc(cut_text)}</div>'
                ) if cut_state else ""
@@ -1416,6 +1417,8 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
             {cut_srt_btn}
             <button class="slirn-btn" data-action="opt-final-view" data-task-id="{_esc(task_id)}"
                     {"" if confirmed else 'disabled title="确认保存后可查看"'}>📄 查看最终字幕</button>
+            <button class="slirn-btn" data-action="opt-cut-rekick" data-task-id="{_esc(task_id)}"
+                    title="按当前 🗑️ 标记删除行，对粗剪成片做剪除+拼接，生成 optimize_compose.mp4（精剪合成自动优先使用）">🎬 重新剪辑成片</button>
             <button class="slirn-btn" data-action="optimize-start" data-task-id="{_esc(task_id)}"
                     data-has="1">🔄 重新优化</button>
         </div>
@@ -8920,12 +8923,17 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             started_cut = compose_service.start_optimize_cut(
                 tid, outputs_dir, rough, auto=_auto, auto_session_id=_auto_session_id)
             cut_state = "started" if started_cut else "running"
-        elif not marks_now and compose_service.opt_cut_job_status(tid) is None:
-            # 标记已全部取消且无剪辑在跑 → 清掉旧优化成片（同步、毫秒级）
-            removed = compose_service._delete_cut_artifacts(outputs_dir)
-            cut_state = "cleared" if removed else "none"
-        elif compose_service.opt_cut_job_status(tid) is not None:
-            cut_state = "running"  # 剪辑在跑，取消标记由线程 R1 复核自清
+        else:
+            # done/error 条目会常驻内存（job 字典完成后不 pop）→ 不能拿「有无
+            # 条目」当运行判据，否则剪辑完成后再清空标记永远走不到清理分支，
+            # 旧优化成片变孤儿一直躺在磁盘上
+            job_st = compose_service.opt_cut_job_status(tid)
+            if job_st and job_st.get("state") == "running":
+                cut_state = "running"  # 剪辑在跑，取消标记由线程 R1 复核自清
+            elif not marks_now:
+                # 标记已全部取消且无剪辑在跑 → 清掉旧优化成片（同步、毫秒级）
+                removed = compose_service._delete_cut_artifacts(outputs_dir)
+                cut_state = "cleared" if removed else "none"
 
         n_edits = int(est.get("line_edits") or 0)
         edit_suffix = f" · 整句替换 {n_edits} 行" if n_edits else ""
@@ -8987,6 +8995,50 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         return _ok("", job=st,
                    ready={"exists": ready is not None,
                           "path": compose_service.OPTIMIZE_COMPOSE_NAME if ready else ""})
+
+    @app.app.post("/slirn/api/optimize_cut_rekick")
+    async def optimize_cut_rekick(body: dict = Body(default_factory=dict)):
+        """显式触发优化成片剪辑（REQ-20260922-NNN 优化字幕页「🎬 重新剪辑成片」）。
+
+        按当前 🗑️ 标记删除行对粗剪成片做剪除+拼接。与保存钩子同一引擎
+        （start_optimize_cut），供产物失效（rough 重合成 / 轮询中断）/ 想手动
+        触发时使用，不必再走一遍「确认保存」。
+        """
+        from slirn_home import compose_service, optimize_service
+
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            mgr.get(tid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+        outputs_dir = mgr.tasks_dir / tid / "outputs"
+        data = optimize_service.load_optimize(outputs_dir)
+        if data is None:
+            return _err("尚无优化字幕数据 — 请先执行「开始优化字幕」")
+        marks = data.get("line_marks") or []
+        # 剪辑在跑 → 不二启，前端直接续上轮询
+        job_st = compose_service.opt_cut_job_status(tid)
+        if job_st and job_st.get("state") == "running":
+            return _ok("", cut={"state": "running", "marks": marks})
+        if not marks:
+            # 与保存钩子同语义：无标记 → 顺手清掉失效旧产物（如 marks 已清但
+            # job 曾在跑没走到清理分支）
+            removed = compose_service._delete_cut_artifacts(outputs_dir)
+            if removed:
+                return _ok("", cut={"state": "cleared", "marks": []},
+                           toast="🗑️ 当前没有标记删除的行 — 已清掉旧的优化成片")
+            return _err("当前没有标记删除的行 — 先在列表中点 🗑️ 标记要剪除的行")
+        rough = compose_service.rough_compose_path(outputs_dir)
+        if not rough.exists():
+            return _err("粗剪成片不存在 — 请先完成「粗剪合成」")
+        started = compose_service.start_optimize_cut(tid, outputs_dir, rough)
+        if started:
+            return _ok("", cut={"state": "started", "marks": marks},
+                       toast=f"🎬 已开始剪辑优化成片（删除 {len(marks)} 行）— 完成后精剪合成自动使用")
+        return _ok("", cut={"state": "running", "marks": marks},
+                   toast="🎬 优化成片剪辑正在进行中")
 
     @app.app.post("/slirn/api/resplit_segment")
     async def resplit_segment_api(body: dict = Body(default_factory=dict)):

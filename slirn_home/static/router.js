@@ -4857,7 +4857,7 @@
             if (el) {
               el.dataset.state = 'error';
               el.innerHTML = '⚠️ 优化成片剪辑失败：' + escapeHtml(j.error || '未知错误')
-                + ' — 重新「确认保存」可再次触发';
+                + ' — 点「🎬 重新剪辑成片」或重新「确认保存」可再次触发';
             }
             toast('❌ 优化成片剪辑失败（精剪合成将回退使用粗剪成片）', 'error');
           }
@@ -4866,6 +4866,25 @@
     };
     update();
     optCutPollTimer = setInterval(update, 2000);
+  }
+  function optCutRekick(btn) {  // 🎬 重新剪辑成片：按当前 🗑️ 标记手动触发（不必再走「确认保存」）
+    var tid = btn.getAttribute('data-task-id') || '';
+    if (!tid) return;
+    btn.disabled = true;
+    postJSON(SLIRN_API + '/optimize_cut_rekick', {task_id: tid}).then(function(r) {
+      btn.disabled = false;
+      if (!r || !r.ok) {
+        toast('❌ ' + ((r && r.error) || '触发失败'), 'error');
+        return;
+      }
+      if (r.toast) toast(r.toast);
+      var cut = r.cut || {};
+      if (cut.state === 'started' || cut.state === 'running') {
+        startOptCutPolling(tid);
+      } else if (cut.state === 'cleared') {
+        openWorkbench(tid);  // 清掉旧产物 → 刷新剪辑状态条
+      }
+    });
   }
   function optSrtDownload(btn) {  // 下载优化字幕 SRT（base=rough 粗剪时间基 / cut 优化成片时间基）
     var tid = btn.getAttribute('data-task-id') || '';
@@ -6293,6 +6312,10 @@
     else if (action === 'opt-line-delete') {
       // REQ-20260922-NNN 标记删除行：🗑️ 标记 / ✚ 取消（保存后剪除出优化成片）
       optLineDelete(target.closest('.slirn-opt-row'));
+    }
+    else if (action === 'opt-cut-rekick') {
+      // REQ-20260922-NNN 🎬 重新剪辑成片：按当前标记手动触发优化成片剪辑
+      optCutRekick(target);
     }
     else if (action === 'opt-line-apply') {
       optLineApply(target.closest('.slirn-opt-row'));

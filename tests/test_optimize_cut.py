@@ -205,6 +205,106 @@ def test_save_rejects_bad_line_marks(tmp_path):
     assert r["ok"] is False and "line_marks" in r["error"]
 
 
+def test_save_clears_artifacts_after_done_job_lingers(tmp_path):
+    """回归（REQ-20260922-NNN）：job 完成后 done 条目常驻内存（字典不 pop）—
+    清空标记再保存必须仍走清理分支，否则旧优化成片成孤儿滞留磁盘。"""
+    m, t, outputs = _make_task(tmp_path)
+    _mk_cut_artifacts(outputs, [1])
+    _write_optimize(outputs, marks=[1])
+    compose_service._OPT_CUT_JOBS[t.task_id] = {
+        "state": "done", "progress": 100.0, "stage": "完成", "error": None,
+        "started_at": 0.0, "finished_at": 1.0, "result": {"marks": [1]}}
+    try:
+        c = _client(tmp_path)
+        r = c.post("/slirn/api/save_optimize_subtitle",
+                   json={"task_id": t.task_id, "decisions": [],
+                         "line_marks": []}).json()
+        assert r["ok"] is True, r
+        assert r["cut"]["state"] == "cleared"
+        assert not compose_service.optimize_compose_path(outputs).exists()
+        assert not (outputs / compose_service.OPTIMIZE_CUT_JSON).exists()
+        assert not (outputs / "optimize_compose.srt").exists()
+    finally:
+        compose_service._OPT_CUT_JOBS.pop(t.task_id, None)
+
+
+# ---------- /optimize_cut_rekick 显式触发（🎬 重新剪辑成片按钮） ----------
+
+def test_rekick_requires_optimize_data(tmp_path):
+    m, t, outputs = _make_task(tmp_path)
+    c = _client(tmp_path)
+    r = c.post("/slirn/api/optimize_cut_rekick",
+               json={"task_id": t.task_id}).json()
+    assert r["ok"] is False and "优化字幕" in r["error"]
+
+
+def test_rekick_marks_empty_errs_or_clears_stale(tmp_path):
+    m, t, outputs = _make_task(tmp_path)
+    _write_optimize(outputs, marks=[])
+    c = _client(tmp_path)
+    r = c.post("/slirn/api/optimize_cut_rekick",
+               json={"task_id": t.task_id}).json()
+    assert r["ok"] is False and "标记删除" in r["error"]
+    # 旧产物滞留（如 job 在跑时清空标记）→ 顺手清掉
+    _mk_cut_artifacts(outputs, [1])
+    r2 = c.post("/slirn/api/optimize_cut_rekick",
+                json={"task_id": t.task_id}).json()
+    assert r2["ok"] is True and r2["cut"]["state"] == "cleared"
+    assert not compose_service.optimize_compose_path(outputs).exists()
+    assert not (outputs / compose_service.OPTIMIZE_CUT_JSON).exists()
+
+
+def test_rekick_requires_rough(tmp_path):
+    m, t, outputs = _make_task(tmp_path)
+    _write_optimize(outputs, marks=[1])  # 有标记、无 rough_compose.mp4
+    c = _client(tmp_path)
+    r = c.post("/slirn/api/optimize_cut_rekick",
+               json={"task_id": t.task_id}).json()
+    assert r["ok"] is False and "粗剪成片" in r["error"]
+
+
+def test_rekick_starts_cut(tmp_path, monkeypatch):
+    m, t, outputs = _make_task(tmp_path)
+    _mk_rough(outputs)
+    _write_optimize(outputs, marks=[1, 2])
+    calls = []
+    monkeypatch.setattr(compose_service, "start_optimize_cut",
+                        lambda *a, **k: calls.append(a) or True)
+    c = _client(tmp_path)
+    r = c.post("/slirn/api/optimize_cut_rekick",
+               json={"task_id": t.task_id}).json()
+    assert r["ok"] is True, r
+    assert r["cut"]["state"] == "started" and r["cut"]["marks"] == [1, 2]
+    assert len(calls) == 1 and calls[0][0] == t.task_id
+
+
+def test_rekick_reports_running_when_job_busy(tmp_path, monkeypatch):
+    m, t, outputs = _make_task(tmp_path)
+    _mk_rough(outputs)
+    _write_optimize(outputs, marks=[3])
+    compose_service._OPT_CUT_JOBS[t.task_id] = {
+        "state": "running", "progress": 5.0, "stage": "剪辑中", "error": None,
+        "started_at": 0.0, "finished_at": None, "result": None}
+    try:
+        def _boom(*a, **k):
+            raise AssertionError("剪辑在跑时不应二启")
+
+        monkeypatch.setattr(compose_service, "start_optimize_cut", _boom)
+        c = _client(tmp_path)
+        r = c.post("/slirn/api/optimize_cut_rekick",
+                   json={"task_id": t.task_id}).json()
+        assert r["ok"] is True and r["cut"]["state"] == "running"
+    finally:
+        compose_service._OPT_CUT_JOBS.pop(t.task_id, None)
+
+
+def test_router_js_has_rekick_wiring():
+    js = (FUNCLIP_ROOT / "slirn_home" / "static" / "router.js").read_text(encoding="utf-8")
+    assert "action === 'opt-cut-rekick'" in js, "委托分发应有 opt-cut-rekick 分支"
+    assert "/optimize_cut_rekick" in js, "JS 应调用 /optimize_cut_rekick 端点"
+    assert "function optCutRekick" in js
+
+
 # ---------- /optimize_cut_status 磁盘兜底 ----------
 
 def test_cut_status_endpoint_fallback(tmp_path):
@@ -298,6 +398,9 @@ def test_render_optimize_zone_marks_ui(tmp_path):
     # 统计 + 剪辑状态条（有标记无产物 → pending 提示重存）
     assert "标记删除 <b>1</b> 行" in html
     assert 'id="slirn-opt-cut-status"' in html and 'data-state="pending"' in html
+    assert "重新剪辑成片" in html  # pending 提示应指向显式按钮
+    # 🎬 重新剪辑成片按钮（常驻动作行 — 无标记也可点，端点负责提示/清产物）
+    assert 'data-action="opt-cut-rekick"' in html
     # 产物就绪 → done 状态条（含保留秒数）
     _mk_cut_artifacts(outputs, [2])
     html2 = _render_optimize_zone(t.task_id, m.get(t.task_id), m)
