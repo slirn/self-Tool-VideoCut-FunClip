@@ -2378,6 +2378,34 @@ input[type="checkbox"]:focus-visible {
   .slirn-opt-row.slirn-opt-subrow { margin-left: 12px; }
 }
 
+/* ============ REQ-20260923-NNN 行搜索：字幕行文本筛选（镜像 057B 词过滤样式） ============ */
+.slirn-opt-row-search {
+  display: inline-flex; align-items: center; margin-left: auto; gap: 4px;
+}
+.slirn-opt-row-search input#slirn-opt-search {
+  width: 200px; padding: 2px 8px;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--input-bg, #fff);
+  color: var(--text);
+}
+.slirn-opt-row-search input#slirn-opt-search:focus {
+  outline: none;
+  border-color: var(--accent, #3178c6);
+  box-shadow: 0 0 0 2px rgba(49, 120, 198, 0.15);
+}
+.slirn-opt-row-search .slirn-opt-search-clear {
+  border: none; background: transparent;
+  color: var(--text-muted);
+  cursor: pointer; font-size: 13px;
+  padding: 0 4px;
+}
+.slirn-opt-row-search .slirn-opt-search-clear:hover { color: var(--text); }
+.slirn-opt-search-count { font-size: 11.5px; color: var(--text-muted); white-space: nowrap; }
+/* 隐藏规则与 only-occ / only-deleted 的隐藏规则天然叠加 = 交集 */
+.slirn-opt-list.opt-searching .slirn-opt-row.opt-search-miss { display: none; }
+
 /* ============ 粗剪合成 · 有效字幕 SRT 预览（REQ-20260916-019） ============ */
 .slirn-rc-subs {
   border: 1px solid var(--border, rgba(255,255,255,0.12));

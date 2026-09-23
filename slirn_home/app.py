@@ -1476,6 +1476,18 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
         f'data-all-text="🗑️ 只看已删除的（{n_del_total}）">🗑️ 只看已删除的（{n_del_total}）</button>'
         if n_del_total else ""
     )
+    # REQ-20260923-NNN 行搜索：字幕行文本筛选（纯前端 — 原文/生效文本/整句替换/
+    # 替换值/子段文本全量匹配，与上面两个筛选按钮 CSS 类叠加 = 交集）
+    search_box = (
+        '<span class="slirn-opt-row-search">'
+        '<input type="text" id="slirn-opt-search" placeholder="🔍 搜索字幕文本…" '
+        'autocomplete="off" title="匹配范围：原文 + 生效文本 + 整句替换 + 替换值 + 切分子段'
+        '（不区分大小写）；Enter 跳到第一条命中行，Esc 清空">'
+        '<button type="button" class="slirn-opt-search-clear" data-action="opt-search-clear" '
+        'style="display:none" title="清空搜索">✕</button>'
+        '<span id="slirn-opt-search-count" class="slirn-opt-search-count"></span>'
+        '</span>'
+    )
     return f'''<div class="slirn-card" style="margin-top:16px;">
         <div class="slirn-panel-header"><div class="slirn-panel-title">✨ 优化字幕 · 不明确字词</div></div>
         <div class="slirn-sub-meta">识别 {n_lines} 行 · 不明确 {est["occurrences"]} 处（{est["words"]} 个词）
@@ -1499,6 +1511,7 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
             <button class="slirn-btn" data-action="opt-filter" data-shown="1"
                     data-all-text="🔍 只看有不明确字词的行（{n_occ_rows}/{n_lines}）">🔍 只看有不明确字词的行（{n_occ_rows}/{n_lines}）</button>
             {del_filter_btn}
+            {search_box}
         </div>
         <div id="slirn-opt-player-wrap" class="slirn-video-wrap slirn-sub-player-wrap" style="display:none;">
             <video id="slirn-opt-player" controls preload="metadata"></video>

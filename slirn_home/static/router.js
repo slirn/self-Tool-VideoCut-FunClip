@@ -727,6 +727,7 @@
         if (optPv) bindSpeedControl(optPv);  // 优化字幕行播放倍速（REQ-20260917-030）
         bindOptRows(tid);
         setupOptWordsPagination();  // REQ-20260918-050：词频列表分页（每次 wb 重渲后调）
+        bindOptRowSearch();  // REQ-20260923-NNN 行搜索输入框（幂等重绑）
         optInputOverflowInit();  // REQ-20260918-058：替换输入框溢出检测 + 自动换行
         bindFineControls();  // REQ-20260919-061：精剪视频·素材合成器控件绑定（位置/缩放/字体/输出自动保存）
         bindFineSteppers();  // REQ-20260919-061：精剪视频·数值控件（number input + ▲▼）与滑块双向同步
@@ -4467,6 +4468,70 @@
     btn.textContent = only ? '📋 显示全部识别行'
       : (btn.getAttribute('data-all-text') || '🗑️ 只看已删除的行');
   }
+  // REQ-20260923-NNN 行搜索：字幕行文本筛选（纯前端）。命中范围 = 原文 +
+  // 生效文本 + 整句替换 + 替换值 + 切分子段（不区分大小写）；子段命中 →
+  // 父行（含全部子段）一并显示。opt-search-miss 类与 only-occ / only-deleted
+  // 的 CSS 隐藏规则天然叠加 = 交集（与词筛选 chip 的行内 display 互不干扰）。
+  function optRowSearch() {
+    var list = revVis('slirn-opt-list');
+    var inp = document.getElementById('slirn-opt-search');
+    if (!list || !inp) return;
+    var q = (inp.value || '').trim().toLowerCase();
+    var clr = document.querySelector('.slirn-opt-search-clear');
+    var cnt = document.getElementById('slirn-opt-search-count');
+    if (clr) clr.style.display = q ? '' : 'none';
+    list.classList.toggle('opt-searching', !!q);
+    var hit = 0, total = 0;
+    list.querySelectorAll('.slirn-opt-row[data-id]').forEach(function(row) {
+      total++;
+      var rid = row.getAttribute('data-id') || '';
+      // 子段是父行的平级兄弟（data-parent 关联）— 命中判定并入父行的 haystack
+      var subs = rid ? list.querySelectorAll(
+        '.slirn-opt-subrow[data-parent="' + rid + '"]') : [];
+      var hay = [row.getAttribute('data-orig-text') || '',
+                 row.getAttribute('data-eff-text') || '',
+                 row.getAttribute('data-full-text') || '',
+                 row.getAttribute('data-split-target') || ''];
+      row.querySelectorAll('.slirn-opt-after').forEach(function(o) {
+        hay.push(o.value || o.getAttribute('value') || '');
+      });
+      subs.forEach(function(sr) {
+        var st = sr.querySelector('.slirn-opt-subtext');
+        if (st) hay.push(st.textContent || '');
+      });
+      var miss = !!q && hay.join('\n').toLowerCase().indexOf(q) < 0;
+      row.classList.toggle('opt-search-miss', miss);
+      subs.forEach(function(sr) { sr.classList.toggle('opt-search-miss', miss); });
+      if (!miss) hit++;
+    });
+    if (cnt) cnt.textContent = q ? (hit + '/' + total + ' 行') : '';
+  }
+  function bindOptRowSearch() {  // 幂等 — wb 重渲后重绑 input 事件（镜像 bindOptWordTextFilter）
+    var inp = document.getElementById('slirn-opt-search');
+    if (!inp || inp.dataset.bound) return;
+    inp.dataset.bound = '1';
+    var t = null;
+    inp.addEventListener('input', function() {
+      if (t) clearTimeout(t);
+      t = setTimeout(optRowSearch, 250);
+    });
+    inp.addEventListener('keydown', function(ev) {
+      if (ev.key === 'Enter') {  // 立即应用 + 平滑跳到第一条命中行
+        ev.preventDefault();
+        if (t) clearTimeout(t);
+        optRowSearch();
+        var list = revVis('slirn-opt-list');
+        var first = list && list.querySelector(
+          '.slirn-opt-row[data-id]:not(.opt-search-miss)');
+        if (first) first.scrollIntoView({block: 'center', behavior: 'smooth'});
+      } else if (ev.key === 'Escape') {
+        ev.preventDefault();
+        inp.value = '';
+        optRowSearch();
+        inp.focus();
+      }
+    });
+  }
   // REQ-20260922-NNN 查看最终字幕：应用替换 + 去掉删除行 = 成片将使用的字幕内容。
   // 默认粗剪时间基（原始时间轴）；优化成片已生成时给「优化成片时间基」切换（已前移）。
   function optFinalView(btn) {
@@ -6892,6 +6957,9 @@
       optFilterBtn(target);
     } else if (action === 'opt-filter-deleted') {
       optFilterDeletedBtn(target);
+    } else if (action === 'opt-search-clear') {  // REQ-20260923-NNN 行搜索清空
+      var _si = document.getElementById('slirn-opt-search');
+      if (_si) { _si.value = ''; optRowSearch(); _si.focus(); }
     } else if (action === 'opt-final-view') {
       optFinalView(target);
     }

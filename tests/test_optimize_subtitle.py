@@ -439,6 +439,10 @@ def test_render_zone_result_state(tmp_path, monkeypatch):
     assert 'data-action="opt-srt-download"' in html and "disabled" in html
     assert 'data-action="opt-resplice"' in html and "重新拼接字幕" in html
     assert 'data-has="1"' not in html  # 旧「重新优化（覆盖）」入口不再渲染
+    # REQ-20260923-NNN 行搜索框（筛选按钮行右侧 + 清空按钮 + 命中计数）
+    assert 'id="slirn-opt-search"' in html and "搜索字幕文本" in html
+    assert 'data-action="opt-search-clear"' in html
+    assert 'id="slirn-opt-search-count"' in html
     # 统计行
     assert "识别 3 行" in html and "不明确 3 处" in html
 

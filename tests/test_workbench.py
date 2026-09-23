@@ -12096,3 +12096,33 @@ def test_opt_split_css_styles():
         "删除子段必须红压紫（同特异性更晚 → 需显式重申，否则紫条盖红）")
     assert ".slirn-opt-subfb {" in css, "必须有降级 ⚠️ 样式"
     assert ".slirn-opt-submark:hover" in css, "子段翻转按钮 hover 必须显红"
+
+
+def test_opt_row_search_js_and_css():
+    """REQ-20260923-NNN 行搜索：全量 haystack 匹配 + miss 类交集隐藏 + 防抖绑定
+    + Enter 跳首条 + Esc 清空 + wb 重渲重绑。"""
+    src = _router_src()
+    i = src.find("function optRowSearch")
+    assert i > 0, "必须有 optRowSearch"
+    body = src[i:src.find("\n  }\n", i)]
+    assert "data-orig-text" in body and "data-eff-text" in body \
+        and "data-full-text" in body, "命中范围必须含原文/生效文本/整句替换"
+    assert "slirn-opt-after" in body, "替换值也要参与匹配"
+    assert "slirn-opt-subrow[data-parent=" in body, "子段命中要并到父行 haystack"
+    assert "classList.toggle('opt-search-miss'" in body
+    assert "classList.toggle('opt-searching'" in body
+    assert "opt-search-count" in body, "必须更新命中计数"
+    # 防抖绑定（幂等）+ Enter 跳首条命中 + Esc 清空
+    j = src.find("function bindOptRowSearch")
+    assert j > 0, "必须有 bindOptRowSearch"
+    b2 = src[j:src.find("\n  }\n", j)]
+    assert "dataset.bound" in b2 and "setTimeout(optRowSearch, 250)" in b2
+    assert "scrollIntoView" in b2 and "Escape" in b2
+    # 委托分支 + wb 重渲重绑
+    assert "action === 'opt-search-clear'" in src
+    assert "bindOptRowSearch();" in src, "wb 重渲后必须重绑搜索输入框"
+    # CSS：隐藏规则可与 only-occ/only-deleted 叠加（交集）
+    css = _css_src()
+    assert ".slirn-opt-list.opt-searching .slirn-opt-row.opt-search-miss" in css, (
+        "搜索隐藏规则必须与其他筛选叠加")
+    assert ".slirn-opt-row-search input#slirn-opt-search" in css
