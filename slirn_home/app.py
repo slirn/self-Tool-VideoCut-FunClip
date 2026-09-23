@@ -9138,6 +9138,62 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
                               f"（未采纳 {est['skipped']} 处）{edit_suffix}{mark_suffix}"),
                    stats=est, cut={"state": cut_state, "marks": marks_now})
 
+    @app.app.post("/slirn/api/optimize_resplit")
+    async def optimize_resplit(body: dict = Body(default_factory=dict)):
+        """优化字幕行内切分（REQ-20260923-NNN 二次切分 + 重新拼接）。
+
+        {task_id, seg_id, target_text} — 把一行按目标文字切成多子段，立即写盘
+        （镜像切分修剪 /resplit_segment 的即时语义）：默认删除子段 = 目标未命中
+        的原文 token 洞；重切重置该行子段标记、清除整行标记。毫秒级无 job；
+        剪辑产物失效由 /optimize_cut_rekick 的 R1 复核自清（见 compose_service）。
+        """
+        from slirn_home import optimize_service
+
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            mgr.get(tid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+        try:
+            seg_id = int(body.get("seg_id"))
+        except (TypeError, ValueError):
+            return _err("seg_id 必须是整数")
+        outputs_dir = mgr.tasks_dir / tid / "outputs"
+        res, err = optimize_service.resplit_line(outputs_dir, seg_id,
+                                                 str(body.get("target_text") or ""))
+        if err:
+            return _err(err)
+        est = optimize_service.effective_stats(optimize_service.load_optimize(outputs_dir) or {})
+        fb = "（⚠️ 无字级时间戳，按文本占比估算）" if res.get("fallback") else ""
+        return _ok("", toast=(f"✂️ 第 {seg_id} 条已切成 {len(res['subs'])} 段"
+                              f"（默认删除 {res['deleted_default']} 段）{fb}"),
+                   resplit=res, stats=est)
+
+    @app.app.post("/slirn/api/optimize_unsplit")
+    async def optimize_unsplit(body: dict = Body(default_factory=dict)):
+        """取消一行的行内切分（REQ-20260923-NNN）：恢复整行，毫秒级。"""
+        from slirn_home import optimize_service
+
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            mgr.get(tid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+        try:
+            seg_id = int(body.get("seg_id"))
+        except (TypeError, ValueError):
+            return _err("seg_id 必须是整数")
+        outputs_dir = mgr.tasks_dir / tid / "outputs"
+        res, err = optimize_service.unsplit_line(outputs_dir, seg_id)
+        if err:
+            return _err(err)
+        est = optimize_service.effective_stats(optimize_service.load_optimize(outputs_dir) or {})
+        return _ok("", toast=f"↩️ 第 {seg_id} 条已恢复整行", unsplit=res, stats=est)
+
     @app.app.post("/slirn/api/optimized_srt")
     async def optimized_srt(body: dict = Body(default_factory=dict)):
         """下载优化后成片字幕 SRT（REQ-20260917-030）。

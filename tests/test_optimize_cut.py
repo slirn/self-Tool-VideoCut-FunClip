@@ -452,3 +452,65 @@ def test_render_optimize_zone_deleted_stats_and_buttons(tmp_path):
     html2 = _render_optimize_zone(t.task_id, m.get(t.task_id), m)
     assert "opt-filter-deleted" not in html2
     assert 'disabled title="确认保存后可查看"' in html2
+
+
+# ---------- /optimize_resplit + /optimize_unsplit（REQ-20260923-NNN 行内切分） ----------
+
+def test_resplit_endpoint_writes_and_returns(tmp_path):
+    """切分端点：立即写盘 + 返回子段与统计（降级口径 — SEGS 无 token_ts）。"""
+    m, t, outputs = _make_task(tmp_path)
+    _write_optimize(outputs, saved=True, marks=[1])  # 旧整行标记应被切分清除
+    c = _client(tmp_path)
+    r = c.post("/slirn/api/optimize_resplit",
+               json={"task_id": t.task_id, "seg_id": 1,
+                     "target_text": "第一行"}).json()
+    assert r["ok"] is True, r
+    assert r["resplit"]["seg"] == 1 and r["resplit"]["fallback"] is True
+    assert len(r["resplit"]["subs"]) == 2  # keep 头段 + delete 尾洞
+    assert r["stats"]["line_splits"] == 1 and r["stats"]["split_subs"] == 2
+    # 落盘核对：三映射齐 + 整行标记被清
+    data = json.loads((outputs / optimize_service.OPTIMIZE_JSON).read_text(encoding="utf-8"))
+    assert data["split_targets"]["1"] == "第一行"
+    assert data["line_marks"] == []
+
+
+def test_resplit_endpoint_errors(tmp_path):
+    m, t, outputs = _make_task(tmp_path)
+    _write_optimize(outputs, saved=True)
+    c = _client(tmp_path)
+    # 参数缺失/非法
+    assert c.post("/slirn/api/optimize_resplit", json={}).json()["ok"] is False
+    assert "seg_id" in c.post("/slirn/api/optimize_resplit",
+                              json={"task_id": t.task_id, "seg_id": "x"}).json()["error"]
+    assert "任务不存在" in c.post("/slirn/api/optimize_resplit",
+                                  json={"task_id": "nope", "seg_id": 1}).json()["error"]
+    # 服务层错误透传（命中 0 字）且不写盘
+    before = (outputs / optimize_service.OPTIMIZE_JSON).read_text(encoding="utf-8")
+    r = c.post("/slirn/api/optimize_resplit",
+               json={"task_id": t.task_id, "seg_id": 1, "target_text": "zzz英文"}).json()
+    assert r["ok"] is False and "命中 0 字" in r["error"]
+    assert (outputs / optimize_service.OPTIMIZE_JSON).read_text(encoding="utf-8") == before
+    # 无优化数据（optimize_subtitle.json 缺失）
+    (outputs / optimize_service.OPTIMIZE_JSON).unlink()
+    assert "不存在" in c.post("/slirn/api/optimize_resplit",
+                              json={"task_id": t.task_id, "seg_id": 1,
+                                    "target_text": "x"}).json()["error"]
+
+
+def test_unsplit_endpoint_restores(tmp_path):
+    m, t, outputs = _make_task(tmp_path)
+    _write_optimize(outputs, saved=True)
+    c = _client(tmp_path)
+    assert c.post("/slirn/api/optimize_resplit",
+                  json={"task_id": t.task_id, "seg_id": 2,
+                        "target_text": "第二行"}).json()["ok"] is True
+    r = c.post("/slirn/api/optimize_unsplit",
+               json={"task_id": t.task_id, "seg_id": 2}).json()
+    assert r["ok"] is True and r["unsplit"] == {"seg": 2, "subs_left": 0}
+    assert r["stats"]["line_splits"] == 0 and r["stats"]["split_subs"] == 0
+    data = json.loads((outputs / optimize_service.OPTIMIZE_JSON).read_text(encoding="utf-8"))
+    assert data["line_splits"] == {} and data["split_marks"] == {}
+    # 未切分行报错
+    r2 = c.post("/slirn/api/optimize_unsplit",
+                json={"task_id": t.task_id, "seg_id": 2}).json()
+    assert r2["ok"] is False and "没有切分" in r2["error"]
