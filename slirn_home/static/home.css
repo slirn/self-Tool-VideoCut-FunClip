@@ -375,7 +375,9 @@ footer { display: none !important; }
   margin-top: 12px;
   padding-top: 12px;
   border-top: 1px solid var(--border);
-  flex-wrap: nowrap;  /* 按钮一行放下（REQ-20260915-009） */
+  /* 放得下时保持一行（REQ-20260915-009）；放不下换行、不顶出卡片 —
+     优化字幕操作行加到 7 个按钮后原「强制单行」会溢出（REQ-20260923-NNN） */
+  flex-wrap: wrap;
 }
 .slirn-task-actions .slirn-btn {
   white-space: nowrap;

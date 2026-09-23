@@ -12171,3 +12171,15 @@ def test_opt_final_video_js():
         "行定位播放必须把最终视频模式切回粗剪源")
     # 委托分支
     assert "action === 'opt-final-video'" in src and "optFinalVideoView(target)" in src
+
+
+def test_task_actions_wrap():
+    """REQ-20260923-NNN 操作行按钮溢出：.slirn-task-actions 改 flex-wrap: wrap —
+    放得下仍是一行（REQ-20260915-009 观感不变），放不下换行不顶出卡片
+    （优化字幕底行 7 个按钮实测溢出）。"""
+    css = _css_src()
+    i = css.find(".slirn-task-actions {")
+    assert i > 0, "必须有 .slirn-task-actions 样式"
+    block = css[i:css.find("}", i)]
+    assert "flex-wrap: wrap" in block and "nowrap" not in block, (
+        "操作行必须允许换行，否则按钮超出面板（nowrap + flex-shrink:0 会溢出）")
