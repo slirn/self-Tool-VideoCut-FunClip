@@ -11779,6 +11779,60 @@ def test_save_optimize_subtitle_rejects_bad_line_edits(tmp_path: Path):
     assert "line_edits" in body["error"]
 
 
+def test_save_optimize_subtitle_keeps_split_marks(tmp_path: Path):
+    """REQ-20260923-NNN 自动保存回归：POST save 的 split_marks 必须落盘。
+
+    前端 ✓/✕（optOccToggle）与 🗑️/✚（optLineDelete/optSubToggle）翻转即
+    optAutoSave 全量快照提交（含 split_marks）；端点曾漏传该字段 → 服务端
+    「不传 = 清空手工翻转」语义把子段翻转全部抹掉 = 打勾打叉后改动存不住。
+    """
+    from slirn_home.app import build_app
+    from fastapi.testclient import TestClient
+    from slirn_home import optimize_service as osvc
+
+    m, _ = _make_mgr(tmp_path)
+    t = m.create(name="子段保存", original_video=tmp_path / "lecture.mp4")
+    outputs = tmp_path / "tasks" / t.task_id / "outputs"
+    segs = [{"i": 1, "start_ms": 0, "end_ms": 3600, "start": "00:00:00,000",
+             "end": "00:00:03,600", "text": "今天讲一下神精网络"}]
+    _write_min_optimize(outputs, segs=segs)
+    # 注入切分（默认洞 = 中段 delete）+ 用户翻转快照（改为删第 0 段）
+    p = outputs / osvc.OPTIMIZE_JSON
+    data = json.loads(p.read_text(encoding="utf-8"))
+    data["line_splits"] = {"1": [
+        {"mark": "keep", "start_ms": 0, "end_ms": 1200, "start": "00:00:00,000",
+         "end": "00:00:01,200", "text": "今天讲", "fallback": False},
+        {"mark": "delete", "start_ms": 1200, "end_ms": 2400, "start": "00:00:01,200",
+         "end": "00:00:02,400", "text": "一下", "fallback": False},
+        {"mark": "keep", "start_ms": 2400, "end_ms": 3600, "start": "00:00:02,400",
+         "end": "00:00:03,600", "text": "神精网络", "fallback": False},
+    ]}
+    data["split_marks"] = {"1": [0]}
+    p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    client = TestClient(build_app(tmp_path).app)
+    # 场景 1：✓/✕ 触发的自动保存（decisions 变了，其余全量原样回传）
+    resp = client.post("/slirn/api/save_optimize_subtitle", json={
+        "task_id": t.task_id,
+        "decisions": [{"occ_id": 0, "applied": False, "after": "", "reviewed": True}],
+        "line_edits": [], "line_marks": [],
+        "split_marks": {"1": [0]},
+    })
+    body = resp.json()
+    assert body["ok"] is True, body
+    disk = json.loads(p.read_text(encoding="utf-8"))
+    assert disk["split_marks"] == {"1": [0]}, "自动保存必须保住子段翻转（端点漏传 = 清空）"
+    assert disk["line_splits"]["1"], "切分几何不受保存影响"
+    assert disk["stats"]["split_subs_delete"] == 1
+
+    # 场景 2：split_marks 类型错 → 显式报错（防静默清空）
+    resp2 = client.post("/slirn/api/save_optimize_subtitle", json={
+        "task_id": t.task_id, "decisions": [], "split_marks": [1, 2],
+    })
+    body2 = resp2.json()
+    assert body2["ok"] is False and "split_marks" in body2["error"]
+
+
 def _router_src() -> str:
     p = FUNCLIP_ROOT / "slirn_home" / "static" / "router.js"
     if not p.exists():

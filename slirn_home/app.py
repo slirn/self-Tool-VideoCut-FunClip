@@ -9214,6 +9214,13 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         line_marks = body.get("line_marks")
         if line_marks is not None and not isinstance(line_marks, list):
             return _err("line_marks 必须是数组")
+        # REQ-20260923-NNN 切分子段：可选 split_marks {"<seg>": [索引…]}（全量
+        # 口径，不传 = 清空）。前端 ✓/✕/🗑️ 翻转即 optAutoSave 全量快照提交 —
+        # 这里漏传的话服务端语义 = 每次自动保存都把子段翻转清空（打勾打叉
+        # 后「改了存不住」的根源）。
+        split_marks = body.get("split_marks")
+        if split_marks is not None and not isinstance(split_marks, dict):
+            return _err("split_marks 必须是对象")
         outputs_dir = mgr.tasks_dir / tid / "outputs"
         # REQ-20260919-075：开始记录 — 确认保存
         exec_id = execution_history.record_start(
@@ -9224,7 +9231,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         )
         try:
             data, applied_n = optimize_service.save_decisions(
-                outputs_dir, decisions, line_edits, line_marks)
+                outputs_dir, decisions, line_edits, line_marks, split_marks)
         except Exception as e:  # noqa: BLE001
             execution_history.record_finish(outputs_dir, exec_id, success=False, error=str(e))
             return _err(f"保存失败: {e}")
