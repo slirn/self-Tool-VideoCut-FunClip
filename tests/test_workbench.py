@@ -11930,8 +11930,8 @@ def test_opt_line_delete_js_actions_and_collect():
     assert "startOptCutPolling(tid)" in save_body
     # 编辑态/重渲保留删除按钮（镜像服务端结构）
     assert "function optDelBtnHtml" in src
-    assert "optDelBtnHtml(row) + btn + body" in src, (
-        "optLineRender 重渲必须保留删除按钮")
+    assert "optDelBtnHtml(row) + splitBtn + btn + body" in src, (
+        "optLineRender 重渲必须保留删除 + 切分按钮")
 
 
 def test_opt_cut_polling_and_resume_js():
@@ -12028,3 +12028,71 @@ def test_opt_deleted_filter_and_final_view_js():
     assert ".slirn-opt-list.slirn-opt-only-deleted .slirn-opt-row:not(.line-deleted)" in css, (
         "必须有只看已删除行的隐藏规则")
     assert ".slirn-opt-final-pre {" in css, "必须有最终字幕 pre 样式"
+
+
+# =============== REQ-20260923-NNN 优化字幕行内切分 + 重新拼接（JS/CSS 源码断言） ===============
+
+def test_opt_split_js_actions_and_collect():
+    """行内切分 JS：split_marks 全量快照收集 + 子段翻转 + ✂️/↩️/🔄 端点接线 +
+    保存负载带 split_marks + 跳播区间并入删除子段。"""
+    src = _router_src()
+    # split_marks 收集：全量快照（[] = 全保留也要有键，否则服务端回落默认洞）
+    i = src.find("function optCollectSplitMarks")
+    assert i > 0, "必须有 optCollectSplitMarks"
+    body = src[i:src.find("\n  }\n", i)]
+    assert "querySelectorAll('.slirn-opt-subrow')" in body
+    assert "data-parent" in body and "data-mark" in body and "data-sub-idx" in body
+    # 保存负载三处都带 split_marks（autosave 现场 / pending 快照 / 手动保存）
+    n_payload = src.count("split_marks = optCollectSplitMarks()") \
+        + src.count("split_marks: optCollectSplitMarks()")
+    assert n_payload >= 3, f"保存负载必须三处带 split_marks（实测 {n_payload}）"
+    # 子段翻转：data-mark 翻转 + line-deleted 类 + ✚/🗑️ 互换 + 自动保存
+    j = src.find("function optSubToggle")
+    assert j > 0, "必须有 optSubToggle"
+    b2 = src[j:src.find("\n  }\n", j)]
+    assert "classList.toggle('line-deleted'" in b2
+    assert "optLineAfterEdit" in b2, "翻转后必须触发自动保存"
+    # ✂️ 编辑框（复用切分修剪 .slirn-cut-resplit 类）+ Enter/Esc + 提交端点
+    k = src.find("function optOpenResplit")
+    assert k > 0, "必须有 optOpenResplit"
+    b3 = src[k:k + 2000]
+    assert "slirn-cut-resplit-input" in b3 and "optDoResplit()" in b3
+    m = src.find("function optDoResplit")
+    assert m > 0 and "/optimize_resplit" in src[m:src.find("\n  }\n", m)]
+    u = src.find("function optUnsplit")
+    assert u > 0 and "/optimize_unsplit" in src[u:src.find("\n  }\n", u)]
+    # 🔄 重新拼接字幕：即时重算 SRT（不编码视频）
+    p = src.find("function optResplice")
+    assert p > 0 and "/optimize_resplice_subs" in src[p:src.find("\n  }\n", p)]
+    # 委托分发六分支
+    for act in ("opt-line-resplit", "opt-resplit-go", "opt-resplit-cancel",
+                "opt-line-unsplit", "opt-sub-toggle", "opt-resplice"):
+        assert f"action === '{act}'" in src, f"缺少委托分支 {act}"
+    # 跳播区间收集并入删除子段（播放预览成片效果）
+    d = src.find("function optDeletedIntervals")
+    assert 'slirn-opt-subrow[data-mark="delete"]' in src[d:d + 800], (
+        "删除子段必须并入跳播区间")
+
+
+def test_opt_split_js_render_preserves_split_btn():
+    """行内重渲（optLineRender/optLineEdit）不得丢 ✂️ 按钮：切分行让位（不渲染
+    ✂️/🗑️），未切分行保留 ✂️。"""
+    src = _router_src()
+    assert "getAttribute('data-split') === '1'" in src, (
+        "重渲必须按 data-split 分支决定是否保留 ✂️")
+    # 切分行重渲后不再是切分行（编辑态整行操作被切分互斥）→ 行动按钮集合以
+    # data-split 分支为准，两个重渲函数都要走同一判定
+    assert src.count("getAttribute('data-split') === '1'") >= 2, (
+        "optLineRender 与 optLineEdit 两处重渲都必须判定 data-split")
+
+
+def test_opt_split_css_styles():
+    """切分子段样式：紫条 inset 缩进 + ✂️ 徽章 + 删除态红压紫 + ⚠️ 降级标记。"""
+    css = _css_src()
+    assert ".slirn-opt-row.slirn-opt-subrow {" in css, "必须有子段行样式（紫条 inset）"
+    assert "#8b5cf6" in css, "切分系主色紫"
+    assert ".slirn-opt-line-badge.split {" in css, "必须有 ✂️ 已切分徽章样式"
+    assert ".slirn-opt-row.slirn-opt-subrow.line-deleted {" in css, (
+        "删除子段必须红压紫（同特异性更晚 → 需显式重申，否则紫条盖红）")
+    assert ".slirn-opt-subfb {" in css, "必须有降级 ⚠️ 样式"
+    assert ".slirn-opt-submark:hover" in css, "子段翻转按钮 hover 必须显红"

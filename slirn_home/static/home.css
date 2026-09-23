@@ -2349,6 +2349,35 @@ input[type="checkbox"]:focus-visible {
 .slirn-opt-cut-status[data-state="error"] { background: rgba(220, 38, 38, 0.08); }
 .slirn-opt-cut-status[data-state="done"] { background: rgba(22, 163, 74, 0.08); }
 
+/* ============ REQ-20260923-NNN 行内切分：子段平铺行 + ✂️ 徽章 ============ */
+/* 切分子段：紫条 inset 缩进行（紫 = 切分系，红 = 删除，黄 = occ，青 = 整句替换）；
+   720p 下随 .slirn-opt-row 收成 36px 1fr 两列（类名同挂，自动生效） */
+.slirn-opt-row.slirn-opt-subrow {
+  margin-left: 26px; border-left: 3px solid #8b5cf6;
+  background: rgba(139, 92, 246, 0.05);
+  font-size: 12.5px;
+}
+/* 父行 ✂️ 已切分徽章（紫系，区别于 🗑️ del 红徽章 / ✏️ 整句替换青徽章） */
+.slirn-opt-line-badge.split {
+  background: rgba(139, 92, 246, 0.16); color: #6d28d9;
+}
+/* 降级子段 ⚠️：无字级时间戳，时间段按文本占比估算（title 有说明） */
+.slirn-opt-subfb { cursor: help; font-size: 11.5px; opacity: 0.85; }
+/* 子段标记删除：红压紫（上面 .slirn-opt-subrow 与 .line-deleted 同特异性且更晚，
+   需显式重申 (0,3,0) 让删除态胜出 — 与整行删除同视觉语义） */
+.slirn-opt-row.slirn-opt-subrow.line-deleted {
+  background: rgba(220, 38, 38, 0.08);
+  border-left-color: #dc2626;
+}
+.slirn-opt-row.slirn-opt-subrow.line-deleted .slirn-opt-subtext {
+  text-decoration: line-through; opacity: 0.6;
+}
+/* 子段 ✚/🗑️ 按钮：hover 显红（对齐 .slirn-opt-del-btn） */
+.slirn-opt-submark:hover { opacity: 1; background: rgba(220, 38, 38, 0.15); }
+@media (max-width: 720px) {
+  .slirn-opt-row.slirn-opt-subrow { margin-left: 12px; }
+}
+
 /* ============ 粗剪合成 · 有效字幕 SRT 预览（REQ-20260916-019） ============ */
 .slirn-rc-subs {
   border: 1px solid var(--border, rgba(255,255,255,0.12));

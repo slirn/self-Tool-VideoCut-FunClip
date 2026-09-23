@@ -1198,28 +1198,45 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
     for e in data.get("line_edits") or []:
         if isinstance(e, dict) and e.get("text"):
             edits_by_seg[str(e.get("seg"))] = str(e["text"])
-    # REQ-20260922-NNN 标记删除行：标记集 + 优化成片剪辑状态条
+    # REQ-20260923-NNN 行内切分：切分行 → 子段列表 + 生效删除索引 + 重切预填
+    splits_by_seg: dict[str, list[dict]] = {}
+    for k, subs in (data.get("line_splits") or {}).items():
+        try:
+            key = str(int(k))
+        except (TypeError, ValueError):
+            continue
+        if isinstance(subs, list) and subs:
+            splits_by_seg[key] = subs
+    smarks_by_seg = {rid: optimize_service.deleted_sub_indexes(
+        rid, subs, data.get("split_marks")) for rid, subs in splits_by_seg.items()}
+    targets_by_seg = {str(k): str(v) for k, v in (data.get("split_targets") or {}).items()}
+    # REQ-20260922-NNN 标记删除行 + REQ-20260923-NNN 删除子段：剪辑计划 + 状态条
     marks_set = {str(m) for m in data.get("line_marks") or []}
     cut_job = compose_service.opt_cut_job_status(task_id)
-    cut_ready = compose_service.optimize_cut_ready(outputs_dir, sorted(int(m) for m in marks_set))
+    cut_plan_now = optimize_service.cut_plan(data)
+    cut_ready = compose_service.optimize_cut_ready(outputs_dir, cut_plan_now)
+    cut_has_del = optimize_service.plan_has_deletions(cut_plan_now)
     cut_state, cut_text = "", ""
     if cut_job and cut_job.get("state") == "running":
         cut_state = "running"
-        cut_text = (f'⏳ 优化成片剪辑中 · {cut_job.get("progress") or 0:.0f}% · '
+        cut_text = (f'⏳ 视频重新拼接中 · {cut_job.get("progress") or 0:.0f}% · '
                     f'{cut_job.get("stage") or ""} — 完成后精剪合成自动使用新视频')
     elif cut_job and cut_job.get("state") == "error":
         cut_state = "error"
-        cut_text = (f'⚠️ 优化成片剪辑失败：{cut_job.get("error") or "未知错误"}'
-                    ' — 点「🎬 重新优化粗剪视频」可再次触发')
-    elif marks_set and cut_ready is not None:
+        cut_text = (f'⚠️ 视频重新拼接失败：{cut_job.get("error") or "未知错误"}'
+                    ' — 点「🎬 重新拼接视频」可再次触发')
+    elif cut_has_del and cut_ready is not None:
         cut_state = "done"
-        cut_text = (f'🎬 优化成片已生成：剪除 {len(cut_ready.get("marks") or [])} 行 · '
+        _n_subs = int(cut_ready.get("split_subs") or 0)
+        _what = (f'{len(cut_ready.get("marks") or [])} 行'
+                 + (f' + {_n_subs} 子段' if _n_subs else ''))
+        cut_text = (f'🎬 优化成片已生成：剪除 {_what} · '
                     f'删 {cut_ready.get("deleted_sec", "?")}s · 保留 {cut_ready.get("kept_sec", "?")}s'
                     ' — 精剪合成将自动使用 optimize_compose.mp4')
-    elif marks_set:
+    elif cut_has_del:
         cut_state = "pending"
-        cut_text = ("⚠️ 有标记删除行但优化成片未生成 — 点下方「🎬 重新优化粗剪视频」"
-                    "按钮触发剪辑（保存不会自动剪辑）")
+        cut_text = ("⚠️ 有要剪除的内容（标记删除行/删除子段）但优化成片未生成 — "
+                    "点下方「🎬 重新拼接视频」按钮触发剪辑（保存不会自动剪辑）")
     cut_bar = (f'<div id="slirn-opt-cut-status" class="slirn-status-msg slirn-opt-cut-status" '
                f'data-task-id="{_esc(task_id)}" data-state="{_esc(cut_state)}">{_esc(cut_text)}</div>'
                ) if cut_state else ""
@@ -1337,9 +1354,71 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
             if deleted else
             f'<button class="slirn-btn slirn-btn-xs slirn-opt-line-btn slirn-opt-del-btn" '
             f'data-action="opt-line-delete" data-deleted="0" '
-            f'title="标记删除：保存后本行时间段将从粗剪成片剪除，字幕时间轴自动前移">🗑️</button>'
+            f'title="标记删除：点「🎬 重新拼接视频」后本行时间段将从粗剪成片剪除，字幕时间轴自动前移">🗑️</button>'
         )
         del_row_cls = " line-deleted" if deleted else ""
+        # REQ-20260923-NNN 行内切分：未切分行也给 ✂️（首切口）
+        split_btn = (
+            f'<button class="slirn-btn slirn-btn-xs slirn-opt-line-btn" '
+            f'data-action="opt-line-resplit" '
+            f'title="行内切分：填「切分后内容」（保留想留的文字，对不上的字自动落进删除洞；'
+            f'子段可单独删除）">✂️</button>'
+        )
+        # REQ-20260923-NNN 行内切分：切分行 → ✂️ 重切 / ↩️ 取消切分（🗑️/✏️ 让位 —
+        # 切分定义了该行的命运，与整行标记/整句替换互斥），子段平铺在父行下方
+        subs = splits_by_seg.get(rid)
+        if subs is not None:
+            del_idx = set(smarks_by_seg.get(rid) or [])
+            n_del = len(del_idx)
+            split_btns = (
+                f'<button class="slirn-btn slirn-btn-xs slirn-opt-line-btn" '
+                f'data-action="opt-line-resplit" '
+                f'title="重新切分：修改「切分后内容」（多写少写都行，对不上的字自动落进删除洞）">✂️</button>'
+                f'<button class="slirn-btn slirn-btn-xs slirn-opt-line-btn" '
+                f'data-action="opt-line-unsplit" '
+                f'title="取消切分：本行恢复整行（子段标记一并清除）">↩️</button>'
+            )
+            parts = [f'<span class="slirn-opt-line-badge split">✂️ 已切分 · '
+                     f'{len(subs)} 段（删 {n_del}）</span>', _esc(raw)]  # 整句替换在切分行上忽略
+            parent = (f'<div class="slirn-opt-row{has_occ}{del_row_cls}" data-id="{_esc(rid)}" '
+                      f'data-split="1" data-split-target="{_esc(targets_by_seg.get(rid) or "")}" '
+                      f'data-start-ms="{int(seg.get("start_ms", 0))}" '
+                      f'data-end-ms="{int(seg.get("end_ms", 0))}"'
+                      f' data-words="{_esc(chr(10).join(row_words))}"'
+                      f' data-orig-text="{_esc(raw)}"'
+                      f' data-full-edit="0" data-full-text=""'
+                      f' data-deleted="0">'
+                      f'<span class="slirn-sub-idx">{_esc(rid)}</span>'
+                      f'<span class="slirn-fw-time">{_esc(str(seg.get("start") or ""))}</span>'
+                      f'<div class="slirn-fw-text">{split_btns}{"".join(parts)}</div>'
+                      f'{occ_col}</div>')
+            sub_rows = []
+            for i, sub in enumerate(subs):
+                smark = "delete" if i in del_idx else "keep"
+                fb = ('<span class="slirn-opt-subfb" '
+                      'title="无字级时间戳 — 该子段时间段按文本占比估算（⚠️ 仅供参考）">⚠️</span>'
+                      if sub.get("fallback") else "")
+                toggle = (
+                    f'<button class="slirn-btn slirn-btn-xs slirn-opt-line-btn slirn-opt-submark" '
+                    f'data-action="opt-sub-toggle" data-parent="{_esc(rid)}" data-sub-idx="{i}" '
+                    f'data-mark="delete" title="恢复保留该子段">✚</button>'
+                    if smark == "delete" else
+                    f'<button class="slirn-btn slirn-btn-xs slirn-opt-line-btn slirn-opt-submark" '
+                    f'data-action="opt-sub-toggle" data-parent="{_esc(rid)}" data-sub-idx="{i}" '
+                    f'data-mark="keep" title="标记删除该子段：重新拼接时从成片剪除该时间段">🗑️</button>'
+                )
+                sub_del_cls = " line-deleted" if smark == "delete" else ""
+                sub_rows.append(
+                    f'<div class="slirn-opt-row slirn-opt-subrow{has_occ}{sub_del_cls}"'
+                    f' data-parent="{_esc(rid)}" data-sub-idx="{i}" data-mark="{smark}"'
+                    f' data-start-ms="{int(sub.get("start_ms", 0))}"'
+                    f' data-end-ms="{int(sub.get("end_ms", 0))}">'
+                    f'<span class="slirn-sub-idx">{_esc(rid)}.{i + 1}</span>'
+                    f'<span class="slirn-fw-time">{_esc(str(sub.get("start") or ""))}</span>'
+                    f'<div class="slirn-fw-text">{toggle}{fb}'
+                    f'<span class="slirn-opt-subtext">{_esc(str(sub.get("text") or ""))}</span></div>'
+                    f'</div>')
+            return parent + "".join(sub_rows)
         # REQ-20260918-054：补 data-end-ms，前端 timeupdate 按 [start,end) 命中行
         return (f'<div class="slirn-opt-row{has_occ}{full_cls}{del_row_cls}" data-id="{_esc(rid)}" '
                 f'data-start-ms="{int(seg.get("start_ms", 0))}" '
@@ -1351,7 +1430,7 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
                 f' data-deleted="{1 if deleted else 0}">'
                 f'<span class="slirn-sub-idx">{_esc(rid)}</span>'
                 f'<span class="slirn-fw-time">{_esc(str(seg.get("start") or ""))}</span>'
-                f'<div class="slirn-fw-text">{del_btn}{edit_btn}{"".join(parts)}</div>'
+                f'<div class="slirn-fw-text">{del_btn}{split_btn}{edit_btn}{"".join(parts)}</div>'
                 f'{occ_col}</div>')
 
     rows = "".join(_line_html(s) for s in (data.get("segments") or []))
@@ -1369,6 +1448,19 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
         mark_stat = f" · 标记删除 <b>{n_marks}</b> 行 · 共 {del_ms / 1000:.1f}s"
     else:
         mark_stat = ""
+    # REQ-20260923-NNN 行内切分统计：切分行数 / 子段数（含删除子段数与总时长）
+    n_split_lines = int(est.get("line_splits") or 0)
+    n_del_subs = int(est.get("split_subs_delete") or 0)
+    if n_split_lines:
+        sub_del_ms = sum(
+            max(0, int(sub.get("end_ms") or 0) - int(sub.get("start_ms") or 0))
+            for rid, idx in smarks_by_seg.items() for i in idx
+            if i < len(splits_by_seg.get(rid) or [])
+            for sub in [splits_by_seg[rid][i]])
+        split_stat = (f" · 切分 <b>{n_split_lines}</b> 行 / <b>{est.get('split_subs')}</b> 段"
+                      f"（删 <b>{n_del_subs}</b> 段 · {sub_del_ms / 1000:.1f}s）")
+    else:
+        split_stat = ""
     model_disp = _esc(data.get("model") or "")
     # 优化成片就绪时多给一个「优化成片时间基」的 SRT 下载（时间轴已前移）
     cut_srt_btn = (
@@ -1376,16 +1468,18 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
         f'data-base="cut">⬇️ 下载优化成片字幕 SRT</button>'
         if cut_ready is not None else ""
     )
-    # REQ-20260922-NNN 查找被删除的字幕：只看已删除行（有标记才渲染）
+    # REQ-20260922-NNN 查找被删除的字幕：只看已删除行（有删除内容才渲染 —
+    # REQ-20260923-NNN 计数并入删除子段）
+    n_del_total = n_marks + n_del_subs
     del_filter_btn = (
         f'<button class="slirn-btn" data-action="opt-filter-deleted" data-shown="0" '
-        f'data-all-text="🗑️ 只看已删除的行（{n_marks}）">🗑️ 只看已删除的行（{n_marks}）</button>'
-        if n_marks else ""
+        f'data-all-text="🗑️ 只看已删除的（{n_del_total}）">🗑️ 只看已删除的（{n_del_total}）</button>'
+        if n_del_total else ""
     )
     return f'''<div class="slirn-card" style="margin-top:16px;">
         <div class="slirn-panel-header"><div class="slirn-panel-title">✨ 优化字幕 · 不明确字词</div></div>
         <div class="slirn-sub-meta">识别 {n_lines} 行 · 不明确 {est["occurrences"]} 处（{est["words"]} 个词）
-        · 生效替换 <b>{est["applied"]}</b> 处 · 未采纳 {est["skipped"]} 处{edit_stat}{mark_stat} · 模型 {model_disp}
+        · 生效替换 <b>{est["applied"]}</b> 处 · 未采纳 {est["skipped"]} 处{edit_stat}{mark_stat}{split_stat} · 模型 {model_disp}
         {" · ✅ 已确认" if confirmed else ""}</div>
         {stale_note}
         {cut_bar}
@@ -1396,8 +1490,10 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
         <div class="slirn-form-hint">行内 <s class="slirn-opt-before">删除线</s> = 疑似误识别原文，旁边输入框 = 替换值（可直接编辑）；
         <b>✓</b> 采纳 / <b>✕</b> 不采纳（逐处切换）。点词筛选出现行，点行按成片时间跳播核对。
         行首 <b>✏️</b> = 整句替换（直接改写整行文本，覆盖本行局部替换）；
-        <b>🗑️</b> = 标记删除整行（点「🎬 重新优化粗剪视频」后从成片剪除该行时间段并前移后续字幕；
-        播放时也会自动跳过已标记删除的片段 = 成片效果预览）。</div>
+        <b>🗑️</b> = 标记删除整行（点「🎬 重新拼接视频」后从成片剪除该行时间段并前移后续字幕；
+        播放时也会自动跳过已删除的片段 = 成片效果预览）；
+        <b>✂️</b> = 行内切分（填「切分后内容」，对不上的字自动落进删除洞；子段可单独 🗑️/✚，
+        重新拼接时按子段剪除并前移）。</div>
         <div class="slirn-opt-kbhint" id="slirn-opt-kbhint"></div>
         <div class="slirn-task-actions" style="margin-top:10px;">
             <button class="slirn-btn" data-action="opt-filter" data-shown="1"
@@ -1418,9 +1514,9 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
             <button class="slirn-btn" data-action="opt-final-view" data-task-id="{_esc(task_id)}"
                     {"" if confirmed else 'disabled title="确认保存后可查看"'}>📄 查看最终字幕</button>
             <button class="slirn-btn" data-action="opt-cut-rekick" data-task-id="{_esc(task_id)}"
-                    title="按当前 🗑️ 标记删除行，对粗剪成片做剪除+拼接，生成 optimize_compose.mp4（精剪合成自动优先使用）">🎬 重新优化粗剪视频</button>
-            <button class="slirn-btn" data-action="optimize-start" data-task-id="{_esc(task_id)}"
-                    data-has="1">🔄 重新优化字幕</button>
+                    title="按当前剪辑计划（🗑️ 标记删除行 + 切分删除子段），对粗剪成片做剪除+拼接，生成 optimize_compose.mp4（精剪合成自动优先使用）">🎬 重新拼接视频</button>
+            <button class="slirn-btn" data-action="opt-resplice" data-task-id="{_esc(task_id)}"
+                    title="按当前剪辑计划即时重算拼接字幕（optimize_compose.srt）：删除内容剔除 + 时间轴前移，不编码视频">🔄 重新拼接字幕</button>
         </div>
         <div id="slirn-opt-status" class="slirn-status-msg" style="{'display:none;' if job_state != 'running' else ''};"
              data-task-id="{_esc(task_id)}" data-state="{_esc(job_state)}">{running_html}</div>

@@ -2,7 +2,7 @@
 
 覆盖：
 - /save_optimize_subtitle 保存（手动触发语义：不启动剪辑 / running 续报 / 空标记清产物）
-- /optimize_cut_rekick「🎬 重新优化粗剪视频」按钮（剪辑的唯一触发入口）
+- /optimize_cut_rekick「🎬 重新拼接视频」按钮（剪辑的唯一触发入口）
 - /optimize_cut_status 服务重启后的磁盘兜底
 - /optimized_srt base=rough|cut 两种时间基
 - _fine_upstream_path / _effective_fine_video_path：优化成片优先 + 失效回退
@@ -166,7 +166,7 @@ def _client(tmp_path):
 
 def test_save_does_not_auto_kick_cut(tmp_path, monkeypatch):
     """手动触发语义：保存（含标记非空）只落盘，不启动剪辑 —
-    剪辑只由「🎬 重新优化粗剪视频」(/optimize_cut_rekick) 显式触发。"""
+    剪辑只由「🎬 重新拼接视频」(/optimize_cut_rekick) 显式触发。"""
     m, t, outputs = _make_task(tmp_path)
     _mk_rough(outputs)
     _write_optimize(outputs, saved=False)
@@ -253,7 +253,7 @@ def test_save_clears_artifacts_after_done_job_lingers(tmp_path):
         compose_service._OPT_CUT_JOBS.pop(t.task_id, None)
 
 
-# ---------- /optimize_cut_rekick 显式触发（🎬 重新优化粗剪视频按钮） ----------
+# ---------- /optimize_cut_rekick 显式触发（🎬 重新拼接视频按钮） ----------
 
 def test_rekick_requires_optimize_data(tmp_path):
     m, t, outputs = _make_task(tmp_path)
@@ -423,8 +423,8 @@ def test_render_optimize_zone_marks_ui(tmp_path):
     # 统计 + 剪辑状态条（有标记无产物 → pending 提示重存）
     assert "标记删除 <b>1</b> 行" in html
     assert 'id="slirn-opt-cut-status"' in html and 'data-state="pending"' in html
-    assert "重新优化粗剪视频" in html  # pending 提示应指向显式按钮
-    # 🎬 重新优化粗剪视频按钮（常驻动作行 — 无标记也可点，端点负责提示/清产物）
+    assert "重新拼接视频" in html  # pending 提示应指向显式按钮
+    # 🎬 重新拼接视频按钮（常驻动作行 — 无标记也可点，端点负责提示/清产物）
     assert 'data-action="opt-cut-rekick"' in html
     # 产物就绪 → done 状态条（含保留秒数）
     _mk_cut_artifacts(outputs, [2])
@@ -446,7 +446,7 @@ def test_render_optimize_zone_play_skip_hint(tmp_path):
     _mk_rough(outputs)
     _write_optimize(outputs, saved=True, marks=[2])
     html = _render_optimize_zone(t.task_id, m.get(t.task_id), m)
-    assert "播放时也会自动跳过已标记删除的片段" in html, (
+    assert "播放时也会自动跳过已删除的片段" in html, (
         "hint 必须说明播放自动跳过删除片段")
 
 
@@ -461,7 +461,7 @@ def test_render_optimize_zone_deleted_stats_and_buttons(tmp_path):
     # 统计：行数 + 总时长
     assert "标记删除 <b>1</b> 行 · 共 2.0s" in html, "统计必须含删除行数 + 总时长"
     # 筛选按钮（有标记才渲染）
-    assert 'data-action="opt-filter-deleted"' in html and "只看已删除的行（1）" in html
+    assert 'data-action="opt-filter-deleted"' in html and "只看已删除的（1）" in html
     # 最终字幕按钮（已确认 → 可用；未确认 → disabled）
     assert 'data-action="opt-final-view"' in html
     assert 'disabled title="确认保存后可查看"' not in html
@@ -470,6 +470,44 @@ def test_render_optimize_zone_deleted_stats_and_buttons(tmp_path):
     html2 = _render_optimize_zone(t.task_id, m.get(t.task_id), m)
     assert "opt-filter-deleted" not in html2
     assert 'disabled title="确认保存后可查看"' in html2
+
+
+# ---------- 渲染：行内切分 UI（REQ-20260923-NNN） ----------
+
+def test_render_optimize_zone_split_ui(tmp_path):
+    """切分行渲染：父行 data-split + ✂️/↩️ + 徽章；子段平铺 subrow（data-mark /
+    翻转按钮 / 降级 ⚠️ / 删除态红条）；统计与只看已删除计数并入子段。"""
+    from slirn_home.app import _render_optimize_zone
+
+    m, t, outputs = _make_task(tmp_path)
+    _mk_rough(outputs)
+    splits = {k: [dict(s) for s in v] for k, v in SPLITS2.items()}
+    splits["2"][0]["fallback"] = True  # 头段降级（无字级时间戳）→ ⚠️
+    _write_optimize(outputs, saved=True, marks=[], splits=splits,
+                    split_marks={"2": [1]})
+    html = _render_optimize_zone(t.task_id, m.get(t.task_id), m)
+    # 父行：data-split + ✂️ 已切分徽章 + ↩️ 取消（🗑️/✏️ 让位 — 切分定义该行命运）
+    assert 'data-id="2" data-split="1"' in html
+    assert "✂️ 已切分 · 3 段（删 1）" in html
+    assert 'data-action="opt-line-unsplit"' in html
+    # 未切分行也有 ✂️（首切口）且保留 🗑️ 整行删除
+    assert 'data-action="opt-line-resplit"' in html
+    assert 'data-action="opt-line-delete"' in html
+    # 子段平铺：删除子段带 line-deleted + ✚ 恢复；保留子段 🗑️ 可删；降级 ⚠️
+    assert ('slirn-opt-subrow line-deleted" data-parent="2" data-sub-idx="1"'
+            ' data-mark="delete"') in html
+    assert ('slirn-opt-subrow" data-parent="2" data-sub-idx="0"'
+            ' data-mark="keep"') in html
+    assert ('data-action="opt-sub-toggle" data-parent="2" data-sub-idx="1"'
+            ' data-mark="delete"') in html
+    assert ('data-action="opt-sub-toggle" data-parent="2" data-sub-idx="0"'
+            ' data-mark="keep"') in html
+    assert 'class="slirn-opt-subfb"' in html
+    # 统计：切分行数 / 子段数（含删除数与时长）+ 只看已删除计数并入子段
+    assert "切分 <b>1</b> 行 / <b>3</b> 段（删 <b>1</b> 段 · 1.0s）" in html
+    assert "只看已删除的（1）" in html
+    # 空整行标记但删除子段在 → 剪辑状态条 pending（有要剪除的内容）
+    assert 'data-state="pending"' in html
 
 
 # ---------- /optimize_resplit + /optimize_unsplit（REQ-20260923-NNN 行内切分） ----------

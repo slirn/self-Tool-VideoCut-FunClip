@@ -434,10 +434,11 @@ def test_render_zone_result_state(tmp_path, monkeypatch):
     assert 'data-applied="1"' in html and ">✓</button>" in html
     # 行携带定位播放与词命中数据
     assert 'data-start-ms="0"' in html and "data-words=" in html
-    # 保存 / SRT（未确认 → disabled）/ 重新优化
+    # 保存 / SRT（未确认 → disabled）/ 🔄 重新拼接字幕（旧 force 重跑按钮已从结果态移除）
     assert 'data-action="save-optimize"' in html
     assert 'data-action="opt-srt-download"' in html and "disabled" in html
-    assert 'data-action="optimize-start"' in html and 'data-has="1"' in html
+    assert 'data-action="opt-resplice"' in html and "重新拼接字幕" in html
+    assert 'data-has="1"' not in html  # 旧「重新优化（覆盖）」入口不再渲染
     # 统计行
     assert "识别 3 行" in html and "不明确 3 处" in html
 
