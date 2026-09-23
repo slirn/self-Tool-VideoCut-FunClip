@@ -229,28 +229,133 @@ def apply_to_segments(
 
 
 # ---- 标记删除行（REQ-20260922-NNN）----
+# ---- 行内切分（REQ-20260923-NNN 二次切分 + 重新拼接）----
+
+
+def _norm_splits(line_splits: dict | None) -> dict[int, list[dict]]:
+    """line_splits 原始数据 → {seg_id: [子段 dict…]}（非法条目剔除）。"""
+    out: dict[int, list[dict]] = {}
+    for key, subs in (line_splits or {}).items():
+        try:
+            seg_id = int(key)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(subs, list) or not subs:
+            continue
+        if all(isinstance(s, dict) for s in subs):
+            out[seg_id] = subs
+    return out
+
+
+def deleted_sub_indexes(seg_key: str, subs: list[dict],
+                        split_marks: dict | None) -> list[int]:
+    """切分行的生效删除子段索引。
+
+    split_marks[seg] 存在（哪怕是空列表）→ 权威全量快照（[]=全保留）；
+    键缺失 → 回落到切分时算出的默认洞（sub["mark"]=="delete"，即用户
+    输入中没命中的原文 token 段）。管线 accept-all 保存不传 split_marks
+    → 维持默认洞语义。
+    """
+    raw = (split_marks or {}).get(seg_key)
+    if isinstance(raw, list):
+        idx: set[int] = set()
+        for v in raw:
+            try:
+                i = int(v)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= i < len(subs):
+                idx.add(i)
+        return sorted(idx)
+    return [i for i, sub in enumerate(subs)
+            if str(sub.get("mark") or "") == "delete"]
+
+
+def cut_plan(data: dict) -> dict:
+    """优化数据的规范化「剪辑计划」（重新拼接视频/字幕的唯一事实源）。
+
+    {"marks": [整行标记（剔除已切分行）],
+     "splits": {str(seg): [[s,e], …] — 已删除子段的毫秒区间},
+     "split_marks": {str(seg): [生效删除子段索引]}}
+
+    - sidecar optimize_cut.json 与 optimize_cut_ready 都以本结构的规范
+      JSON 做相等比较（ marks/splits/split_marks 任一变化 → 需重剪）；
+    - 切分行忽略整行标记（切分定义了该行的命运，UI 同步隐藏 🗑️）。
+    """
+    segments = data.get("segments") or []
+    splits = _norm_splits(data.get("line_splits"))
+    split_marks = data.get("split_marks") or {}
+    known_ids = set()
+    try:
+        known_ids = {int(s.get("i", -1)) for s in segments}
+    except (TypeError, ValueError):
+        known_ids = set()
+    plan_splits: dict[str, list[list[int]]] = {}
+    plan_split_marks: dict[str, list[int]] = {}
+    for seg_id, subs in splits.items():
+        if seg_id not in known_ids:
+            continue  # 段已被重新优化掉 → 计划里剔除
+        key = str(seg_id)
+        del_idx = deleted_sub_indexes(key, subs, split_marks)
+        spans: list[list[int]] = []
+        for i in del_idx:
+            try:
+                spans.append([int(subs[i]["start_ms"]), int(subs[i]["end_ms"])])
+            except (KeyError, TypeError, ValueError, IndexError):
+                continue
+        plan_splits[key] = spans
+        plan_split_marks[key] = del_idx
+    split_keys = set(plan_splits)  # str 键（与 sidecar JSON 对齐）
+    marks: set[int] = set()
+    for m in data.get("line_marks") or []:
+        try:
+            mid = int(m)
+        except (TypeError, ValueError):
+            continue
+        if mid in known_ids and str(mid) not in split_keys:
+            marks.add(mid)
+    return {"marks": sorted(marks), "splits": plan_splits,
+            "split_marks": plan_split_marks}
+
+
+def plan_has_deletions(plan: dict) -> bool:
+    """剪辑计划是否有任何删除区间（整行标记或删除子段）。"""
+    if not isinstance(plan, dict):
+        return False
+    if plan.get("marks"):
+        return True
+    return any(spans for spans in (plan.get("splits") or {}).values())
+
 
 def deleted_intervals_ms(
     segments: list[dict], line_marks: list[int] | None,
+    line_splits: dict | None = None, split_marks: dict | None = None,
 ) -> list[list[int]]:
-    """标记删除行 → 合并后的毫秒区间（升序，缝隙 <1ms 合并 — 同粗剪口径）。
+    """标记删除行 + 删除子段 → 合并后的毫秒区间（升序，缝隙 <1ms 合并 — 同粗剪口径）。
 
     优化成片剪辑据此从 rough_compose.mp4 剪除这些区间；时间戳平移据此累计。
+    REQ-20260923-NNN：line_splits 切分行的删除子段区间并入；切分行忽略
+    整行标记（切分优先，与 cut_plan 同口径）。
     """
-    if not line_marks:
-        return []
     from slirn_home import compose_service
 
     marks = set()
-    for m in line_marks:
+    for m in line_marks or []:
         try:
             marks.add(int(m))
         except (TypeError, ValueError):
             continue
+    split_keys = set(_norm_splits(line_splits))
     spans: list[tuple[int, int]] = []
+    for seg_id, subs in _norm_splits(line_splits).items():
+        for i in deleted_sub_indexes(str(seg_id), subs, split_marks):
+            try:
+                spans.append((int(subs[i]["start_ms"]), int(subs[i]["end_ms"])))
+            except (KeyError, TypeError, ValueError, IndexError):
+                continue
     for s in segments or []:
         try:
-            if int(s.get("i", -1)) in marks:
+            if int(s.get("i", -1)) in marks and int(s.get("i", -1)) not in split_keys:
                 spans.append((int(s["start_ms"]), int(s["end_ms"])))
         except (KeyError, TypeError, ValueError):
             continue
@@ -270,12 +375,38 @@ def shift_ms(t: int, intervals_ms: list[list[int]] | None) -> int:
     return int(t) - moved
 
 
+def _seg_reps(data_occurrences: list[dict] | None, seg_id: int) -> list[dict]:
+    """该行的生效局部替换（供切分子段文本沿用；pos 升序）。"""
+    reps = []
+    for o in data_occurrences or []:
+        if o.get("applied", True) and str(o.get("seg")) == str(seg_id):
+            reps.append({"before": o.get("before"), "after": o.get("after")})
+    return reps
+
+
+def _sub_text(base: str, reps: list[dict]) -> str:
+    """子段文本先按行内局部替换口径过一遍（整句替换在切分行上忽略）。"""
+    if not reps:
+        return base
+    try:
+        text, _n = apply_replacements(base, reps)
+        return text
+    except Exception:  # noqa: BLE001
+        return base
+
+
 def build_srt(segments: list[dict], line_marks: list[int] | None = None,
-              *, shift: bool = False) -> str:
+              *, shift: bool = False, line_splits: dict | None = None,
+              split_marks: dict | None = None,
+              occurrences: list[dict] | None = None) -> str:
     """优化后行集 → 标准 SRT（new_text 优先；与 subtitle.srt 同构）。
 
     REQ-20260922-NNN 标记删除行：line_marks 命中的行不进 SRT；shift=True 时
     保留行时间戳按删除区间累计前移（优化成片 optimize_compose.mp4 时间基）。
+
+    REQ-20260923-NNN 行内切分：切分行的保留子段各自成为独立字幕条目
+    （编号 seg.N；文本 = 对齐切出的原文片段，行内生效局部替换沿用、整句
+    替换忽略）；删除子段与整行标记的区间一并计入平移基准。
     """
     from slirn_home import asr_service
 
@@ -285,10 +416,30 @@ def build_srt(segments: list[dict], line_marks: list[int] | None = None,
             marks.add(int(m))
         except (TypeError, ValueError):
             continue
-    del_ms = deleted_intervals_ms(segments, line_marks)
+    splits = _norm_splits(line_splits)
+    del_ms = deleted_intervals_ms(segments, line_marks, line_splits, split_marks)
     norm = []
     for s in segments:
-        if int(s.get("i", -1)) in marks:
+        sid = int(s.get("i", -1))
+        subs = splits.get(sid)
+        if subs:
+            reps = _seg_reps(occurrences, sid)
+            for i, sub in enumerate(subs):
+                if i in deleted_sub_indexes(str(sid), subs, split_marks):
+                    continue
+                item = {"i": f"{sid}.{i + 1}",
+                        "start": sub.get("start", ""), "end": sub.get("end", ""),
+                        "text": _sub_text(str(sub.get("text", "")), reps)}
+                if shift and del_ms:
+                    from slirn_home import compose_service
+
+                    item["start"] = compose_service._ms_to_srt_time(
+                        shift_ms(int(sub["start_ms"]), del_ms))
+                    item["end"] = compose_service._ms_to_srt_time(
+                        shift_ms(int(sub["end_ms"]), del_ms))
+                norm.append(item)
+            continue
+        if sid in marks:
             continue
         item = {"i": s["i"], "start": s["start"], "end": s["end"],
                 "text": str(s.get("new_text") or s.get("text", ""))}
@@ -304,11 +455,14 @@ def build_srt(segments: list[dict], line_marks: list[int] | None = None,
 
 
 def srt_entries(segments: list[dict], line_marks: list[int] | None = None,
-                *, shift: bool = False) -> list[dict]:
+                *, shift: bool = False, line_splits: dict | None = None,
+                split_marks: dict | None = None,
+                occurrences: list[dict] | None = None) -> list[dict]:
     """优化后行集 → [{"start_ms", "end_ms", "text"}]（排除删除行；shift 同 build_srt）。
 
     精剪合成字幕素材 auto 来源的内存直供数据 — 不落共享 tmp 文件，避免与
     下载端点/其他素材写同一个 tmp/optimized_subs.srt 产生竞态。
+    REQ-20260923-NNN：切分行保留子段各自成条（与 build_srt 同口径）。
     """
     marks = set()
     for m in line_marks or []:
@@ -316,10 +470,24 @@ def srt_entries(segments: list[dict], line_marks: list[int] | None = None,
             marks.add(int(m))
         except (TypeError, ValueError):
             continue
-    del_ms = deleted_intervals_ms(segments, line_marks)
+    splits = _norm_splits(line_splits)
+    del_ms = deleted_intervals_ms(segments, line_marks, line_splits, split_marks)
     out: list[dict] = []
     for s in segments:
-        if int(s.get("i", -1)) in marks:
+        sid = int(s.get("i", -1))
+        subs = splits.get(sid)
+        if subs:
+            reps = _seg_reps(occurrences, sid)
+            for i, sub in enumerate(subs):
+                if i in deleted_sub_indexes(str(sid), subs, split_marks):
+                    continue
+                sm, em = int(sub["start_ms"]), int(sub["end_ms"])
+                if shift and del_ms:
+                    sm, em = shift_ms(sm, del_ms), shift_ms(em, del_ms)
+                out.append({"start_ms": sm, "end_ms": em,
+                            "text": _sub_text(str(sub.get("text", "")), reps)})
+            continue
+        if sid in marks:
             continue
         sm, em = int(s["start_ms"]), int(s["end_ms"])
         if shift and del_ms:
@@ -331,9 +499,15 @@ def srt_entries(segments: list[dict], line_marks: list[int] | None = None,
 
 def effective_stats(data: dict) -> dict:
     """生效统计：识别行数 / 提取出现数 / 生效替换数 / 未采纳数 / 涉及词数 /
-    整句替换行数（REQ-20260922-NNN，与局部替换正交单列）/ 标记删除行数。"""
+    整句替换行数（REQ-20260922-NNN，与局部替换正交单列）/ 标记删除行数 /
+    行内切分统计（REQ-20260923-NNN：切分行数 / 子段总数 / 删除子段数）。"""
     occs = data.get("occurrences") or []
     live = [o for o in occs if o.get("applied", True)]
+    splits = _norm_splits(data.get("line_splits"))
+    split_subs = sum(len(v) for v in splits.values())
+    split_subs_del = sum(
+        len(deleted_sub_indexes(str(k), v, data.get("split_marks")))
+        for k, v in splits.items())
     return {
         "lines": len(data.get("segments") or []),
         "occurrences": len(occs),
@@ -342,6 +516,9 @@ def effective_stats(data: dict) -> dict:
         "words": len(aggregate_words(occs)),
         "line_edits": len(data.get("line_edits") or []),
         "line_marks": len(data.get("line_marks") or []),
+        "line_splits": len(splits),
+        "split_subs": split_subs,
+        "split_subs_delete": split_subs_del,
     }
 
 
@@ -555,6 +732,7 @@ def save_decisions(
     decisions: list[dict],
     line_edits: list[dict] | None = None,
     line_marks: list[int] | None = None,
+    split_marks: dict | None = None,
 ) -> tuple[dict, int]:
     """把人工决定合并落盘。返回 (data, 生效条数)。
 
@@ -572,6 +750,11 @@ def save_decisions(
     （None/[]）= 清空。校验：非法 int / 未知 seg → 丢弃；去重升序。保存后有
     标记行的剪辑由 /save_optimize_subtitle 端点 kick（见 compose_service.
     start_optimize_cut）。
+
+    REQ-20260923-NNN 行内切分：split_marks {"<seg>": [子段索引…]}，全量口径
+    — 不传（None）= 清空所有手工翻转（回落到切分默认洞：输入未命中的原文
+    token 段视为删除）。校验：非 dict / 未知切分行 / 越界索引 → 丢弃，去重
+    升序。整行标记与切分互斥：已切分行的整行标记被丢弃（切分优先）。
     """
     data = load_optimize(outputs_dir)
     if data is None:
@@ -620,7 +803,33 @@ def save_decisions(
             continue
         if key in seg_texts:
             marks.add(int(key))
+    # REQ-20260923-NNN：切分行剪除死数据（段已被重新优化掉）+ 整行标记互斥
+    live_splits = _norm_splits(data.get("line_splits"))
+    split_keys = {str(k) for k in live_splits}
+    if live_splits:
+        data["line_splits"] = {str(k): v for k, v in live_splits.items()}
+        targets = data.get("split_targets") or {}
+        data["split_targets"] = {k: v for k, v in targets.items() if k in split_keys}
+        marks = {m for m in marks if str(m) not in split_keys}
     data["line_marks"] = sorted(marks)
+    # REQ-20260923-NNN：切分子段标记全量快照（键缺失/越界索引丢弃）
+    norm_split_marks: dict[str, list[int]] = {}
+    if isinstance(split_marks, dict):
+        for key, idx_list in split_marks.items():
+            seg_id = _safe_int(key)
+            subs = live_splits.get(seg_id)
+            if subs is None or not isinstance(idx_list, list):
+                continue
+            idx: set[int] = set()
+            for v in idx_list:
+                try:
+                    i = int(v)
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= i < len(subs):
+                    idx.add(i)
+            norm_split_marks[str(seg_id)] = sorted(idx)  # 键归一到 str(int)，与 line_splits 对齐
+    data["split_marks"] = norm_split_marks
     data["segments"] = apply_to_segments(data.get("segments") or [], data["occurrences"], edits)
     data["words"] = aggregate_words(data["occurrences"])
     data["mapping"] = build_mapping(data["occurrences"])
@@ -629,3 +838,150 @@ def save_decisions(
     p = Path(outputs_dir) / OPTIMIZE_JSON
     p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return data, applied_n
+
+
+def _safe_int(v) -> int | None:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+# ---- 行内切分：/optimize_resplit、/optimize_unsplit 的服务端（REQ-20260923-NNN）----
+
+def resplit_line(outputs_dir: Path, seg_id: int, target_text: str) -> tuple[dict | None, str]:
+    """把一行优化字幕按目标文字切分成多个子段（立即写入 optimize_subtitle.json）。
+
+    机制与切分修剪阶段同源（cutlist_service 的 token 对齐）：
+    - 有字级时间戳（tokens/token_ts 等长）→ align_tokens + partition_tokens
+      完整划分（keep 块 = 目标文字命中的连续 token 段，delete 洞 = 间隙），
+      洞边界外扩贴邻（与 cutlist _split_items 同口径），零长洞不产段；
+    - 无字级时间戳 → 按文本长度比例在 [start_ms, end_ms] 内插值降级
+      （子段带 fallback:true，UI 显示 ⚠️）；
+    - 目标与原 token 全对不上（命中 0）→ 报错不写。
+
+    重切（同一行再次调用）重置该行的子段标记为默认洞、清除整行标记。
+    返回 ({"seg", "subs", "fallback"}, "") 或 (None, 错误信息)。
+    """
+    from slirn_home import cutlist_service as _cl
+
+    data = load_optimize(outputs_dir)
+    if data is None:
+        return None, "optimize_subtitle.json 不存在"
+    target = str(target_text or "").strip()
+    if not target:
+        return None, "切分后内容不能为空"
+    seg = None
+    for s in data.get("segments") or []:
+        if _safe_int(s.get("i")) == _safe_int(seg_id):
+            seg = s
+            break
+    if seg is None:
+        return None, f"未找到第 {seg_id} 条字幕"
+    seg_start_ms, seg_end_ms = int(seg.get("start_ms", 0)), int(seg.get("end_ms", 0))
+    aligned = _cl._segment_tokens(seg)
+
+    subs: list[dict] = []
+    fallback = False
+    if aligned:
+        orig_tokens, token_ts = aligned
+        keep_marks = _cl.align_tokens(orig_tokens, _cl.tokenize(target))
+        if keep_marks:
+            parts = _cl.partition_tokens(len(orig_tokens), keep_marks)
+            prev_e = seg_start_ms
+            for mark, a, b in parts:
+                if mark == "keep":
+                    s_ms, e_ms = token_ts[a][0], token_ts[b][1]
+                else:  # delete 洞外扩：贴前段终点 / 下一 keep 块首 token 起点
+                    s_ms = prev_e
+                    e_ms = token_ts[b + 1][0] if b + 1 < len(token_ts) else seg_end_ms
+                s_ms = max(s_ms, prev_e)  # ts 非单调防御
+                if e_ms - s_ms <= 0:
+                    continue  # 零长洞不产段
+                subs.append({
+                    "mark": mark,
+                    "start_ms": s_ms, "end_ms": e_ms,
+                    "start": _cl.ms2srt(s_ms), "end": _cl.ms2srt(e_ms),
+                    "text": _cl.join_tokens(orig_tokens[a:b + 1]),
+                    "fallback": False,
+                })
+                prev_e = e_ms
+        if not subs:
+            return None, "切分后内容与原行文字对不上（命中 0 字）— 请检查内容后重试"
+    if not aligned:
+        # 比例降级：目标 token 在原文本 token 序列上贪心对齐拿字符边界，
+        # 时间按 token 字符长度占比在行时间窗内插值
+        fallback = True
+        text_tokens = _cl.tokenize(str(seg.get("text", "")))
+        target_tokens = _cl.tokenize(target)
+        hit = _cl.align_tokens(text_tokens, target_tokens)
+        if not hit:
+            return None, "切分后内容与原行文字对不上（命中 0 字）— 请检查内容后重试"
+        total_chars = sum(len(t) for t in text_tokens) or 1
+        win = max(0, seg_end_ms - seg_start_ms)
+        cum = 0
+        bounds: list[int] = []  # 每个 token 的 (起始字符累计)
+        token_char_start = []
+        for t in text_tokens:
+            token_char_start.append(cum)
+            cum += len(t)
+        prev_e = seg_start_ms
+        for mark, a, b in _cl.partition_tokens(len(text_tokens), hit):
+            s_frac = token_char_start[a] / total_chars
+            e_frac = (token_char_start[b] + len(text_tokens[b])) / total_chars
+            s_ms = seg_start_ms + int(round(s_frac * win))
+            e_ms = seg_start_ms + int(round(e_frac * win))
+            s_ms = max(s_ms, prev_e)
+            if e_ms - s_ms <= 0:
+                continue
+            subs.append({
+                "mark": mark,
+                "start_ms": s_ms, "end_ms": e_ms,
+                "start": _cl.ms2srt(s_ms), "end": _cl.ms2srt(e_ms),
+                "text": _cl.join_tokens(text_tokens[a:b + 1]),
+                "fallback": True,
+            })
+            prev_e = e_ms
+        if not subs:
+            return None, "切分后没有产生任何子段"
+
+    # 写回：切分几何 + 默认删除索引（洞） + 用户输入（重切预填）；清整行标记
+    key = str(int(seg_id))
+    line_splits = data.get("line_splits") or {}
+    line_splits[key] = subs
+    data["line_splits"] = line_splits
+    split_marks = data.get("split_marks") or {}
+    split_marks[key] = [i for i, sub in enumerate(subs) if sub["mark"] == "delete"]
+    data["split_marks"] = split_marks
+    targets = data.get("split_targets") or {}
+    targets[key] = target[:500]
+    data["split_targets"] = targets
+    data["line_marks"] = [m for m in (data.get("line_marks") or []) if str(m) != key]
+    data["stats"] = effective_stats(data)
+    p = Path(outputs_dir) / OPTIMIZE_JSON
+    p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return ({"seg": int(seg_id), "subs": subs, "fallback": fallback,
+             "deleted_default": len(split_marks[key])}, "")
+
+
+def unsplit_line(outputs_dir: Path, seg_id: int) -> tuple[dict | None, str]:
+    """取消一行的切分，恢复整行（弹出 line_splits / split_marks / split_targets）。"""
+    data = load_optimize(outputs_dir)
+    if data is None:
+        return None, "optimize_subtitle.json 不存在"
+    key = str(int(seg_id))
+    splits = data.get("line_splits") or {}
+    if key not in splits:
+        return None, f"第 {seg_id} 条没有切分"
+    splits.pop(key, None)
+    data["line_splits"] = splits
+    marks = data.get("split_marks") or {}
+    marks.pop(key, None)
+    data["split_marks"] = marks
+    targets = data.get("split_targets") or {}
+    targets.pop(key, None)
+    data["split_targets"] = targets
+    data["stats"] = effective_stats(data)
+    p = Path(outputs_dir) / OPTIMIZE_JSON
+    p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"seg": int(seg_id), "subs_left": len(splits)}, ""

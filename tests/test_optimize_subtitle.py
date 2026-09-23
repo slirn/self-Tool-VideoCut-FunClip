@@ -176,7 +176,8 @@ def test_effective_stats():
     data = {"segments": SEGS, "occurrences": _occs(**{"1": False})}
     est = osvc.effective_stats(data)
     assert est == {"lines": 3, "occurrences": 3, "applied": 2, "skipped": 1,
-                   "words": 1, "line_edits": 0, "line_marks": 0}
+                   "words": 1, "line_edits": 0, "line_marks": 0,
+                   "line_splits": 0, "split_subs": 0, "split_subs_delete": 0}
 
 
 def test_effective_stats_with_line_edits():
@@ -586,3 +587,236 @@ def test_save_decisions_line_marks_absent_clears(tmp_path):
     p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     data, _ = osvc.save_decisions(tmp_path, [])
     assert data["line_marks"] == []
+
+
+# =============== REQ-20260923-NNN 行内切分 + 重新拼接 ===============
+
+# 带字级时间戳的切分行（token_ts 与 tokens 等长）— 对齐分支用
+SEG_SPLIT = {
+    "i": 1, "start_ms": 0, "end_ms": 3600, "start": "00:00:00,000", "end": "00:00:03,600",
+    "text": "今天讲一下神精网络",
+    "tokens": ["今", "天", "讲", "一", "下", "神", "精", "网", "络"],
+    "token_ts": [[0, 400], [400, 800], [800, 1200], [1200, 1600], [1600, 2000],
+                 [2000, 2400], [2400, 2800], [2800, 3200], [3200, 3600]],
+}
+# 手工切分数据（中间洞：删除子段 1200-2800ms）
+SPLITS = {
+    "1": [
+        {"mark": "keep", "start_ms": 0, "end_ms": 1200,
+         "start": "00:00:00,000", "end": "00:00:01,200", "text": "今天讲", "fallback": False},
+        {"mark": "delete", "start_ms": 1200, "end_ms": 2800,
+         "start": "00:00:01,200", "end": "00:00:02,800", "text": "一下神精", "fallback": False},
+        {"mark": "keep", "start_ms": 2800, "end_ms": 3600,
+         "start": "00:00:02,800", "end": "00:00:03,600", "text": "网络", "fallback": False},
+    ],
+}
+
+
+def _write_split_opt(tmp_path: Path, segs=None, splits=None, split_marks=None) -> Path:
+    """_write_opt 基础上注入切分数据（segments 可换成带 token_ts 的行）。"""
+    p = _write_opt(tmp_path)
+    data = json.loads(p.read_text(encoding="utf-8"))
+    if segs is not None:
+        data["segments"] = segs
+    data["line_splits"] = SPLITS if splits is None else splits
+    if split_marks is not None:
+        data["split_marks"] = split_marks
+    p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    return p
+
+
+def test_deleted_sub_indexes():
+    """split_marks 快照权威（[] = 全保留）；键缺失回落默认洞（mark=="delete"）。"""
+    subs = SPLITS["1"]
+    assert osvc.deleted_sub_indexes("1", subs, None) == [1]
+    assert osvc.deleted_sub_indexes("1", subs, {}) == [1]
+    assert osvc.deleted_sub_indexes("1", subs, {"1": []}) == []  # 快照权威：空 = 全保留
+    assert osvc.deleted_sub_indexes("1", subs, {"1": [2, 0, 9, "x", None]}) == [0, 2]
+
+
+def test_deleted_intervals_ms_with_splits():
+    """删除子段 + 整行标记合并；切分行自身的整行标记被忽略（切分优先）。"""
+    # 行 1 切分（洞 1200-2800）+ 行 1 整行标记（忽略）+ 行 3 整行标记
+    assert osvc.deleted_intervals_ms(
+        SEGS, [1, 3], line_splits=SPLITS, split_marks={"1": [1]}) == [
+        [1200, 2800], [6000, 8000]]
+    # split_marks 快照 []=全保留 → 切分行无删除区间
+    assert osvc.deleted_intervals_ms(
+        SEGS, [1, 3], line_splits=SPLITS, split_marks={"1": []}) == [[6000, 8000]]
+    # split_marks 键缺失 → 默认洞
+    assert osvc.deleted_intervals_ms(SEGS, [], line_splits=SPLITS) == [[1200, 2800]]
+
+
+def test_cut_plan():
+    """规范化剪辑计划：整行标记剔除切分行；splits = 删除子段毫秒区间。"""
+    data = {"segments": SEGS, "line_marks": [1, 2, 99, "x"],
+            "line_splits": SPLITS, "split_marks": {"1": [1]}}
+    plan = osvc.cut_plan(data)
+    assert plan == {"marks": [2], "splits": {"1": [[1200, 2800]]},
+                    "split_marks": {"1": [1]}}
+    assert osvc.plan_has_deletions(plan)
+    # 全保留切分 + 无整行标记 → 无删除
+    plan2 = osvc.cut_plan({"segments": SEGS, "line_marks": [],
+                           "line_splits": SPLITS, "split_marks": {"1": []}})
+    assert plan2["splits"] == {"1": []}
+    assert not osvc.plan_has_deletions(plan2)
+
+
+def test_effective_stats_with_splits():
+    """切分统计：切分行数 / 子段总数 / 删除子段数（按生效口径）。"""
+    data = {"segments": SEGS, "occurrences": _occs(),
+            "line_splits": SPLITS, "split_marks": {"1": [1]}}
+    est = osvc.effective_stats(data)
+    assert est["line_splits"] == 1 and est["split_subs"] == 3
+    assert est["split_subs_delete"] == 1
+    # 快照空 → 删除 0（权威口径，不是默认洞）
+    data2 = {"segments": SEGS, "occurrences": _occs(),
+             "line_splits": SPLITS, "split_marks": {"1": []}}
+    assert osvc.effective_stats(data2)["split_subs_delete"] == 0
+
+
+def test_build_srt_split_kept_subs_separate_entries():
+    """切分行保留子段各自成条；删除子段与整行标记行剔除；shift 前移。"""
+    segs = osvc.apply_to_segments([SEG_SPLIT, SEGS[1], SEGS[2]], _occs())
+    # rough 基：时间不动，行 2 整行标记剔除
+    srt = osvc.build_srt(segs, [2], line_splits=SPLITS, split_marks={"1": [1]},
+                         occurrences=_occs())
+    assert "今天讲" in srt and "网络" in srt
+    assert "一下神精" not in srt          # 删除子段剔除
+    assert "爱在很多行业都有应用" not in srt  # 整行标记剔除
+    assert "00:00:00,000 --> 00:00:01,200" in srt
+    assert "00:00:02,800 --> 00:00:03,600" in srt
+    # cut 基：删除 1200-2800 + 3000-5000 → 子段 1.2 与行 3 前移
+    srt2 = osvc.build_srt(segs, [2], shift=True, line_splits=SPLITS,
+                          split_marks={"1": [1]}, occurrences=_occs())
+    assert "00:00:00,000 --> 00:00:01,200" in srt2  # 删除段之前不动
+    assert "00:00:01,200 --> 00:00:01,400" in srt2  # 2800/3600 - 1600/2200
+    assert "00:00:02,400 --> 00:00:04,400" in srt2  # 6000/8000 - 3600
+
+
+def test_build_srt_split_ignores_full_edit():
+    """切分行上整句替换被忽略（切分定义了行内容）；局部替换沿用到子段文本。"""
+    segs = osvc.apply_to_segments([SEG_SPLIT], _occs(),
+                                  line_edits=[{"seg": 1, "text": "整句改写不该出现"}])
+    assert segs[0].get("new_text") == "整句改写不该出现"  # 整句替换本身仍生效
+    # 头洞切分：保留子段 = 「神精网络」，局部替换沿用 → 神经网络
+    splits = {"1": [
+        {"mark": "delete", "start_ms": 0, "end_ms": 2000,
+         "start": "00:00:00,000", "end": "00:00:02,000", "text": "今天讲一下", "fallback": False},
+        {"mark": "keep", "start_ms": 2000, "end_ms": 3600,
+         "start": "00:00:02,000", "end": "00:00:03,600", "text": "神精网络", "fallback": False},
+    ]}
+    srt = osvc.build_srt(segs, [], line_splits=splits, occurrences=_occs())
+    assert "神经网络" in srt               # 局部替换（神精网络→神经网络）沿用到子段
+    assert "神精网络" not in srt           # 替换后原文不应残留
+    assert "整句改写不该出现" not in srt   # 整句替换在切分行上忽略
+    assert "今天讲一下" not in srt         # 头洞删除
+
+
+def test_srt_entries_split():
+    """内存直供 entries：切分子段成条 + shift（供精剪字幕素材）。"""
+    segs = osvc.apply_to_segments([SEG_SPLIT, SEGS[1], SEGS[2]], _occs())
+    ents = osvc.srt_entries(segs, [2], shift=True, line_splits=SPLITS,
+                            split_marks={"1": [1]}, occurrences=_occs())
+    assert [e["text"] for e in ents] == ["今天讲", "网络", "神经网络这个词很形象"]
+    assert [(e["start_ms"], e["end_ms"]) for e in ents] == [
+        (0, 1200), (1200, 1400), (2400, 4400)]
+    # 不 shift：只剔除（删除子段 + 标记行）
+    ents2 = osvc.srt_entries(segs, [2], line_splits=SPLITS, split_marks={"1": [1]})
+    assert [(e["start_ms"], e["end_ms"]) for e in ents2] == [
+        (0, 1200), (2800, 3600), (6000, 8000)]
+
+
+def test_resplit_line_aligned_writes_splits(tmp_path):
+    """有字级时间戳：token 对齐切分（头部洞），立即写盘 + 默认删除 = 洞。"""
+    _write_split_opt(tmp_path, segs=[SEG_SPLIT, SEGS[1], SEGS[2]], splits={})
+    p = tmp_path / osvc.OPTIMIZE_JSON
+    data = json.loads(p.read_text(encoding="utf-8"))
+    data["line_marks"] = [1]  # 旧整行标记应被切分清除
+    p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    res, err = osvc.resplit_line(tmp_path, 1, "神精网络")
+    assert err == "" and res is not None
+    assert res["fallback"] is False and res["deleted_default"] == 1
+    assert [(s["mark"], s["start_ms"], s["end_ms"], s["text"]) for s in res["subs"]] == [
+        ("delete", 0, 2000, "今天讲一下"), ("keep", 2000, 3600, "神精网络")]
+
+    data = json.loads(p.read_text(encoding="utf-8"))
+    assert data["line_splits"]["1"] == res["subs"]
+    assert data["split_marks"]["1"] == [0]           # 默认洞
+    assert data["split_targets"]["1"] == "神精网络"  # 重切预填
+    assert data["line_marks"] == []                  # 整行标记被清
+    assert data["stats"]["line_splits"] == 1
+    assert data["stats"]["split_subs"] == 2
+    assert data["stats"]["split_subs_delete"] == 1
+
+
+def test_resplit_line_middle_hole(tmp_path):
+    """中间洞：保留两块之间夹一个删除洞（洞边界贴邻 keep 块 token）。"""
+    _write_split_opt(tmp_path, segs=[SEG_SPLIT], splits={})
+    res, err = osvc.resplit_line(tmp_path, 1, "今天讲 网络")
+    assert err == "" and res is not None
+    assert [(s["mark"], s["start_ms"], s["end_ms"], s["text"]) for s in res["subs"]] == [
+        ("keep", 0, 1200, "今天讲"),
+        ("delete", 1200, 2800, "一下神精"),
+        ("keep", 2800, 3600, "网络")]
+    assert res["deleted_default"] == 1
+
+
+def test_resplit_line_proportional_fallback(tmp_path):
+    """无字级时间戳：按 token 字符长度占比插值降级（fallback=True）。"""
+    _write_split_opt(tmp_path, splits={})  # SEGS 无 tokens/token_ts
+    res, err = osvc.resplit_line(tmp_path, 1, "今天讲")
+    assert err == "" and res is not None
+    assert res["fallback"] is True
+    assert [(s["mark"], s["start_ms"], s["end_ms"], s["text"]) for s in res["subs"]] == [
+        ("keep", 0, 667, "今天讲"), ("delete", 667, 2000, "一下神精网络")]
+    data = json.loads((tmp_path / osvc.OPTIMIZE_JSON).read_text(encoding="utf-8"))
+    assert data["line_splits"]["1"][0]["fallback"] is True
+
+
+def test_resplit_line_errors(tmp_path):
+    """空目标 / 未知行 / 命中 0 字 → 报错且不写盘。"""
+    _write_split_opt(tmp_path, segs=[SEG_SPLIT, SEGS[1]], splits={})
+    p = tmp_path / osvc.OPTIMIZE_JSON
+    before = p.read_text(encoding="utf-8")
+    assert osvc.resplit_line(tmp_path, 1, "   ")[1] == "切分后内容不能为空"
+    assert osvc.resplit_line(tmp_path, 99, "x")[1] == "未找到第 99 条字幕"
+    # 对齐分支命中 0（目标 token 全对不上）
+    res, err = osvc.resplit_line(tmp_path, 1, "英文abc")
+    assert res is None and "命中 0 字" in err
+    assert p.read_text(encoding="utf-8") == before  # 报错不写盘
+    # 降级分支命中 0（SEGS[1] 无 token_ts）
+    assert "命中 0 字" in osvc.resplit_line(tmp_path, 2, "zzz英文")[1]
+
+
+def test_unsplit_line_restores(tmp_path):
+    """取消切分：三个切分键全部弹出，stats 复位；未切分行报错。"""
+    _write_split_opt(tmp_path)
+    res, err = osvc.unsplit_line(tmp_path, 1)
+    assert err == "" and res == {"seg": 1, "subs_left": 0}
+    data = json.loads((tmp_path / osvc.OPTIMIZE_JSON).read_text(encoding="utf-8"))
+    assert data.get("line_splits") == {} and data.get("split_marks") == {}
+    assert data.get("split_targets") == {}
+    assert data["stats"]["line_splits"] == 0 and data["stats"]["split_subs"] == 0
+    assert "没有切分" in osvc.unsplit_line(tmp_path, 1)[1]
+
+
+def test_save_decisions_split_marks_roundtrip(tmp_path):
+    """split_marks 全量快照：越界/非法索引与未知切分行丢弃；整行标记互斥。"""
+    _write_split_opt(tmp_path)
+    data, _ = osvc.save_decisions(tmp_path, [], line_marks=[1, 2],
+                                  split_marks={"1": [0, 99, "x", None, 2], "99": [0]})
+    assert data["split_marks"] == {"1": [0, 2]}
+    assert data["line_marks"] == [2]  # 已切分行 1 的整行标记被丢弃
+    assert data["stats"]["split_subs_delete"] == 2
+
+
+def test_save_decisions_split_marks_absent_defaults(tmp_path):
+    """不传 split_marks = 清空快照 → 生效口径回落默认洞（mark=="delete"）。"""
+    _write_split_opt(tmp_path, split_marks={"1": []})  # 原本全保留
+    data, _ = osvc.save_decisions(tmp_path, [])
+    assert data["split_marks"] == {}
+    assert data["stats"]["split_subs_delete"] == 1  # 默认洞：中间 1 个 delete 子段
+    # 切分几何 + 预填目标保留（只清手工翻转）
+    assert data["line_splits"]["1"] == SPLITS["1"]
