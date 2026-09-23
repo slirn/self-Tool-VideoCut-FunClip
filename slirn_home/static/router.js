@@ -4975,6 +4975,21 @@
       else if (r && r.error) toast('❌ ' + r.error, 'error');
     }).catch(function() { btn.disabled = false; });
   }
+  function optFinalVideoView(btn) {  // ▶️ 查看最终视频：播放器切到 optimize_compose
+    var tid = btn.getAttribute('data-task-id') || '';
+    var wrap = revVis('slirn-opt-player-wrap');
+    var v = revVis('slirn-opt-player');
+    if (!v || !tid) { toast('❌ 播放器未就绪', 'error'); return; }
+    if (wrap) vfShow(wrap);
+    _optFinalVideo = true;  // 高亮/跳播让位（时间轴已前移，行 ms 对不上）
+    var url = SLIRN_API + '/video/' + encodeURIComponent(tid) + '?src=optimize_compose';
+    if (v.src !== url) { v.src = url; v.load(); }
+    try { v.currentTime = 0; } catch (err) {}
+    var p = v.play();
+    if (p && p.catch) p.catch(function() {});
+    toast('🎬 正在播放优化成片（已剪除标记内容，时间轴已前移）— '
+      + '点任意字幕行恢复粗剪时间基定位播放');
+  }
   // ========== REQ-20260922-NNN 播放跳过：标记删除的行区间不播出（成片效果预览） ==========
   // 与切分修剪「保留内容跳播」同口径（见 cutKeepAllFrom）：播放 rough_compose 时
   // currentTime 落进任一已删除行区间 → 跳到该块末尾。每次 timeupdate 现读 DOM —
@@ -5009,6 +5024,7 @@
   }
   function optSkipDeletedOnTick(v) {  // 播放中跳块（暂停不跳 — 用户可停在删除段内查看）
     if (!v || v.paused) return;
+    if (_optFinalVideo) return;  // REQ-20260923-NNN：最终视频已物理剪除，无块可跳（跳了反而错位）
     var ivs = optDeletedIntervals();
     if (!ivs.length) return;
     var tms = (v.currentTime || 0) * 1000;
@@ -5100,12 +5116,16 @@
         + (base === 'cut' ? '（优化成片时间基）' : ''));
     });
   }
+  // REQ-20260923-NNN 查看最终视频：播放器切到 optimize_compose（时间轴已前移）—
+  // 行 ms 是粗剪时间基，高亮/跳播在此模式下暂停；点任意字幕行切回粗剪源
+  var _optFinalVideo = false;
   function playOptAt(tid, startMs) {  // 行定位播放（成片时间基 — ?src=rough_compose 源）
     var wrap = revVis('slirn-opt-player-wrap');
     var v = revVis('slirn-opt-player');
     if (!v) { toast('❌ 播放器未就绪', 'error'); return; }
     if (wrap) vfShow(wrap);
-    if (!v.src) {
+    if (!v.src || _optFinalVideo) {  // 从最终视频模式回来 → 换回粗剪源
+      _optFinalVideo = false;
       v.src = SLIRN_API + '/video/' + encodeURIComponent(tid) + '?src=rough_compose';
       v.load();
     }
@@ -5126,6 +5146,7 @@
   // REQ-20260918-054：按 currentTime 重算当前播放行 + 应用 .active + 自动滚到视口
   // 单行点击语义，没有 cut/rev 那样的连续跳播链；只做"高亮跟随"。
   function optPlayerHighlight(v) {
+    if (_optFinalVideo) return;  // REQ-20260923-NNN：最终视频时间轴已前移，行 ms 对不上
     var list = revVis('slirn-opt-list');
     if (!v || !list) return;
     var rows = Array.prototype.slice.call(
@@ -6528,6 +6549,9 @@
     else if (action === 'opt-sub-toggle') {
       // REQ-20260923-NNN 子段 🗑️/✚ 翻转（split_marks 全量快照自动保存）
       optSubToggle(target);
+    }
+    else if (action === 'opt-final-video') {
+      optFinalVideoView(target);
     }
     else if (action === 'opt-resplice') {
       // REQ-20260923-NNN 🔄 重新拼接字幕：即时重算 optimize_compose.srt（不编码视频）

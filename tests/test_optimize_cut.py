@@ -424,12 +424,15 @@ def test_render_optimize_zone_marks_ui(tmp_path):
     assert "标记删除 <b>1</b> 行" in html
     assert 'id="slirn-opt-cut-status"' in html and 'data-state="pending"' in html
     assert "重新拼接视频" in html  # pending 提示应指向显式按钮
+    # ▶️ 查看最终视频：产物就绪才渲染（pending 态不渲染）
+    assert 'data-action="opt-final-video"' not in html
     # 🎬 重新拼接视频按钮（常驻动作行 — 无标记也可点，端点负责提示/清产物）
     assert 'data-action="opt-cut-rekick"' in html
     # 产物就绪 → done 状态条（含保留秒数）
     _mk_cut_artifacts(outputs, [2])
     html2 = _render_optimize_zone(t.task_id, m.get(t.task_id), m)
     assert 'data-state="done"' in html2 and "优化成片已生成" in html2
+    assert 'data-action="opt-final-video"' in html2  # ▶️ 查看最终视频（就绪才渲染）
     # 无标记 → 无状态条 + 无删除徽章（hint 常驻文案含「已标记删除」字样，
     # 故断言徽章容器而非裸子串）
     _write_optimize(outputs, marks=[])

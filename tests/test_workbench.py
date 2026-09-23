@@ -11470,6 +11470,26 @@ def test_video_endpoint_rejects_fname_path_traversal(tmp_path: Path):
     assert r.status_code == 404
 
 
+def test_video_endpoint_serves_optimize_compose(tmp_path: Path):
+    """REQ-20260923-NNN ?src=optimize_compose → 优化成片；产物未生成 → 404。"""
+    from fastapi.testclient import TestClient
+    from slirn_home import build_app
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="video-opt-compose", original_video=video)
+    out = m.tasks_dir / t.task_id / "outputs"
+    out.mkdir(parents=True, exist_ok=True)
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    # 产物未生成 → 404（不回退其他视频）
+    r0 = client.get(f"/slirn/api/video/{t.task_id}", params={"src": "optimize_compose"})
+    assert r0.status_code == 404
+    raw = b"opt-cut-video"
+    (out / "optimize_compose.mp4").write_bytes(raw)
+    r = client.get(f"/slirn/api/video/{t.task_id}", params={"src": "optimize_compose"})
+    assert r.status_code == 200
+    assert r.content == raw
+
+
 # ---------- REQ-20260921-NNN-outputs-browser：前端产物浏览器渲染 ----------
 
 def test_pipeline_js_has_outputs_panel_html():
@@ -12126,3 +12146,28 @@ def test_opt_row_search_js_and_css():
     assert ".slirn-opt-list.opt-searching .slirn-opt-row.opt-search-miss" in css, (
         "搜索隐藏规则必须与其他筛选叠加")
     assert ".slirn-opt-row-search input#slirn-opt-search" in css
+
+
+def test_opt_final_video_js():
+    """REQ-20260923-NNN 查看最终视频：切 optimize_compose 源 + 模式门控高亮/跳播
+    + 点任意字幕行切回粗剪时间基。"""
+    src = _router_src()
+    i = src.find("function optFinalVideoView")
+    assert i > 0, "必须有 optFinalVideoView"
+    body = src[i:src.find("\n  }\n", i)]
+    assert "src=optimize_compose" in body
+    assert "_optFinalVideo = true" in body
+    # 高亮/跳播在最终视频模式让位（时间轴已前移 / 已物理剪除）
+    h = src.find("function optPlayerHighlight")
+    hb = src[h:src.find("\n  }\n", h)]
+    assert "_optFinalVideo) return" in hb, "最终视频时间轴已前移，行高亮必须暂停"
+    s = src.find("function optSkipDeletedOnTick")
+    sb = src[s:src.find("\n  }\n", s)]
+    assert "_optFinalVideo) return" in sb, "最终视频已物理剪除，跳播必须暂停"
+    # 点任意字幕行（playOptAt）→ 切回粗剪时间基
+    p = src.find("function playOptAt")
+    pb = src[p:src.find("\n  }\n", p)]
+    assert "_optFinalVideo = false" in pb and "src=rough_compose" in pb, (
+        "行定位播放必须把最终视频模式切回粗剪源")
+    # 委托分支
+    assert "action === 'opt-final-video'" in src and "optFinalVideoView(target)" in src

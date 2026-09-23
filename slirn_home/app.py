@@ -1468,6 +1468,14 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
         f'data-base="cut">⬇️ 下载优化成片字幕 SRT</button>'
         if cut_ready is not None else ""
     )
+    # REQ-20260923-NNN 查看最终视频：优化成片就绪才渲染（与 cut_srt_btn 同条件 —
+    # cut_ready 已含「与当前剪辑计划一致」判据，产物必可看）
+    cut_video_btn = (
+        f'<button class="slirn-btn" data-action="opt-final-video" data-task-id="{_esc(task_id)}" '
+        f'title="播放重新拼接后的优化成片（已剪除标记删除行/子段，时间轴已前移；'
+        f'此模式下行高亮/跳播暂停 — 点任意字幕行恢复粗剪时间基定位播放）">▶️ 查看最终视频</button>'
+        if cut_ready is not None else ""
+    )
     # REQ-20260922-NNN 查找被删除的字幕：只看已删除行（有删除内容才渲染 —
     # REQ-20260923-NNN 计数并入删除子段）
     n_del_total = n_marks + n_del_subs
@@ -1528,6 +1536,7 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
                     {"" if confirmed else 'disabled title="确认保存后可查看"'}>📄 查看最终字幕</button>
             <button class="slirn-btn" data-action="opt-cut-rekick" data-task-id="{_esc(task_id)}"
                     title="按当前剪辑计划（🗑️ 标记删除行 + 切分删除子段），对粗剪成片做剪除+拼接，生成 optimize_compose.mp4（精剪合成自动优先使用）">🎬 重新拼接视频</button>
+            {cut_video_btn}
             <button class="slirn-btn" data-action="opt-resplice" data-task-id="{_esc(task_id)}"
                     title="按当前剪辑计划即时重算拼接字幕（optimize_compose.srt）：删除内容剔除 + 时间轴前移，不编码视频">🔄 重新拼接字幕</button>
         </div>
@@ -7902,6 +7911,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         tid = _unquote(scope["path"].rsplit("/", 1)[-1])
         # ?src=original → 完整原视频（编辑页滑全片定位用，REQ-20260915-003）
         # ?src=rough_compose → 粗剪成片（可选阶段产物，REQ-20260916-016）
+        # ?src=optimize_compose → 优化成片（REQ-20260923-NNN 查看最终视频）
         # ?src=fine_preview → 精剪视频前 10 秒预览（Phase B，REQ-20260919-061）
         # ?src=fine_export → 精剪视频完整导出（Phase B，REQ-20260919-061）
         src_q = _parse_qs(scope.get("query_string", b"").decode("latin-1")).get("src", [""])[0]
@@ -7910,10 +7920,13 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             t = mgr.get(tid)
             if src_q == "original" and t.original_video_source.exists():
                 video = t.original_video_source
-            elif src_q == "rough_compose":
+            elif src_q in ("rough_compose", "optimize_compose"):
                 from slirn_home import compose_service as _comp_mod
 
-                rc = _comp_mod.rough_compose_path(mgr.tasks_dir / tid / "outputs")
+                if src_q == "rough_compose":
+                    rc = _comp_mod.rough_compose_path(mgr.tasks_dir / tid / "outputs")
+                else:
+                    rc = _comp_mod.optimize_compose_path(mgr.tasks_dir / tid / "outputs")
                 video = rc if rc.exists() else None
             elif src_q in ("fine_preview", "fine_export"):
                 # REQ-20260921-NNN-outputs-browser：支持 ?fname= 显式文件名（区间导出
