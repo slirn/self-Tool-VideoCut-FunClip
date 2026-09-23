@@ -617,3 +617,59 @@ def test_optimized_srt_split_entries(tmp_path):
     assert "00:00:01,000 --> 00:00:01,500" in srt  # 3000/3500 - 2000（行 1 整删）
     assert "00:00:01,500 --> 00:00:02,000" in srt  # 4500/5000 - 3000（再含中洞 1s）
     assert "00:00:03,000 --> 00:00:05,000" in srt  # 6000/8000 - 3000
+
+
+# ---------- /optimize_resplice_subs（REQ-20260923-NNN 🔄 重新拼接字幕） ----------
+
+def test_resplice_subs_writes_srt_and_stats(tmp_path):
+    """只重写 optimize_compose.srt（不产视频）：删除内容剔除 + 前移 + 计数。"""
+    m, t, outputs = _make_task(tmp_path)
+    _write_optimize(outputs, marks=[1], splits=SPLITS2, split_marks={"2": [1]})
+    c = _client(tmp_path)
+    r = c.post("/slirn/api/optimize_resplice_subs",
+               json={"task_id": t.task_id}).json()
+    assert r["ok"] is True, r
+    assert r["resplice"]["marks"] == 1 and r["resplice"]["split_subs"] == 1
+    assert r["resplice"]["entries"] == 3  # AAA + CCC + 行 3
+    assert r["resplice"]["deleted_sec"] == 3.0  # 行 1 整行 2s + 中洞 1s
+    srt = (outputs / "optimize_compose.srt").read_text(encoding="utf-8")
+    assert "AAA" in srt and "BBB" not in srt and "第一行废话" not in srt
+    assert "00:00:01,000 --> 00:00:01,500" in srt  # 前移口径与 /optimized_srt 一致
+    # 不产视频 / 不产 sidecar（那是 🎬 的产物）
+    assert not compose_service.optimize_compose_path(outputs).exists()
+    assert not (outputs / compose_service.OPTIMIZE_CUT_JSON).exists()
+
+
+def test_resplice_subs_refuses_running_job(tmp_path):
+    m, t, outputs = _make_task(tmp_path)
+    _write_optimize(outputs, marks=[1])
+    compose_service._OPT_CUT_JOBS[t.task_id] = {
+        "state": "running", "progress": 5.0, "stage": "剪辑中", "error": None,
+        "started_at": 0.0, "finished_at": None, "result": None}
+    try:
+        c = _client(tmp_path)
+        r = c.post("/slirn/api/optimize_resplice_subs",
+                   json={"task_id": t.task_id}).json()
+        assert r["ok"] is False and "正在进行中" in r["error"]
+        assert not (outputs / "optimize_compose.srt").exists()
+    finally:
+        compose_service._OPT_CUT_JOBS.pop(t.task_id, None)
+
+
+def test_resplice_subs_empty_plan_errs(tmp_path):
+    m, t, outputs = _make_task(tmp_path)
+    _write_optimize(outputs, marks=[])  # 无删除内容
+    c = _client(tmp_path)
+    r = c.post("/slirn/api/optimize_resplice_subs",
+               json={"task_id": t.task_id}).json()
+    assert r["ok"] is False and "要剪除的内容" in r["error"]
+    # 全保留切分同样算空计划
+    _write_optimize(outputs, marks=[], splits=SPLITS2, split_marks={"2": []})
+    r2 = c.post("/slirn/api/optimize_resplice_subs",
+                json={"task_id": t.task_id}).json()
+    assert r2["ok"] is False and "要剪除的内容" in r2["error"]
+    # 无数据
+    (outputs / optimize_service.OPTIMIZE_JSON).unlink()
+    r3 = c.post("/slirn/api/optimize_resplice_subs",
+                json={"task_id": t.task_id}).json()
+    assert r3["ok"] is False and "尚无优化字幕数据" in r3["error"]

@@ -9202,6 +9202,57 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         est = optimize_service.effective_stats(optimize_service.load_optimize(outputs_dir) or {})
         return _ok("", toast=f"↩️ 第 {seg_id} 条已恢复整行", unsplit=res, stats=est)
 
+    @app.app.post("/slirn/api/optimize_resplice_subs")
+    async def optimize_resplice_subs(body: dict = Body(default_factory=dict)):
+        """重新拼接字幕（REQ-20260923-NNN 优化字幕页「🔄 重新拼接字幕」）。
+
+        按当前剪辑计划（🗑️ 整行标记 + 切分行删除子段）即时重算
+        optimize_compose.srt（删除内容剔除 + 时间轴前移），**不编码视频** —
+        字幕先行，视频拼接由「🎬 重新拼接视频」显式触发。剪辑在跑时拒绝
+        （完成后 SRT 随片自动生成，同口径）；剪辑计划空 → 报错（清理语义
+        归保存钩子 / rekick）。
+        """
+        from slirn_home import compose_service, optimize_service
+
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            mgr.get(tid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+        outputs_dir = mgr.tasks_dir / tid / "outputs"
+        data = optimize_service.load_optimize(outputs_dir)
+        if data is None:
+            return _err("尚无优化字幕数据 — 请先执行「开始优化字幕」")
+        job_st = compose_service.opt_cut_job_status(tid)
+        if job_st and job_st.get("state") == "running":
+            return _err("视频重新拼接正在进行中 — 完成后会自动生成同步字幕，无需手动拼接")
+        plan = optimize_service.cut_plan(data)
+        if not optimize_service.plan_has_deletions(plan):
+            return _err("当前没有要剪除的内容 — 先点 🗑️ 标记整行，或 ✂️ 切分后删除子段")
+        marks = data.get("line_marks") or []
+        segs = data.get("segments") or []
+        del_ms = optimize_service.deleted_intervals_ms(
+            segs, marks, data.get("line_splits"), data.get("split_marks"))
+        srt = optimize_service.build_srt(
+            segs, marks, shift=True,
+            line_splits=data.get("line_splits"),
+            split_marks=data.get("split_marks"),
+            occurrences=data.get("occurrences"))
+        (outputs_dir / "optimize_compose.srt").write_text(srt, encoding="utf-8")
+        n_entries = len(optimize_service.srt_entries(
+            segs, marks, line_splits=data.get("line_splits"),
+            split_marks=data.get("split_marks")))
+        n_marks = len(plan["marks"])
+        n_subs = sum(len(v) for v in plan["split_marks"].values())
+        deleted_sec = round(sum(e - s for s, e in del_ms) / 1000.0, 1)
+        return _ok("", toast=(f"🔄 字幕已重新拼接：{n_entries} 条（剪除 {n_marks} 行"
+                              f"+{n_subs} 子段 · 共 {deleted_sec}s）— "
+                              f"视频请点「🎬 重新拼接视频」"),
+                   resplice={"entries": n_entries, "marks": n_marks,
+                             "split_subs": n_subs, "deleted_sec": deleted_sec})
+
     @app.app.post("/slirn/api/optimized_srt")
     async def optimized_srt(body: dict = Body(default_factory=dict)):
         """下载优化后成片字幕 SRT（REQ-20260917-030）。
