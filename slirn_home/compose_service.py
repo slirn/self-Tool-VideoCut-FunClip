@@ -589,11 +589,51 @@ def _delete_cut_artifacts(outputs_dir: Path) -> list[str]:
     return removed
 
 
-def optimize_cut_ready(outputs_dir: Path, line_marks: list[int] | None) -> dict | None:
-    """优化成片是否「就绪」（与当前 marks 匹配且不旧于粗剪成片）。不就绪 → None。
+def _norm_cut_plan(plan: dict | list | None) -> dict:
+    """剪辑计划规范化（可比较形态）。
 
-    判据：mp4 + sidecar 都在、sidecar.marks == 当前 line_marks（R2 — 单靠
-    mtime 判新鲜度会被「marks 只翻转了一行」绕过）、且 optimize_compose.mp4
+    接受 optimize_service.cut_plan 的 dict，或旧调用口径的纯 marks 列表；
+    sidecar 里的 plan（JSON 解析回的）也过这里 — 三方比较前统一形态。
+    """
+    if isinstance(plan, list):  # 旧口径：只有整行标记
+        plan = {"marks": plan, "splits": {}, "split_marks": {}}
+    if not isinstance(plan, dict):
+        plan = {}
+    marks: set[int] = set()
+    for m in plan.get("marks") or []:
+        try:
+            marks.add(int(m))
+        except (TypeError, ValueError):
+            continue
+    splits: dict[str, list[list[int]]] = {}
+    for key, spans in (plan.get("splits") or {}).items():
+        norm: list[list[int]] = []
+        for sp in spans or []:
+            if isinstance(sp, (list, tuple)) and len(sp) == 2:
+                try:
+                    norm.append([int(sp[0]), int(sp[1])])
+                except (TypeError, ValueError):
+                    continue
+        if norm:  # 空列表（全保留切分行）不参与比较 — 与「无该切分删除」等价
+            splits[str(key)] = norm
+    smarks: dict[str, list[int]] = {}
+    for key, idx in (plan.get("split_marks") or {}).items():
+        try:
+            norm_idx = sorted({int(v) for v in idx or []})
+        except (TypeError, ValueError):
+            continue
+        if norm_idx:
+            smarks[str(int(key))] = norm_idx
+    return {"marks": sorted(marks), "splits": splits, "split_marks": smarks}
+
+
+def optimize_cut_ready(outputs_dir: Path, plan: dict | list | None) -> dict | None:
+    """优化成片是否「就绪」（与当前剪辑计划匹配且不旧于粗剪成片）。不就绪 → None。
+
+    REQ-20260923-NNN：判据从 line_marks 扩展为完整剪辑计划（整行标记 +
+    切分行删除子段）。plan 接受 cut_plan 的 dict 或旧口径 marks 列表；
+    sidecar 优先读 plan 字段，旧 sidecar（只有 marks）等价于无切分计划。
+    单靠 mtime 判新鲜度会被「只翻转一行/一个子段」绕过；且 optimize_compose.mp4
     不旧于 rough_compose.mp4（rough 重合成后自动失效，精剪回退用 rough）。
     """
     out_dir = Path(outputs_dir)
@@ -607,8 +647,9 @@ def optimize_cut_ready(outputs_dir: Path, line_marks: list[int] | None) -> dict 
     except Exception as e:  # noqa: BLE001
         log.warning("[opt-cut] sidecar 损坏: %s", e)
         return None
-    want = sorted({int(m) for m in line_marks or []})
-    have = sorted({int(m) for m in meta.get("marks") or []})
+    want = _norm_cut_plan(plan)
+    have = _norm_cut_plan(meta.get("plan") if isinstance(meta.get("plan"), dict)
+                          else meta.get("marks") or [])
     if want != have:
         return None
     if mp4.stat().st_mtime < rough.stat().st_mtime:
@@ -629,15 +670,15 @@ def opt_cut_job_status(task_id: str) -> dict | None:
 
 
 def opt_cut_status(task_id: str, outputs_dir: Path,
-                   line_marks: list[int] | None = None) -> dict:
+                   plan: dict | list | None = None) -> dict:
     """剪辑状态：内存 job 优先，服务重启后按磁盘兜底。
 
-    兜底口径：sidecar 与当前 marks 匹配且不旧于 rough → done；只剩 tmp 半成品
-    → error（提示重存触发）；否则 idle。"""
+    兜底口径：sidecar 与当前剪辑计划（cut_plan 或旧口径 marks）匹配且不旧于
+    rough → done；只剩 tmp 半成品 → error（提示重存触发）；否则 idle。"""
     job = opt_cut_job_status(task_id)
     if job:
         return job
-    ready = optimize_cut_ready(outputs_dir, line_marks)
+    ready = optimize_cut_ready(outputs_dir, plan)
     if ready is not None:
         return {"state": "done", "progress": 100.0, "stage": "完成",
                 "error": None, "result": ready}
@@ -652,9 +693,10 @@ def start_optimize_cut(task_id: str, outputs_dir: Path, src: Path, *,
                        auto: bool = False, auto_session_id: str = "") -> bool:
     """启动优化成片剪辑线程。已在跑 → False（不重复起）。
 
-    R1（autosave 竞态）：编码耗时分钟级，期间用户可能继续翻转标记 → 每轮
-    编码完成后重读 optimize_subtitle.json 复核 marks；不一致删 tmp 重跑
-    （≤3 次）；marks 变空 → 线程自清产物直接完成。保存端点只 kick。
+    R1（autosave 竞态）：编码耗时分钟级，期间用户可能继续翻转标记/切分子段
+    → 每轮编码完成后重读 optimize_subtitle.json 复核剪辑计划（cut_plan：
+    整行标记 + 删除子段）；不一致删 tmp 重跑（≤3 次）；计划变空 → 线程自清
+    产物直接完成。保存端点只 kick。
     R3（crash-safe）：先写 optimize_compose.tmp.mp4，成功后 os.replace —
     optimize_compose.mp4 永无半截态。
     """
@@ -687,20 +729,21 @@ def start_optimize_cut(task_id: str, outputs_dir: Path, src: Path, *,
                 data = optimize_service.load_optimize(outputs_dir)
                 if data is None:
                     raise RuntimeError("optimize_subtitle.json 不存在")
-                marks = sorted({int(m) for m in data.get("line_marks") or []})
-                if not marks:
-                    # marks 已被清空（保存时全部取消）→ 自清产物，直接完成
+                # REQ-20260923-NNN：剪辑计划 = 整行标记 + 切分行删除子段
+                plan = optimize_service.cut_plan(data)
+                if not optimize_service.plan_has_deletions(plan):
+                    # 计划已空（保存时全部取消 / 切分子段全部保留）→ 自清产物，直接完成
                     removed = _delete_cut_artifacts(outputs_dir)
                     job.update({"state": "done", "progress": 100.0, "stage": "无需剪辑",
                                 "finished_at": time.time(),
                                 "result": {"cleared": True, "removed": removed}})
-                    log.info("[opt-cut][%s] 标记已清空，清理产物: %s", task_id, removed)
+                    log.info("[opt-cut][%s] 剪辑计划已空，清理产物: %s", task_id, removed)
                     execution_history.patch_fields(outputs_dir, exec_id, {
-                        "description": "标记删除行已全部取消，清理优化成片产物（无剪辑）"})
+                        "description": "剪辑计划已空（无删除行/子段），清理优化成片产物（无剪辑）"})
                     execution_history.record_finish(outputs_dir, exec_id, success=True, error="")
                     return
-                # 已就绪且与当前 marks 一致 → 幂等直接完成（防重复 kick 白编）
-                ready = optimize_cut_ready(outputs_dir, marks)
+                # 已就绪且与当前计划一致 → 幂等直接完成（防重复 kick 白编）
+                ready = optimize_cut_ready(outputs_dir, plan)
                 if ready is not None:
                     job.update({"state": "done", "progress": 100.0, "stage": "完成",
                                 "finished_at": time.time(),
@@ -709,9 +752,11 @@ def start_optimize_cut(task_id: str, outputs_dir: Path, src: Path, *,
                     return
 
                 segments = data.get("segments") or []
-                del_ms = optimize_service.deleted_intervals_ms(segments, marks)
+                del_ms = optimize_service.deleted_intervals_ms(
+                    segments, data.get("line_marks") or [],
+                    data.get("line_splits"), data.get("split_marks"))
                 if not del_ms:
-                    raise RuntimeError("标记删除行没有对应的有效时间段")
+                    raise RuntimeError("剪辑计划没有对应的有效时间段")
                 job["stage"] = "读取源视频"
                 dur = _probe_duration(src)
                 if not dur:
@@ -719,16 +764,19 @@ def start_optimize_cut(task_id: str, outputs_dir: Path, src: Path, *,
                 total_ms = int(dur * 1000)
                 keep_ms = complement_intervals_ms(del_ms, total_ms)
                 if not keep_ms:
-                    raise RuntimeError("全部内容都被标记删除 — 请至少保留一行字幕")
+                    raise RuntimeError("全部内容都在剪除计划里 — 请至少保留一部分字幕")
                 total_keep_ms = sum(e - s for s, e in keep_ms)
                 deleted_ms = total_ms - total_keep_ms
+                n_marks = len(plan["marks"])
+                n_subs = sum(len(v) for v in plan["split_marks"].values())
 
                 job["stage"] = "剪辑中"
                 has_audio = asr_service.has_audio_track(src)
                 dst_tmp = outputs_dir / OPTIMIZE_COMPOSE_TMP_NAME
                 cmd = build_optimize_cut_cmd(src, dst_tmp, keep_ms, has_audio=has_audio)
-                log.info("[opt-cut][%s] 第 %d 次剪辑：删 %d 区间 %.1fs → 保留 %.1fs",
-                         task_id, attempt + 1, len(del_ms),
+                log.info("[opt-cut][%s] 第 %d 次剪辑：删 %d 区间（%d 行 + %d 子段）"
+                         "%.1fs → 保留 %.1fs",
+                         task_id, attempt + 1, len(del_ms), n_marks, n_subs,
                          deleted_ms / 1000, total_keep_ms / 1000)
                 # 进度解析照搬 app.py 精剪导出（Windows 8KB 缓冲 + stderr 死锁教训）
                 proc = subprocess.Popen(
@@ -761,12 +809,11 @@ def start_optimize_cut(task_id: str, outputs_dir: Path, src: Path, *,
                         pass
                     raise RuntimeError(f"ffmpeg 剪辑失败（退出码 {rc}）")
 
-                # R1 复核：编码期间 marks 可能又变了（autosave 不经过保存端点）
+                # R1 复核：编码期间剪辑计划可能又变了（autosave/resplit 不经过保存端点）
                 data2 = optimize_service.load_optimize(outputs_dir)
-                marks2 = sorted({int(m) for m in (data2 or {}).get("line_marks") or []})
-                if marks2 != marks:
-                    log.info("[opt-cut][%s] 剪辑期间标记已变化 %s → %s，重跑",
-                             task_id, marks, marks2)
+                plan2 = optimize_service.cut_plan(data2 or {})
+                if plan2 != plan:
+                    log.info("[opt-cut][%s] 剪辑期间计划已变化，重跑", task_id)
                     try:
                         dst_tmp.unlink()
                     except OSError:
@@ -778,10 +825,16 @@ def start_optimize_cut(task_id: str, outputs_dir: Path, src: Path, *,
                 os.replace(dst_tmp, final)
                 segs_now = (data2 or {}).get("segments") or segments
                 final.with_suffix(".srt").write_text(
-                    optimize_service.build_srt(segs_now, marks, shift=True),
+                    optimize_service.build_srt(
+                        segs_now, plan["marks"], shift=True,
+                        line_splits=(data2 or {}).get("line_splits"),
+                        split_marks=(data2 or {}).get("split_marks"),
+                        occurrences=(data2 or {}).get("occurrences")),
                     encoding="utf-8")
                 meta = {
-                    "marks": marks,
+                    "marks": plan["marks"],
+                    "plan": plan,  # REQ-20260923-NNN：完整剪辑计划（新鲜度比较基准）
+                    "split_subs": n_subs,
                     "intervals": len(del_ms),
                     "deleted_ms": deleted_ms,
                     "deleted_sec": round(deleted_ms / 1000.0, 1),
@@ -802,16 +855,17 @@ def start_optimize_cut(task_id: str, outputs_dir: Path, src: Path, *,
                          task_id, deleted_ms / 1000, total_keep_ms / 1000,
                          final.name, result["elapsed"])
                 execution_history.patch_extra(outputs_dir, exec_id, {
-                    "lines": len(marks), "deleted_sec": meta["deleted_sec"],
-                    "output": final.name})
+                    "lines": n_marks, "split_subs": n_subs,
+                    "deleted_sec": meta["deleted_sec"], "output": final.name})
+                _what = f"{n_marks} 行" + (f" + {n_subs} 子段" if n_subs else "")
                 execution_history.patch_fields(outputs_dir, exec_id, {
-                    "description": (f"剪除 {len(marks)} 行（{meta['deleted_sec']}s），"
+                    "description": (f"剪除 {_what}（{meta['deleted_sec']}s），"
                                     f"输出优化成片 {final.name}（{meta['kept_sec']}s）")})
                 execution_history.record_finish(outputs_dir, exec_id, success=True, error="")
                 return
-            # 3 轮 marks 都在变（用户持续编辑中）→ 提示稳定后再保存
-            raise RuntimeError("剪辑期间标记删除行持续变化（已重试 3 次）— "
-                               "标记稳定后请再次保存触发剪辑")
+            # 3 轮计划都在变（用户持续编辑中）→ 提示稳定后再保存
+            raise RuntimeError("剪辑期间剪辑计划持续变化（已重试 3 次）— "
+                               "内容稳定后请再次触发重新拼接")
         except Exception as e:  # noqa: BLE001 — 后台线程必须全兜底
             job["state"] = "error"
             job["error"] = str(e)

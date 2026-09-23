@@ -48,7 +48,8 @@ def _make_task(tmp_path: Path):
     return m, t, outputs
 
 
-def _write_optimize(outputs: Path, *, saved=True, marks=None):
+def _write_optimize(outputs: Path, *, saved=True, marks=None, splits=None,
+                    split_marks=None):
     data = {
         "version": 1, "video": "rough_compose.mp4", "model": "m", "provider": "p",
         "protocol": "openai", "created_at": "2026-09-22T10:00:00",
@@ -58,9 +59,26 @@ def _write_optimize(outputs: Path, *, saved=True, marks=None):
     }
     if marks is not None:
         data["line_marks"] = marks
+    if splits is not None:
+        data["line_splits"] = splits
+    if split_marks is not None:
+        data["split_marks"] = split_marks
     (outputs / optimize_service.OPTIMIZE_JSON).write_text(
         json.dumps(data, ensure_ascii=False), encoding="utf-8")
     return data
+
+
+# 行 2 的手工切分（中间洞 3500-4500ms；子段文本用唯一标记词避免与行文撞车）
+SPLITS2 = {
+    "2": [
+        {"mark": "keep", "start_ms": 3000, "end_ms": 3500,
+         "start": "00:00:03,000", "end": "00:00:03,500", "text": "AAA", "fallback": False},
+        {"mark": "delete", "start_ms": 3500, "end_ms": 4500,
+         "start": "00:00:03,500", "end": "00:00:04,500", "text": "BBB", "fallback": False},
+        {"mark": "keep", "start_ms": 4500, "end_ms": 5000,
+         "start": "00:00:04,500", "end": "00:00:05,000", "text": "CCC", "fallback": False},
+    ],
+}
 
 
 def _mk_rough(outputs: Path):
@@ -251,7 +269,7 @@ def test_rekick_marks_empty_errs_or_clears_stale(tmp_path):
     c = _client(tmp_path)
     r = c.post("/slirn/api/optimize_cut_rekick",
                json={"task_id": t.task_id}).json()
-    assert r["ok"] is False and "标记删除" in r["error"]
+    assert r["ok"] is False and "要剪除的内容" in r["error"]
     # 旧产物滞留（如 job 在跑时清空标记）→ 顺手清掉
     _mk_cut_artifacts(outputs, [1])
     r2 = c.post("/slirn/api/optimize_cut_rekick",
@@ -514,3 +532,88 @@ def test_unsplit_endpoint_restores(tmp_path):
     r2 = c.post("/slirn/api/optimize_unsplit",
                 json={"task_id": t.task_id, "seg_id": 2}).json()
     assert r2["ok"] is False and "没有切分" in r2["error"]
+
+
+# ---------- 剪辑计划化（REQ-20260923-NNN）：sidecar 新鲜度 + 上游回退 ----------
+
+def test_norm_cut_plan_legacy_list_equivalent():
+    """旧口径 marks 列表 == 无切分的 cut_plan dict（向后兼容）。"""
+    legacy = compose_service._norm_cut_plan([2, 1, 2])
+    as_dict = compose_service._norm_cut_plan(
+        {"marks": [1, 2], "splits": {}, "split_marks": {}})
+    assert legacy == as_dict == {"marks": [1, 2], "splits": {}, "split_marks": {}}
+
+
+def test_optimize_cut_ready_plan_aware(tmp_path):
+    """新鲜度按完整剪辑计划比较：出现切分 → 旧产物不再就绪。"""
+    m, t, outputs = _make_task(tmp_path)
+    _write_optimize(outputs, marks=[1])
+    _mk_cut_artifacts(outputs, [1])  # 旧 sidecar（只有 marks 字段）
+    # 旧口径（marks 列表）与 cut_plan dict 等价 → 就绪
+    assert compose_service.optimize_cut_ready(outputs, [1]) is not None
+    assert compose_service.optimize_cut_ready(
+        outputs, optimize_service.cut_plan(_write_optimize(outputs, marks=[1]))) is not None
+    # 行 2 切分出删除子段 → 计划变化 → 不再就绪
+    data = _write_optimize(outputs, marks=[1], splits=SPLITS2, split_marks={"2": [1]})
+    assert compose_service.optimize_cut_ready(outputs, optimize_service.cut_plan(data)) is None
+    # 切分全部保留（快照 []）→ 计划回到纯 marks → 恢复就绪
+    data = _write_optimize(outputs, marks=[1], splits=SPLITS2, split_marks={"2": []})
+    assert compose_service.optimize_cut_ready(outputs, optimize_service.cut_plan(data)) is not None
+
+
+def test_optimize_cut_ready_sidecar_plan_match(tmp_path):
+    """sidecar 带 plan 字段：计划一致就绪；翻转任一子段 → 失效。"""
+    import os
+
+    m, t, outputs = _make_task(tmp_path)
+    data = _write_optimize(outputs, marks=[], splits=SPLITS2, split_marks={"2": [1]})
+    plan = optimize_service.cut_plan(data)
+    rough = _mk_rough(outputs)
+    mp4 = compose_service.optimize_compose_path(outputs)
+    mp4.write_bytes(b"cut")
+    (outputs / "optimize_compose.srt").write_text("1\nx", encoding="utf-8")
+    (outputs / compose_service.OPTIMIZE_CUT_JSON).write_text(json.dumps(
+        {"marks": plan["marks"], "plan": plan, "deleted_ms": 1000, "deleted_sec": 1.0,
+         "kept_sec": 7.0, "src": "rough_compose.mp4", "src_mtime": 0,
+         "created_at": "2026-09-23T10:00:00", "elapsed": 3.0},
+        ensure_ascii=False), encoding="utf-8")
+    base = rough.stat().st_mtime
+    os.utime(mp4, (base, base + 10))
+    assert compose_service.optimize_cut_ready(outputs, plan) is not None
+    # 翻转子段：删 1 保留、删 0 → 计划变化
+    data["split_marks"] = {"2": [0]}
+    assert compose_service.optimize_cut_ready(
+        outputs, optimize_service.cut_plan(data)) is None
+
+
+def test_status_and_upstream_split_invalidation(tmp_path):
+    """切分后优化成片失效：/optimize_cut_status 报不就绪、精剪上游回退 rough。"""
+    from slirn_home.app import _fine_upstream_path
+
+    m, t, outputs = _make_task(tmp_path)
+    _write_optimize(outputs, marks=[1])
+    _mk_cut_artifacts(outputs, [1])
+    assert _fine_upstream_path(t.task_id, "video", m).name == "optimize_compose.mp4"
+    # 行 2 切分 → 计划变化 → 优化成片失效
+    _write_optimize(outputs, marks=[1], splits=SPLITS2, split_marks={"2": [1]})
+    assert _fine_upstream_path(t.task_id, "video", m).name == "rough_compose.mp4"
+    r = _client(tmp_path).post("/slirn/api/optimize_cut_status",
+                               json={"task_id": t.task_id}).json()
+    assert r["ok"] is True and r["ready"]["exists"] is False
+
+
+def test_optimized_srt_split_entries(tmp_path):
+    """base=cut：整行删除 + 中洞子段都剔除；保留子段与后续行时间前移。"""
+    m, t, outputs = _make_task(tmp_path)
+    _write_optimize(outputs, marks=[1], splits=SPLITS2, split_marks={"2": [1]})
+    c = _client(tmp_path)
+    r = c.post("/slirn/api/optimized_srt",
+               json={"task_id": t.task_id, "base": "cut"}).json()
+    assert r["ok"] is True, r
+    srt = r["srt"]
+    assert "AAA" in srt and "BBB" not in srt       # 删除子段剔除，保留子段成条
+    assert "CCC" in srt
+    assert "第一行废话" not in srt                  # 整行标记剔除
+    assert "00:00:01,000 --> 00:00:01,500" in srt  # 3000/3500 - 2000（行 1 整删）
+    assert "00:00:01,500 --> 00:00:02,000" in srt  # 4500/5000 - 3000（再含中洞 1s）
+    assert "00:00:03,000 --> 00:00:05,000" in srt  # 6000/8000 - 3000
