@@ -254,23 +254,41 @@ def test_complement_intervals_ms():
     assert compose_service.complement_intervals_ms([[3000, 3000]], 8000) == [[0, 8000]]
 
 
-def test_build_optimize_cut_cmd_audio():
-    """有音轨：每段 v+a trim/setpts + concat a=1 + 重编码参数 + progress。"""
+def test_build_optimize_cut_cmd_audio(monkeypatch):
+    """有音轨多段：split/asplit 扇出 + 每段 trim 消费 [svK]/[saK] + concat。"""
+    monkeypatch.setattr(compose_service, "ffmpeg_bin", lambda: "ffmpeg")
     cmd = compose_service.build_optimize_cut_cmd(
         Path("in.mp4"), Path("out.mp4"), [[0, 2000], [4000, 8000]], has_audio=True)
     joined = " ".join(cmd)
     assert cmd[:4] == ["ffmpeg", "-y", "-i", "in.mp4"]
     fc = cmd[cmd.index("-filter_complex") + 1]
-    assert "[0:v]trim=start=0.000:end=2.000,setpts=PTS-STARTPTS[v0]" in fc
-    assert "[0:a]atrim=start=4.000:end=8.000,asetpts=PTS-STARTPTS[a1]" in fc
+    # 输入流只能消费一次：多段先扇出（REQ-20260923-NNN 音频丢失修复）
+    assert fc.startswith("[0:v]split=2[sv0][sv1];[0:a]asplit=2[sa0][sa1]")
+    assert "[sv0]trim=start=0.000:end=2.000,setpts=PTS-STARTPTS[v0]" in fc
+    assert "[sa1]atrim=start=4.000:end=8.000,asetpts=PTS-STARTPTS[a1]" in fc
     assert "concat=n=2:v=1:a=1[vout][aout]" in fc
+    # trim/atrim 不得直接引用 [0:v]/[0:a]（多段时 = 多次消费 = 帧分发未定义）
+    assert "[0:v]trim" not in fc and "[0:a]atrim" not in fc
     assert "[vout]" in cmd and "[aout]" in cmd and cmd.count("-map") == 2
     assert "-c:v" in cmd and "libx264" in cmd and "veryfast" in cmd
     assert "-progress pipe:1" in joined and "out.mp4" in cmd[-1]
 
 
-def test_build_optimize_cut_cmd_no_audio():
+def test_build_optimize_cut_cmd_audio_single_segment(monkeypatch):
+    """有音轨单段：无扇出（单次消费合法），[0:v]/[0:a] 直连。"""
+    monkeypatch.setattr(compose_service, "ffmpeg_bin", lambda: "ffmpeg")
+    cmd = compose_service.build_optimize_cut_cmd(
+        Path("in.mp4"), Path("out.mp4"), [[500, 2500]], has_audio=True)
+    fc = cmd[cmd.index("-filter_complex") + 1]
+    assert "split=" not in fc and "asplit=" not in fc
+    assert fc == ("[0:v]trim=start=0.500:end=2.500,setpts=PTS-STARTPTS[v0];"
+                  "[0:a]atrim=start=0.500:end=2.500,asetpts=PTS-STARTPTS[a0];"
+                  "[v0][a0]concat=n=1:v=1:a=1[vout][aout]")
+
+
+def test_build_optimize_cut_cmd_no_audio(monkeypatch):
     """无音轨：只有视频链 + concat a=0，无 -map [aout]/音频编码参数。"""
+    monkeypatch.setattr(compose_service, "ffmpeg_bin", lambda: "ffmpeg")
     cmd = compose_service.build_optimize_cut_cmd(
         Path("in.mp4"), Path("out.mp4"), [[1000, 3000]], has_audio=False)
     fc = cmd[cmd.index("-filter_complex") + 1]
@@ -278,6 +296,44 @@ def test_build_optimize_cut_cmd_no_audio():
                   "[v0]concat=n=1:v=1:a=0[vout]")
     assert "[0:a]" not in fc
     assert "[aout]" not in cmd and "aac" not in cmd
+
+
+def test_build_optimize_cut_cmd_no_audio_multi_split_only(monkeypatch):
+    """无音轨多段：只 split 视频扇出，无 asplit/[0:a]。"""
+    monkeypatch.setattr(compose_service, "ffmpeg_bin", lambda: "ffmpeg")
+    cmd = compose_service.build_optimize_cut_cmd(
+        Path("in.mp4"), Path("out.mp4"), [[0, 1000], [2000, 4000]], has_audio=False)
+    fc = cmd[cmd.index("-filter_complex") + 1]
+    assert fc.startswith("[0:v]split=2[sv0][sv1];[sv0]trim=")
+    assert "asplit" not in fc and "[0:a]" not in fc
+    assert "[sv1]trim=start=2.000:end=4.000" in fc
+    assert "concat=n=2:v=1:a=0[vout]" in fc
+
+
+def test_ffmpeg_bin_prefers_imageio(monkeypatch):
+    """ffmpeg_bin：优先 imageio_ffmpeg 自带稳定版（PATH 9.0.1 trim/concat
+    长片回归 — 音频静默/ENOMEM 崩），未装回落 PATH "ffmpeg"。"""
+    # 真实环境：装了 imageio_ffmpeg → 返回可执行文件路径
+    real = compose_service.ffmpeg_bin()
+    assert real and real != ""
+    # 未装/异常 → 回落 PATH（先测，再测 FFBIN-X 注入不冲突）
+    import builtins
+
+    orig_import = builtins.__import__
+
+    def _no_imageio(name, *a, **kw):
+        if name == "imageio_ffmpeg":
+            raise ImportError("no imageio_ffmpeg")
+        return orig_import(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", _no_imageio)
+    assert compose_service.ffmpeg_bin() == "ffmpeg"
+    monkeypatch.undo()
+    # 剪辑命令确实用 ffmpeg_bin() 的返回值做 argv[0]
+    monkeypatch.setattr(compose_service, "ffmpeg_bin", lambda: "FFBIN-X")
+    cmd = compose_service.build_optimize_cut_cmd(
+        Path("in.mp4"), Path("out.mp4"), [[0, 1000]], has_audio=True)
+    assert cmd[0] == "FFBIN-X"
 
 
 def test_optimize_cut_ready_matrix(tmp_path):

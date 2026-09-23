@@ -427,6 +427,34 @@ def _probe_duration(p: Path) -> float | None:
         return None
 
 
+def _probe_av_durations(p: Path) -> tuple[float | None, float | None]:
+    """逐流时长 (video, audio) — 优化成片编码后 A/V 一致性校验用。
+
+    format=duration 是容器时长（取最长流），分不出音轨被截断；必须逐流看。
+    """
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type,duration",
+             "-of", "csv=p=0", str(p)],
+            capture_output=True, text=True, timeout=30,
+        )
+        v = a = None
+        for row in r.stdout.splitlines():
+            fields = (row or "").strip().split(",")
+            if len(fields) >= 2 and fields[0] in ("video", "audio"):
+                try:
+                    d = float(fields[-1])
+                except ValueError:
+                    continue
+                if fields[0] == "video":
+                    v = d
+                else:
+                    a = d
+        return v, a
+    except subprocess.TimeoutExpired:
+        return None, None
+
+
 # =============== 后台 job 管理（对齐 asr_service 范式） ===============
 
 # task_id → {"state": "running|done|error", "progress": 0-100, "error": str|None,
@@ -538,30 +566,56 @@ def complement_intervals_ms(del_ms: list[list[int]], total_ms: int) -> list[list
     return keep
 
 
+def ffmpeg_bin() -> str:
+    """编码用 ffmpeg 二进制：优先 imageio_ffmpeg 自带的稳定版。
+
+    PATH 上的 ffmpeg 9.0.1（gyan full build）在 trim/concat filter 图 +
+    长片上有回归：68 分钟三段剪除实测三种死法 — rc=0 但音频 ~900s 起数字
+    静默且末段音轨缺失 / 编码尾部 muxer ENOMEM 崩（rc=-12）/ 中途 ENOMEM
+    崩；同一条命令换 imageio 自带的 7.1 一次通过（A/V 双流 4128.6s 完整、
+    全程响亮）。moviepy 依赖 imageio_ffmpeg，粗剪成片正是它编的 — 与粗剪
+    同源最稳。拿不到（未装）再回落 PATH。
+    """
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:  # noqa: BLE001 — 未装/解析失败 → PATH 兜底
+        return "ffmpeg"
+
+
 def build_optimize_cut_cmd(src: Path, dst: Path, keep_ms: list[list[int]],
                            *, has_audio: bool = True) -> list[str]:
     """优化成片剪辑的 ffmpeg argv（单趟精确重编码，纯函数可单测）。
 
-    每段 [0:v]trim+setpts（有音轨再 [0:a]atrim+asetpts）→ concat 拼接。
+    每段 trim+setpts（有音轨再 atrim+asetpts）→ concat 拼接。
     不用 -c copy 流复制：关键帧对齐会把被删语音漏回成片且累积字幕失步 —
     本阶段的意义就是精确剪除。
+
+    输入流 [0:v]/[0:a] 在一个 filter_complex 里只能被消费一次：多段时先
+    split/asplit 扇出成 n 份再各自 trim/atrim（单次消费合法，单段直连）。
     """
+    n = len(keep_ms)
     parts: list[str] = []
     labels: list[str] = []
-    for k, (s, e) in enumerate(keep_ms):
-        ss, se = f"{s / 1000:.3f}", f"{e / 1000:.3f}"
-        parts.append(f"[0:v]trim=start={ss}:end={se},setpts=PTS-STARTPTS[v{k}]")
+    if n > 1:  # 扇出：每段消费自己的 [svK]/[saK] 副本
+        parts.append("[0:v]split=%d%s" % (n, "".join(f"[sv{k}]" for k in range(n))))
         if has_audio:
-            parts.append(f"[0:a]atrim=start={ss}:end={se},asetpts=PTS-STARTPTS[a{k}]")
+            parts.append("[0:a]asplit=%d%s" % (n, "".join(f"[sa{k}]" for k in range(n))))
+    for k, (s, e) in enumerate(keep_ms):
+        vsrc = f"[sv{k}]" if n > 1 else "[0:v]"
+        asrc = f"[sa{k}]" if n > 1 else "[0:a]"
+        ss, se = f"{s / 1000:.3f}", f"{e / 1000:.3f}"
+        parts.append(f"{vsrc}trim=start={ss}:end={se},setpts=PTS-STARTPTS[v{k}]")
+        if has_audio:
+            parts.append(f"{asrc}atrim=start={ss}:end={se},asetpts=PTS-STARTPTS[a{k}]")
             labels.extend((f"[v{k}]", f"[a{k}]"))
         else:
             labels.append(f"[v{k}]")
-    n = len(keep_ms)
     if has_audio:
         parts.append(f"{''.join(labels)}concat=n={n}:v=1:a=1[vout][aout]")
     else:
         parts.append(f"{''.join(labels)}concat=n={n}:v=1:a=0[vout]")
-    cmd = ["ffmpeg", "-y", "-i", str(src),
+    cmd = [ffmpeg_bin(), "-y", "-i", str(src),
            "-filter_complex", ";".join(parts)]
     if has_audio:
         cmd += ["-map", "[vout]", "-map", "[aout]", "-c:a", "aac", "-b:a", "128k"]
@@ -808,6 +862,26 @@ def start_optimize_cut(task_id: str, outputs_dir: Path, src: Path, *,
                     except OSError:
                         pass
                     raise RuntimeError(f"ffmpeg 剪辑失败（退出码 {rc}）")
+
+                # 编码后 A/V 时长复核：rc=0 也可能产出坏文件（历史上
+                # filter_complex 多次消费 [0:a] 导致音频中途数字静默 + 末段
+                # 缺失，就是 rc=0 混过所有检查的）。视频/音频流时长都应
+                # ≈ 保留总时长；背离 >1s 判坏，自清产物报错重试。
+                expect_sec = total_keep_ms / 1000.0
+                if has_audio:
+                    v_dur, a_dur = _probe_av_durations(dst_tmp)
+                else:
+                    v_dur, _ = _probe_av_durations(dst_tmp)
+                    a_dur = None
+                if v_dur is None or abs(v_dur - expect_sec) > 1.0 or (
+                        has_audio and (a_dur is None or abs(a_dur - expect_sec) > 1.0)):
+                    try:
+                        dst_tmp.unlink()
+                    except OSError:
+                        pass
+                    raise RuntimeError(
+                        f"优化成片 A/V 时长校验失败（视频 {v_dur}s / 音频 {a_dur}s，"
+                        f"应约 {expect_sec:.1f}s）— 已丢弃坏产物，请重试")
 
                 # R1 复核：编码期间剪辑计划可能又变了（autosave/resplit 不经过保存端点）
                 data2 = optimize_service.load_optimize(outputs_dir)
