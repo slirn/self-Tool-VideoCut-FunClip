@@ -1462,14 +1462,10 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
     else:
         split_stat = ""
     model_disp = _esc(data.get("model") or "")
-    # 优化成片就绪时多给一个「优化成片时间基」的 SRT 下载（时间轴已前移）
-    cut_srt_btn = (
-        f'<button class="slirn-btn" data-action="opt-srt-download" data-task-id="{_esc(task_id)}" '
-        f'data-base="cut">⬇️ 下载优化成片字幕 SRT</button>'
-        if cut_ready is not None else ""
-    )
-    # REQ-20260923-NNN 查看最终视频：优化成片就绪才渲染（与 cut_srt_btn 同条件 —
-    # cut_ready 已含「与当前剪辑计划一致」判据，产物必可看）
+    # REQ-20260923-NNN 查看最终视频：优化成片就绪才渲染 — 同时是前端判断
+    # 「成片时间基可用」的 DOM 信号（cut_ready 已含「与当前剪辑计划一致」判据）。
+    # SRT 下载/预览统一走「📄 查看最终字幕」弹窗（内含粗剪/成片时间基切换 +
+    # 下载）— 原两枚 ⬇️ 下载按钮与查看同打 /optimized_srt，操作行去重移除。
     cut_video_btn = (
         f'<button class="slirn-btn" data-action="opt-final-video" data-task-id="{_esc(task_id)}" '
         f'title="播放重新拼接后的优化成片（已剪除标记删除行/子段，时间轴已前移；'
@@ -1528,11 +1524,8 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
         <div class="slirn-task-actions" style="margin-top:14px;">
             <button class="slirn-btn slirn-btn-primary" data-action="save-optimize"
                     data-task-id="{_esc(task_id)}">{save_label}</button>
-            <button class="slirn-btn" data-action="opt-srt-download" data-task-id="{_esc(task_id)}"
-                    data-base="rough"
-                    {"" if confirmed else 'disabled title="确认保存后可下载"'}>⬇️ 下载优化字幕 SRT</button>
-            {cut_srt_btn}
             <button class="slirn-btn" data-action="opt-final-view" data-task-id="{_esc(task_id)}"
+                    title="预览/下载最终字幕（应用替换 + 剔除删除内容；弹窗内可切换粗剪/优化成片时间基并下载）"
                     {"" if confirmed else 'disabled title="确认保存后可查看"'}>📄 查看最终字幕</button>
             <button class="slirn-btn" data-action="opt-cut-rekick" data-task-id="{_esc(task_id)}"
                     title="按当前剪辑计划（🗑️ 标记删除行 + 切分删除子段），对粗剪成片做剪除+拼接，生成 optimize_compose.mp4（精剪合成自动优先使用）">🎬 重新拼接视频</button>

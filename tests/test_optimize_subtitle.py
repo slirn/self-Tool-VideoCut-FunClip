@@ -434,9 +434,11 @@ def test_render_zone_result_state(tmp_path, monkeypatch):
     assert 'data-applied="1"' in html and ">✓</button>" in html
     # 行携带定位播放与词命中数据
     assert 'data-start-ms="0"' in html and "data-words=" in html
-    # 保存 / SRT（未确认 → disabled）/ 🔄 重新拼接字幕（旧 force 重跑按钮已从结果态移除）
+    # 保存 / 查看最终字幕（未确认 → disabled；SRT 下载已并入其弹窗 —
+    # REQ-20260923-NNN 操作行去重）/ 🔄 重新拼接字幕（旧 force 重跑按钮已移除）
     assert 'data-action="save-optimize"' in html
-    assert 'data-action="opt-srt-download"' in html and "disabled" in html
+    assert 'data-action="opt-final-view"' in html and "disabled" in html
+    assert 'data-action="opt-srt-download"' not in html
     assert 'data-action="opt-resplice"' in html and "重新拼接字幕" in html
     assert 'data-has="1"' not in html  # 旧「重新优化（覆盖）」入口不再渲染
     # REQ-20260923-NNN 行搜索框（筛选按钮行右侧 + 清空按钮 + 命中计数）

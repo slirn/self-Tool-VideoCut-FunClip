@@ -11968,10 +11968,11 @@ def test_opt_cut_polling_and_resume_js():
     assert k > 0, "wb 重渲后必须检查剪辑状态条"
     after = src[k:k + 300]
     assert "startOptCutPolling(optCutSt.dataset.taskId)" in after
-    # SRT 下载带 base 参数（rough/cut 两种时间基）
-    m = src.find("function optSrtDownload")
-    dl = src[m:src.find("\n  }\n", m)]
-    assert "data-base" in dl and "'cut'" in dl
+    # SRT 双时间基（rough/cut）：下载已并入查看弹窗（REQ-20260923-NNN 去重）
+    m = src.find("function _renderOptFinalModal")
+    modal = src[m:src.find("\n  }\n  }\n", m)]
+    assert "data-final-base" in modal and "'cut'" in modal, (
+        "弹窗内必须可切换粗剪/优化成片两种时间基")
 
 
 def test_opt_delete_css_styles():
@@ -12028,13 +12029,13 @@ def test_opt_deleted_filter_and_final_view_js():
     assert "slirn-opt-only-deleted" in body and "显示全部识别行" in body
     assert "action === 'opt-filter-deleted'" in src, "必须委托 opt-filter-deleted"
     assert "optFilterDeletedBtn(target)" in src
-    # 最终字幕预览：拉 /optimized_srt + 弹窗渲染 + 双时间基切换
+    # 最终字幕预览：拉 /optimized_srt + 弹窗渲染 + 双时间基切换 + 弹窗内下载
     j = src.find("function optFinalView")
     assert j > 0, "必须有 optFinalView"
     body2 = src[j:src.find("\n  }\n", j)]
     assert "/optimized_srt" in body2 and "base: 'rough'" in body2
-    assert '[data-action="opt-srt-download"][data-base="cut"]' in body2, (
-        "cut 时间基可用性要与 SRT 下载按钮同源判断")
+    assert '[data-action="opt-final-video"]' in body2, (
+        "cut 时间基可用性要与「查看最终视频」按钮同源判断（下载按钮已并入弹窗）")
     assert "action === 'opt-final-view'" in src and "optFinalView(target)" in src
     k = src.find("function _renderOptFinalModal")
     assert k > 0, "必须有弹窗渲染函数"
@@ -12042,6 +12043,10 @@ def test_opt_deleted_filter_and_final_view_js():
     assert "slirn-opt-final-pre" in body3 and "escapeHtml(srt)" in body3, (
         "SRT 原文必须转义后进 <pre>")
     assert "data-final-base" in body3 and '"cut"' in body3, "cut 就绪时给双时间基切换"
+    assert "slirn-opt-final-dl" in body3 and "curBase = base;" in src, (
+        "SRT 下载并入弹窗：下载当前所选时间基（REQ-20260923-NNN 操作行去重）")
+    assert "optSrtDownload" not in src and "opt-srt-download" not in src, (
+        "行内 SRT 下载按钮已并入查看弹窗，不留死代码")
     assert "去掉标记删除行" in body3, "弹窗说明必须写明删除行已去掉"
     # CSS：删除行筛选隐藏规则 + 弹窗 pre 样式
     css = _css_src()

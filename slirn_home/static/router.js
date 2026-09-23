@@ -4537,9 +4537,10 @@
   function optFinalView(btn) {
     var tid = btn.getAttribute('data-task-id') || '';
     if (!tid) return;
-    // cut 基是否可用 = 优化成片 SRT 下载按钮在 DOM（与服务端 cut_ready 同源渲染）
+    // cut 基是否可用 = 「▶️ 查看最终视频」按钮在 DOM（与服务端 cut_ready
+    // 同源渲染；SRT 下载按钮已并入本弹窗 — REQ-20260923-NNN 去重）
     var hasCutBase = !!document.querySelector(
-      '[data-action="opt-srt-download"][data-base="cut"]');
+      '[data-action="opt-final-video"]');
     postJSON(SLIRN_API + '/optimized_srt', {task_id: tid, base: 'rough'})
       .then(function(r) {
         if (!r || !r.ok) {
@@ -4569,11 +4570,26 @@
           : '') +
         '<pre class="slirn-opt-final-pre">' + escapeHtml(srt) + '</pre>' +
         '<div style="display:flex; gap:10px; justify-content:center;">'
+          + '<button class="slirn-btn" id="slirn-opt-final-dl">⬇️ 下载当前时间基 SRT</button>'
           + '<button class="slirn-btn" id="slirn-opt-final-close">❌ 关闭</button></div>' +
       '</div>';
     document.body.appendChild(overlay);
     var close = function() { overlay.remove(); };
     document.getElementById('slirn-opt-final-close').onclick = close;
+    // 下载当前显示的字幕（时间基随弹窗内切换 — 原 ⬇️ 行内下载按钮并入此处）
+    var curBase = 'rough';
+    document.getElementById('slirn-opt-final-dl').onclick = function() {
+      var pre2 = overlay.querySelector('.slirn-opt-final-pre');
+      var blob = new Blob([pre2.textContent || ''], {type: 'text/plain;charset=utf-8'});
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = (curBase === 'cut' ? 'optimize_compose_subs_' : 'optimized_subs_')
+        + tid + '.srt';
+      document.body.appendChild(a); a.click();
+      setTimeout(function() { URL.revokeObjectURL(url); document.body.removeChild(a); }, 100);
+      toast('⬇️ 已下载 SRT' + (curBase === 'cut' ? '（优化成片时间基）' : '（粗剪时间基）'));
+    };
     overlay.addEventListener('click', function(e) {
       if (e.target === overlay) close();  // 点遮罩关闭
     });
@@ -4599,6 +4615,7 @@
                 return;
               }
               pre.textContent = r.srt || '';
+              curBase = base;  // 下载随切换（下载的是当前显示内容）
               title.textContent = '📄 最终字幕 · ' + (r.lines || 0) + ' 行';
             });
         };
@@ -5095,25 +5112,6 @@
       } else if (cut.state === 'cleared') {
         openWorkbench(tid);  // 清掉旧产物 → 刷新剪辑状态条
       }
-    });
-  }
-  function optSrtDownload(btn) {  // 下载优化字幕 SRT（base=rough 粗剪时间基 / cut 优化成片时间基）
-    var tid = btn.getAttribute('data-task-id') || '';
-    var base = btn.getAttribute('data-base') || 'rough';
-    postJSON(SLIRN_API + '/optimized_srt', {task_id: tid, base: base}).then(function(r) {
-      if (!r || !r.ok || !r.srt) {
-        toast('❌ ' + (r && r.error ? r.error : '获取 SRT 失败'), 'error');
-        return;
-      }
-      var blob = new Blob([r.srt], {type: 'text/plain;charset=utf-8'});
-      var url = URL.createObjectURL(blob);
-      var a = document.createElement('a');
-      a.href = url;
-      a.download = (base === 'cut' ? 'optimize_compose_subs_' : 'optimized_subs_') + tid + '.srt';
-      document.body.appendChild(a); a.click();
-      setTimeout(function() { URL.revokeObjectURL(url); document.body.removeChild(a); }, 100);
-      toast('⬇️ 已下载 ' + (r.lines || 0) + ' 行 SRT'
-        + (base === 'cut' ? '（优化成片时间基）' : ''));
     });
   }
   // REQ-20260923-NNN 查看最终视频：播放器切到 optimize_compose（时间轴已前移）—
@@ -6989,9 +6987,6 @@
     }
     else if (action === 'save-optimize') {
       optSave(target);
-    }
-    else if (action === 'opt-srt-download') {
-      optSrtDownload(target);
     }
     else if (action === 'rebuild-cutlist') {
       // 重新执行切分修剪（REQ-20260916-011）：按最新修订决策整单重算落盘，
