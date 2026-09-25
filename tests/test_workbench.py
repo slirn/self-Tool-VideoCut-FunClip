@@ -11954,6 +11954,31 @@ def test_cut_player_seeked_listener_instant_highlight():
         "seeked 里必须按落点绝对重定位跳播索引（前拖/后拖/拖进删除洞都收敛）")
 
 
+def test_cut_auto_save_silent_js():
+    """REQ-20260925-NNN：切分修剪自动保存函数必须静默（in-flight 锁 +
+    pending 快照 + 不调 openWorkbench — 避免打断修剪/播放）。"""
+    src = _router_src()
+    i = src.find("function cutAutoSave")
+    assert i > 0, "必须有 cutAutoSave"
+    body = src[i:src.find("\n  }\n", i)]
+    assert "save_cut_decisions" in body, "自动保存必须 POST /save_cut_decisions"
+    assert "_cutSaveInFlight" in body and "_cutSavePending" in body, (
+        "必须有 in-flight 锁 + pending 快照防并发（仿 optAutoSave）")
+    assert "openWorkbench" not in body, "自动保存成功不能 openWorkbench（静默）"
+
+
+def test_cut_decision_changes_trigger_auto_save():
+    """REQ-20260925-NNN：切分修剪 4 个改判入口末尾必须调 cutAutoSave（自动落盘）。"""
+    src = _router_src()
+    for fn in ("function cutFlipMark", "function cutApplyAct",
+               "function cutBatchApply", "function cutSpkDelete"):
+        i = src.find(fn)
+        assert i > 0, f"必须有 {fn}"
+        # 取函数体：到下一个 2 空格缩进的 "  }\n"
+        body = src[i:src.find("\n  }\n", i)]
+        assert "cutAutoSave()" in body, f"{fn} 末尾必须调 cutAutoSave() 自动保存"
+
+
 def test_open_workbench_pauses_stale_videos_before_rerender():
     """③b 工作台重渲染前必须暂停浮层 + 工作台里的所有视频（防旧播放器裸播）。"""
     src = _router_src()
@@ -12230,6 +12255,30 @@ def test_opt_final_video_js():
         "行定位播放必须把最终视频模式切回粗剪源")
     # 委托分支
     assert "action === 'opt-final-video'" in src and "optFinalVideoView(target)" in src
+
+
+def test_opt_player_highlight_center_on_hit_change():
+    """REQ-20260925-NNN：优化字幕播放跟随滚动居中 — block:'center' + _optLastHit
+    守卫（命中行变化才滚），去掉 block:'nearest'。"""
+    src = _router_src()
+    h = src.find("function optPlayerHighlight")
+    assert h > 0, "必须有 optPlayerHighlight"
+    body = src[h:src.find("\n  }\n", h)]
+    assert "block: 'center'" in body, "播放跟随滚动必须居中（block: 'center'）"
+    assert "block: 'nearest'" not in body, "播放跟随滚动不能再是 nearest"
+    assert "_optLastHit" in body, (
+        "必须有 _optLastHit 守卫 — 命中行变化才滚，防同一行内每帧回拉用户滚动")
+
+
+def test_cut_hl_selection_follows_playback_and_centers():
+    """REQ-20260925-NNN：切分修剪播放时选中态（kbsel）跟随播放行 + 命中行变化才居中。"""
+    src = _router_src()
+    i = src.find("var cutHL = function(tms)")
+    assert i > 0, "必须有 cutHL 闭包"
+    body = src[i:src.find("\n      };", i)]
+    assert "toggle('kbsel'" in body, "选中态 kbsel 必须跟随播放行"
+    assert "block: 'center'" in body, "播放跟随滚动必须居中"
+    assert "block: 'nearest'" not in body, "播放跟随滚动不能再是 nearest"
 
 
 def test_task_actions_wrap():

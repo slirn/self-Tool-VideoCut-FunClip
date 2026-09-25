@@ -1925,14 +1925,15 @@
       + ' · 保留段 ' + (cutKeepIdx + 1) + '/' + cutKeepSeq.length
       + ' · 对应视频 ' + cutFmtMS(v.currentTime * 1000);
   }
-  // 翻转子段标记（未保存纯前端；data-mark 与 data-mark-init 供「有手工修改」判断）
+  // 翻转子段标记（自动保存落盘；data-mark 与 data-mark-init 供「有手工修改」判断）
   function cutFlipMark(row) {
     var nw = (row.getAttribute('data-mark') || 'keep') === 'keep' ? 'delete' : 'keep';
     row.setAttribute('data-mark', nw);
     row.classList.toggle('mark-delete', nw === 'delete');
     var el = row.querySelector('.slirn-cut-mark');
     if (el) el.textContent = nw === 'keep' ? '✅ 保留' : '❌ 删除';
-    toast(nw === 'keep' ? '已翻转为 ✅ 保留（未保存）' : '已翻转为 ❌ 删除（未保存）');
+    toast(nw === 'keep' ? '已翻转为 ✅ 保留' : '已翻转为 ❌ 删除');
+    cutAutoSave();
   }
   // ===== 字幕级改判 K/D/S（REQ-20260916-011 M3）：作用于选中行所属的字幕（组）=====
   // 空=维持原状 · delete=整条删 · keep=原切分不切了整段保留 · split=改为切分（展开编辑区）
@@ -1946,18 +1947,19 @@
     if (!val) {  // 维持原状 → 取消改判
       g.removeAttribute('data-act');
       cutActBadge(g, '');
-      toast('已取消改判（维持原状）— 未保存');
-      return;
-    }
-    g.setAttribute('data-act', val);
-    cutActBadge(g, val);
-    if (val === 'split') {
-      cutOpenResplit(g);  // 切分需要内容：展开编辑区（预填原文/当前切分后文字）
-      toast('✂️ 已改判切分 — 填写切分后内容后点「重新切分」（未保存）');
+      toast('已取消改判（维持原状）');
     } else {
-      toast((val === 'keep' ? '✅ 已改判整条保留' : '❌ 已改判整条删除')
-        + '（子段标记不再参与执行）— 未保存');
+      g.setAttribute('data-act', val);
+      cutActBadge(g, val);
+      if (val === 'split') {
+        cutOpenResplit(g);  // 切分需要内容：展开编辑区（预填原文/当前切分后文字）
+        toast('✂️ 已改判切分 — 填写切分后内容后点「重新切分」');
+      } else {
+        toast((val === 'keep' ? '✅ 已改判整条保留' : '❌ 已改判整条删除')
+          + '（子段标记不再参与执行）');
+      }
     }
+    cutAutoSave();
   }
   function cutApplyDecision(val) {
     var rows = cutRows();
@@ -2213,7 +2215,7 @@
     var rows = cutSpkRows().filter(function(r) { return r.getAttribute('data-spk') === spk; });
     if (!rows.length) { toast('👤' + spk + ' 无匹配字幕记录', 'error'); return; }
     if (!window.confirm('把人员 👤' + spk + ' 的 ' + rows.length + ' 条字幕记录全部改判删除？\n'
-      + '（未保存 — 可逐条/逐组翻回；点「💾 保存切分决策」后落盘并影响成片）')) return;
+      + '（可逐条/逐组翻回，自动保存后影响成片）')) return;
     cutCloseResplit();
     var nWhole = 0, nSub = 0;
     rows.forEach(function(r) {
@@ -2234,7 +2236,8 @@
     });
     cutSpkBarRender();
     toast('❌ 👤' + spk + ' 已改判删除：整段 ' + nWhole + ' + 子段 ' + nSub
-      + '（未保存 — 可翻回；其记录已不计入统计，点「🧮 重新统计」可确认清零）');
+      + '（可翻回；其记录已不计入统计，点「🧮 重新统计」可确认清零）');
+    cutAutoSave();
   }
 
   // ===== REQ-20260919-068：字幕修订阶段关联人员 ID =====
@@ -5117,6 +5120,7 @@
   // REQ-20260923-NNN 查看最终视频：播放器切到 optimize_compose（时间轴已前移）—
   // 行 ms 是粗剪时间基，高亮/跳播在此模式下暂停；点任意字幕行切回粗剪源
   var _optFinalVideo = false;
+  var _optLastHit = -1;  // 上次播放命中行（REQ-20260925-NNN：命中行变化才居中，防每帧回拉）
   function playOptAt(tid, startMs) {  // 行定位播放（成片时间基 — ?src=rough_compose 源）
     var wrap = revVis('slirn-opt-player-wrap');
     var v = revVis('slirn-opt-player');
@@ -5129,6 +5133,7 @@
     }
     // REQ-20260918-054：首次绑定 timeupdate + seeked 跟高亮（幂等）
     bindOptPlayerHighlight();
+    _optLastHit = -1;  // 每次点行都立刻把命中行滚到中间（REQ-20260925-NNN）
     var goO = function() {
       // REQ-20260922-NNN：起点若落在已删除块内 → 推进到块尾后（点删除行 =
       // 从其后内容播起，与切分修剪「点删除内容播下一个保留区间」同口径）
@@ -5164,11 +5169,15 @@
       if (tms >= s0 && tms < eEff) { hit = i; break; }
       if (s0 > tms) break;
     }
+    // REQ-20260925-NNN：命中行变化才滚到中间，避免同一行内每帧 timeupdate 反复
+    // 回拉用户手动滚动（block:'center' 与 nearest 不同，已可见也会强制居中）
+    var changed = (hit !== _optLastHit);
+    _optLastHit = hit;
     for (var j = 0; j < rows.length; j++) {
       rows[j].classList.toggle('active', j === hit);
     }
-    if (hit >= 0 && rows[hit] && rows[hit].scrollIntoView) {
-      try { rows[hit].scrollIntoView({block: 'nearest'}); } catch (err) {}
+    if (changed && hit >= 0 && rows[hit] && rows[hit].scrollIntoView) {
+      try { rows[hit].scrollIntoView({block: 'center'}); } catch (err) {}
     }
   }
   function bindOptPlayerHighlight() {  // 幂等：video 替换后由 v.dataset 标记防重复
@@ -5341,8 +5350,8 @@
       + '<button type="button" data-action="opt-page-next"' + (optWordsCurrentPage >= pages ? ' disabled' : '') + '>下一页 ›</button>';
   }
   // 保存切分决策：全量收集子段 mark + 组级 action（改判 split 附切分后内容）→ 落盘
-  function cutSave(btn) {
-    var tid = btn.getAttribute('data-task-id') || '';
+  // 收集逻辑抽成 cutCollectSave，供手动保存（cutSave）与自动保存（cutAutoSave）复用
+  function cutCollectSave() {
     var marks = {};
     cutRows().forEach(function(r) {
       if (r.classList.contains('sub') && r.getAttribute('data-id'))
@@ -5362,12 +5371,44 @@
       if (!tv) badSplit = g.getAttribute('data-source-i');
       targets[g.getAttribute('data-source-i') || ''] = tv;
     });
-    if (badSplit !== null) {
-      toast('❌ 第 ' + badSplit + ' 条已改判切分，但未填写切分后内容 — 按 S 或点 ✂️ 填写后重切', 'error');
+    return {marks: marks, acts: acts, targets: targets, badSplit: badSplit};
+  }
+  function cutTaskId() {  // 当前工作台任务 id（自动保存不持有按钮/行引用时用）
+    var wb = document.getElementById('slirn-tab-workbench-inner');
+    return wb ? (wb.getAttribute('data-task-id') || '') : '';
+  }
+  // REQ-20260925-NNN：决策改判后台自动保存（静默，不 openWorkbench — 不断播放）
+  // 仿 optAutoSave 的 in-flight 锁 + pending 快照，连续改判只留最后一次
+  var _cutSaveInFlight = false;
+  var _cutSavePending = false;
+  function cutAutoSave() {
+    var tid = cutTaskId();
+    if (!tid) return;
+    if (_cutSaveInFlight) { _cutSavePending = true; return; }
+    var c = cutCollectSave();
+    if (c.badSplit !== null) return;  // 改判 split 未填内容：静默跳过（重新切分/手动保存兜底）
+    _cutSaveInFlight = true;
+    postJSON(SLIRN_API + '/save_cut_decisions',
+             {task_id: tid, manual_marks: c.marks, actions: c.acts, split_targets: c.targets})
+      .then(function(r) {
+        if (r && r.ok) toast('✅ 已自动保存', 'success');
+        else if (r && r.error) toast('❌ 自动保存失败：' + r.error, 'error');
+      })
+      .catch(function() { toast('❌ 自动保存失败（网络错误）', 'error'); })
+      .then(function() {
+        _cutSaveInFlight = false;
+        if (_cutSavePending) { _cutSavePending = false; cutAutoSave(); }
+      });
+  }
+  function cutSave(btn) {  // 手动保存：落盘 + 刷新阶段态（进入优化字幕）— 仍 openWorkbench
+    var tid = btn.getAttribute('data-task-id') || '';
+    var c = cutCollectSave();
+    if (c.badSplit !== null) {
+      toast('❌ 第 ' + c.badSplit + ' 条已改判切分，但未填写切分后内容 — 按 S 或点 ✂️ 填写后重切', 'error');
       return;
     }
     postJSON(SLIRN_API + '/save_cut_decisions',
-             {task_id: tid, manual_marks: marks, actions: acts, split_targets: targets})
+             {task_id: tid, manual_marks: c.marks, actions: c.acts, split_targets: c.targets})
       .then(function(r) {
         if (r && r.ok) { toast(r.toast || '切分决策已保存'); openWorkbench(tid); }
         else if (r && r.error) toast('❌ ' + r.error, 'error');
@@ -5399,9 +5440,17 @@
             : Infinity;
           if (tms >= eh && tms < nh) hit = lastHit;
         }
+        // REQ-20260925-NNN：选中态（kbsel）跟随播放 — 播放到哪条就把哪条置为选中，
+        // 并滚到列表中间（命中行变化才滚，防每帧回拉用户手动滚动）。
+        var changed = (hit !== lastHit);
         lastHit = hit;
-        for (var j = 0; j < rows.length; j++) rows[j].classList.toggle('active', j === hit);
-        if (hit >= 0 && rows[hit] && rows[hit].scrollIntoView) rows[hit].scrollIntoView({block: 'nearest'});
+        for (var j = 0; j < rows.length; j++) {
+          rows[j].classList.toggle('active', j === hit);
+          if (hit >= 0) rows[j].classList.toggle('kbsel', j === hit);
+        }
+        if (changed && hit >= 0 && rows[hit] && rows[hit].scrollIntoView) {
+          rows[hit].scrollIntoView({block: 'center'});
+        }
       };
       v.addEventListener('timeupdate', function() {
         var tms = v.currentTime * 1000;
@@ -5422,9 +5471,8 @@
               cutKeepIdx++;
               var nxt = cutKeepSeq[cutKeepIdx];
               try { v.currentTime = nxt.s / 1000; } catch (err) {}
-              // 不移动 kbsel（REQ-20260917-027）：跳播/播放位置的高亮由 ② 的
-              // .active 跟随；kbsel 是键盘/鼠标的决策目标，保持在用户选中的行 —
-              // 快捷键删除过的行点击后选中不再被跳播抢走，可立即用下拉改回
+              // REQ-20260925-NNN：跳播跳转本身不直接改选中/高亮，return 后由下一帧
+              // timeupdate 的 cutHL 统一把 .active/.kbsel 移到实际播放行（选中跟随播放）
               if (cutKeepMode === 'group') cutAuditionBar(v);
               return;  // 跳转后的首个 timeupdate 再走高亮，防旧位置误亮
             }
@@ -5758,7 +5806,7 @@
     if (wholes.length) parts.push('整段行 ' + wholes.length + ' 条（改组级决策）');
     if (subs.length) parts.push('子段行 ' + subs.length + ' 条（改去留标记）');
     if (!window.confirm('把第 ' + rg.s + ' ～ ' + rg.e + ' 条改为「' + label + '」？\n'
-        + parts.join(' · ') + '\n（未保存 — 保存前可继续调整）')) return;
+        + parts.join(' · ') + '\n（保存前可继续调整）')) return;
     wholes.forEach(function(r) {  // 整段行 → 组级决策（与 actsel 同效；静默不逐条 toast）
       var g = r.closest('.slirn-cut-group');
       if (!g) return;
@@ -5772,7 +5820,8 @@
     });
     var spkBar = document.getElementById('slirn-cut-spk-bar');  // 仅计未删除口径跟随刷新
     if (spkBar && spkBar.getAttribute('data-linked') === '1') cutSpkBarRender();
-    toast('🧮 已批量设置 ' + n + ' 条 →「' + label + '」（未保存 — 记得保存切分决策）');
+    toast('🧮 已批量设置 ' + n + ' 条 →「' + label + '」');
+    cutAutoSave();
   }
 
   // ===== 状态跳转（REQ-20260917-025）：独立状态选择列表 + 完整列表内跳上/下一条 =====
