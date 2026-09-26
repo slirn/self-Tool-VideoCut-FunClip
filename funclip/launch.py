@@ -10,8 +10,9 @@ import argparse
 import tempfile
 from datetime import datetime
 import gradio as gr
-from funasr import AutoModel
-from videoclipper import VideoClipper
+# REQ-20260926-NNN：funasr / videoclipper 的 import 必须延后到原始 FunClip 分支。
+# 否则即使走 slirn 分支，模块级导入也会触发 torch.multiprocessing.spawn 子进程
+# → 启动 pyenv pythonw 副本争 7861，导致服务卡死。
 from llm.openai_api import openai_call
 from llm.qwen_api import call_qwen_model
 from llm.g4f_openai_api import g4f_openai_call
@@ -31,6 +32,7 @@ if __name__ == "__main__":
 
     # ---- Slirn 自定义首页分支（REQ-20260914-001-B）----
     if args.home == "slirn":
+        print("[launch.py] entering slirn branch", flush=True)
         import sys
         from pathlib import Path
         # 把 funclip-main 仓库根加到 sys.path（slirn_home 在那里）
@@ -130,6 +132,11 @@ if __name__ == "__main__":
                 time.sleep(3600)
         sys.exit(0)
     
+    # REQ-20260926-NNN：原始 FunClip 分支才需要 funasr/videoclipper（slirn 分支不需要）。
+    # 必须延后到这里，否则 torch.multiprocessing.spawn 会立刻启 pyenv pythonw 副本争 7861。
+    from funasr import AutoModel
+    from videoclipper import VideoClipper
+
     if args.lang == 'zh':
         if hasattr(args, 'model') and args.model == 'fun-asr-nano':
             funasr_model = AutoModel(model="FunAudioLLM/Fun-ASR-Nano-2512",
