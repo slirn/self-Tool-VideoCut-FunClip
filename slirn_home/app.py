@@ -33,6 +33,9 @@ from slirn_home.paths import ensure_tasklib_importable
 
 ensure_tasklib_importable()
 
+# REQ-20260926-NNN：用户管理 + 会话
+from slirn_home.auth import AuthStore as _AuthStore  # noqa: E402
+
 from tasklib import TaskManager, TaskNotFoundError, TaskStatus  # noqa: E402
 from tasklib.hotword_lib import HotwordLibrary  # noqa: E402
 
@@ -179,8 +182,31 @@ def _status_dot_class(status) -> str:
     return "progress"
 
 
-def _render_task_list(mgr: TaskManager) -> str:
-    summaries = mgr.list()
+def _render_task_list(
+    mgr: TaskManager,
+    scope: str = "mine",
+    current_user: dict | None = None,
+    memberships: list[str] | None = None,
+) -> str:
+    # REQ-20260926-NNN：按用户可见性过滤
+    if current_user and not current_user.get("is_admin") and scope == "mine":
+        summaries = mgr.list_for_user(
+            current_user.get("username", ""),
+            is_admin=False,
+            member_of=memberships or [],
+        )
+    else:
+        summaries = mgr.list()
+    is_admin = bool(current_user and current_user.get("is_admin"))
+    # scope radio（admin 才能选「全部」）
+    scope_html = (
+        '<div class="slirn-scope-toggle">'
+        '<label><input type="radio" name="slirn-task-scope" value="mine"' +
+        (' checked' if scope != "all" else '') + '> 我的</label>'
+        '<label><input type="radio" name="slirn-task-scope" value="all"' +
+        (' checked' if scope == "all" else '') + '> 全部</label>'
+        '</div>'
+    ) if current_user else ''
 
     cards = ""
     for s in summaries:
@@ -218,6 +244,7 @@ def _render_task_list(mgr: TaskManager) -> str:
 
     return f'''<div id="slirn-tab-tasks-inner" class="slirn-tab-inner">
     <div class="slirn-toolbar">
+        {scope_html}
         <div class="slirn-search-wrap">
             <input class="slirn-search-box" id="slirn-task-search" placeholder="搜索任务名 / ID / 视频..." />
         </div>
@@ -5045,12 +5072,41 @@ def _render_hotword_picker(repo_root: Path) -> str:
         sections += f'''<div class="slirn-category-section slirn-pick-section" data-category="{cat_id}">
             <div class="slirn-category-title">
                 <span class="slirn-cat-name">{cat_id} <span class="slirn-category-count">{len(words)}</span></span>
+                <button class="slirn-btn-mini" data-action="hw-cat-select-all" title="全选该分类所有热词">☑ 全选</button>
+                <button class="slirn-btn-mini" data-action="hw-cat-invert" title="反选该分类所有热词">⇄ 反选</button>
             </div>
             <div class="slirn-hotword-grid">{cells}</div>
         </div>'''
     if not sections:
         sections = '<div class="slirn-empty"><div class="slirn-empty-text">公共热词库为空 — 先去「📚 热词库」添加</div></div>'
     return sections
+
+# REQ-20260926-NNN：AI 热词分析面板（输入框 + URL + 结果候选 + 加入任务/公共库）
+#   REQ-20260926-NNN-b：默认折叠，需要时点 summary 展开
+def _render_hotword_analysis_section() -> str:
+    return (
+        '<details class="slirn-hw-analysis-collapsible" style="margin-top:14px;">'
+        '  <summary>🤖 AI 热词分析 <small style="opacity:.6;font-weight:400;">— 点此展开（默认折叠以保持页面紧凑）</small></summary>'
+        '  <div class="slirn-form-row" style="padding-top:10px;">'
+        '    <textarea class="slirn-textarea" id="slirn-hw-analysis-requirement" rows="2"'
+        '              placeholder="描述需求 / 主题，例如：这是一档讲 RAG 与向量数据库的播客，主持人叫张老师"></textarea>'
+        '    <input class="slirn-input" id="slirn-hw-analysis-url" style="margin-top:8px;"'
+        '           placeholder="（可选）粘贴文章 / 字幕 URL，AI 会读取内容一起分析" />'
+        '    <input class="slirn-input" id="slirn-hw-analysis-hint" style="margin-top:8px;"'
+        '           placeholder="（可选）页面区域 / 选择器 / 文字说明 — 例如 #article, .post-content, 或「找正文部分」" />'
+        '    <div style="display:flex; gap:8px; margin-top:8px; align-items:center;">'
+        '      <button class="slirn-btn slirn-btn-primary" data-action="hw-analyze">🔍 分析</button>'
+        '      <span class="slirn-status-msg" id="slirn-hw-analysis-status" style="flex:1;"></span>'
+        '    </div>'
+        '    <div class="slirn-form-hint" style="margin-top:10px;">✅ 候选（点击选中要采纳的词）</div>'
+        '    <div class="slirn-hotword-grid" id="slirn-hw-analysis-grid"></div>'
+        '    <div style="display:flex; gap:8px; margin-top:10px;">'
+        '      <button class="slirn-btn slirn-btn-primary" data-action="hw-analysis-add-task">➕ 选中的加入任务</button>'
+        '      <button class="slirn-btn" data-action="hw-analysis-add-public">📚 选中的加入公共库</button>'
+        '    </div>'
+        '  </div>'
+        '</details>'
+    )
 
 def _render_hotword_lib(repo_root: Path) -> str:
     hwlib = HotwordLibrary(repo_root)
@@ -5099,14 +5155,14 @@ def _render_hotword_lib(repo_root: Path) -> str:
         <div class="slirn-form-grid">
             <div class="slirn-form-row">
                 <label class="slirn-form-label">词</label>
-                <textarea class="slirn-input" id="slirn-hw-word" rows="3" placeholder="例如：张老师（多个用空格 / 逗号 / 换行分隔）"></textarea>
+                <textarea class="slirn-input" id="slirn-hw-word" rows="3" placeholder="例如：张老师（多个用半角逗号或换行分隔）"></textarea>
             </div>
             <div class="slirn-form-row">
                 <label class="slirn-form-label">分类</label>
                 <input class="slirn-input" id="slirn-hw-category" placeholder="例如：讲师（留空 = 默认）" />
             </div>
         </div>
-        <div class="slirn-form-hint">💡 支持一次添加多个词（空格 / 逗号 / 换行分隔），已存在的词会自动跳过</div>
+        <div class="slirn-form-hint">💡 支持一次添加多个词（半角逗号或换行分隔），已存在的词会自动跳过</div>
         <button class="slirn-btn slirn-btn-primary" data-action="hw-add" style="margin-top:12px;">➕ 添加</button>
         <div class="slirn-status-msg" id="slirn-hw-status" style="display:none;"></div>
     </div>'''
@@ -5161,12 +5217,26 @@ def _render_create_task(repo_root: Path, edit=None) -> str:
                 )
         manual_words = [w for w in (edit.hotwords_path.read_text(encoding="utf-8").split()
                                     if edit.hotwords_path.exists() else []) if sources.get(w) == "manual"]
+        # REQ-20260926-NNN：回填 manual textarea 用「半角逗号+换行」拼接
+        # （不能用空格，否则 separator 改后多词热词被塌缩成一个）
+        manual_text_value = ("," + chr(10)).join(manual_words)
         return f'''<div id="slirn-tab-create-inner" class="slirn-tab-inner">
     <div id="slirn-edit-state"
          data-task-id="{_esc(edit.task_id)}"
          data-video-path="{_esc(str(src).replace(chr(92), '/'))}"
          data-video-url="/slirn/api/video/{_esc(edit.task_id)}?src=original"
          data-duration-seconds="{float(dur) if dur else 0}"></div>
+    <div class="slirn-card" style="margin-bottom:14px;">
+        <div style="display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap;">
+            <div class="slirn-form-hint" style="margin:0;">
+                正在编辑任务 <strong>{_esc(edit.name)}</strong>（{_esc(edit.task_id)}）— 可直接跳到剪辑工作台查看/操作各阶段
+            </div>
+            <button class="slirn-btn slirn-btn-primary"
+                    data-action="open-workbench"
+                    data-task-id="{_esc(edit.task_id)}"
+                    data-task-label="{_esc(edit.name)}">✂️ 进入剪辑工作台 →</button>
+        </div>
+    </div>
     <div class="slirn-card">
         <div class="slirn-panel-header">
             <div class="slirn-panel-title">📁 步骤 1 · 原视频（编辑模式，不可更换）</div>
@@ -5235,14 +5305,33 @@ def _render_create_task(repo_root: Path, edit=None) -> str:
                 </div>
             </div>
 
-            <div class="slirn-form-hint" style="margin-top:14px;">③ <strong>手动输入</strong>（空格 / 换行分隔 · 与上面两个叠加）</div>
-            <textarea class="slirn-textarea" id="slirn-hotwords-manual" rows="3" placeholder="手动输入热词...">{_esc(' '.join(manual_words))}</textarea>
+            <div class="slirn-form-hint" style="margin-top:14px;">③ <strong>手动输入</strong>（半角逗号或换行分隔 · 与上面两个叠加）</div>
+            <textarea class="slirn-textarea" id="slirn-hotwords-manual" rows="3" placeholder="手动输入热词（多个用半角逗号或换行分隔）">{_esc(manual_text_value)}</textarea>
+            {_render_hotword_analysis_section()}
 
             <div class="slirn-form-hint" style="margin-top:14px;">✅ <strong>最终生效的热词</strong>（点击 ✕ 可移除）</div>
             <div class="slirn-hw-chips" id="slirn-hw-chips"></div>
             <div class="slirn-hw-summary" id="slirn-hw-summary"></div>
         </div>
     </div>
+
+    <!-- REQ-20260926-NNN：成员管理（多用户协作）— 成员列表由 JS 拉成员端点动态渲染 -->
+    <details class="slirn-members-section" id="slirn-members-section"
+             data-task-id="{_esc(edit.task_id)}"
+             data-created-by="{_esc(edit.created_by or '')}">
+        <summary>👥 成员管理（多用户协作）</summary>
+        <div class="slirn-form-hint" style="margin:8px 0 4px;">
+            创建者与 admin 始终可访问；成员可查看 / 编辑该任务并出现在其「我的任务」里。
+        </div>
+        <div id="slirn-member-list"></div>
+        <div style="display:flex; gap:8px; margin-top:10px; flex-wrap:wrap;">
+            <input class="slirn-input" id="slirn-member-add-name" placeholder="要添加的用户名"
+                   style="flex:1; min-width:160px;" />
+            <button class="slirn-btn" data-action="member-add"
+                    data-task-id="{_esc(edit.task_id)}">➕ 添加成员</button>
+        </div>
+        <div id="slirn-member-msg" class="slirn-form-hint" style="margin-top:6px;"></div>
+    </details>
 
     <div style="display:flex; gap:12px;">
         <button class="slirn-btn slirn-btn-primary" data-action="update-task" data-task-id="{_esc(edit.task_id)}" style="flex:1;">💾 保存修改</button>
@@ -5324,8 +5413,9 @@ def _render_create_task(repo_root: Path, edit=None) -> str:
                 </div>
             </div>
 
-            <div class="slirn-form-hint" style="margin-top:14px;">③ <strong>手动输入</strong>（空格 / 换行分隔 · 与上面两个叠加）</div>
-            <textarea class="slirn-textarea" id="slirn-hotwords-manual" rows="3" placeholder="手动输入热词..."></textarea>
+            <div class="slirn-form-hint" style="margin-top:14px;">③ <strong>手动输入</strong>（半角逗号或换行分隔 · 与上面两个叠加）</div>
+            <textarea class="slirn-textarea" id="slirn-hotwords-manual" rows="3" placeholder="手动输入热词（多个用半角逗号或换行分隔）"></textarea>
+            {_render_hotword_analysis_section()}
 
             <div class="slirn-form-hint" style="margin-top:14px;">✅ <strong>最终生效的热词</strong>（点击 ✕ 可移除）</div>
             <div class="slirn-hw-chips" id="slirn-hw-chips"></div>
@@ -5417,6 +5507,7 @@ def build_app(repo_root: Path | None = None) -> gr.Blocks:
         repo_root = find_slirn_standalone_root()
 
     mgr = TaskManager(repo_root)
+    auth = _AuthStore(repo_root)                      # REQ-20260926-NNN：用户/会话/成员扁平文件存储
 
     app = gr.Blocks(title="Video Studio — 自定义首页")
     _inject_css_and_js(app)
@@ -5436,6 +5527,12 @@ def build_app(repo_root: Path | None = None) -> gr.Blocks:
             <button class="slirn-btn-icon" data-action="open-llm-settings" aria-label="大模型设置" title="大模型设置">⚙️</button>
             <button class="slirn-btn-icon" onclick="window.slirnToggleTheme && window.slirnToggleTheme()" aria-label="切换主题" title="切换主题">🌓</button>
             <a class="slirn-btn" href="http://127.0.0.1:7860/" target="_blank">🚀 上游首页</a>
+            <span class="slirn-current-user" id="slirn-current-user" style="display:none;">
+                👤 <span id="slirn-current-user-name"></span>
+                <button class="slirn-btn-mini" data-action="users-open" id="slirn-users-open-btn" style="display:none;" title="用户管理">用户管理</button>
+                <button class="slirn-btn-mini" data-action="logout">登出</button>
+            </span>
+            <button class="slirn-btn-icon" data-action="show-login" id="slirn-login-btn" title="登录">🔑</button>
         </div>
     </div>
 
@@ -5457,6 +5554,45 @@ def build_app(repo_root: Path | None = None) -> gr.Blocks:
     <div id="slirn-tab-hotwords" class="slirn-tab-content" style="display:none;">{_render_hotword_lib(repo_root)}</div>
     <div id="slirn-tab-detail" class="slirn-tab-content" style="display:none;"></div>
     <div id="slirn-tab-workbench" class="slirn-tab-content" style="display:none;"></div>
+
+    <!-- REQ-20260926-NNN：登录 modal（默认隐藏） -->
+    <div class="slirn-modal" id="slirn-login-modal" style="display:none;">
+        <div class="slirn-modal-card">
+            <h3>🔑 登录</h3>
+            <div class="slirn-form-row">
+                <label class="slirn-form-label">用户名</label>
+                <input class="slirn-input" id="slirn-login-username" placeholder="用户名" autocomplete="username">
+            </div>
+            <div class="slirn-form-row">
+                <label class="slirn-form-label">密码</label>
+                <input class="slirn-input" id="slirn-login-password" type="password" placeholder="密码" autocomplete="current-password">
+            </div>
+            <div class="slirn-form-hint" id="slirn-login-hint" style="display:none;"></div>
+            <div style="display:flex; gap:8px; margin-top:14px;">
+                <button class="slirn-btn slirn-btn-primary" data-action="do-login" style="flex:1;">登录</button>
+                <button class="slirn-btn" data-action="hide-login" style="flex:1;">取消</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- REQ-20260926-NNN：用户管理 modal（仅 admin 可用，默认隐藏） -->
+    <div class="slirn-modal" id="slirn-users-modal" style="display:none;">
+        <div class="slirn-modal-card" style="width:460px;">
+            <h3>👤 用户管理</h3>
+            <div id="slirn-users-list"></div>
+            <div class="slirn-form-hint" style="margin:12px 0 4px;">➕ 创建新用户</div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                <input class="slirn-input" id="slirn-users-new-name" placeholder="用户名" style="flex:1; min-width:110px;">
+                <input class="slirn-input" id="slirn-users-new-pw" type="password" placeholder="密码 ≥4 位" style="flex:1; min-width:110px;">
+                <label class="slirn-sd-toggle"><input type="checkbox" id="slirn-users-new-admin"> admin</label>
+                <button class="slirn-btn slirn-btn-primary" data-action="users-create">创建</button>
+            </div>
+            <div class="slirn-form-hint" id="slirn-users-msg" style="margin-top:8px;"></div>
+            <div style="display:flex; justify-content:flex-end; margin-top:12px;">
+                <button class="slirn-btn" data-action="users-close">关闭</button>
+            </div>
+        </div>
+    </div>
     '''
 
     with app:
@@ -5573,7 +5709,7 @@ def build_app(repo_root: Path | None = None) -> gr.Blocks:
                 return _render_create_task(repo_root)
             src = Path(fp)
             final_name = name.strip() or src.stem
-            hotwords = [w.strip() for w in hotwords_text.replace("\n", " ").split() if w.strip()]
+            hotwords = [w.strip() for w in _re.split(r"[,\n，;；、]+", hotwords_text) if w.strip()]
             segment = None
             segment_temp = None
             seg_filename = None
@@ -5622,12 +5758,37 @@ def build_app(repo_root: Path | None = None) -> gr.Blocks:
         btn_hw_add.click(fn=on_hw_add, inputs=[hidden_hw_word, hidden_hw_cat], outputs=[])
 
     # 注册自定义 FastAPI 路由 — 绕过 Gradio 队列（POST 同步返回 JSON）
-    _register_slirn_api(app, mgr, repo_root)
+    _register_slirn_api(app, mgr, repo_root, auth)
 
     return app
 
 
-def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> None:
+def slirn_task_access(mgr: "TaskManager", auth: "_AuthStore"):
+    """REQ-20260926-NNN：构造 task_access(user, tid) -> bool 给 auth 中间件用。
+
+    admin → True；创建者 → True；成员 → True；其他 → False。
+    任务不存在 → True（放行，由端点自己报「任务不存在」，保住 404 语义）。
+    """
+    def _check(user: dict, tid: str) -> bool:
+        try:
+            t = mgr.get(tid)
+        except Exception:                       # noqa: BLE001 — 不存在/坏数据 → 端点兜底
+            return True
+        if user.get("is_admin"):
+            return True
+        username = user.get("username")
+        if getattr(t, "created_by", None) == username:
+            return True
+        return username in auth.list_task_members(tid)
+    return _check
+
+
+def _register_slirn_api(
+    app: gr.Blocks, mgr: TaskManager, repo_root: Path, auth: _AuthStore,
+) -> None:
+    # REQ-20260926-NNN：从 contextvar 读当前 user（中间件已 set，端点直接 get）
+    # 绕开 Gradio 6 把任意额外参数当 query 的 bug — 不在端点参数位声明 Request/Depends
+    from slirn_home.auth import get_current_user_from_context as _get_cur_user
     """为 Gradio app 注册自定义 /slirn/api/* 路由 — 同步返回 JSON，绕过 Gradio 队列。
 
     路由返回格式：{"ok": true, "html": "...", "toast": "...", "file_info": {...}, "cut_done": {...}}
@@ -5820,8 +5981,9 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             tokens = [str(w).strip() for w in words_raw]
         else:
             raw = body.get("word") or ""
-            # 切分：换行 / 制表 / 逗号 / 分号 / 全角逗号 / 空白
-            tokens = _re.split(r"[\s,，;；、]+", str(raw))
+            # 切分：半角逗号 / 换行 / 全角逗号 / 分号 / 顿号（空格不算分隔符，
+            # 保留多词热词如 "machine learning"）
+            tokens = _re.split(r"[,\n，;；、]+", str(raw))
             tokens = [t.strip() for t in tokens]
         tokens = [t for t in tokens if t]
         if not tokens:
@@ -5847,6 +6009,74 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         else:
             return _err(f"全部为重复词：{', '.join(dup[:5])}")
         return _ok(_render_hotword_lib(repo_root), toast=msg)
+
+    def _fetch_url_text(url: str) -> str:
+        """抓取 URL 内容并提纯为文本（URL → HTML → 文本）。
+        失败抛 RuntimeError；空内容抛 RuntimeError("empty")。"""
+        import re as _re2
+        try:
+            import httpx
+            resp = httpx.get(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 (slirn hotword analyzer)"},
+                timeout=20, follow_redirects=True,
+            )
+            html = resp.text or ""
+        except Exception as e:  # noqa: BLE001
+            raise RuntimeError(f"GET 失败: {e}") from e
+        # HTML → 纯文本（stdlib；不引 bs4 依赖）
+        # 1) 先剥 <script>/<style>/<noscript> 内容（保留标签不删，避免漏嵌套）
+        html = _re2.sub(r"<script\b[^>]*>.*?</script>", " ", html, flags=_re2.IGNORECASE | _re2.DOTALL)
+        html = _re2.sub(r"<style\b[^>]*>.*?</style>", " ", html, flags=_re2.IGNORECASE | _re2.DOTALL)
+        html = _re2.sub(r"<noscript\b[^>]*>.*?</noscript>", " ", html, flags=_re2.IGNORECASE | _re2.DOTALL)
+        # 2) 其余标签全剥
+        text = _re2.sub(r"<[^>]+>", " ", html)
+        # 3) 解码 HTML entities + 合并空白
+        import html as _html_mod
+        text = _html_mod.unescape(text)
+        text = _re2.sub(r"\s+", " ", text).strip()
+        if not text:
+            raise RuntimeError("empty")
+        return text
+
+    @app.app.post("/slirn/api/hotword_extract")
+    async def hotword_extract(body: dict = Body(default_factory=dict)):
+        """REQ-20260926-NNN：分析输入框/URL → LLM 提取热词（同步）。
+
+        入参：{"requirement": "...", "url": "..."}，二选一必填。
+        出参：{"ok": true, "candidates": [{"word","category"}, ...]}。
+        """
+        from slirn_home import llm_config, hotword_service
+
+        requirement = str(body.get("requirement") or "").strip()
+        url = str(body.get("url") or "").strip()
+        page_hint = str(body.get("page_hint") or "").strip()
+        parts: list[str] = []
+        if requirement:
+            parts.append(requirement)
+        if url:
+            try:
+                url_text = _fetch_url_text(url)
+            except RuntimeError as e:
+                msg = str(e)
+                if msg == "empty":
+                    return _err(f"抓取 URL 失败或为空：{url}")
+                return _err(f"抓取 URL 失败：{msg}（{url}）")
+            parts.append(f"\n\n[URL 内容]\n{url_text[:8000]}")
+        if not parts:
+            return _err("requirement 或 url 必填其一")
+        source = "\n\n".join(parts)
+
+        entry = llm_config.get_current_entry(repo_root)
+        if entry is None:
+            return _err("未注册任何大模型 — 请先点顶栏 ⚙️ 添加模型")
+        try:
+            candidates = hotword_service.extract_hotwords(
+                source, entry=entry, page_hint=page_hint,
+            )
+        except Exception as e:  # noqa: BLE001
+            return _err(str(e))
+        return _ok("", candidates=candidates)
 
     @app.app.post("/slirn/api/hw_remove")
     async def hw_remove(body: dict = Body(default_factory=dict)):
@@ -5885,8 +6115,12 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
         return _ok(_render_hotword_lib(repo_root), toast=toast)
 
     @app.app.post("/slirn/api/refresh_tasks")
-    async def refresh_tasks():
-        return _ok(_render_task_list(mgr))
+    async def refresh_tasks(body: dict = Body(default_factory=dict)):
+        # REQ-20260926-NNN：按用户可见性过滤（contextvar 由中间件 set）
+        user = _get_cur_user()
+        scope = str(body.get("scope") or "mine").strip() or "mine"
+        members = auth.list_user_tasks(user.get("username", "")) if user else []
+        return _ok(_render_task_list(mgr, scope=scope, current_user=user, memberships=members))
 
     @app.app.post("/slirn/api/view_task")
     async def view_task(body: dict = Body(default_factory=dict)):
@@ -5952,7 +6186,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
                     seen.add(w)
                     ordered.append(w)
                     word_sources[w] = "pick"
-        for w in manual_text.replace("\n", " ").split():
+        for w in _re.split(r"[,\n，;；、]+", manual_text):
             w = w.strip()
             if w and w not in seen:
                 seen.add(w)
@@ -9659,7 +9893,7 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
                     seen.add(w)
                     ordered.append(w)
                     word_sources[w] = "pick"
-        for w in manual_text.replace("\n", " ").split():
+        for w in _re.split(r"[,\n，;；、]+", manual_text):
             w = w.strip()
             if w and w not in seen:
                 seen.add(w)
@@ -9692,11 +9926,17 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
             else:
                 segment_temp = None
         try:
+            # REQ-20260926-NNN：记录创建者（未登录/测试 → None，按旧任务兼容）
+            creator = _get_cur_user().get("username")
             task = mgr.create(
                 name=final_name, original_video=src, segment=segment, hotwords=hotwords,
                 inherit_public=inherit_public,
                 hotword_sources=word_sources if word_sources else None,
+                created_by=creator,
             )
+            if creator:
+                # 创建者自动成为成员（admin 之外的用户凭成员资格访问）
+                auth.add_task_member(task.task_id, creator)
         except Exception as e:
             return _err(f"创建失败: {e}")
         if segment_temp is not None and segment_temp.exists() and seg_filename:
@@ -9849,3 +10089,10 @@ def _register_slirn_api(app: gr.Blocks, mgr: TaskManager, repo_root: Path) -> No
     @app.app.post("/slirn/api/cancel_create")
     async def cancel_create():
         return _ok(_render_task_list(mgr))
+
+    # ===== REQ-20260926-NNN：用户管理 + 会话 =====
+    from slirn_home.auth_routes import register_auth_endpoints as _register_auth
+    _register_auth(app, auth, repo_root)
+    # 中间件要在所有路由注册完后再 add_middleware（Starlette 顺序）
+    from slirn_home.auth import install_auth_middleware
+    install_auth_middleware(app.app, auth, task_access=slirn_task_access(mgr, auth))

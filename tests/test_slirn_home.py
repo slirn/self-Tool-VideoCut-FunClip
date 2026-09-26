@@ -240,3 +240,174 @@ def test_time_ago_invalid_string():
 
     assert _time_ago("not-a-date") == "未知"
     assert _time_ago(None) == "未知"
+
+
+# ---------- REQ-20260926-NNN：编辑任务页顶部「进入剪辑工作台」跳转 ----------
+
+def test_edit_task_page_has_open_workbench_jump():
+    """编辑任务页（_render_create_task edit 分支）顶部必须有
+    data-action="open-workbench" 按钮，data-task-id 用 edit.task_id 插值。
+    复用 router.js:7313 的 open-workbench action（→ openWorkbench）。"""
+    src = (FUNCLIP_ROOT / "slirn_home" / "app.py").read_text(encoding="utf-8")
+    i = src.find('id="slirn-edit-state"')
+    assert i > 0, "必须有 slirn-edit-state（编辑页隐藏状态 div）"
+    # 取整个 edit 分支 f-string 内容（到下一个 ''' 结束）
+    end = src.find("'''", i)
+    assert end > i, "edit 分支 f-string 未闭合"
+    edit_block = src[i:end]
+    assert 'data-action="open-workbench"' in edit_block, (
+        "编辑页顶部缺少 data-action=\"open-workbench\" 跳转按钮")
+    assert 'data-task-id="{_esc(edit.task_id)}"' in edit_block, (
+        "跳转按钮必须用 edit.task_id 插值（不能写死）")
+    # 必须出现中文「进入剪辑工作台」按钮文案
+    assert "进入剪辑工作台" in edit_block, "跳转按钮文案缺失"
+
+
+# ---------- REQ-20260926-NNN：编辑/剪辑页 URL hash 互斥持久化 ----------
+
+def test_task_page_hash_helpers_exist():
+    """REQ-20260926-NNN：编辑/剪辑页独立刷新需要 #edit=/#wb= hash 互斥持久化。"""
+    src = (FUNCLIP_ROOT / "slirn_home" / "static" / "router.js").read_text(encoding="utf-8")
+    for fn in ("_setTaskPageHash", "_clearTaskPageHash", "_loadEditTaskHTML",
+               "_restoreTaskPageFromHash"):
+        assert "function " + fn in src, f"缺少 helper {fn}"
+
+
+def test_open_workbench_writes_wb_hash():
+    """openWorkbench 必须写 #wb=<tid>（通过 _setTaskPageHash，自动清 #edit=）。"""
+    src = (FUNCLIP_ROOT / "slirn_home" / "static" / "router.js").read_text(encoding="utf-8")
+    i = src.find("function openWorkbench")
+    assert i > 0
+    body = src[i:src.find("\n  }\n", i)]
+    assert "_setTaskPageHash('wb'" in body, (
+        "openWorkbench 必须通过 _setTaskPageHash('wb', tid) 写 hash")
+
+
+def test_edit_task_action_writes_edit_hash():
+    """edit-task 成功路径必须写 #edit=<tid>。"""
+    src = (FUNCLIP_ROOT / "slirn_home" / "static" / "router.js").read_text(encoding="utf-8")
+    i = src.find("action === 'edit-task'")
+    assert i > 0
+    body = src[i:src.find("else if (action === 'open-workbench')")]
+    assert "_setTaskPageHash('edit'" in body, (
+        "edit-task 成功分支必须写 #edit=<tid> hash（刷新保留）")
+
+
+def test_cancel_create_and_goto_tabs_clear_hash():
+    """cancel-create 与 TAB_BUTTONS 跳转必须清 hash（防刷新跳回）。"""
+    src = (FUNCLIP_ROOT / "slirn_home" / "static" / "router.js").read_text(encoding="utf-8")
+    i = src.find("action === 'cancel-create'")
+    assert i > 0
+    body = src[i:src.find("else if (action === 'hw-add')")]
+    assert "_clearTaskPageHash" in body, "cancel-create 必须清 hash"
+    i = src.find("if (TAB_BUTTONS[action])")
+    assert i > 0
+    body = src[i:i + 400]
+    assert "_clearTaskPageHash" in body, (
+        "TAB_BUTTONS 跳转必须清 hash（防切走非 wb 页后刷新跳回任务页）")
+    assert "slirn-tab-workbench'" in body and "!== 'slirn-tab-workbench'" in body, (
+        "TAB_BUTTONS 跳转需豁免 workbench（进 wb 不清，由 openWorkbench 自己写）")
+
+
+def test_restore_hash_supports_both_wb_and_edit():
+    """_restoreTaskPageFromHash 必须同时识别 #wb= 和 #edit=。"""
+    src = (FUNCLIP_ROOT / "slirn_home" / "static" / "router.js").read_text(encoding="utf-8")
+    i = src.find("function _restoreTaskPageFromHash")
+    assert i > 0
+    body = src[i:src.find("\n  }\n", i)]
+    assert "kind === 'wb'" in body, "恢复函数必须识别 #wb="
+    assert "kind === 'edit'" in body, "恢复函数必须识别 #edit="
+    assert "_loadEditTaskHTML" in body, (
+        "#edit= 恢复必须调 _loadEditTaskHTML 注入编辑 HTML")
+    assert "openWorkbench" in body, "#wb= 恢复必须调 openWorkbench"
+    assert "DOMContentLoaded" in src, "DOMContentLoaded 绑定必须存在"
+
+
+# ---------- REQ-20260926-NNN：用户管理 + 登录 + 成员守卫 ----------
+
+def test_app_imports_auth_and_routes():
+    """app.py 必须 import AuthStore + register_auth_endpoints + install_auth_middleware。"""
+    src = (FUNCLIP_ROOT / "slirn_home" / "app.py").read_text(encoding="utf-8")
+    assert "from slirn_home.auth import AuthStore" in src or "AuthStore as _AuthStore" in src, (
+        "app.py 必须 import AuthStore")
+    assert "register_auth_endpoints" in src, "app.py 必须调 register_auth_endpoints"
+    assert "install_auth_middleware" in src, "app.py 必须调 install_auth_middleware"
+
+
+def test_app_renders_login_modal_and_topbar_user_indicator():
+    """UI 必须有登录 modal + topbar 用户指示 + 🔑 登录按钮。"""
+    src = (FUNCLIP_ROOT / "slirn_home" / "app.py").read_text(encoding="utf-8")
+    assert "slirn-login-modal" in src, "缺少登录 modal"
+    assert "slirn-current-user" in src, "缺少 topbar 用户指示"
+    assert 'data-action="show-login"' in src, "缺少登录按钮 (show-login)"
+    assert 'data-action="do-login"' in src, "缺少登录提交按钮 (do-login)"
+    assert 'data-action="logout"' in src, "缺少登出按钮 (logout)"
+
+
+def test_refresh_tasks_uses_scope_and_user():
+    """refresh_tasks 端点必须按 user + scope 过滤。"""
+    src = (FUNCLIP_ROOT / "slirn_home" / "app.py").read_text(encoding="utf-8")
+    i = src.find('"/slirn/api/refresh_tasks"')
+    assert i > 0
+    j = src.find("\n    @app.app.post", i + 1)
+    body = src[i:j]
+    assert "scope" in body, "refresh_tasks 必须支持 scope 参数"
+    # REQ-20260926-NNN：user 改从 contextvar 读（_get_cur_user），不再碰 request.state
+    assert "_get_cur_user()" in body, "refresh_tasks 必须读当前 user"
+    assert "list_for_user" in body or "list_user_tasks" in body, (
+        "refresh_tasks 必须用 list_for_user / list_user_tasks 过滤")
+
+
+def test_router_js_credentials_and_login_actions():
+    """router.js 必须带 credentials + 处理登录/登出 actions + 401 拦截。"""
+    src = (FUNCLIP_ROOT / "slirn_home" / "static" / "router.js").read_text(encoding="utf-8")
+    assert "credentials: 'same-origin'" in src, (
+        "router.js fetch 必须带 credentials:'same-origin' 带 cookie")
+    assert "status === 401" in src, "必须拦截 401 弹登录"
+    assert "slirnShowLogin" in src, "必须定义 slirnShowLogin"
+    assert "slirnHideLogin" in src, "必须定义 slirnHideLogin"
+    assert "/auth/login" in src, "必须 POST /auth/login"
+    assert "/auth/logout" in src, "必须 POST /auth/logout"
+    assert "/auth/me" in src, "启动必须 GET /auth/me 拉当前用户"
+    assert "name === 'slirn-task-scope'" in src, (
+        "scope radio change 必须触发 /refresh_tasks 重 fetch")
+
+
+def test_launch_py_wires_auth_middleware_and_bootstrap_check():
+    """launch.py 必须在 _register_slirn_api 之后调 install_auth_middleware；无用户时打印提示。"""
+    src = (FUNCLIP_ROOT / "funclip" / "launch.py").read_text(encoding="utf-8")
+    assert "_install_auth" in src or "install_auth_middleware" in src, (
+        "launch.py 必须调 install_auth_middleware 修复 Gradio 6 重建丢失")
+    assert "count_users() == 0" in src, "launch.py 必须检测无用户并打印提示"
+
+
+def test_update_task_stays_on_edit_page_not_jump_to_list():
+    """REQ-20260926-NNN：编辑页保存成功必须原地刷新编辑页（_loadEditTaskHTML），
+    不能跳到任务列表（showTab('slirn-tab-tasks')）。"""
+    src = (FUNCLIP_ROOT / "slirn_home" / "static" / "router.js").read_text(encoding="utf-8")
+    i = src.find("action === 'update-task'")
+    assert i > 0
+    body = src[i:src.find("else if (action === 'set-start')")]
+    assert "_loadEditTaskHTML" in body, (
+        "update-task 成功必须原地刷新编辑页（_loadEditTaskHTML）")
+    assert "showTab('slirn-tab-tasks')" not in body, (
+        "update-task 成功不能再切到任务列表（用户要求停留编辑页）")
+    assert "handleResp(r, 'slirn-tab-tasks')" not in body, (
+        "update-task 成功不能再 handleResp 任务列表 tab")
+
+
+# ---------- REQ-20260926-NNN：热词网格紧凑化（flex-wrap，不再固定 5 列） ----------
+
+def test_hotword_grid_uses_flex_wrap_not_fixed_columns():
+    """热词库展示区必须改用 flex-wrap 自适应换行（词宽 + 小 gap），不再固定 5 列。"""
+    css = (FUNCLIP_ROOT / "slirn_home" / "static" / "home.css").read_text(encoding="utf-8")
+    # 定位 .slirn-hotword-grid 块
+    i = css.find(".slirn-hotword-grid {")
+    assert i > 0, "必须有 .slirn-hotword-grid 样式块"
+    block = css[i:css.find("}", i)]
+    assert "display: flex" in block, "热词网格必须改用 flex（自适应词宽换行）"
+    assert "flex-wrap: wrap" in block, "热词网格必须 flex-wrap 换行"
+    assert "grid-template-columns: repeat(5" not in block, (
+        "不应再固定 5 列（用 flex-wrap 自适应换行）")
+    # gap 应较小（紧凑）
+    assert "gap: 6px" in block, "gap 应缩小到 6px（紧凑化）"

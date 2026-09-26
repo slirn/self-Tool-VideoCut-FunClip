@@ -25,16 +25,160 @@
     return fetch(url, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
+      credentials: 'same-origin',                  // REQ-20260926-NNN：带 cookie 会话
       body: JSON.stringify(payload || {})
-    }).then(function(r) { return r.json(); }).catch(function(e) { return {ok: false, error: String(e)}; });
+    }).then(function(r) {
+      if (r.status === 401) {                     // REQ-20260926-NNN：401 → 弹登录 modal
+        try { window.slirnShowLogin && window.slirnShowLogin(); } catch (e) {}
+        return { ok: false, error: '未登录或会话已过期' };
+      }
+      return r.json();
+    }).catch(function(e) { return {ok: false, error: String(e)}; });
   }
 
   function postForm(url, formData) {
     return fetch(url, {
       method: 'POST',
+      credentials: 'same-origin',                  // REQ-20260926-NNN
       body: formData
     }).then(function(r) { return r.json(); }).catch(function(e) { return {ok: false, error: String(e)}; });
   }
+
+  function getJSON(url) {
+    return fetch(url, { credentials: 'same-origin' })
+      .then(function(r) {
+        if (r.status === 401) {
+          try { window.slirnShowLogin && window.slirnShowLogin(); } catch (e) {}
+          return { ok: false, user: null, error: '未登录' };
+        }
+        return r.json();
+      })
+      .catch(function(e) { return {ok: false, user: null, error: String(e)}; });
+  }
+
+  // ===== REQ-20260926-NNN：登录 / 当前用户 / 登出 =====
+
+  function _setCurrentUserUI(user) {
+    var box = document.getElementById('slirn-current-user');
+    var loginBtn = document.getElementById('slirn-login-btn');
+    var nameEl = document.getElementById('slirn-current-user-name');
+    var usersBtn = document.getElementById('slirn-users-open-btn');
+    if (!box || !loginBtn) return;
+    if (user && user.username) {
+      nameEl.textContent = user.username + (user.is_admin ? ' (admin)' : '');
+      box.style.display = '';
+      loginBtn.style.display = 'none';
+      if (usersBtn) usersBtn.style.display = user.is_admin ? '' : 'none';
+    } else {
+      box.style.display = 'none';
+      loginBtn.style.display = '';
+      if (usersBtn) usersBtn.style.display = 'none';
+    }
+  }
+  window.slirnShowLogin = function () {
+    var m = document.getElementById('slirn-login-modal');
+    if (m) m.style.display = '';
+  };
+  window.slirnHideLogin = function () {
+    var m = document.getElementById('slirn-login-modal');
+    if (m) m.style.display = 'none';
+    var hint = document.getElementById('slirn-login-hint');
+    if (hint) { hint.style.display = 'none'; hint.textContent = ''; }
+  };
+  function _refreshCurrentUser() {
+    getJSON(SLIRN_API + '/auth/me').then(function(r) {
+      _setCurrentUserUI(r && r.user);
+    });
+  }
+  // 启动时拉一次当前用户
+  try { _refreshCurrentUser(); } catch (e) {}
+
+  // ===== REQ-20260926-NNN：用户管理 modal（仅 admin） =====
+
+  function _usersModalMsg(msg, isErr) {
+    var el = document.getElementById('slirn-users-msg');
+    if (el) { el.textContent = msg || ''; el.style.color = isErr ? '#ef4444' : ''; }
+  }
+  function _renderUsersList(users) {
+    var wrap = document.getElementById('slirn-users-list');
+    if (!wrap) return;
+    if (!users || !users.length) {
+      wrap.innerHTML = '<div class="slirn-form-hint">暂无用户</div>';
+      return;
+    }
+    wrap.innerHTML = users.map(function(u) {
+      return '<div class="slirn-member-row">' +
+        '<span class="slirn-member-name">' + escapeHtml(u.username) +
+        (u.is_admin ? ' <span class="slirn-member-role">admin</span>' : '') +
+        ' <span class="slirn-member-role">' + escapeHtml(u.display_name || '') + '</span></span>' +
+        '<span>' +
+        '<button class="slirn-btn-mini" data-action="users-reset-pw" data-username="' + escapeHtml(u.username) + '">改密码</button> ' +
+        '<button class="slirn-btn-mini slirn-btn-mini-danger" data-action="users-delete" data-username="' + escapeHtml(u.username) + '">删除</button>' +
+        '</span></div>';
+    }).join('');
+  }
+  function _loadUsers() {
+    getJSON(SLIRN_API + '/auth/users').then(function(r) {
+      if (r && r.ok) _renderUsersList(r.users);
+      else _usersModalMsg((r && r.error) || '拉取用户失败', true);
+    });
+  }
+  function _showUsersModal() {
+    var m = document.getElementById('slirn-users-modal');
+    if (!m) return;
+    _usersModalMsg('');
+    m.style.display = '';
+    _loadUsers();
+  }
+  function _hideUsersModal() {
+    var m = document.getElementById('slirn-users-modal');
+    if (m) m.style.display = 'none';
+  }
+
+  // ===== REQ-20260926-NNN：任务成员管理（编辑页折叠块） =====
+
+  function _memberMsg(msg, isErr) {
+    var el = document.getElementById('slirn-member-msg');
+    if (el) { el.textContent = msg || ''; el.style.color = isErr ? '#ef4444' : ''; }
+  }
+  function _loadTaskMembers() {
+    var sec = document.getElementById('slirn-members-section');
+    if (!sec) return;
+    var tid = sec.getAttribute('data-task-id') || '';
+    var creator = sec.getAttribute('data-created-by') || '';
+    getJSON(SLIRN_API + '/auth/tasks/' + encodeURIComponent(tid) + '/members').then(function(r) {
+      var list = document.getElementById('slirn-member-list');
+      if (!list) return;
+      var rows = [];
+      if (creator) {
+        rows.push('<div class="slirn-member-row"><span class="slirn-member-name">' +
+          escapeHtml(creator) + ' <span class="slirn-member-role">创建者</span></span><span></span></div>');
+      }
+      var members = (r && r.ok && r.members) ? r.members : [];
+      members.forEach(function(name) {
+        if (name === creator) return;
+        rows.push('<div class="slirn-member-row"><span class="slirn-member-name">' +
+          escapeHtml(name) + '</span>' +
+          '<button class="slirn-btn-mini slirn-btn-mini-danger" data-action="member-remove" ' +
+          'data-task-id="' + escapeHtml(tid) + '" data-username="' + escapeHtml(name) + '">移除</button></div>');
+      });
+      if (!rows.length) rows.push('<div class="slirn-form-hint">暂无成员</div>');
+      list.innerHTML = rows.join('');
+    });
+  }
+  window._loadTaskMembers = _loadTaskMembers;
+
+  // REQ-20260926-NNN：按当前 scope（我的/全部）重拉任务列表 — 登录/登出/手动刷新共用
+  function _refreshTasksList() {
+    var scope = 'mine';
+    try {
+      var sR = document.querySelector('input[name="slirn-task-scope"]:checked');
+      if (sR) scope = sR.value;
+    } catch (e) {}
+    postJSON(SLIRN_API + '/refresh_tasks', {scope: scope})
+      .then(function(r) { handleResp(r, 'slirn-tab-tasks'); });
+  }
+  window._refreshTasksList = _refreshTasksList;
 
   function getInput(id) {
     var el = document.getElementById(id);
@@ -130,10 +274,31 @@
     return out;
   }
 
-  // 解析手动输入的词
+  // 解析手动输入的词（REQ-20260926-NNN：分隔符半角逗号/换行，空格不算分隔符）
   function parseManual(text) {
     if (!text) return [];
-    return (text.replace(/\n/g, ' ').split(/[\s,，;；、]+/)).filter(Boolean);
+    return text.split(/[,\n，;；、]+/).map(function(s) { return s.trim(); }).filter(Boolean);
+  }
+
+  // REQ-20260926-NNN：渲染 AI 分析候选词网格（复用 .slirn-hotword-cell.slirn-pick-cell 样式）
+  function renderAnalysisGrid(candidates) {
+    var grid = document.getElementById('slirn-hw-analysis-grid');
+    if (!grid) return;
+    if (!candidates || !candidates.length) {
+      grid.innerHTML = '<div class="slirn-hotword-cell empty">（无候选）</div>';
+      return;
+    }
+    grid.innerHTML = candidates.map(function(c) {
+      var w = String(c.word || '');
+      var cat = String(c.category || '');
+      var label = cat ? (w + ' <small style="opacity:.6">· ' + cat + '</small>') : w;
+      return '<div class="slirn-hotword-cell slirn-pick-cell" data-word="'
+        + escapeAttr(w) + '"><span class="slirn-cell-text">' + label + '</span></div>';
+    }).join('');
+  }
+  function escapeAttr(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;')
+      .replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
   // 渲染「最终生效热词」的 chips（继承 + 选中 + 手动，去重）
@@ -231,6 +396,16 @@
         renderHwChips();
       });
     }
+    // REQ-20260926-NNN：AI 分析候选网格同样支持点击切换 .selected
+    var analysisGrid = document.getElementById('slirn-hw-analysis-grid');
+    if (analysisGrid && !analysisGrid.dataset.slirnClickBound) {
+      analysisGrid.dataset.slirnClickBound = '1';
+      analysisGrid.addEventListener('click', function(ev) {
+        var cell = ev.target.closest('.slirn-pick-cell');
+        if (!cell) return;
+        cell.classList.toggle('selected');
+      });
+    }
     // chips 容器上的 ✕ 移除（事件代理）
     var chipsBox = document.getElementById('slirn-hw-chips');
     if (chipsBox && !chipsBox.dataset.slirnClickBound) {
@@ -246,8 +421,10 @@
         // 如果是手动来源，从 textarea 里去掉这个词
         var manualEl2 = document.getElementById('slirn-hotwords-manual');
         if (manualEl2 && manualEl2.value) {
-          var tokens = manualEl2.value.split(/(\s+)/);
-          manualEl2.value = tokens.filter(function(t) { return t.trim() !== w; }).join('');
+          // REQ-20260926-NNN：按 parseManual 拆词后过滤 + 半角逗号重拼，
+          // 多词热词（如 "machine learning"）不会再被空格切碎
+          var entries = parseManual(manualEl2.value);
+          manualEl2.value = entries.filter(function(e) { return e !== w; }).join(',');
         }
         renderHwChips();
       });
@@ -625,13 +802,48 @@
       td.textContent = '00:00:00.000 / ' + ds + '.000';
     }
     try { window.slirnRenderHwChips && window.slirnRenderHwChips(); } catch (e) {}
+    // REQ-20260926-NNN：编辑页 HTML 是动态注入的，initHotwordPicker 没机会跑，
+    // → picker 点击切换 + 分析网格点击切换 .selected 都没挂上。手动补一次。
+    try { initHotwordPicker(); } catch (e) {}
+    // REQ-20260926-NNN：成员管理折叠块 — 编辑页注入后拉一次成员列表
+    try { _loadTaskMembers(); } catch (e) {}
+  }
+
+  // REQ-20260926-NNN：编辑页/剪辑页 URL hash 持久化（互斥）：
+  //   进入剪辑 → #wb=<tid>（同时清掉 #edit=）；进入编辑 → #edit=<tid>（清掉 #wb=）；
+  //   离开（取消/返回列表）→ 清空 hash，避免刷新跳回任务页。
+  function _setTaskPageHash(page, tid) {
+    try {
+      var h = '#' + page + '=' + encodeURIComponent(tid || '');
+      history.replaceState(null, '', h);  // 整 hash 替换 → 自动清掉对侧
+    } catch (e) {}
+  }
+  function _clearTaskPageHash() {
+    try {
+      // 用 pathname+search 替换（去掉 #...），刷新就不会再触发任务页恢复
+      var u = (location && (location.pathname + location.search)) || '/';
+      history.replaceState(null, '', u);
+    } catch (e) {}
+  }
+  function _loadEditTaskHTML(tid) {
+    // 提取编辑页 HTML 注入 + initTaskEdit（编辑页与 hash 恢复共用）
+    return postJSON(SLIRN_API + '/edit_task', {task_id: tid}).then(function(r) {
+      if (!(r && r.ok && r.html)) return r;
+      var c = document.getElementById('slirn-tab-create');
+      if (c) { c.innerHTML = r.html; c.style.display = ''; }
+      ALL_TABS.forEach(function(id) {
+        if (id !== 'slirn-tab-create') { var el = document.getElementById(id); if (el) el.style.display = 'none'; }
+      });
+      var dE = document.getElementById('slirn-tab-detail');
+      if (dE) dE.style.display = 'none';
+      try { initTaskEdit(); } catch (e) {}
+      return r;
+    });
   }
 
   function openWorkbench(tid) {
     // REQ-20260918-053：进 wb 时把 task_id 写到 URL hash，F5/Cmd+R 刷新仍在同一任务页
-    if (tid && history && history.replaceState) {
-      try { history.replaceState(null, '', '#wb=' + encodeURIComponent(tid)); } catch (e) {}
-    }
+    if (tid) _setTaskPageHash('wb', tid);
     postJSON(SLIRN_API + '/workbench', {task_id: tid}).then(function(r) {
       hideWbLoader();  // REQ-20260918-051：无论成功失败都关掉等待弹窗
       if (r && r.ok && r.html) {
@@ -901,6 +1113,11 @@
   }
   document.addEventListener('change', function(e) {
     if (e.target && e.target.name === 'slirn-rev-rigor') syncRigorCustomUI();
+    // REQ-20260926-NNN：任务列表「我的 / 全部」radio 切换 → 自动刷新
+    if (e.target && e.target.name === 'slirn-task-scope') {
+      postJSON(SLIRN_API + '/refresh_tasks', {scope: e.target.value})
+        .then(function(r) { handleResp(r, 'slirn-tab-tasks'); });
+    }
     // 切分修剪·组级决策下拉（REQ-20260917-027）：鼠标改判与快捷键 K/D/S 同效；
     // 选「维持原状」=取消改判，选回当前值 = 无操作（区别于键盘的「再按同键取消」）
     if (e.target && e.target.classList && e.target.classList.contains('slirn-cut-actsel')) {
@@ -6414,12 +6631,16 @@
 
     // Tab 切换
     if (TAB_BUTTONS[action]) {
+      // REQ-20260926-NNN：离开 wb/create 进非任务页 → 清 hash（防刷新跳回）
+      if (TAB_BUTTONS[action] !== 'slirn-tab-workbench') {
+        try { _clearTaskPageHash(); } catch (e) {}
+      }
       showTab(TAB_BUTTONS[action]);
       return;
     }
 
     if (action === 'refresh-tasks') {
-      postJSON(SLIRN_API + '/refresh_tasks', {}).then(function(r) { handleResp(r, 'slirn-tab-tasks'); });
+      _refreshTasksList();
     }
     else if (action === 'refresh-wb') {
       // REQ-20260918-053 延伸：wb 内「🔄 刷新」按钮 — 不刷整页，仅重渲 wb 面板
@@ -7120,6 +7341,124 @@
         try { localStorage.setItem('slirnWbStagesCollapsed', nowCollapsed ? '1' : '0'); } catch (err) {}
       }
     }
+    else if (action === 'show-login') {
+      if (window.slirnShowLogin) window.slirnShowLogin();
+      var u = document.getElementById('slirn-login-username');
+      if (u) setTimeout(function() { u.focus(); }, 50);
+    }
+    else if (action === 'hide-login') {
+      if (window.slirnHideLogin) window.slirnHideLogin();
+    }
+    else if (action === 'do-login') {
+      var usr = getInput('slirn-login-username');
+      var pw = getInput('slirn-login-password');
+      if (!usr || !pw) {
+        var hint = document.getElementById('slirn-login-hint');
+        if (hint) { hint.textContent = '用户名和密码必填'; hint.style.display = ''; }
+        return;
+      }
+      postJSON(SLIRN_API + '/auth/login', {username: usr, password: pw})
+        .then(function(r) {
+          if (r && r.ok) {
+            if (window.slirnHideLogin) window.slirnHideLogin();
+            _setCurrentUserUI(r.user);
+            toast('✅ 已登录：' + r.user.username);
+            // 登录后重拉任务列表（按新用户过滤「我的」scope）
+            try { _refreshTasksList(); } catch (e) {}
+          } else {
+            var hint = document.getElementById('slirn-login-hint');
+            if (hint) { hint.textContent = '登录失败：' + (r.error || '未知错误'); hint.style.display = ''; }
+          }
+        });
+    }
+    else if (action === 'logout') {
+      postJSON(SLIRN_API + '/auth/logout', {})
+        .then(function() {
+          _setCurrentUserUI(null);
+          toast('已登出');
+          // 刷新任务列表（避免显示已无权访问的任务）
+          try { _refreshTasksList(); } catch (e) {}
+        });
+    }
+    // ===== REQ-20260926-NNN：用户管理 modal（admin） =====
+    else if (action === 'users-open') {
+      _showUsersModal();
+    }
+    else if (action === 'users-close') {
+      _hideUsersModal();
+    }
+    else if (action === 'users-create') {
+      var newName = getInput('slirn-users-new-name');
+      var newPw = getInput('slirn-users-new-pw');
+      var newAdmin = !!(document.getElementById('slirn-users-new-admin') || {}).checked;
+      if (!newName || !newPw) { _usersModalMsg('用户名和密码必填', true); return; }
+      postJSON(SLIRN_API + '/auth/users', {username: newName, password: newPw, is_admin: newAdmin})
+        .then(function(r) {
+          if (r && r.ok) {
+            _usersModalMsg('✅ 已创建用户：' + r.user.username);
+            var nEl = document.getElementById('slirn-users-new-name');
+            var pEl = document.getElementById('slirn-users-new-pw');
+            if (nEl) nEl.value = '';
+            if (pEl) pEl.value = '';
+            _loadUsers();
+          } else {
+            _usersModalMsg((r && r.error) || '创建失败', true);
+          }
+        });
+    }
+    else if (action === 'users-delete') {
+      var delName = target.getAttribute('data-username') || '';
+      if (!delName) return;
+      if (!window.confirm('确定删除用户「' + delName + '」？其会话与任务成员关系将一并清除。')) return;
+      fetch(SLIRN_API + '/auth/users/' + encodeURIComponent(delName), {
+        method: 'DELETE', credentials: 'same-origin'
+      }).then(function(r) { return r.json(); }).then(function(r) {
+        if (r && r.ok) { _usersModalMsg('✅ 已删除：' + delName); _loadUsers(); }
+        else _usersModalMsg((r && r.error) || '删除失败', true);
+      }).catch(function(e) { _usersModalMsg(String(e), true); });
+    }
+    else if (action === 'users-reset-pw') {
+      var pwName = target.getAttribute('data-username') || '';
+      if (!pwName) return;
+      var npw = window.prompt('给用户「' + pwName + '」设置新密码（≥4 位）：', '');
+      if (!npw) return;
+      postJSON(SLIRN_API + '/auth/users/change_password', {username: pwName, new_password: npw})
+        .then(function(r) {
+          if (r && r.ok) _usersModalMsg('✅ 已更新 ' + pwName + ' 的密码');
+          else _usersModalMsg((r && r.error) || '更新失败', true);
+        });
+    }
+    // ===== REQ-20260926-NNN：任务成员管理（编辑页） =====
+    else if (action === 'member-add') {
+      var secA = document.getElementById('slirn-members-section');
+      var tidA = (target.getAttribute('data-task-id') ||
+                  (secA ? secA.getAttribute('data-task-id') : '') || '');
+      var addName = getInput('slirn-member-add-name');
+      if (!tidA || !addName) { _memberMsg('用户名必填', true); return; }
+      postJSON(SLIRN_API + '/auth/tasks/' + encodeURIComponent(tidA) + '/members', {username: addName})
+        .then(function(r) {
+          if (r && r.ok) {
+            _memberMsg('✅ 已添加成员：' + addName);
+            var inEl = document.getElementById('slirn-member-add-name');
+            if (inEl) inEl.value = '';
+            _loadTaskMembers();
+          } else {
+            _memberMsg((r && r.error) || '添加失败', true);
+          }
+        });
+    }
+    else if (action === 'member-remove') {
+      var tidR = target.getAttribute('data-task-id') || '';
+      var rmName = target.getAttribute('data-username') || '';
+      if (!tidR || !rmName) return;
+      if (!window.confirm('把「' + rmName + '」从该任务成员中移除？')) return;
+      fetch(SLIRN_API + '/auth/tasks/' + encodeURIComponent(tidR) + '/members/' + encodeURIComponent(rmName), {
+        method: 'DELETE', credentials: 'same-origin'
+      }).then(function(r) { return r.json(); }).then(function(r) {
+        if (r && r.ok) { _memberMsg('✅ 已移除：' + rmName); _loadTaskMembers(); }
+        else _memberMsg((r && r.error) || '移除失败', true);
+      }).catch(function(e) { _memberMsg(String(e), true); });
+    }
     else if (action === 'rev-detail') {
       var rowD = target.closest('.slirn-rev-row');
       if (rowD) {
@@ -7256,18 +7595,12 @@
         if (c2) c2.style.display = 'none';
         if (tEl) tEl.style.display = '';
       };
-      postJSON(SLIRN_API + '/edit_task', {task_id: tidE}).then(function(r) {
+      _loadEditTaskHTML(tidE).then(function(r) {
         target.disabled = false;
         target.textContent = origTextE;
-        if (r && r.ok && r.html) {
-          var c = document.getElementById('slirn-tab-create');
-          if (c) { c.innerHTML = r.html; c.style.display = ''; }
-          ALL_TABS.forEach(function(id) {
-            if (id !== 'slirn-tab-create') { var el = document.getElementById(id); if (el) el.style.display = 'none'; }
-          });
-          var dE = document.getElementById('slirn-tab-detail');
-          if (dE) dE.style.display = 'none';
-          initTaskEdit();
+        if (r && r.ok) {
+          // REQ-20260926-NNN：写 #edit= hash → F5/Cmd+R 留在编辑页（不进列表）
+          _setTaskPageHash('edit', tidE);
         } else if (r && r.error) {
           restoreTabsE();
           toast('❌ ' + r.error, 'error');
@@ -7301,8 +7634,13 @@
       }).then(function(r) {
         if (r && r.ok) {
           toast(r.toast || '✅ 已保存');
-          handleResp(r, 'slirn-tab-tasks');
-          showTab('slirn-tab-tasks');
+          // REQ-20260926-NNN：保存后原地刷新编辑页（不跳任务列表）；
+          // 复用 _loadEditTaskHTML 重拉 HTML 注回 + 保留 #edit=<tid> hash。
+          _loadEditTaskHTML(tidU).then(function(r2) {
+            if (r2 && r2.ok) {
+              _setTaskPageHash('edit', tidU);  // 保险：hash 已是 edit，刷一次确保不被覆盖
+            }
+          });
         } else if (r && r.error) {
           toast('❌ ' + r.error, 'error');
         }
@@ -7348,6 +7686,7 @@
     }
     else if (action === 'cancel-create') {
       postJSON(SLIRN_API + '/cancel_create', {}).then(function(r) {
+        _clearTaskPageHash();  // REQ-20260926-NNN：取消编辑 → 清 hash 防刷新跳回
         handleResp(r, 'slirn-tab-tasks');
         showTab('slirn-tab-tasks');
       });
@@ -7363,6 +7702,48 @@
           }
           handleResp(r, 'slirn-tab-hotwords');
         });
+    }
+    else if (action === 'hw-analyze') {
+      // REQ-20260926-NNN：调 LLM 提取热词 → 渲染候选网格
+      var req = getInput('slirn-hw-analysis-requirement');
+      var urlV = getInput('slirn-hw-analysis-url');
+      var hintV = getInput('slirn-hw-analysis-hint');
+      var status = document.getElementById('slirn-hw-analysis-status');
+      if (status) status.textContent = '🔄 正在分析…';
+      postJSON(SLIRN_API + '/hotword_extract',
+        {requirement: req, url: urlV, page_hint: hintV})
+        .then(function(r) {
+          if (!(r && r.ok)) {
+            if (status) status.textContent = '❌ ' + ((r && r.error) || '失败');
+            return;
+          }
+          renderAnalysisGrid(r.candidates || []);
+          if (status) status.textContent = '✅ 找到 ' + (r.candidates || []).length + ' 个候选';
+        });
+    }
+    else if (action === 'hw-analysis-add-task') {
+      // 选中候选 → 以半角逗号拼回手动 textarea（不走空格，防多词热词塌缩）
+      var selA = [].slice.call(
+        document.querySelectorAll('#slirn-hw-analysis-grid .slirn-pick-cell.selected')
+      ).map(function(c) { return c.getAttribute('data-word'); });
+      if (!selA.length) { toast('请先选中候选词'); return; }
+      var taA = document.getElementById('slirn-hotwords-manual');
+      if (taA) {
+        var cur = parseManual(taA.value);
+        var merged = cur.concat(selA.filter(function(w) { return cur.indexOf(w) < 0; }));
+        taA.value = merged.join(',');
+      }
+      renderHwChips();
+      toast('已加入任务：' + selA.length + ' 个');
+    }
+    else if (action === 'hw-analysis-add-public') {
+      var selB = [].slice.call(
+        document.querySelectorAll('#slirn-hw-analysis-grid .slirn-pick-cell.selected')
+      ).map(function(c) { return c.getAttribute('data-word'); });
+      if (!selB.length) { toast('请先选中候选词'); return; }
+      var catB = window.prompt('分类（留空 = 默认）', '') || '';
+      postJSON(SLIRN_API + '/hw_add', {words: selB, category: catB})
+        .then(function(r) { handleResp(r, 'slirn-tab-hotwords'); });
     }
     else if (action === 'hw-delete-one') {
       // 阻止冒泡到 cell 上的潜在 click 监听
@@ -7381,9 +7762,12 @@
       if (action === 'hw-cat-select-all') {
         cells.forEach(function(c) { c.classList.add('selected'); });
         updateDeleteCount(section);
+        // REQ-20260926-NNN：picker 也用同一 action — bulk 选后刷新 chips
+        try { renderHwChips(); } catch (e) {}
       } else if (action === 'hw-cat-invert') {
         cells.forEach(function(c) { c.classList.toggle('selected'); });
         updateDeleteCount(section);
+        try { renderHwChips(); } catch (e) {}
       } else if (action === 'hw-cat-delete') {
         var selected = section.querySelectorAll('.slirn-hotword-cell.selected');
         var words = [];
@@ -7498,24 +7882,39 @@
 
   console.log('[slirn] router initialized (custom /slirn/api mode)');
 
-  // ===== REQ-20260918-053：URL #wb=<tid> 持久化 — F5 / Cmd+R 自动回到 wb =====
-  // 写入端：openWorkbench(tid) → history.replaceState('#wb=<tid>')
-  // 读取端：DOMContentLoaded → 解析 hash → 切到任务页 + openWorkbench(tid)
-  function _restoreWbFromHash() {
+  // ===== REQ-20260918-053 + REQ-20260926-NNN：URL hash 持久化 =====
+  //   写入端：openWorkbench → #wb=<tid>（自动清 #edit=）
+  //          edit-task click  / hash 恢复 → #edit=<tid>（自动清 #wb=）
+  //   离开任务页（cancel/goto-*）→ 清空 hash，避免刷新跳回。
+  // 读取端：DOMContentLoaded → 解析 hash → 切到对应 tab + 加载内容。
+  function _restoreTaskPageFromHash() {
     var hash = (location && location.hash) ? location.hash : '';
-    var m = hash.match(/^#wb=(.+)$/);
+    var m = hash.match(/^#(wb|edit)=(.+)$/);
     if (!m) return;
-    var tid = decodeURIComponent(m[1] || '').trim();
+    var kind = m[1];
+    var tid = decodeURIComponent(m[2] || '').trim();
     if (!tid) return;
-    // 切到 wb tab，再异步加载 wb 内容（顺序：tab 切换 → openWorkbench）
-    try { showTab('slirn-tab-workbench'); } catch (e) {}
-    // 等待 wb tab 显示后再渲染（避免 race）
-    setTimeout(function() { try { openWorkbench(tid); } catch (e) {} }, 0);
+    if (kind === 'wb') {
+      try { showTab('slirn-tab-workbench'); } catch (e) {}
+      setTimeout(function() { try { openWorkbench(tid); } catch (e) {} }, 0);
+    } else if (kind === 'edit') {
+      // 编辑页加载慢（要读视频信息+热词），先给加载态
+      var cEl = document.getElementById('slirn-tab-create');
+      if (cEl) {
+        cEl.innerHTML = '<div class="slirn-card" style="margin-top:16px;">'
+          + '<div class="slirn-loading-box"><div class="slirn-spinner"></div>'
+          + '<div>⏳ 正在加载编辑页（读取视频信息与热词）…</div></div></div>';
+        cEl.style.display = '';
+        ALL_TABS.forEach(function(id) {
+          if (id !== 'slirn-tab-create') { var el = document.getElementById(id); if (el) el.style.display = 'none'; }
+        });
+      }
+      setTimeout(function() { try { _loadEditTaskHTML(tid); } catch (e) {} }, 0);
+    }
   }
   if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', _restoreWbFromHash);
+    document.addEventListener('DOMContentLoaded', _restoreTaskPageFromHash);
   } else {
-    // DOM 已就绪，立即执行（router.js 通常在 </body> 之前同步加载）
-    try { _restoreWbFromHash(); } catch (e) {}
+    try { _restoreTaskPageFromHash(); } catch (e) {}
   }
 })();

@@ -75,8 +75,19 @@ if __name__ == "__main__":
             # launch() 已重新创建 app — 在新 app 上重新注册 /slirn/api/* 路由
             from slirn_home.paths import find_slirn_standalone_root as _find_root
             from tasklib import TaskManager as _TM
+            from slirn_home.auth import AuthStore as _AuthStore, install_auth_middleware as _install_auth
+            from slirn_home.app import slirn_task_access as _slirn_task_access
             _mgr = _TM(_find_root())
-            _register_slirn_api(slirn_app, _mgr, _find_root())
+            _auth = _AuthStore(_find_root())
+            # REQ-20260926-NNN：首次启动检测无用户 → 提示创建 admin
+            if _auth.count_users() == 0:
+                print("[slirn] ⚠ 首次启动：尚无用户。请运行：", flush=True)
+                print("    .venv/Scripts/python.exe -m slirn_home.bootstrap_admin", flush=True)
+                print("    或打开 Web 用 /slirn/api/auth/bootstrap 创建第一个 admin", flush=True)
+            _register_slirn_api(slirn_app, _mgr, _find_root(), _auth)
+            # REQ-20260926-NNN：Gradio 6 launch() 重建 self.app 会丢 middleware，必须重挂
+            _install_auth(slirn_app.app, _auth,
+                          task_access=_slirn_task_access(_mgr, _auth))
             print(f"[slirn] custom /slirn/api/* routes re-registered on live app", flush=True)
             # REQ-20260922-NNN-b：把 launch() 实际解析出的端口回写给 pipeline 调度器。
             # Gradio 在 server_port 被占用时会自动 +1（7861 被旧实例占用 → 新实例
@@ -97,8 +108,13 @@ if __name__ == "__main__":
             try:
                 from slirn_home.paths import find_slirn_standalone_root as _find_root
                 from tasklib import TaskManager as _TM
+                from slirn_home.auth import AuthStore as _AuthStore, install_auth_middleware as _install_auth
+                from slirn_home.app import slirn_task_access as _slirn_task_access
                 _mgr = _TM(_find_root())
-                _register_slirn_api(slirn_app, _mgr, _find_root())
+                _auth = _AuthStore(_find_root())
+                _register_slirn_api(slirn_app, _mgr, _find_root(), _auth)
+                _install_auth(slirn_app.app, _auth,
+                              task_access=_slirn_task_access(_mgr, _auth))
                 print(f"[slirn] custom /slirn/api/* routes re-registered (recovery path)", flush=True)
                 # REQ-20260922-NNN-b：恢复路径同样回写实际端口（见上方成功路径注释）
                 _live_port = getattr(slirn_app, "server_port", None)
