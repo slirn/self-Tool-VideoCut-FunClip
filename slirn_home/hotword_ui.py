@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 import gradio as gr
@@ -150,9 +151,11 @@ def on_confirm_selection(
 ) -> tuple[str, str]:
     """确认选择：把选中词追加到现有 Textbox。"""
     existing_raw = existing_text or ""
-    existing = [w.strip() for w in existing_raw.replace("\n", " ").split() if w.strip()]
+    existing = [w.strip() for w in re.split(r"[,\n，;；、]+", existing_raw) if w.strip()]
     merged = list(dict.fromkeys(existing + selected))  # 去重保持顺序
-    new_text = " ".join(merged)
+    # REQ-20260926-NNN：用半角逗号拼回（不能再用空格，否则多词热词 +
+    # 相邻词会被空格合到一起，下游用新分隔符解析时塌成一个词）
+    new_text = ",".join(merged)
     return new_text, f"✅ 已添加 {len(selected)} 个（共 {len(merged)} 个）"
 
 

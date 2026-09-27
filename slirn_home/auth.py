@@ -396,6 +396,18 @@ class SlirnAuthMiddleware:
             await self.app(scope, receive, send)
             return
         path = scope.get("path", "")
+        method = scope.get("method", "?")
+        # REQ-20260926-NNN 排查：记每个 /slirn/api 请求的路径+方法+是否带 cookie
+        # 写到独立文件，不污染主日志
+        try:
+            import time as _t
+            ck = _extract_session_token(scope)
+            # 写到 repo_root/middleware_debug.log（slirn-standalone 仓库根）
+            _dbg = self.auth.repo_root / "middleware_debug.log"
+            with open(_dbg, "a", encoding="utf-8") as _f:
+                _f.write(f"{_t.strftime('%H:%M:%S')} {method} {path} cookie={'Y' if ck else 'N'}\n")
+        except Exception:  # noqa: BLE001
+            pass
         if not path.startswith("/slirn/api/") or any(
             path.startswith(p) for p in _PUBLIC_PREFIXES
         ):

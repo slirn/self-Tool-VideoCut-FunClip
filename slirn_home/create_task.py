@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 import uuid
 from pathlib import Path
@@ -135,9 +136,9 @@ def on_create_task(
     # 默认任务名 = 文件名 stem
     final_name = task_name.strip() or src.stem
 
-    # 解析热词（空格 / 换行分隔）
+    # 解析热词（REQ-20260926-NNN：半角逗号 / 换行分隔，空格不算分隔符）
     hotwords = [
-        w.strip() for w in hotwords_text.replace("\n", " ").split()
+        w.strip() for w in re.split(r"[,\n，;；、]+", hotwords_text)
         if w.strip()
     ]
 

@@ -30,10 +30,16 @@
     }).then(function(r) {
       if (r.status === 401) {                     // REQ-20260926-NNN：401 → 弹登录 modal
         try { window.slirnShowLogin && window.slirnShowLogin(); } catch (e) {}
-        return { ok: false, error: '未登录或会话已过期' };
+        return { ok: false, error: '未登录或会话已过期', _status: 401 };
+      }
+      if (!r.ok) {
+        // 把真实状态码 + 文本带回去，便于排查「看起来 401 但其实是别的」
+        return r.json().then(function(b) {
+          return { ok: false, error: (b && b.error) || ('HTTP ' + r.status), _status: r.status };
+        }).catch(function() { return { ok: false, error: 'HTTP ' + r.status, _status: r.status }; });
       }
       return r.json();
-    }).catch(function(e) { return {ok: false, error: String(e)}; });
+    }).catch(function(e) { return {ok: false, error: String(e), _status: 0}; });
   }
 
   function postForm(url, formData) {
@@ -7354,7 +7360,11 @@
       var pw = getInput('slirn-login-password');
       if (!usr || !pw) {
         var hint = document.getElementById('slirn-login-hint');
-        if (hint) { hint.textContent = '用户名和密码必填'; hint.style.display = ''; }
+        if (hint) {
+          hint.textContent = '用户名和密码必填';
+          hint.classList.remove('is-ok');
+          hint.style.display = '';
+        }
         return;
       }
       postJSON(SLIRN_API + '/auth/login', {username: usr, password: pw})
@@ -7367,7 +7377,13 @@
             try { _refreshTasksList(); } catch (e) {}
           } else {
             var hint = document.getElementById('slirn-login-hint');
-            if (hint) { hint.textContent = '登录失败：' + (r.error || '未知错误'); hint.style.display = ''; }
+            if (hint) {
+              // 把真实状态码附在错误后，方便排查「401 vs 404 vs 5xx」
+              var tag = r && r._status ? ' [HTTP ' + r._status + ']' : '';
+              hint.textContent = '登录失败：' + (r.error || '未知错误') + tag;
+              hint.classList.remove('is-ok');
+              hint.style.display = '';
+            }
           }
         });
     }

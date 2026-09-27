@@ -149,10 +149,51 @@ def test_on_confirm_selection_dedup():
 
 def test_on_confirm_selection_preserves_existing():
     from slirn_home.hotword_ui import on_confirm_selection
-    new_text, _ = on_confirm_selection(["FunASR"], "张老师 达摩院")
+    # REQ-20260926-NNN：空格不再做分隔符，改用半角逗号
+    new_text, _ = on_confirm_selection(["FunASR"], "张老师,达摩院")
     assert "张老师" in new_text
     assert "达摩院" in new_text
     assert "FunASR" in new_text
+
+
+def test_on_confirm_selection_keeps_two_word_hotword_intact():
+    """REQ-20260926-NNN：含空格的双词热词（如 "machine learning"）必须
+    整体保留，不能被空格分隔符拆碎；join 改半角逗号，下游用新分隔符
+    重拆仍能还原成两条独立热词。"""
+    import re
+    from slirn_home.hotword_ui import on_confirm_selection
+    new_text, _ = on_confirm_selection([], "machine learning,foo")
+    # 用新分隔符重新解析输出，验证仍是两条独立热词
+    re_split = [s.strip() for s in re.split(r"[,\n，;；、]+", new_text) if s.strip()]
+    assert re_split == ["machine learning", "foo"], (
+        f"空格分隔符误合并/拆碎，round-trip 失败：{new_text!r} → {re_split!r}")
+
+
+# ---------- REQ-20260926-NNN：分隔符半角逗号 / 换行，空格不算分隔符 ----------
+
+def test_hw_add_split_regex_drops_whitespace():
+    """REQ-20260926-NNN：/slirn/api/hw_add 的 split 正则必须去掉 \\s
+    （否则 "machine learning" 被切成两个），只留半角逗号/换行/全角逗号/分号/顿号。"""
+    src = (FUNCLIP_ROOT / "slirn_home" / "app.py").read_text(encoding="utf-8")
+    # 定位 /hw_add 端点内的 split
+    i = src.find('"/slirn/api/hw_add"')
+    assert i > 0, "必须有 /hw_add 端点"
+    j = src.find("_re.split", i)
+    assert j > 0, "/hw_add 必须用 _re.split"
+    # 取该行附近
+    line = src[src.rfind("\n", i, j) + 1:src.find("\n", j) + 1]
+    assert r"[,\n，;；、]+" in line, f"/hw_add 必须用新分隔符正则，实际：{line!r}"
+    assert r"\s" not in line, f"/hw_add 正则不能再含 \\s（否则空格还会切词）：{line!r}"
+
+
+def test_parse_manual_js_uses_new_separator():
+    """REQ-20260926-NNN：前端 parseManual 必须用新分隔符正则（去掉 \\s）。"""
+    src = (FUNCLIP_ROOT / "slirn_home" / "static" / "router.js").read_text(encoding="utf-8")
+    i = src.find("function parseManual")
+    assert i > 0, "必须有 parseManual"
+    body = src[i:src.find("\n  }\n", i)]
+    assert r"/[,\n，;；、]+/" in body, f"parseManual 必须用新分隔符正则，实际 body：{body!r}"
+    assert r"\s" not in body, f"parseManual 正则不能再含 \\s：{body!r}"
 
 
 # ---------- on_clear_selection ----------
@@ -202,6 +243,73 @@ def test_build_picker_after_returns_dict(repo):
         "page_state", "selected_state",
     }
     assert expected.issubset(set(picker.keys()))
+
+
+def test_manual_textarea_uses_comma_newline_join_not_space():
+    """REQ-20260926-NNN：编辑页手动 textarea 回填必须用「半角逗号+换行」拼接
+    （不能用空格），否则 separator 改后多词热词被塌缩成一个。"""
+    src = (FUNCLIP_ROOT / "slirn_home" / "app.py").read_text(encoding="utf-8")
+    # 找 manual_text_value 预计算（手动 textarea 回填值）
+    assert '("," + chr(10)).join(manual_words)' in src, (
+        "编辑页 manual textarea 回填必须用 ',' + chr(10) 拼接（不能再用空格）")
+    # 防卫：编辑分支不能有 ' '.join(manual_words)
+    i = src.find('id="slirn-tab-create-inner"')
+    assert i > 0
+    end = src.find("'''", i)
+    block = src[i:end]
+    assert "' '.join(manual_words)" not in block, (
+        "编辑页 manual textarea 回填仍是 ' '.join(manual_words) — 会塌缩多词热词")
+
+
+def test_picker_has_per_category_bulk_select_buttons():
+    """REQ-20260926-NNN：picker 分类标题必须有「☑ 全选 / ⇄ 反选」按钮。"""
+    src = (FUNCLIP_ROOT / "slirn_home" / "app.py").read_text(encoding="utf-8")
+    i = src.find("def _render_hotword_picker")
+    assert i > 0
+    # 找下一个 def 边界
+    end = src.find("\n\n# ", i)
+    if end < 0:
+        end = src.find("\n\ndef ", i)
+    body = src[i:end]
+    assert 'data-action="hw-cat-select-all"' in body, (
+        "picker 分类标题缺少 ☑ 全选 按钮")
+    assert 'data-action="hw-cat-invert"' in body, (
+        "picker 分类标题缺少 ⇄ 反选 按钮")
+
+
+def test_hw_cat_bulk_select_refreshes_chips():
+    """REQ-20260926-NNN：picker 复用 hw-cat-select-all/invert 后必须刷新 chips。"""
+    src = (FUNCLIP_ROOT / "slirn_home" / "static" / "router.js").read_text(encoding="utf-8")
+    i = src.find("action === 'hw-cat-select-all' || action === 'hw-cat-invert'")
+    assert i > 0
+    body = src[i:src.find("\n    else if (action === 'trigger-file')", i)]
+    assert body.count("renderHwChips()") >= 2, (
+        "hw-cat-select-all / hw-cat-invert 必须都调 renderHwChips() 刷新 chips")
+
+
+def test_hotword_analysis_section_collapsed_by_default():
+    """REQ-20260926-NNN：AI 热词分析区域必须默认折叠（<details> 元素），点 summary 展开。"""
+    src = (FUNCLIP_ROOT / "slirn_home" / "app.py").read_text(encoding="utf-8")
+    i = src.find("def _render_hotword_analysis_section")
+    assert i > 0
+    # 找函数结尾（下一个 def 或顶层块）
+    end = src.find("\n\ndef ", i)
+    body = src[i:end]
+    assert "<details" in body, "分析区域必须用 <details> 默认折叠"
+    assert "<summary>" in body, "折叠面板必须有 <summary> 触发展开"
+    assert "[open]" not in body or '<details' in body, "<details> 不能预设 open（必须默认折叠）"
+
+
+def test_hotword_analysis_collapsible_css_exists():
+    """CSS 必须给 .slirn-hw-analysis-collapsible summary 提供可点击样式。"""
+    css = (FUNCLIP_ROOT / "slirn_home" / "static" / "home.css").read_text(encoding="utf-8")
+    assert ".slirn-hw-analysis-collapsible" in css, (
+        "CSS 必须定义折叠面板样式")
+    assert ".slirn-hw-analysis-collapsible > summary" in css, (
+        "CSS 必须给 summary 提供可点击样式")
+    # 必须隐藏默认三角（list-style: none 或 ::-webkit-details-marker）
+    assert "::-webkit-details-marker" in css or "list-style: none" in css, (
+        "必须隐藏 details 默认三角标记")
 
 
 # ---------- build_app 集成 ----------
