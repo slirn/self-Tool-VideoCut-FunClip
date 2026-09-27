@@ -1,4 +1,20 @@
-# CLAUDE.md — 项目级 AI 协作规范
+# CLAUDE.md — Claude Code 适配层
+
+> ⚠️ **入口迁移（2026-09-27 起）**：本项目的**唯一** Agent 执行入口已迁移到 [`AGENTS.md`](AGENTS.md)。
+>
+> 本文件保留为 **Claude Code 工具的适配层**，仅承担 Claude 特有的设置说明（权限白名单 / Hooks / Skill 索引位置）。**不**作为第二套权威规则存在。
+>
+> 任何新任务开始时请 Claude Code 先读 `AGENTS.md`，再按需读本文件中的 Claude 特定内容。
+>
+> - 公共规范基线：`.agent/standards/`（v0.14.0 锁定）
+> - 项目事实：`.agent/project-context.md`
+> - 项目适配与例外：`.agent/standards-profile.md`
+>
+> 冲突处理优先级参见 `standards/adoption.md` §「生效规范与优先级」。本文件中的项目特定约定与公共规范的关系见 `.agent/standards-profile.md`。
+
+---
+
+# CLAUDE.md — 项目级 AI 协作规范（历史标题，保留以兼容旧引用）
 
 > 本文件是 AI 协作的**入口文档**。任何 AI Agent 在本项目工作时，必须先读这份文件。
 
@@ -145,3 +161,16 @@ git commit -m "chore(submodule): update slirn ref"
 - 上游文档：见 `README.md`
 - Skill 编排详细说明：见各 Skill 的 `SKILL.md`
 - 历史备份：`../FunClip-main-backup-20260914/funclip-main-pre-filter.bundle`
+
+## 11. Agent 规范接入（适配 Agent-Engineering-Standards v0.14.0）
+
+2026-09-27 起，本项目接入 `D:\Slirn\WorkSpaces\PriProjs\Agent-Engineering-Standards` 公共规范：
+
+- **唯一 Agent 入口**：[`AGENTS.md`](AGENTS.md)（顶部已声明）
+- **公共规范基线**：`.agent/standards/`（29 个文件，SHA-256 锁定）
+- **版本锁定**：`.agent/standards.lock.json`（v0.14.0 + `sourceCommit=4b1763faf6b607685ae967dbb34a3e29cf0e98bb`）
+- **项目事实**：`.agent/project-context.md`
+- **项目适配与例外**：`.agent/standards-profile.md`
+- **本文件（CLAUDE.md）的角色**：Claude Code 工具适配层——仅承担 Claude 特有的权限 / Hooks / Skill 索引引用，不作为第二套权威规则
+
+升级路径：当公共规范新版本发布时，使用 `sync-standards.ps1` 更新；详细步骤见 `.agent/standards-profile.md` §「升级路径」。
