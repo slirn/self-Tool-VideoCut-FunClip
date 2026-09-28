@@ -39,6 +39,25 @@ project/
 
 公共规范仓库中的 README、使用说明和同步脚本不是业务项目的 Agent 执行入口。业务项目从项目根目录启动 Agent 时，以 `AGENTS.md` 为起点。
 
+## 安装模式与分发
+
+安装或升级时必须显式确定安装模式，并记录在 `.agent/standards.lock.json` 的 `installMode` 字段。未显式指定时按以下顺序推断：锁文件已记录的模式 → 仓库实际跟踪状态 → Git 仓库内默认 `lock-only`、无仓库时 `local`。
+
+| 模式 | 进入项目仓库 | 忽略（`.gitignore` 受管区块） | 适用 |
+| --- | --- | --- | --- |
+| `lock-only`（默认） | `AGENTS.md`、`.agent/project-context.md`、`.agent/standards-profile.md`、`.agent/standards.lock.json`、`.agent/feedback/` | `.agent/standards/`、`.agent/backups/` | 不希望规范正文进入第三方仓库，同时保留团队一致性和版本溯源 |
+| `committed` | 全部文件含 `.agent/standards/` | `.agent/backups/` | 希望仓库完整自包含、CI 离线可用 |
+| `local` | 无 | `.agent/`、`/AGENTS.md` | 个人试用；属于 `deviate`，须先在适配表登记 |
+
+各模式规则：
+
+- **锁文件必须提交**（`local` 除外）：锁文件记录版本、来源提交和全部文件 SHA-256，是复原和校验的唯一账本。
+- **lock-only 复原**：新机器或拉取后通过 `standards upgrade --target . --source <规范仓库> --version <锁文件版本>` 按账本复原 `.agent/standards/` 并逐文件哈希核验；未复原时 `standards verify` 必须报缺失。
+- **模式切换**：`standards mode set <committed|lock-only|local>`。切换只调整 `.gitignore`、Git 暂存区和锁文件字段，不删除工作区文件、不代替提交；由用户审查后提交。
+- **降级护栏**：切换到 `local` 前必须在适配表登记 `install-mode-local` 的 `deviate` 行；从 `committed` 切出时应先备份被解除跟踪的文件到 `.agent/backups/`（该目录任何模式下都被忽略）。
+- **团队通知**：从 `committed` 切换到其他模式后，其他机器拉取时 Git 会删除对应文件；提交说明必须附复原命令，`local` 还须提醒备份。
+- `.gitignore` 中由工具维护的受管区块使用 `# agent-standards:begin` / `# agent-standards:end` 标记，区块外内容保持不变。
+
 ## 生效规范与优先级
 
 项目实际生效规范按以下模型形成：
@@ -121,7 +140,7 @@ project/
 2. 只重新评估受影响的映射、适配和例外；
 3. 更新 `.agent/standards-profile.md`；
 4. 通过同步脚本更新 `AGENTS.md` 受管区块；
-5. 在业务项目中提交规范副本、锁定文件、受管区块和适配表变更。
+5. 在业务项目中按安装模式提交相应文件（见「安装模式与分发」）。
 
 公共规范锁文件必须同时记录发布版本和完整来源提交。同步脚本必须校验工作区干净、发布 tag 存在且指向当前 HEAD，不能仅根据人工传入的版本名称声明来源。
 

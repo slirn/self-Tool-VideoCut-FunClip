@@ -81,7 +81,7 @@
 ## 规范入口与适配
 
 - **唯一 Agent 入口**：`AGENTS.md`
-- **公共规范基线**：`.agent/standards/`（29 个文件，v0.14.0 锁定）
+- **公共规范基线**：`.agent/standards/`（31 个文件，v0.17.0 锁定，installMode=committed）
 - **项目事实**：本文件
 - **项目适配与例外**：`.agent/standards-profile.md`
 - **工具适配层**：

@@ -1,11 +1,11 @@
 # Standards Profile — FunClip-main
 
-> 本文件记录本项目对公共规范（Agent-Engineering-Standards v0.14.0）的补充、适配、例外和历史差距，不复制公共规范正文。冲突时按 `.agent/standards/adoption.md` 优先级处理，实质性冲突由项目负责人批准。
+> 本文件记录本项目对公共规范（Agent-Engineering-Standards v0.17.0）的补充、适配、例外和历史差距，不复制公共规范正文。冲突时按 `.agent/standards/adoption.md` 优先级处理，实质性冲突由项目负责人批准。
 
 ## 入口与优先级
 
 - **唯一 Agent 入口**：`AGENTS.md`
-- **公共规范基线**：`.agent/standards/`（v0.14.0，`sourceCommit=4b1763f`）
+- **公共规范基线**：`.agent/standards/`（v0.17.0，`sourceCommit=5d68778`，installMode=`committed`）
 - **项目事实**：`.agent/project-context.md`
 - **项目适配与例外**：本文件
 - **冲突优先级**（参见 `standards/adoption.md` §「生效规范与优先级」）：
@@ -37,7 +37,10 @@
 | `decisions.md` ADR 模板 | 决策背景 / 取舍 / 后果 / 生命周期 | `docs/design/DESIGN-*.md` 含"关键决策"段落（背景/取舍/后果） | `specialize` | 保留项目约定；关键决策段落对齐 ADR 模板；不另开 ADR 目录 | — | — |
 | `technical-debt.md` 技术债治理 | 问题 / 风险 / 负责人 / 期限 / 退出条件 | 散落在 `docs/REQM/` 与 memory/ 中 `funclip-*.md` 条目 | `specialize` | 维护现有约定；需要时引用 `templates/decision-record.md` 模板 | — | — |
 | `incident-management.md` 事故复盘 | 止损 → 根因 → 纠正项 → 验证闭环 | `memory/funclip-recovery-pattern.md`（不复用 `git reset --hard`） | `specialize` | 现有约定与公共规范等价；继续维护 | — | — |
-| `agent-runtime-security.md` | 身份 / 工具权限 / 提示注入 / 上下文隔离 / 审计 | `.claude/settings.json/.local.json` 部分覆盖（权限白名单 + Hooks） | `extend` | 保留 settings.json 工具白名单；不引入新工具权限 | — | — |
+| `agent-runtime-security.md` | 身份 / 工具权限 / 提示注入 / 上下文隔离 / 审计（v0.17 追加：项目知识不得写入用户级目录） | `.claude/settings.json/.local.json` 部分覆盖（权限白名单 + Hooks） | `extend` | 保留 settings.json 工具白名单；不引入新工具权限；知识放置按 `knowledge-placement.md` 行执行 | — | — |
+| `knowledge-placement.md`（v0.15 新增） | 项目知识必须入仓库受版本管理位置；用户级记忆只存个人偏好/环境特性；禁止双源；存量须迁移留痕 | 用户级 memory/ 存有 20+ 条项目知识（v0.14 接入前形成，含项目事实/协作规则/REQ 历史/技术坑）；迁移清单已备：`docs/knowledge-migration.md` | `legacy-gap`（存量）/ 新知识立即 `adopt` | 执行迁移清单（A→standards-profile、B→project-context、C→docs/REQM、D→测试优先）；迁移完成前新知识一律直接落仓库 | 项目负责人 | 2026-Q4 |
+| `task-intake.md`（v0.16 新增） | 受理模板（类型/目标/不做什么/风险/验收/事实假设）+ 集中询问（≤3 问）+ 受理卡入库 | `docs/sop/01-requirements.md` 需求澄清 + `requirements/REQ-<id>.md`（每条有验收标准）已等价覆盖大部分；受理卡落点即 REQ 文档 | `specialize` | 以 SOP-01 + REQ 文档为受理机制；Agent 受理时对照受理模板补缺项（不做什么/风险初判/≤3 问集中确认） | — | — |
+| `adoption.md` 安装模式与分发（v0.17 新增） | installMode 三选一并记入锁文件；`committed` = 全部文件含 `.agent/standards/` 入库 | 本仓库 `.agent/standards/` 已入库（v0.14 起）；锁文件已记录 `installMode=committed` | `adopt` | 保持 `committed`（存量项目默认不变）；`.agent/backups/` 已在 .gitignore 受管区块忽略 | — | — |
 | `logging.md` 统一日志 | 统一日志 API + 流程追踪 + 诊断页面 | 无统一日志 API；`funclip/` 内置 logging + `slirn_home/` 各服务 logging + `execution_history.py` | `legacy-gap` | 当前通过 memory/ + REQM 追踪；评估是否引入统一日志 | 项目负责人 | TBD |
 | `data-governance.md` 数据治理 | 分类 / 最小化 / 共享 / 保留 / 删除 / 脱敏 / 泄漏响应 | 用户数据 = 本地 JSON（用户名 + pbkdf2 hash + cookie session）；视频数据 = 本地处理 | `extend` | 用户密码 pbkdf2 200000 迭代；session HttpOnly + SameSite=Lax；视频数据零上传 | 项目负责人 | 持续 |
 | `slo-resilience.md` SLO 容灾 | SLI/SLO / 错误预算 / 容量 / 备份恢复 / RTO/RPO / 演练 | 单进程 Gradio 桌面工具 | `not-applicable` | 无 SLO 概念 | — | — |
@@ -53,8 +56,8 @@
 | 公共要求 | 项目机制 | 等价性说明 | 验证证据 |
 | --- | --- | --- | --- |
 | `decisions.md` ADR 决策记录 | `docs/design/DESIGN-*.md` 中"关键决策"段落（背景 / 取舍 / 后果 / 拒绝方案理由） | 与 `decisions.md` 模板对齐；37 个 DESIGN 文件已包含 ADR 风格段落 | `docs/design/DESIGN-20260919-061-fine-cut-material-compositor.md` 等实例 |
-| `incident-management.md` 事故复盘 | `memory/funclip-recovery-pattern.md`（不复用 `git reset --hard`，按 E2E 蓝图完整重做） | 与公共规范"止损 → 根因 → 纠正项 → 验证"等价 | memory 中现有条目（如 `funclip-bg-alpha-white-frame.md`、`funclip-bgm-e2e-corrupt-video.md`） |
-| `technical-debt.md` 技术债 | `docs/REQM/REQ-*.md` 追踪 + memory/ 中 `funclip-*.md` 散落记录 | 公开规范要求"问题 / 风险 / 负责人 / 期限 / 退出条件"；项目用 REQ 历史 + memory 散落实现 | `docs/REQM/REQ-20260923-NNN` + memory/funclip-*.md 现有条目 |
+| `incident-management.md` 事故复盘 | `memory/funclip-recovery-pattern.md`（不复用 `git reset --hard`，按 E2E 蓝图完整重做） | 与公共规范"止损 → 根因 → 纠正项 → 验证"等价 | memory 中现有条目（如 `funclip-bg-alpha-white-frame.md`、`funclip-bgm-e2e-corrupt-video.md`）— **v0.15 后 memory/ 不再是合规落点，待按迁移清单 D 类转入测试/文档** |
+| `technical-debt.md` 技术债 | `docs/REQM/REQ-*.md` 追踪 + memory/ 中 `funclip-*.md` 散落记录 | 公开规范要求"问题 / 风险 / 负责人 / 期限 / 退出条件"；项目用 REQ 历史 + memory 散落实现 | `docs/REQM/REQ-20260923-NNN` + memory/funclip-*.md 现有条目 — **memory 部分待按迁移清单处理** |
 
 ## 已批准例外（deviate）
 
@@ -69,6 +72,7 @@
 | `acceptance-automation.md` 平台未接入 | 测试 + 验收流程 | 仅手动 pytest，无独立审查证明 / 48h 运行 | 评估 `Agent-Acceptance-Platform v0.2.0` 是否适配本项目 | 试点 + 决策 | 项目负责人 | TBD |
 | `frontend-quality.md` 前端指标缺失 | `slirn_home/static/` | 无可访问性 / 响应式 / 性能度量 | 评估引入 axe-core / Lighthouse CI | 报告分数 + 性能预算 | 项目负责人 | TBD |
 | `architecture-fitness.md` 模块依赖检查缺失 | `funclip/` + `slirn/` + `slirn_home/` | 依赖规则靠文档约束，无自动 lint | 评估 `standards architecture check` 是否可加 funclip 边界规则 | CI 跑通 | 项目负责人 | TBD |
+| `knowledge-placement.md` 用户级记忆存量项目知识未迁移 | Claude 用户级 memory/（20+ 条） | 知识不共享、无版本历史、违反禁止双源；v0.17 升级时审计已确认存在 | 按 `docs/knowledge-migration.md` 迁移清单执行（A 协作规则 / B 项目事实 / C REQ 记录 / D 技术坑转测试） | 清单收尾验收 4 条逐项核对 + `standards verify` | 项目负责人 | 2026-Q4 |
 
 ## 待确认事项
 
@@ -77,6 +81,7 @@
 3. **`frontend-quality.md` 前端指标（axe-core / Lighthouse）引入计划？**
 4. **决策记录是否拆出独立 ADR 目录？**（当前复用 `docs/design/`，若团队习惯改变可拆出）
 5. **CLAUDE.md 是否需要把 Claude Code 特有内容迁到独立文件（如 `CLAUDE-INTEGRATION.md`）？**（当前"CLAUDE.md 适配层 + AGENTS.md 入口"结构清晰，暂不需要）
+6. **知识迁移清单（`docs/knowledge-migration.md`）何时执行？**（涉及删除用户级记忆条目，需用户确认后执行；执行前新知识一律直接落仓库，不再写入用户级记忆的项目知识区）
 
 ## 升级路径
 
@@ -86,6 +91,10 @@
 2. 只重新评估受影响的映射、适配和例外
 3. 更新本文件
 4. 通过 `sync-standards.ps1` 更新 `AGENTS.md` 受管区块 + `.agent/standards/*.md`
-5. 在业务项目中提交规范副本、锁定文件、受管区块和适配表变更
+5. 在业务项目中按安装模式提交相应文件（见 `standards/adoption.md` §「安装模式与分发」）
 
-当前锁定版本：`v0.14.0`（sourceCommit `4b1763faf6b607685ae967dbb34a3e29cf0e98bb`）
+### 升级记录
+
+- **2026-09-28 v0.14.0 → v0.17.0**：新增 `knowledge-placement.md` / `task-intake.md` 两份规范与 `adoption.md` 安装模式章节；`agent-runtime-security.md` 追加用户级目录写入禁令；映射表新增 3 行、legacy-gap 新增记忆迁移行；installMode 保持 `committed`（存量默认）。`standards verify` 通过。
+
+当前锁定版本：`v0.17.0`（sourceCommit `5d68778cfd7d08ac08bfc1d080099c57c8892e21`，installMode `committed`）

@@ -54,3 +54,7 @@ tmp_test_vid/
 /tests/_check_*.py
 /tasks/
 /slirn_home/tasks/
+
+# agent-standards:begin
+.agent/backups/
+# agent-standards:end

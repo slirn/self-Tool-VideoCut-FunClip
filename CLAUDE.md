@@ -6,7 +6,7 @@
 >
 > 任何新任务开始时请 Claude Code 先读 `AGENTS.md`，再按需读本文件中的 Claude 特定内容。
 >
-> - 公共规范基线：`.agent/standards/`（v0.14.0 锁定）
+> - 公共规范基线：`.agent/standards/`（v0.17.0 锁定）
 > - 项目事实：`.agent/project-context.md`
 > - 项目适配与例外：`.agent/standards-profile.md`
 >
@@ -162,13 +162,13 @@ git commit -m "chore(submodule): update slirn ref"
 - Skill 编排详细说明：见各 Skill 的 `SKILL.md`
 - 历史备份：`../FunClip-main-backup-20260914/funclip-main-pre-filter.bundle`
 
-## 11. Agent 规范接入（适配 Agent-Engineering-Standards v0.14.0）
+## 11. Agent 规范接入（适配 Agent-Engineering-Standards v0.17.0）
 
 2026-09-27 起，本项目接入 `D:\Slirn\WorkSpaces\PriProjs\Agent-Engineering-Standards` 公共规范：
 
 - **唯一 Agent 入口**：[`AGENTS.md`](AGENTS.md)（顶部已声明）
-- **公共规范基线**：`.agent/standards/`（29 个文件，SHA-256 锁定）
-- **版本锁定**：`.agent/standards.lock.json`（v0.14.0 + `sourceCommit=4b1763faf6b607685ae967dbb34a3e29cf0e98bb`）
+- **公共规范基线**：`.agent/standards/`（31 个文件，SHA-256 锁定）
+- **版本锁定**：`.agent/standards.lock.json`（v0.17.0 + `sourceCommit=5d68778cfd7d08ac08bfc1d080099c57c8892e21`，installMode=committed）
 - **项目事实**：`.agent/project-context.md`
 - **项目适配与例外**：`.agent/standards-profile.md`
 - **本文件（CLAUDE.md）的角色**：Claude Code 工具适配层——仅承担 Claude 特有的权限 / Hooks / Skill 索引引用，不作为第二套权威规则
