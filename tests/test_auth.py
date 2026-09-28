@@ -484,10 +484,147 @@ def test_router_js_member_and_users_actions():
         "_refreshTasksList",
     ):
         assert marker in src, f"router.js 缺少 {marker}"
-    # 登录/登出后必须重拉任务列表
+    # 登录/登出后必须按新登录态刷新任务数据
     i = src.find("action === 'do-login'")
     body = src[i:src.find("else if (action === 'logout')")]
     assert "_refreshTasksList" in body, "登录成功后必须刷新任务列表"
+    assert "_refreshDashboard" in body, "登录成功后必须刷新仪表盘"
     i = src.find("action === 'logout'")
     body = src[i:i + 700]
-    assert "_refreshTasksList" in body, "登出后必须刷新任务列表"
+    assert "location.reload()" in body, (
+        "登出必须整页刷新，把按用户过滤的任务数据从 DOM 清掉")
+
+
+# ---------- REQ-20260926-NNN 修复：普通用户不得看到全部任务 ----------
+
+def _render_setup(tmp_path: Path):
+    """造 2 个任务（alice 建 1 个，bob 建 1 个）+ alice 加为 t_bob 成员。"""
+    from tasklib import TaskManager
+    from slirn_home.auth import AuthStore
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    mgr = TaskManager(repo)
+    va = repo / "a.mp4"
+    vb = repo / "b.mp4"
+    va.write_bytes(b"\x00" * 16)
+    vb.write_bytes(b"\x00" * 16)
+    t_alice = mgr.create(name="alice-owned", original_video=va, created_by="alice")
+    t_bob = mgr.create(name="bob-owned", original_video=vb, created_by="bob")
+    auth = AuthStore(repo)
+    auth.add_task_member(t_bob.task_id, "alice")
+    return mgr, repo, auth, t_alice, t_bob
+
+
+def test_render_task_list_non_admin_clamps_scope_all(tmp_path: Path):
+    """普通用户传 scope="all" 必须被钳回「我的」— 且不渲染「全部」切换 radio。"""
+    from slirn_home.app import _render_task_list
+    mgr, repo, auth, t_alice, t_bob = _render_setup(tmp_path)
+    members = auth.list_user_tasks("alice")
+    html = _render_task_list(
+        mgr, scope="all",
+        current_user={"username": "alice", "is_admin": False},
+        memberships=members,
+    )
+    assert "alice-owned" in html
+    assert "bob-owned" in html                      # alice 是 t_bob 成员 → 可见
+    assert "slirn-task-scope" not in html, "普通用户不应看到「我的/全部」切换"
+    # admin 才有切换 + scope=all 看全部
+    html = _render_task_list(mgr, scope="all",
+                             current_user={"username": "boss", "is_admin": True})
+    assert "alice-owned" in html and "bob-owned" in html
+    assert "slirn-task-scope" in html
+
+
+def test_render_task_list_member_not_visible_without_membership(tmp_path: Path):
+    """非成员非创建者的任务对普通用户不可见（charlie 视角）。"""
+    from slirn_home.app import _render_task_list
+    mgr, repo, auth, t_alice, t_bob = _render_setup(tmp_path)
+    html = _render_task_list(
+        mgr, current_user={"username": "charlie", "is_admin": False}, memberships=[],
+    )
+    assert "alice-owned" not in html and "bob-owned" not in html
+
+
+def test_render_dashboard_filters_for_regular_user(tmp_path: Path):
+    """仪表盘按用户过滤：普通用户只看自己的统计 + 最近任务。"""
+    from slirn_home.app import _render_dashboard
+    mgr, repo, auth, t_alice, t_bob = _render_setup(tmp_path)
+    members = auth.list_user_tasks("alice")
+    html = _render_dashboard(
+        mgr, repo,
+        current_user={"username": "alice", "is_admin": False},
+        memberships=members,
+    )
+    assert "alice-owned" in html and "bob-owned" in html   # 自己的 + 成员的
+    # charlie（无任务无成员）→ 空态
+    html = _render_dashboard(
+        mgr, repo, current_user={"username": "charlie", "is_admin": False},
+        memberships=[],
+    )
+    assert "alice-owned" not in html and "bob-owned" not in html
+    # admin → 全部
+    html = _render_dashboard(
+        mgr, repo, current_user={"username": "boss", "is_admin": True},
+    )
+    assert "alice-owned" in html and "bob-owned" in html
+
+
+def test_task_list_endpoints_render_for_current_user():
+    """refresh/update/delete/create/cancel 端点必须按当前用户渲染列表 —
+    之前这 4 个端点直接回 _render_task_list(mgr)，普通用户一操作就看到全部任务。"""
+    src = (FUNCLIP_ROOT / "slirn_home" / "app.py").read_text(encoding="utf-8")
+    for ep in (
+        "/slirn/api/refresh_tasks", "/slirn/api/update_task",
+        "/slirn/api/delete_task", "/slirn/api/create_task",
+        "/slirn/api/cancel_create",
+    ):
+        i = src.find(f'"{ep}"')
+        assert i > 0, f"缺少端点 {ep}"
+        j = src.find("\n    @app.app.", i + 1)
+        body = src[i:j]
+        assert "_task_list_for_cur_user" in body, (
+            f"{ep} 必须用 _task_list_for_cur_user（按当前用户过滤）")
+        assert "_render_task_list(mgr)" not in body, (
+            f"{ep} 不得直接回未过滤的 _render_task_list(mgr)")
+
+
+def test_dashboard_endpoint_exists_and_filters():
+    src = (FUNCLIP_ROOT / "slirn_home" / "app.py").read_text(encoding="utf-8")
+    assert '"/slirn/api/dashboard"' in src, "必须有 /slirn/api/dashboard 端点"
+    i = src.find('"/slirn/api/dashboard"')
+    body = src[i:src.find("\n    @app.app.", i + 1)]
+    assert "_dashboard_for_cur_user" in body, "dashboard 端点必须按当前用户渲染"
+    # router.js 必须有对应的 _refreshDashboard
+    js = (FUNCLIP_ROOT / "slirn_home" / "static" / "router.js").read_text(encoding="utf-8")
+    assert "_refreshDashboard" in js and "'/dashboard'" in js
+
+
+def test_initial_html_uses_skeletons_not_task_data():
+    """build_app 初始 HTML 必须用骨架 — 任务数据不得烤进页面源码
+    （所有访客拿到同一份 HTML，烤进去 = 泄漏给未登录访客 + 普通用户）。"""
+    src = (FUNCLIP_ROOT / "slirn_home" / "app.py").read_text(encoding="utf-8")
+    i = src.find("def build_app")
+    body = src[i:src.find("with app:", i)]
+    assert "{_render_task_list_skeleton()}" in body
+    assert "{_render_dashboard_skeleton()}" in body
+    assert "{_render_task_list(mgr)}" not in body, "任务列表不得直接嵌初始 HTML"
+    assert "{_render_dashboard(mgr, repo_root)}" not in body, "仪表盘不得直接嵌初始 HTML"
+    assert "initial_stats" not in body, "不得在启动期算全局统计嵌进 hero"
+
+
+def test_router_js_load_refreshes_per_user():
+    """页面加载（auth/me 确认登录态）必须按用户拉任务列表 + 仪表盘；
+    未登录弹登录框 — 否则带 cookie 刷新页面会一直显示启动期骨架/旧数据。"""
+    src = (FUNCLIP_ROOT / "slirn_home" / "static" / "router.js").read_text(encoding="utf-8")
+    i = src.find("function _refreshCurrentUser")
+    body = src[i:src.find("function ", i + 10)]
+    assert "_refreshTasksList" in body and "_refreshDashboard" in body
+    assert "slirnShowLogin" in body
+
+
+def test_hidden_delete_trigger_removed():
+    """死的 Gradio delete 触发器必须移除 — 它不经过 auth 中间件，
+    可被未登录请求经 queue/join 伪造调用删除任务。"""
+    src = (FUNCLIP_ROOT / "slirn_home" / "app.py").read_text(encoding="utf-8")
+    assert "on_delete_task" not in src, "不得存在无鉴权的 on_delete_task 队列回调"
+    assert "btn_delete_task" not in src

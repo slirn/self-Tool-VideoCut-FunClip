@@ -98,9 +98,10 @@ def _time_ago(dt) -> str:
     return "刚刚"
 
 
-def _stats(mgr: TaskManager) -> dict:
+def _stats_from_summaries(summaries) -> dict:
+    """REQ-20260926-NNN 修复：stats 从（已按用户过滤的）summaries 算 —
+    仪表盘不再对普通用户展示全局统计。"""
     from datetime import datetime, timedelta
-    summaries = mgr.list()
     total = len(summaries)
     week_ago = datetime.now() - timedelta(days=7)
     week_new = 0
@@ -118,11 +119,32 @@ def _stats(mgr: TaskManager) -> dict:
     return {"total": total, "week": week_new, "draft": draft, "done": done}
 
 
+def _stats(mgr: TaskManager) -> dict:
+    return _stats_from_summaries(mgr.list())
+
+
 # =============== Dashboard ===============
 
-def _render_dashboard(mgr: TaskManager, repo_root: Path) -> str:
-    stats = _stats(mgr)
-    recent = mgr.list()[:5]
+def _render_dashboard(
+    mgr: TaskManager,
+    repo_root: Path,
+    current_user: dict | None = None,
+    memberships: list[str] | None = None,
+) -> str:
+    """仪表盘 HTML。REQ-20260926-NNN 修复：传 current_user 时按用户可见性过滤
+    （普通用户只看自己的统计 + 最近任务；admin / None 看全部 — None 仅供
+    服务启动期占位与测试，页面初始 HTML 一律用 _render_dashboard_skeleton）。
+    """
+    if current_user and not current_user.get("is_admin"):
+        summaries = mgr.list_for_user(
+            current_user.get("username", ""),
+            is_admin=False,
+            member_of=memberships or [],
+        )
+    else:
+        summaries = mgr.list()
+    stats = _stats_from_summaries(summaries)
+    recent = summaries[:5]
     cards = "".join([
         f'''<div class="slirn-stat-card" data-action="goto-tasks">
             <div class="slirn-stat-icon">{icon}</div>
@@ -171,6 +193,20 @@ def _render_dashboard(mgr: TaskManager, repo_root: Path) -> str:
     </div>'''
 
 
+def _render_dashboard_skeleton() -> str:
+    """启动期仪表盘占位 — 初始 HTML 不嵌任何任务数据（REQ-20260926-NNN 修复）。
+
+    真正的内容由前端确认登录态后经 /slirn/api/dashboard 按用户拉取；
+    未登录访客（含 view-source）只能看到这个骨架。
+    """
+    return '''<div id="slirn-tab-dashboard-inner" class="slirn-tab-inner">
+    <div class="slirn-stats"><div class="slirn-empty" style="grid-column:1/-1;">
+        <div class="slirn-empty-icon">⏳</div>
+        <div class="slirn-empty-text">仪表盘加载中…（登录后按你的权限显示）</div>
+    </div></div>
+    </div>'''
+
+
 # =============== 任务列表 ===============
 
 def _status_dot_class(status) -> str:
@@ -188,8 +224,14 @@ def _render_task_list(
     current_user: dict | None = None,
     memberships: list[str] | None = None,
 ) -> str:
-    # REQ-20260926-NNN：按用户可见性过滤
-    if current_user and not current_user.get("is_admin") and scope == "mine":
+    """任务列表 HTML。REQ-20260926-NNN 修复：非 admin 一律按「我的」过滤 —
+    scope="all" 仅 admin 有效（之前普通用户点「全部」直接看到所有人的任务）。
+    current_user=None（启动期占位 / 隐藏触发器 / 测试）时不做成员过滤。
+    """
+    is_admin = bool(current_user and current_user.get("is_admin"))
+    if not is_admin:
+        scope = "mine"
+    if current_user and scope == "mine":
         summaries = mgr.list_for_user(
             current_user.get("username", ""),
             is_admin=False,
@@ -197,8 +239,7 @@ def _render_task_list(
         )
     else:
         summaries = mgr.list()
-    is_admin = bool(current_user and current_user.get("is_admin"))
-    # scope radio（admin 才能选「全部」）
+    # scope radio（admin 才显示「我的/全部」切换；普通用户固定「我的」）
     scope_html = (
         '<div class="slirn-scope-toggle">'
         '<label><input type="radio" name="slirn-task-scope" value="mine"' +
@@ -206,7 +247,7 @@ def _render_task_list(
         '<label><input type="radio" name="slirn-task-scope" value="all"' +
         (' checked' if scope == "all" else '') + '> 全部</label>'
         '</div>'
-    ) if current_user else ''
+    ) if is_admin else ''
 
     cards = ""
     for s in summaries:
@@ -253,6 +294,27 @@ def _render_task_list(
     </div>
     <div class="slirn-task-grid">{cards}</div>
     <div class="slirn-status-msg" id="slirn-task-status" style="display:none;"></div>
+    </div>'''
+
+
+def _render_task_list_skeleton() -> str:
+    """启动期任务列表占位 — 初始 HTML 不嵌任何任务数据（REQ-20260926-NNN 修复）。
+
+    真正的列表由前端确认登录态后经 /slirn/api/refresh_tasks 按用户拉取；
+    未登录访客（含 view-source）只能看到这个骨架。
+    """
+    return '''<div id="slirn-tab-tasks-inner" class="slirn-tab-inner">
+    <div class="slirn-toolbar">
+        <div class="slirn-search-wrap">
+            <input class="slirn-search-box" id="slirn-task-search" placeholder="搜索任务名 / ID / 视频..." />
+        </div>
+        <button class="slirn-btn" data-action="refresh-tasks">🔄 刷新</button>
+        <button class="slirn-btn slirn-btn-primary" data-action="goto-create">➕ 新建任务</button>
+    </div>
+    <div class="slirn-task-grid"><div class="slirn-empty" style="grid-column:1/-1;">
+        <div class="slirn-empty-icon">⏳</div>
+        <div class="slirn-empty-text">任务列表加载中…（登录后按你的权限显示）</div>
+    </div></div>
     </div>'''
 
 
@@ -5514,8 +5576,9 @@ def build_app(repo_root: Path | None = None) -> gr.Blocks:
     # 放宽 Gradio 默认上传大小限制到 10 GB（原默认很小，会截断大视频）
     app.max_file_size = 10 * 1024 * 1024 * 1024  # bytes
 
-    initial_stats = _stats(mgr)
-
+    # REQ-20260926-NNN 修复：启动期不再渲染任务/仪表盘数据 — 初始 HTML 只放
+    # 骨架占位（所有访客拿到同一份 HTML，真实数据由前端确认登录态后按用户拉取），
+    # 否则全部任务会随页面源码泄漏给未登录访客和普通用户。
     # 单个 gr.HTML 包裹全部 UI — JS 通过 ID 控制各 tab 的可见性
     full_html = f'''
     <div class="slirn-topbar">
@@ -5539,7 +5602,7 @@ def build_app(repo_root: Path | None = None) -> gr.Blocks:
     <div class="slirn-hero">
         <div class="slirn-hero-text">
             <h1>欢迎回来 👋</h1>
-            <p>今天有 <strong>{initial_stats["draft"]}</strong> 个草稿任务待处理 · 仓库 <code>{_esc(repo_root)}</code></p>
+            <p>登录后按你的权限管理任务 · 仓库 <code>{_esc(repo_root)}</code></p>
         </div>
         <div class="slirn-hero-actions">
             <button class="slirn-btn" data-action="goto-tasks">📋 任务列表</button>
@@ -5548,8 +5611,8 @@ def build_app(repo_root: Path | None = None) -> gr.Blocks:
         </div>
     </div>
 
-    <div id="slirn-tab-dashboard" class="slirn-tab-content">{_render_dashboard(mgr, repo_root)}</div>
-    <div id="slirn-tab-tasks" class="slirn-tab-content" style="display:none;">{_render_task_list(mgr)}</div>
+    <div id="slirn-tab-dashboard" class="slirn-tab-content">{_render_dashboard_skeleton()}</div>
+    <div id="slirn-tab-tasks" class="slirn-tab-content" style="display:none;">{_render_task_list_skeleton()}</div>
     <div id="slirn-tab-create" class="slirn-tab-content" style="display:none;">{_render_create_task(repo_root)}</div>
     <div id="slirn-tab-hotwords" class="slirn-tab-content" style="display:none;">{_render_hotword_lib(repo_root)}</div>
     <div id="slirn-tab-detail" class="slirn-tab-content" style="display:none;"></div>
@@ -5643,15 +5706,10 @@ def build_app(repo_root: Path | None = None) -> gr.Blocks:
         btn_view_task = gr.Button("view", elem_classes=["slirn-hidden-trigger"])
         btn_view_task.click(fn=on_view_task, inputs=[hidden_task_id], outputs=[])
 
-        def on_delete_task(task_id: str) -> str:
-            if task_id.strip():
-                try:
-                    mgr.delete(task_id.strip())
-                except Exception:
-                    pass
-            return _render_task_list(mgr)
-        btn_delete_task = gr.Button("delete", elem_classes=["slirn-hidden-trigger"])
-        btn_delete_task.click(fn=on_delete_task, inputs=[hidden_task_id], outputs=[])
+        # REQ-20260926-NNN 修复：移除死的 delete 触发器 — router.js 早已走
+        # /slirn/api/delete_task（有 auth 中间件 + task_access 校验），这个遗留
+        # Gradio 队列回调不经过任何鉴权，可被未登录请求经 queue/join 伪造调用删任务。
+        # 其余 hidden-trigger 回调 outputs=[] 纯渲染、无副作用，留作兼容。
 
         def on_file_selected() -> str:
             fp = hidden_file.value
@@ -5817,6 +5875,23 @@ def _register_slirn_api(
 
     def _err(msg: str) -> JSONResponse:
         return JSONResponse({"ok": False, "error": msg})
+
+    # REQ-20260926-NNN 修复：按当前登录用户渲染任务列表 / 仪表盘。
+    # 之前 create/delete/update/cancel 端点直接回 _render_task_list(mgr)（无用户
+    # 过滤）→ 普通用户一操作就看到全部任务；仪表盘则完全没有按用户的入口。
+    # 中间件保证非公开端点必有 user（401 拦截 / bypass 挂 test-admin）。
+    # scope=None（增删改端点）：admin → 全部（老行为），普通用户 → 我的（钳制）。
+    def _task_list_for_cur_user(scope: str | None = None) -> str:
+        user = _get_cur_user()
+        members = auth.list_user_tasks(user.get("username", "")) if user else []
+        if scope is None:
+            scope = "all" if user and user.get("is_admin") else "mine"
+        return _render_task_list(mgr, scope=scope, current_user=user, memberships=members)
+
+    def _dashboard_for_cur_user() -> str:
+        user = _get_cur_user()
+        members = auth.list_user_tasks(user.get("username", "")) if user else []
+        return _render_dashboard(mgr, repo_root, current_user=user, memberships=members)
 
     # 事件路由 JS — 静态文件提供。head= 内联注入会被反斜杠转义解码破坏（见 ROUTER_JS 注释），
     # 所以 _build_head 只注入 <script src>，实际内容从这里出。no-cache 方便改版后刷新即生效。
@@ -6116,11 +6191,16 @@ def _register_slirn_api(
 
     @app.app.post("/slirn/api/refresh_tasks")
     async def refresh_tasks(body: dict = Body(default_factory=dict)):
-        # REQ-20260926-NNN：按用户可见性过滤（contextvar 由中间件 set）
-        user = _get_cur_user()
+        # REQ-20260926-NNN：按用户可见性过滤（_task_list_for_cur_user 读 contextvar user；
+        # 非 admin 的 scope="all" 会在 _render_task_list 里钳回 "mine"）
         scope = str(body.get("scope") or "mine").strip() or "mine"
-        members = auth.list_user_tasks(user.get("username", "")) if user else []
-        return _ok(_render_task_list(mgr, scope=scope, current_user=user, memberships=members))
+        return _ok(_task_list_for_cur_user(scope=scope))
+
+    # REQ-20260926-NNN 修复：仪表盘按用户渲染 — 初始 HTML 已骨架化，
+    # 登录态确认后前端经此端点拉取（普通用户只看自己的统计 + 最近任务）
+    @app.app.post("/slirn/api/dashboard")
+    async def dashboard_page():
+        return _ok(_dashboard_for_cur_user())
 
     @app.app.post("/slirn/api/view_task")
     async def view_task(body: dict = Body(default_factory=dict)):
@@ -6251,7 +6331,7 @@ def _register_slirn_api(
 
         if seg_changed and had_subtitle:
             toast += " · 截取范围已变，建议重新生成字幕"
-        return _ok(_render_task_list(mgr), toast=toast, task_id=tid)
+        return _ok(_task_list_for_cur_user(), toast=toast, task_id=tid)
 
     @app.app.post("/slirn/api/workbench")
     async def workbench(body: dict = Body(default_factory=dict)):
@@ -7923,7 +8003,7 @@ def _register_slirn_api(
         except OSError as e:
             log.exception("删除任务 %s 失败（真删未完成）", tid)
             return _err(f"删除失败: {e} — 可能有文件正被预览/占用，关闭预览后重试")
-        return _ok(_render_task_list(mgr), toast="✅ 已删除（任务文件已从磁盘移除）")
+        return _ok(_task_list_for_cur_user(), toast="✅ 已删除（任务文件已从磁盘移除）")
 
     # REQ-20260921-NNN-outputs-browser：列出任务 outputs/ + 任务根下的全部产物
     # 给「📦 查看产物」面板用 — 之前用户必须自己翻目录或记文件名（区间导出是
@@ -9947,7 +10027,7 @@ def _register_slirn_api(
                 shutil.move(str(segment_temp), str(final_path))
             except Exception:
                 pass
-        return _ok(_render_task_list(mgr), toast="✅ 任务已创建", task_id=task.task_id)
+        return _ok(_task_list_for_cur_user(), toast="✅ 任务已创建", task_id=task.task_id)
 
     # REQ-20260920-090：诊断 BGM 合成路径（不跑 ffmpeg、不创建临时文件）
     @app.app.post("/slirn/api/diagnose_bgm")
@@ -10088,7 +10168,7 @@ def _register_slirn_api(
 
     @app.app.post("/slirn/api/cancel_create")
     async def cancel_create():
-        return _ok(_render_task_list(mgr))
+        return _ok(_task_list_for_cur_user())
 
     # ===== REQ-20260926-NNN：用户管理 + 会话 =====
     from slirn_home.auth_routes import register_auth_endpoints as _register_auth

@@ -93,7 +93,19 @@
   };
   function _refreshCurrentUser() {
     getJSON(SLIRN_API + '/auth/me').then(function(r) {
-      _setCurrentUserUI(r && r.user);
+      var u = r && r.user;
+      _setCurrentUserUI(u);
+      // REQ-20260926-NNN 修复：页面加载即按登录态拉任务列表 + 仪表盘。
+      // 初始 HTML 只有骨架（不再嵌全部任务）— 带 cookie 刷新页面必须重拉，
+      // 否则普通用户会一直看到启动时烤进 HTML 的全量任务。
+      if (u && u.username) {
+        // 首次加载：admin → 全部，普通用户 → 我的（此后跟随 scope radio）
+        try { _refreshTasksList(u.is_admin ? 'all' : 'mine'); } catch (e) {}
+        try { _refreshDashboard(); } catch (e) {}
+      } else {
+        // 未登录：数据端点全部要求会话，弹登录框引导
+        try { window.slirnShowLogin && window.slirnShowLogin(); } catch (e) {}
+      }
     });
   }
   // 启动时拉一次当前用户
@@ -174,17 +186,29 @@
   }
   window._loadTaskMembers = _loadTaskMembers;
 
-  // REQ-20260926-NNN：按当前 scope（我的/全部）重拉任务列表 — 登录/登出/手动刷新共用
-  function _refreshTasksList() {
-    var scope = 'mine';
-    try {
-      var sR = document.querySelector('input[name="slirn-task-scope"]:checked');
-      if (sR) scope = sR.value;
-    } catch (e) {}
+  // REQ-20260926-NNN：按当前 scope（我的/全部）重拉任务列表 — 登录/登出/手动刷新共用。
+  // optScope：首次加载（骨架里还没有 radio）由 _refreshCurrentUser 按角色显式传 —
+  // admin → 'all'（老行为），普通用户 → 'mine'。
+  function _refreshTasksList(optScope) {
+    var scope = optScope || 'mine';
+    if (!optScope) {
+      try {
+        var sR = document.querySelector('input[name="slirn-task-scope"]:checked');
+        if (sR) scope = sR.value;
+      } catch (e) {}
+    }
     postJSON(SLIRN_API + '/refresh_tasks', {scope: scope})
       .then(function(r) { handleResp(r, 'slirn-tab-tasks'); });
   }
   window._refreshTasksList = _refreshTasksList;
+
+  // REQ-20260926-NNN 修复：按当前用户拉仪表盘 — 初始 HTML 已骨架化，
+  // 统计卡片 + 最近任务随登录态加载（普通用户只看自己的）
+  function _refreshDashboard() {
+    postJSON(SLIRN_API + '/dashboard', {})
+      .then(function(r) { handleResp(r, 'slirn-tab-dashboard'); });
+  }
+  window._refreshDashboard = _refreshDashboard;
 
   function getInput(id) {
     var el = document.getElementById(id);
@@ -7373,8 +7397,11 @@
             if (window.slirnHideLogin) window.slirnHideLogin();
             _setCurrentUserUI(r.user);
             toast('✅ 已登录：' + r.user.username);
-            // 登录后重拉任务列表（按新用户过滤「我的」scope）
-            try { _refreshTasksList(); } catch (e) {}
+            // 登录后重拉任务列表 + 仪表盘（admin → 全部，普通用户 → 我的）
+            try {
+              _refreshTasksList(r.user.is_admin ? 'all' : 'mine');
+              _refreshDashboard();
+            } catch (e) {}
           } else {
             var hint = document.getElementById('slirn-login-hint');
             if (hint) {
@@ -7390,10 +7417,12 @@
     else if (action === 'logout') {
       postJSON(SLIRN_API + '/auth/logout', {})
         .then(function() {
-          _setCurrentUserUI(null);
           toast('已登出');
-          // 刷新任务列表（避免显示已无权访问的任务）
-          try { _refreshTasksList(); } catch (e) {}
+          // REQ-20260926-NNN 修复：登出后整页刷新 — 把按用户过滤的任务/仪表盘
+          // 内容从 DOM 彻底清掉（回到无数据骨架），比只重拉列表更干净；
+          // 加载流程发现未登录会自动弹登录框
+          try { _clearTaskPageHash(); } catch (e) {}
+          setTimeout(function() { location.reload(); }, 400);
         });
     }
     // ===== REQ-20260926-NNN：用户管理 modal（admin） =====

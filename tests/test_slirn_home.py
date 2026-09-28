@@ -345,17 +345,22 @@ def test_app_renders_login_modal_and_topbar_user_indicator():
 
 
 def test_refresh_tasks_uses_scope_and_user():
-    """refresh_tasks 端点必须按 user + scope 过滤。"""
+    """refresh_tasks 端点必须按 user + scope 过滤（经 _task_list_for_cur_user）。"""
     src = (FUNCLIP_ROOT / "slirn_home" / "app.py").read_text(encoding="utf-8")
     i = src.find('"/slirn/api/refresh_tasks"')
     assert i > 0
     j = src.find("\n    @app.app.post", i + 1)
     body = src[i:j]
     assert "scope" in body, "refresh_tasks 必须支持 scope 参数"
-    # REQ-20260926-NNN：user 改从 contextvar 读（_get_cur_user），不再碰 request.state
-    assert "_get_cur_user()" in body, "refresh_tasks 必须读当前 user"
-    assert "list_for_user" in body or "list_user_tasks" in body, (
-        "refresh_tasks 必须用 list_for_user / list_user_tasks 过滤")
+    # REQ-20260926-NNN 修复：端点委托 _task_list_for_cur_user（读 contextvar user
+    # + list_user_tasks 成员 + _render_task_list 里 list_for_user 过滤）
+    assert "_task_list_for_cur_user(scope=scope)" in body, (
+        "refresh_tasks 必须经 _task_list_for_cur_user 按当前用户渲染")
+    # helper 本体必须真的按用户过滤
+    k = src.find("def _task_list_for_cur_user")
+    helper = src[k:src.find("\n    def ", k + 10)]
+    assert "_get_cur_user()" in helper
+    assert "list_user_tasks" in helper
 
 
 def test_router_js_credentials_and_login_actions():
