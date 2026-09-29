@@ -970,6 +970,7 @@
         bindOptRows(tid);
         setupOptWordsPagination();  // REQ-20260918-050：词频列表分页（每次 wb 重渲后调）
         bindOptRowSearch();  // REQ-20260923-NNN 行搜索输入框（幂等重绑）
+        bindOptBatchInputs();  // REQ-20260929-NNN 批量替换面板输入框（幂等重绑）
         optInputOverflowInit();  // REQ-20260918-058：替换输入框溢出检测 + 自动换行
         bindFineControls();  // REQ-20260919-061：精剪视频·素材合成器控件绑定（位置/缩放/字体/输出自动保存）
         bindFineSteppers();  // REQ-20260919-061：精剪视频·数值控件（number input + ▲▼）与滑块双向同步
@@ -1584,6 +1585,16 @@
   }
   function colEnhance(root) {
     var scope = root || document;
+    // 2026-09-29 自愈：内容条已被移除的「空壳」（动态 hint 删后残留的折叠壳）
+    // 直接清掉 — 否则插删一次 hint 就多一个只有胶囊头的无用说明区（用户反馈：
+    // 每次保存后堆出一列「说明」）。正常壳必有 head + ≥1 个内容元素。
+    Array.prototype.forEach.call(scope.querySelectorAll('.slirn-col'), function(c) {
+      var hasContent = false;
+      for (var i = 0; i < c.children.length; i++) {
+        if (!c.children[i].classList.contains('slirn-col-head')) { hasContent = true; break; }
+      }
+      if (!hasContent && c.parentNode) c.parentNode.removeChild(c);
+    });
     // REQ-20260918-059：同一 pane 内所有 .slirn-form-hint 合并成单个折叠（不管相邻不相邻）
     // 旧实现只合并相邻 hint；被 opt-words / opt-list 等元素隔开时会各自成组，撑高页面。
     var paneMap = Object.create(null);
@@ -2857,6 +2868,18 @@
     if (!occEl || occEl.getAttribute('data-reviewed') === '1') return;
     occEl.setAttribute('data-reviewed', '1');
     optWordRowRefresh(occEl.getAttribute('data-word') || '');
+    // 2026-09-29 用户反馈：处理完的字幕行保持绿色（防重复处理）。口径与词行
+    // ✅ 一致：本行全部出现处都已 reviewed（采纳或不采纳都算）→ 行挂 occ-done。
+    // 服务端 _line_html 用同一口径渲染初始态，这里负责交互过程中的实时传播。
+    var row = occEl.closest ? occEl.closest('.slirn-opt-row') : null;
+    if (row && !row.classList.contains('occ-done')) {
+      var occs = row.querySelectorAll('.slirn-opt-occ');
+      var all = occs.length > 0;
+      for (var k = 0; k < occs.length; k++) {
+        if (occs[k].getAttribute('data-reviewed') !== '1') { all = false; break; }
+      }
+      if (all) row.classList.add('occ-done');
+    }
   }
   function optWordRowRefresh(word) {  // 重算词行 done 状态（x/y + 徽章 + data-done）
     if (!word) return;
@@ -2936,6 +2959,11 @@
       var hint = document.createElement('div');
       hint.id = hintId;
       hint.className = 'slirn-form-hint slirn-opt-filter-hint';
+      // 2026-09-29 用户反馈：这是随点词不断插删的临时 hint，若被 colEnhance 包进
+      // 「ℹ️ 说明」折叠壳，点下一个词删 hint 时壳会残留 — 每处理一个词（回车即
+      // 自动保存）净增一个空说明区，越积越多。预先标记 slirnCol 让 colEnhance
+      // 跳过：hint 始终原地显示，不产生壳（「说明」壳收起时也不至于把它藏没）。
+      hint.dataset.slirnCol = '1';
       hint.innerHTML = '🔍 <b>' + escapeHtml(word) + '</b> 出现 <b>' + targetIds.length
         + '</b> 处，每处显示上下文 ±' + CONTEXT_RADIUS + ' 行（再点同一词可清除）';
       list.parentNode.insertBefore(hint, list);
@@ -3004,6 +3032,22 @@
     });
   }
   // ========== REQ-20260919-061：精剪视频·四素材合成器 前端函数 ==========
+  function fineEnableOutputBtns() {
+    // 视频素材就绪后解除「生成预览/导出」主按钮 disabled（与卡内预览/详情
+    // 按钮同批解 — 否则上传/自动获取成功后主按钮还灰着，用户以为没生效）。
+    // title 与服务端渲染文案保持一致（_render_fine_cut_zone）。
+    var titles = {
+      'fine-preview': '渲染预览（ffmpeg overlay，时长 2–30 秒可调）',
+      'fine-export': '导出完整视频到 outputs/fine_export.mp4'
+    };
+    Object.keys(titles).forEach(function(act) {
+      var b = document.querySelector('[data-action="' + act + '"]');
+      if (b && b.disabled) {
+        b.disabled = false;
+        b.title = titles[act];
+      }
+    });
+  }
   function fineUpload(btn, kind) {
     var fileInput = document.getElementById('slirn-fine-file-' + kind);
     if (!fileInput || !fileInput.files || !fileInput.files[0]) {
@@ -3048,6 +3092,8 @@
             detBtn.disabled = false;
             detBtn.title = '查看完整路径 + 文件元数据';
           }
+          // 视频素材就绪 → 同时解除卡外「生成预览/导出」主按钮
+          if (kind === 'video') fineEnableOutputBtns();
           toast('✅ ' + (j.toast || '已上传'));
           // REQ-20260920-079：超大图片上传时提示用户「合成时自动缩放」
           if (j.warning) {
@@ -3152,14 +3198,7 @@
       })
         .then(function(r) { return r.json(); })
         .then(function(j) {
-          // REQ-20260919-062 v5：后端在 viewport 限定下夹紧了 video 的 x/y/scale，
-          // 把夹紧后的值同步回滑块显示（用户拖到边界外时滑块自动回退）
-          if (j && j.layout && j.layout.video) {
-            var v = j.layout.video;
-            if (typeof v.x === 'number') _fineSyncSlider('slirn-fine-video-x', v.x);
-            if (typeof v.y === 'number') _fineSyncSlider('slirn-fine-video-y', v.y);
-            if (typeof v.scale === 'number') _fineSyncSlider('slirn-fine-video-scale', v.scale);
-          }
+          // （viewport 夹紧已移除：x/y/scale 按滑块原值保存，服务端不再改写）
           return j;
         })
     );
@@ -3622,30 +3661,9 @@
         _setSlider('slirn-fine-video-crop_h', r.height);
         _setSlider('slirn-fine-video-scale', 1.0);
 
-        // REQ-20260919-062 v5：把 viewport 限定也保存到后端，
-        // 这样用户后续拖滑块时 video 不会跑出检测区域。
-        var applyTid = applyBtn.getAttribute('data-task-id') || '';
-        if (applyTid) {
-          fetch('/slirn/api/save_fine_layout?task_id=' + encodeURIComponent(applyTid), {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              task_id: applyTid,
-              layout: { video: { viewport: { x: r.x, y: r.y, width: r.width, height: r.height } } },
-            }),
-          })
-            .then(function(resp) { return resp.json(); })
-            .then(function(j) {
-              // 后端夹紧 x/y/scale 到 viewport（这里通常无变化；保险起见同步一次）
-              if (j && j.layout && j.layout.video) {
-                var v = j.layout.video;
-                _fineSyncSlider('slirn-fine-video-x', v.x);
-                _fineSyncSlider('slirn-fine-video-y', v.y);
-                _fineSyncSlider('slirn-fine-video-scale', v.scale);
-              }
-            })
-            .catch(function(err) { toast('⚠️ viewport 保存失败：' + err, 'warning'); });
-        }
-        toast('✅ 已填充：video 位置=(' + r.x + ', ' + r.y + ')，从原视频 (0,0) 截取 ' + r.width + '×' + r.height + '，缩放 1.00 填满区域，并已限定视频在该区域内', 'success');
+        // 注意：填充只改滑块显示值，不落库、不设 viewport 限定 —
+        // 用户手工微调 X/Y 后点「保存全部设置」时按调整值原样保存。
+        toast('✅ 已填充：video 位置=(' + r.x + ', ' + r.y + ')，从原视频 (0,0) 截取 ' + r.width + '×' + r.height + '，缩放 1.00 填满区域；可手工调整后保存', 'success');
       });
     }
   }
@@ -4493,8 +4511,18 @@
       .then(function(j) {
         btn.disabled = false; btn.textContent = oldText;
         if (j.ok) {
-          if (typeof refreshWb === 'function') refreshWb();
-          else location.reload();
+          // 局部刷新（不做整页/工作台刷新）：用服务端重渲染的单卡换掉对应
+          // 素材卡（徽章/状态行/预览/详情按钮的 disabled 一次性到位）。
+          // 点击事件全部委托 data-action，换卡后无需重绑。
+          var card = document.querySelector('.slirn-fine-upload-card[data-kind="' + kind + '"]');
+          if (card && j.card_html) {
+            card.outerHTML = j.card_html;
+          }
+          // 视频素材就绪 → 解除卡外「生成预览/导出」主按钮
+          if (kind === 'video') fineEnableOutputBtns();
+          // 从素材详情弹窗里的「重新自动获取」进入时，弹窗信息已过期 → 关掉
+          var modal = document.getElementById('slirn-mat-detail-modal');
+          if (modal && !modal.hidden) modal.hidden = true;
           toast('✅ ' + (j.toast || '已自动从上游获取'));
         } else {
           toast('❌ ' + (j.error || '自动获取失败'));
@@ -5201,6 +5229,53 @@
       else if (ev.key === 'Escape') { ev.preventDefault(); optCloseResplit(); }
     });
   }
+  function optSwapRows(row, html) {  // 行组局部刷新：切分/取消切分后只换本行组
+    // 2026-09-29 用户反馈：按内容切分后整页刷新会把用户踢出当前优化字幕工作
+    // 环境（滚动/词筛选/焦点全丢）。服务端返回该 seg 重渲后的行组（父行 +
+    // 子段行），这里原地替换 — 列表其余 DOM 不动，播放器/词频/筛选全部保留。
+    if (!row || !html) return false;
+    var list = row.closest('.slirn-opt-list');
+    var rid = row.getAttribute('data-id') || '';
+    var inner = document.getElementById('slirn-tab-workbench-inner');
+    var tid = inner ? (inner.getAttribute('data-task-id') || '') : '';
+    optCloseResplit();  // 收起切分编辑框（切分路径它还开着）
+    // 旧子段行（data-parent 同 rid）先移除，再原地换父行 — 位置即原父行位置
+    if (list && rid) {
+      list.querySelectorAll('.slirn-opt-row[data-parent="' + rid + '"]').forEach(function(sr) {
+        if (sr.parentNode) sr.parentNode.removeChild(sr);
+      });
+    }
+    // 记住父行在列表视口中的偏移 → 换完恢复（用户视线不跳）
+    var anchorTop = null;
+    if (list) anchorTop = row.getBoundingClientRect().top - list.getBoundingClientRect().top;
+    var tpl = document.createElement('div');
+    tpl.innerHTML = html;
+    var firstEl = null;
+    while (tpl.firstChild) {
+      var node = tpl.firstChild;
+      row.parentNode.insertBefore(node, row);
+      if (!firstEl && node.nodeType === 1) firstEl = node;
+    }
+    row.parentNode.removeChild(row);
+    // 新行重绑：行点击定位播放（其余交互全是 data-action/input 全局委托）
+    if (list && rid) {
+      var bindAll = function(sel) {
+        list.querySelectorAll(sel).forEach(function(nr) { optBindRowClick(nr, tid); });
+      };
+      bindAll('.slirn-opt-row[data-id="' + rid + '"]');
+      bindAll('.slirn-opt-row[data-parent="' + rid + '"]');
+    }
+    // 替换值输入框溢出检测（data-wrap-bound 守卫，只对新增 input 生效）
+    optInputOverflowInit();
+    // 行文本筛选重放（新行组需要 opt-search-miss 标记；幂等）
+    optRowSearch();
+    // 恢复父行视口偏移（子段行增删改变了列表高度，补 scrollTop 差值）
+    if (list && firstEl && anchorTop !== null) {
+      var nowTop = firstEl.getBoundingClientRect().top - list.getBoundingClientRect().top;
+      list.scrollTop += nowTop - anchorTop;
+    }
+    return true;
+  }
   function optDoResplit() {
     var box = document.querySelector('.slirn-opt-resplit');
     var inp = box && box.querySelector('.slirn-cut-resplit-input');
@@ -5216,7 +5291,11 @@
       seg_id: parseInt(row.getAttribute('data-id'), 10),
       target_text: val,
     }).then(function(r) {
-      if (r && r.ok) { toast(r.toast || '✂️ 已切分'); openWorkbench(tid); }
+      if (r && r.ok) {
+        toast(r.toast || '✂️ 已切分');
+        // 2026-09-29 用户反馈：局部换行组，不再整页刷新；row_html 缺失兜底整刷
+        if (!optSwapRows(row, r.row_html || '')) openWorkbench(tid);
+      }
       else if (r && r.error) toast('❌ ' + r.error, 'error');
     });
   }
@@ -5228,9 +5307,196 @@
       task_id: tid,
       seg_id: parseInt(row.getAttribute('data-id'), 10),
     }).then(function(r) {
-      if (r && r.ok) { toast(r.toast || '↩️ 已恢复整行'); openWorkbench(tid); }
+      if (r && r.ok) {
+        toast(r.toast || '↩️ 已恢复整行');
+        // 2026-09-29 用户反馈：与切分同款 — 局部换行组，row_html 缺失兜底整刷
+        if (!optSwapRows(row, r.row_html || '')) openWorkbench(tid);
+      }
       else if (r && r.error) toast('❌ ' + r.error, 'error');
     });
+  }
+  // ========== REQ-20260929-NNN 批量替换：查找（5 行上下文预览）→ 确认替换 ==========
+  // 用户需求：批量替换之前要查到对应的词并显示出来，同时显示它所在字幕记录的
+  // 前两行和后两行（每处命中共 5 行上下文），明确语境后再输入替换文字点确认。
+  function optBatchTid() {
+    var inner = document.getElementById('slirn-tab-workbench-inner');
+    return inner ? (inner.getAttribute('data-task-id') || '') : '';
+  }
+  function optBatchOpen(btn) {  // 🔁 打开/收起面板（再点同按钮切换）
+    var p = document.getElementById('slirn-opt-batchrep');
+    if (!p) return;
+    var show = p.style.display === 'none';
+    p.style.display = show ? '' : 'none';
+    if (show) {
+      var w = document.getElementById('slirn-opt-batchrep-word');
+      if (w) { w.focus(); w.select(); }
+    }
+  }
+  function optBatchClose() {  // 收起 + 清结果（确认按钮状态复位，下次打开是全新现场）
+    var p = document.getElementById('slirn-opt-batchrep');
+    if (p) p.style.display = 'none';
+    var box = document.getElementById('slirn-opt-batchrep-result');
+    if (box) box.innerHTML = '';
+    var apply = document.getElementById('slirn-opt-batchrep-apply');
+    if (apply) apply.style.display = 'none';
+    var go = document.getElementById('slirn-opt-batchrep-go');
+    if (go) { go.disabled = false; go.textContent = '✅ 确认批量替换'; }
+  }
+  function optBatchFind(text, word) {  // 大小写不敏感找全部不重叠位置（镜像服务端口径）
+    var lt = text.toLowerCase(), lw = word.toLowerCase();
+    var out = [], i = 0, p;
+    if (lt.length !== text.length) {  // 罕见折叠字符长度变化 → 退精确匹配
+      while ((p = text.indexOf(word, i)) >= 0) { out.push(p); i = p + word.length; }
+      return out;
+    }
+    while ((p = lt.indexOf(lw, i)) >= 0) { out.push(p); i = p + word.length; }
+    return out;
+  }
+  function optBatchHi(text, word) {  // XSS 安全高亮：切片逐段 escape，mark 只包命中段
+    var out = [], cur = 0;
+    optBatchFind(text, word).forEach(function(p) {
+      out.push(escapeHtml(text.slice(cur, p)));
+      out.push('<mark class="slirn-opt-batchrep-hit">' +
+               escapeHtml(text.slice(p, p + word.length)) + '</mark>');
+      cur = p + word.length;
+    });
+    out.push(escapeHtml(text.slice(cur)));
+    return out.join('');
+  }
+  function optBatchSearch(btn) {  // 🔍 查找：预览每处命中的 5 行上下文（不写盘）
+    var tid = optBatchTid();
+    var inp = document.getElementById('slirn-opt-batchrep-word');
+    var word = inp ? (inp.value || '').trim() : '';
+    if (!word) { toast('❌ 请输入要查找的词', 'error'); if (inp) inp.focus(); return; }
+    var apply = document.getElementById('slirn-opt-batchrep-apply');
+    if (apply) apply.style.display = 'none';  // 换词后旧预览对应的确认按钮先撤下
+    btn.disabled = true; btn.textContent = '⏳ 查找中…';
+    postJSON(SLIRN_API + '/opt_batch_search', {task_id: tid, word: word})
+      .then(function(r) {
+        btn.disabled = false; btn.textContent = '🔍 查找';
+        if (r && r.ok) { optBatchRender(r.search || {}, word); }
+        else { toast('❌ ' + ((r && r.error) || '查找失败'), 'error'); }
+      })
+      .catch(function() {
+        btn.disabled = false; btn.textContent = '🔍 查找';
+        toast('❌ 查找失败（网络错误）', 'error');
+      });
+  }
+  var _OPT_BATCH_BLOCK_TXT = {
+    full_edit: '✏️ 整句替换行 · 跳过（本行已被整句改写覆盖）',
+    split: '✂️ 已切分行 · 跳过（替换会破坏子段对齐）',
+    deleted: '🗑️ 已标记删除 · 跳过（该行将从成片剪除）',
+  };
+  function optBatchRender(s, word) {
+    var box = document.getElementById('slirn-opt-batchrep-result');
+    var apply = document.getElementById('slirn-opt-batchrep-apply');
+    if (!box || !apply) return;
+    var ms = s.matches || [];
+    if (!ms.length) {  // 空态：明确「没找到」，不是没反应
+      box.innerHTML = '<div class="slirn-opt-batchrep-empty">未找到「' +
+                      escapeHtml(word) + '」— 换个词试试</div>';
+      return;
+    }
+    var html = ['<div class="slirn-opt-batchrep-head">命中 <b>' + (s.hits || 0) +
+                '</b> 处 / ' + (s.lines || 0) + ' 行 · 可替换 ' +
+                (s.free_hits || 0) + ' 处（' + (s.eligible_lines || 0) + ' 行）' +
+                ((s.blocked_lines || 0)
+                  ? ' · 不可替换 ' + s.blocked_lines + ' 行（见标注）' : '') +
+                '</div>'];
+    ms.forEach(function(m) {
+      html.push('<div class="slirn-opt-batchrep-item' +
+                (m.free_positions && m.free_positions.length ? '' : ' blocked') + '">');
+      (m.context || []).forEach(function(c) {
+        var cur = c.seg === m.seg;
+        html.push('<div class="slirn-opt-batchrep-ctx' + (cur ? ' cur' : '') +
+                  (c.deleted ? ' del' : '') + '">' +
+                  '<span class="slirn-opt-batchrep-ctx-idx">' + c.seg + '</span>' +
+                  '<span class="slirn-opt-batchrep-ctx-txt">' +
+                  (cur ? optBatchHi(c.text || '', word) : escapeHtml(c.text || '')) +
+                  '</span></div>');
+      });
+      if (m.block) {
+        html.push('<div class="slirn-opt-batchrep-badge">' +
+                  (_OPT_BATCH_BLOCK_TXT[m.block] || '跳过') + '</div>');
+      } else if (m.skipped_overlap) {
+        html.push('<div class="slirn-opt-batchrep-badge">⚠️ ' + m.skipped_overlap +
+                  ' 处与现有替换重叠，跳过（其余 ' + m.free_positions.length + ' 处替换）</div>');
+      }
+      html.push('</div>');
+    });
+    box.innerHTML = html.join('');
+    // 确认区只在确有可替换处时出现（空态/全阻断都不给替换入口）
+    apply.style.display = (s.free_hits || 0) > 0 ? '' : 'none';
+  }
+  function optBatchReplace(btn) {  // ✅ 确认批量替换：注入出现项 + 受影响行组局部刷新
+    var tid = optBatchTid();
+    var wInp = document.getElementById('slirn-opt-batchrep-word');
+    var tInp = document.getElementById('slirn-opt-batchrep-to');
+    var word = wInp ? (wInp.value || '').trim() : '';
+    var to = tInp ? (tInp.value || '').trim() : '';
+    if (!word) { toast('❌ 请输入要查找的词', 'error'); if (wInp) wInp.focus(); return; }
+    if (!to) { toast('❌ 请输入替换后的文字', 'error'); if (tInp) tInp.focus(); return; }
+    btn.disabled = true; btn.textContent = '⏳ 替换中…';
+    postJSON(SLIRN_API + '/opt_batch_replace',
+             {task_id: tid, word: word, replacement: to})
+      .then(function(r) {
+        if (r && r.ok) {
+          toast(r.toast || '✅ 已批量替换');
+          var rows = (r.rows || {});
+          var list = revVis('slirn-opt-list');
+          var miss = false;
+          Object.keys(rows).forEach(function(rid) {
+            var row = list && list.querySelector('.slirn-opt-row[data-id="' + rid + '"]');
+            if (row && rows[rid] && optSwapRows(row, rows[rid])) return;
+            miss = true;  // 行不在 DOM / row_html 缺失 → 记下兜底整刷
+          });
+          // 词频面板同步（新词 chip 可点选筛选；过滤条在之前零词时才需要补插）
+          var w = r.words || {};
+          var wl = document.getElementById('slirn-opt-words');
+          if (wl && w.list !== undefined) wl.innerHTML = w.list;
+          var wf = document.getElementById('slirn-opt-word-filters');
+          if (w.filters) {
+            if (wf) { wf.outerHTML = w.filters; }
+            else if (wl) { wl.insertAdjacentHTML('beforebegin', w.filters); }
+          }
+          if (typeof setupOptWordsPagination === 'function') setupOptWordsPagination();
+          if (miss) openWorkbench(tid);  // 兜底：整刷一次保证一致
+          else optBatchClose();
+        } else {
+          btn.disabled = false; btn.textContent = '✅ 确认批量替换';
+          toast('❌ ' + ((r && r.error) || '替换失败'), 'error');
+        }
+      })
+      .catch(function() {
+        btn.disabled = false; btn.textContent = '✅ 确认批量替换';
+        toast('❌ 替换失败（网络错误）', 'error');
+      });
+  }
+  function bindOptBatchInputs() {  // 键盘可用（镜像 bindOptRowSearch）：Enter 查找/替换、Esc 收起
+    var w = document.getElementById('slirn-opt-batchrep-word');
+    if (w && !w.dataset.bound) {
+      w.dataset.bound = '1';
+      w.addEventListener('keydown', function(ev) {
+        if (ev.key === 'Enter') {
+          ev.preventDefault();
+          var b = document.getElementById('slirn-opt-batchrep-search-btn');
+          if (b) optBatchSearch(b);
+        } else if (ev.key === 'Escape') {
+          ev.preventDefault(); w.value = ''; optBatchClose();
+        }
+      });
+    }
+    var t = document.getElementById('slirn-opt-batchrep-to');
+    if (t && !t.dataset.bound) {
+      t.dataset.bound = '1';
+      t.addEventListener('keydown', function(ev) {
+        if (ev.key === 'Enter') {
+          ev.preventDefault();
+          var b = document.getElementById('slirn-opt-batchrep-go');
+          if (b) optBatchReplace(b);
+        }
+      });
+    }
   }
   function optResplice(btn) {  // 🔄 重新拼接字幕：即时重算 optimize_compose.srt（不编码视频）
     var tid = btn.getAttribute('data-task-id') || '';
@@ -5303,6 +5569,48 @@
     }
   }
   var optCutPollTimer = null;
+  // 2026-09-29 用户反馈：重新拼接视频缺执行时间/进度反馈 — 格式化 + 按钮/状态条助手
+  function _optCutFmtSec(s) {  // 秒 → m:ss / h:mm:ss
+    s = Math.max(0, Math.round(s || 0));
+    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
+    var two = function(x) { return (x < 10 ? '0' : '') + x; };
+    return (h ? h + ':' + two(m) : '' + m) + ':' + two(ss);
+  }
+  function _optCutElapsedTxt(startedAt) {  // 已耗时（job.started_at 是 epoch 秒，本机同钟）
+    var t = parseFloat(startedAt);
+    if (!t || !isFinite(t) || t <= 0) return '';
+    return '已耗时 ' + _optCutFmtSec(Date.now() / 1000 - t);
+  }
+  function _optCutEtaTxt(startedAt, pct) {  // 预计剩余 = elapsed/pct×(100−pct)（进度太小不稳，不显示）
+    var t = parseFloat(startedAt);
+    if (!t || !isFinite(t) || t <= 0 || pct < 8) return '';
+    var rem = (Date.now() / 1000 - t) * (100 - pct) / pct;
+    if (!isFinite(rem) || rem < 2 || rem > 6 * 3600) return '';
+    return '预计还需 ' + _optCutFmtSec(rem);
+  }
+  function optCutRekickBtn() {  // 当前工作台的 🎬 重新拼接视频按钮
+    return document.querySelector('[data-action="opt-cut-rekick"]');
+  }
+  function optCutBtnRunning(pct, elapsedTxt) {
+    // 按钮状态机（REQ-091 教训）：反馈要出现在用户点击处 — 状态条在词频列表
+    // 上方、按钮在字幕列表末尾，长列表里状态条根本看不到；按钮文字随轮询
+    // 每 2s 刷新「⏳ 拼接中… X% · 已耗时 m:ss」，期间禁用防重复触发。
+    var b = optCutRekickBtn();
+    if (!b) return;
+    if (!b.dataset.origLabel) b.dataset.origLabel = b.textContent || '';
+    b.disabled = true;
+    b.textContent = '⏳ 拼接中… ' + Math.round(pct) + '%'
+      + (elapsedTxt ? ' · ' + elapsedTxt : '');
+  }
+  function optCutBtnRestore() {
+    var b = optCutRekickBtn();
+    if (!b) return;
+    b.disabled = false;
+    if (b.dataset.origLabel) {
+      b.textContent = b.dataset.origLabel;
+      delete b.dataset.origLabel;
+    }
+  }
   function startOptCutPolling(tid) {  // 优化成片剪辑轮询：done → 刷新工作台（含产物提示条）
     if (optCutPollTimer) { clearInterval(optCutPollTimer); optCutPollTimer = null; }
     var update = function() {
@@ -5311,24 +5619,37 @@
         var j = r.job || {};
         var el = revVis('slirn-opt-cut-status');
         if (j.state === 'running') {
+          var pct = Math.max(0, Math.min(100, j.progress || 0));
+          var elTxt = _optCutElapsedTxt(j.started_at);
+          var etaTxt = _optCutEtaTxt(j.started_at, pct);
           if (el) {
             el.dataset.state = 'running';
-            el.innerHTML = '⏳ 视频重新拼接中'
-              + (j.progress ? ' · ' + Math.round(j.progress) + '%' : '')
+            // 2026-09-29 用户反馈：执行时间 + 进度都要可见 — 文字行（% + 已耗时 +
+            // ETA + 阶段）+ 内嵌可视化进度条，轮询每 2s 刷新
+            el.innerHTML = '<div class="slirn-opt-cut-line">⏳ 视频重新拼接中 · '
+              + Math.round(pct) + '%'
+              + (elTxt ? ' · ' + elTxt : '') + (etaTxt ? ' · ' + etaTxt : '')
               + (j.stage ? ' · ' + escapeHtml(j.stage) : '')
-              + ' — 完成后精剪合成自动使用新视频';
+              + ' — 完成后精剪合成自动使用新视频</div>'
+              + '<div class="slirn-opt-cut-prog"><div class="slirn-opt-cut-prog-bar" style="width:'
+              + pct + '%"></div></div>';
           }
+          optCutBtnRunning(pct, elTxt);
         } else {
           if (optCutPollTimer) { clearInterval(optCutPollTimer); optCutPollTimer = null; }
+          optCutBtnRestore();
           if (j.state === 'done') {
             var res = j.result || {};
             if (res.cleared) {
               toast('🧹 剪辑计划已空，优化成片产物已清理');
             } else if (!res.already) {
               var _subs = res.split_subs ? ' + ' + res.split_subs + ' 子段' : '';
+              var _dur = res.elapsed || ((j.started_at && j.finished_at)
+                ? j.finished_at - j.started_at : 0);
               toast('🎬 优化成片已生成：剪除 ' + ((res.marks || []).length) + ' 行'
                 + _subs + ' · 删 ' + (res.deleted_sec || 0)
-                + 's · 保留 ' + (res.kept_sec || 0) + 's — 精剪合成将自动使用');
+                + 's · 保留 ' + (res.kept_sec || 0) + 's · 耗时 '
+                + _optCutFmtSec(_dur) + ' — 精剪合成将自动使用');
             }
             openWorkbench(tid);  // 刷新统计 + 剪辑状态条 + 精剪素材上游
           } else if (j.state === 'error') {
@@ -5348,21 +5669,37 @@
   function optCutRekick(btn) {  // 🎬 重新拼接视频：按当前剪辑计划（🗑️ 整行 + 删除子段）手动触发（唯一剪辑入口）
     var tid = btn.getAttribute('data-task-id') || '';
     if (!tid) return;
+    if (!btn.dataset.origLabel) btn.dataset.origLabel = btn.textContent || '';
     btn.disabled = true;
+    btn.textContent = '⏳ 拼接中…';  // 立刻反馈点击已注册（REQ-091 教训：不等响应）
+    // 兜底：状态条缺失（理论 rekick 前必有 pending 条；若 DOM 被 local 刷新换掉）
+    // → 现场补一个在操作行下方，轮询有处可写
+    var st = revVis('slirn-opt-cut-status');
+    if (!st) {
+      st = document.createElement('div');
+      st.id = 'slirn-opt-cut-status';
+      st.className = 'slirn-status-msg slirn-opt-cut-status';
+      st.dataset.taskId = tid;
+      var act = btn.closest('.slirn-task-actions');
+      var host = act && act.parentNode ? act : btn.parentNode;
+      host.insertBefore(st, (act || btn).nextSibling);
+    }
     postJSON(SLIRN_API + '/optimize_cut_rekick', {task_id: tid}).then(function(r) {
-      btn.disabled = false;
       if (!r || !r.ok) {
+        optCutBtnRestore();
         toast('❌ ' + ((r && r.error) || '触发失败'), 'error');
         return;
       }
       if (r.toast) toast(r.toast);
       var cut = r.cut || {};
       if (cut.state === 'started' || cut.state === 'running') {
+        optCutBtnRunning(0, '');  // 保持禁用，轮询接管按钮文字（%/耗时）
         startOptCutPolling(tid);
       } else if (cut.state === 'cleared') {
+        optCutBtnRestore();
         openWorkbench(tid);  // 清掉旧产物 → 刷新剪辑状态条
       }
-    });
+    }).catch(function() { optCutBtnRestore(); });
   }
   // REQ-20260923-NNN 查看最终视频：播放器切到 optimize_compose（时间轴已前移）—
   // 行 ms 是粗剪时间基，高亮/跳播在此模式下暂停；点任意字幕行切回粗剪源
@@ -5395,6 +5732,19 @@
   }
   // REQ-20260918-054：按 currentTime 重算当前播放行 + 应用 .active + 自动滚到视口
   // 单行点击语义，没有 cut/rev 那样的连续跳播链；只做"高亮跟随"。
+  // 2026-09-29 用户反馈：①当前播放行要「始终」位于字幕区域垂直居中 —
+  //   scrollIntoView({block:'center'}) 会连动外层页面滚动（行居中的是视口，
+  //   不是 560px 的字幕框，且页面会被拽走）→ 改为只滚列表容器本身；
+  // ②当前播放行同时置为选中态（kbsel，与 cut/rev 播放跟随同款）。
+  function optCenterRowInList(list, row) {
+    if (!list || !row) return;
+    try {
+      var lr = list.getBoundingClientRect(), rr = row.getBoundingClientRect();
+      var delta = (rr.top + rr.height / 2) - (lr.top + lr.height / 2);
+      if (Math.abs(delta) < 2) return;  // 已居中，不动
+      list.scrollTop += delta;  // 浏览器自动钳制到 [0, scrollHeight - clientHeight]
+    } catch (err) {}
+  }
   function optPlayerHighlight(v) {
     if (_optFinalVideo) return;  // REQ-20260923-NNN：最终视频时间轴已前移，行 ms 对不上
     var list = revVis('slirn-opt-list');
@@ -5417,14 +5767,16 @@
       if (s0 > tms) break;
     }
     // REQ-20260925-NNN：命中行变化才滚到中间，避免同一行内每帧 timeupdate 反复
-    // 回拉用户手动滚动（block:'center' 与 nearest 不同，已可见也会强制居中）
+    // 回拉用户手动滚动
     var changed = (hit !== _optLastHit);
     _optLastHit = hit;
     for (var j = 0; j < rows.length; j++) {
       rows[j].classList.toggle('active', j === hit);
+      // 选中态跟随播放（cut/rev 同款）：hit=-1 的间隙里保留上一选中行
+      if (hit >= 0) rows[j].classList.toggle('kbsel', j === hit);
     }
-    if (changed && hit >= 0 && rows[hit] && rows[hit].scrollIntoView) {
-      try { rows[hit].scrollIntoView({block: 'center'}); } catch (err) {}
+    if (changed && hit >= 0 && rows[hit]) {
+      optCenterRowInList(list, rows[hit]);
     }
   }
   function bindOptPlayerHighlight() {  // 幂等：video 替换后由 v.dataset 标记防重复
@@ -5436,22 +5788,25 @@
     // REQ-20260922-NNN：同一绑定点挂删除块跳播（幂等随 optHLBound 一起）
     v.addEventListener('timeupdate', function() { optSkipDeletedOnTick(v); });
   }
+  function optBindRowClick(row, tid) {  // 单行点击定位播放（局部换行后只绑新行）
+    row.addEventListener('click', function(ev) {
+      // REQ-20260922-NNN：textarea（整句编辑框）也让位
+      if (ev.target && ev.target.closest('button,input,textarea')) return;
+      // REQ-20260922-NNN：点已删除行 → 起播点自动推进到其后（成片效果），提示一句
+      // REQ-20260923-NNN：删除子段同口径
+      if (row.getAttribute('data-deleted') === '1'
+          || (row.classList.contains('slirn-opt-subrow')
+              && row.getAttribute('data-mark') === 'delete')) {
+        toast('🗑️ 本段已删除 — 从其后内容播起（成片效果）');
+      }
+      playOptAt(tid, parseInt(row.getAttribute('data-start-ms'), 10) || 0);
+    });
+  }
   function bindOptRows(tid) {  // 行点击定位播放（输入框/按钮自身不触发）
     var list = revVis('slirn-opt-list');
     if (!list) return;
     list.querySelectorAll('.slirn-opt-row[data-start-ms]').forEach(function(row) {
-      row.addEventListener('click', function(ev) {
-        // REQ-20260922-NNN：textarea（整句编辑框）也让位
-        if (ev.target && ev.target.closest('button,input,textarea')) return;
-        // REQ-20260922-NNN：点已删除行 → 起播点自动推进到其后（成片效果），提示一句
-        // REQ-20260923-NNN：删除子段同口径
-        if (row.getAttribute('data-deleted') === '1'
-            || (row.classList.contains('slirn-opt-subrow')
-                && row.getAttribute('data-mark') === 'delete')) {
-          toast('🗑️ 本段已删除 — 从其后内容播起（成片效果）');
-        }
-        playOptAt(tid, parseInt(row.getAttribute('data-start-ms'), 10) || 0);
-      });
+      optBindRowClick(row, tid);
     });
   }
   // REQ-20260922-NNN 播放暂停/停止快捷键（仅优化字幕面板）
@@ -7282,6 +7637,14 @@
     } else if (action === 'opt-search-clear') {  // REQ-20260923-NNN 行搜索清空
       var _si = document.getElementById('slirn-opt-search');
       if (_si) { _si.value = ''; optRowSearch(); _si.focus(); }
+    } else if (action === 'opt-batch-open') {  // REQ-20260929-NNN 批量替换面板
+      optBatchOpen(target);
+    } else if (action === 'opt-batch-close') {
+      optBatchClose();
+    } else if (action === 'opt-batch-search') {
+      optBatchSearch(target);
+    } else if (action === 'opt-batch-replace') {
+      optBatchReplace(target);
     } else if (action === 'opt-final-view') {
       optFinalView(target);
     }

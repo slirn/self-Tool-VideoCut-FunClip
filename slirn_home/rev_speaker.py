@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import bisect
 import json
 import time
 from pathlib import Path
@@ -53,9 +54,27 @@ def link_speakers(subtitle_meta: dict, revision: dict) -> dict:
     if not segs:
         return {"available": False, "rows": {}, "stats": []}
 
+    # ---- 性能优化（进工作台慢的根因）：排序 + bisect + 双指针，替代
+    # entries × segs 全量暴力交叉（长视频百万次 overlap_ms，实测 ~600ms；
+    # 改后窗口内只扫真重叠的几段）。结果与暴力版逐位一致：segs 按 start
+    # 升序扫，只在 ov 严格更大时替换 → 并列时保住「时间更早的段」。
+    segs.sort(key=lambda s: s["start_ms"])
+    seg_starts = [s["start_ms"] for s in segs]
+    entries = list((revision or {}).get("entries") or [])
+
+    def _entry_start(e: dict) -> int:
+        try:
+            return int(e.get("start_ms", 0))
+        except (TypeError, ValueError):
+            return 0
+
+    order = sorted(range(len(entries)), key=lambda k: _entry_start(entries[k]))
+
     rows: dict[str, int] = {}
     counts: dict[int, int] = {}
-    for e in (revision or {}).get("entries") or []:
+    lo = 0
+    for k in order:
+        e = entries[k]
         try:
             i = int(e.get("i"))
             s_ms = int(e.get("start_ms", 0))
@@ -64,14 +83,19 @@ def link_speakers(subtitle_meta: dict, revision: dict) -> dict:
             continue
         if not (e_ms > s_ms):
             continue
-        best_ov, best_spk, best_start = 0, None, None
-        for s in segs:
-            ov = overlap_ms(s_ms, e_ms, s["start_ms"], s["end_ms"])
-            if ov <= 0:
+        # 窗口 [lo, hi)：start < e_ms（bisect）且 end > s_ms（lo 按行 start
+        # 升序单调推进安全 — end <= 当前行 start 的段对未来行同样不可能重叠）
+        hi = bisect.bisect_left(seg_starts, e_ms)
+        while lo < hi and segs[lo]["end_ms"] <= s_ms:
+            lo += 1
+        best_ov, best_spk = 0, None
+        for j in range(lo, hi):
+            s = segs[j]
+            if s["end_ms"] <= s_ms:
                 continue
-            if ov > best_ov or (ov == best_ov and best_start is not None
-                                and s["start_ms"] < best_start):
-                best_ov, best_spk, best_start = ov, s["spk"], s["start_ms"]
+            ov = overlap_ms(s_ms, e_ms, s["start_ms"], s["end_ms"])
+            if ov > best_ov:
+                best_ov, best_spk = ov, s["spk"]
         if best_spk is None:
             continue
         rows[str(i)] = best_spk

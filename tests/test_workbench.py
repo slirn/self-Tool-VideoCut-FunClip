@@ -449,8 +449,10 @@ def test_get_fine_compose_backfills_partial_layout_subdict(tmp_path):
     assert video_layout["x"] == 42
     # 默认字段必须补全（不能 KeyError 也不能抛错）
     for required in ("y", "scale", "enabled", "crop_x", "crop_y", "crop_w", "crop_h",
-                     "viewport", "crop_aspect_lock"):
+                     "crop_aspect_lock"):
         assert required in video_layout, f"video.layout 应补全 {required} 字段，实际 keys={list(video_layout.keys())}"
+    # viewport 字段已删除（2026-09-29 用户反馈：填充后 X/Y 需手工调整，不再限定）
+    assert "viewport" not in video_layout, "video.layout 不应再补全 viewport 字段"
     # subtitle 也得补
     sub_layout = fc["layout"]["subtitle"]
     assert sub_layout["x"] == 100
@@ -3285,99 +3287,56 @@ def test_bg_detect_apply_uses_region_top_left_not_center():
     assert "_setSlider('slirn-fine-video-scale', 1.0)" in block, \
         "scale 应填 1.0（让裁剪后的视频填满区域）"
 
-    # v5：fill 之后应把 viewport 也存到后端（限定视频在检测区域内）
-    assert "viewport:" in block, \
-        "fill handler 应把 viewport 写进 save_fine_layout 请求体"
-    assert "x: r.x" in block and "y: r.y" in block, \
-        "viewport 应使用检测结果 r.x/r.y"
-    assert "width: r.width" in block and "height: r.height" in block, \
-        "viewport 应使用检测结果 r.width/r.height"
+    # 2026-09-29 用户反馈：填充只改滑块，不再把 viewport 限定存到后端
+    # （填充后 X/Y 需手工自由调整，不得夹紧回检测区域）
+    assert "viewport:" not in block, \
+        "fill handler 不应再构造 viewport 字段（限定已移除）"
+    assert "save_fine_layout" not in block, \
+        "fill handler 不应自己发保存请求（等用户点「保存全部设置」）"
 
 
-# ─── REQ-20260919-062 v5：把视频展示区域限定在所检测区域之内 ───
+# ─── 2026-09-29 用户反馈：视频 X/Y 填充后需手工调整，viewport 限定整体移除 ───
 
-def test_clamp_video_to_viewport_clamps_xy_when_outside():
-    """当 video.x/y 超出 viewport 时，夹紧到 viewport 内。"""
-    from slirn_home.app import _clamp_video_to_viewport
+def test_clamp_video_to_viewport_function_removed():
+    """_clamp_video_to_viewport 已删除 — X/Y 保存原值，不再夹紧回检测区域。"""
+    import slirn_home.app as app_mod
 
-    vc = {
-        "x": 2000, "y": 1500,                # 都超出 viewport
-        "scale": 0.5,
-        "crop_w": 1920, "crop_h": 1080,
-        "viewport": {"x": 384, "y": 180, "width": 1152, "height": 720},
-    }
-    _clamp_video_to_viewport(vc)
-    # display = 1920*0.5=960, 1080*0.5=540；viewport 1152×720 完全装得下
-    # max_x = 384 + (1152 - 960) = 576
-    # max_y = 180 + (720 - 540) = 360
-    assert vc["x"] == 576, f"x 应夹紧到 576，实际 {vc['x']}"
-    assert vc["y"] == 360, f"y 应夹紧到 360，实际 {vc['y']}"
-    assert vc["scale"] == 0.5, f"scale 不应被改（=0.5 < 上限）"
+    assert not hasattr(app_mod, "_clamp_video_to_viewport"), (
+        "_clamp_video_to_viewport 应已删除（viewport 限定已移除）")
 
 
-def test_clamp_video_to_viewport_clamps_scale_when_too_large():
-    """当 scale 过大导致 display 超出 viewport 时，把 scale 降到刚好装下。"""
-    from slirn_home.app import _clamp_video_to_viewport
+def test_save_fine_layout_ignores_viewport_and_keeps_manual_xy(tmp_path):
+    """手工调整的 x/y/scale 原样保存；请求里夹带的 viewport 被忽略并清除。
 
-    vc = {
-        "x": 384, "y": 180,
-        "scale": 2.0,
-        "crop_w": 1920, "crop_h": 1080,
-        "viewport": {"x": 384, "y": 180, "width": 1152, "height": 720},
-    }
-    _clamp_video_to_viewport(vc)
-    # max_scale = min(1152/1920, 720/1080, 2.0) = 0.6
-    assert abs(vc["scale"] - 0.6) < 0.001, f"scale 应夹紧到 0.6，实际 {vc['scale']}"
-    # 此时 display = 1920*0.6=1152, 1080*0.6=648；x/y 不动
-    assert vc["x"] == 384
-    assert vc["y"] == 180
-
-
-def test_clamp_video_to_viewport_no_change_when_inside():
-    """display 已在 viewport 内时，不动 x/y/scale。"""
-    from slirn_home.app import _clamp_video_to_viewport
-
-    vc = {
-        "x": 400, "y": 200,                # viewport 384..1536 × 180..900 — 完全在内
-        "scale": 0.5,
-        "crop_w": 1920, "crop_h": 1080,
-        "viewport": {"x": 384, "y": 180, "width": 1152, "height": 720},
-    }
-    _clamp_video_to_viewport(vc)
-    assert vc["x"] == 400
-    assert vc["y"] == 200
-    assert vc["scale"] == 0.5
-
-
-def test_clamp_video_to_viewport_no_viewport_means_unlimited():
-    """viewport 缺失/None → 不做夹紧（向后兼容）。"""
-    from slirn_home.app import _clamp_video_to_viewport
-
-    vc = {"x": 5000, "y": 5000, "scale": 2.0,
-          "crop_w": 1920, "crop_h": 1080, "viewport": None}
-    _clamp_video_to_viewport(vc)
-    assert vc["x"] == 5000, "viewport=None 时不应修改 x"
-    assert vc["y"] == 5000
-    assert vc["scale"] == 2.0
-
-
-def test_save_fine_layout_accepts_viewport_field_and_clamps(tmp_path):
-    """save_fine_layout 接受 video.viewport，并把 video.x/y/scale 夹紧到 viewport 内。"""
+    背景（2026-09-29 用户反馈）：检测区域「应用」填充 X/Y 后，用户手工微调的
+    X/Y 会在保存时被旧 viewport 夹紧回检测区域，等于白调。"""
     from fastapi.testclient import TestClient
     from slirn_home import build_app
 
     m, video = _make_mgr(tmp_path)
-    t = m.create(name="viewport-clamp", original_video=video)
+    t = m.create(name="viewport-drop", original_video=video)
     client = TestClient(build_app(repo_root=tmp_path).app)
 
-    # x/y/scale 都超出 viewport；设 viewport 后服务端夹紧
+    # 模拟旧数据：fine_compose.json 里已残留 viewport
+    fc_path = m.tasks_dir / t.task_id / "fine_compose.json"
+    fc_path.parent.mkdir(parents=True, exist_ok=True)
+    fc_path.write_text(json.dumps({
+        "_schema": 2,
+        "layout": {"video": {
+            "x": 384, "y": 180, "scale": 0.7,
+            "viewport": {"x": 384, "y": 180, "width": 1152, "height": 720},
+        }},
+    }), encoding="utf-8")
+
+    # 手工把 X/Y 拖到 viewport 之外（旧逻辑会被夹回 384/252 附近）
     r = client.post(
         "/slirn/api/save_fine_layout",
         json={
             "task_id": t.task_id,
             "layout": {
                 "video": {
-                    "x": 5000, "y": 5000, "scale": 3.0,
+                    "x": 1500, "y": 900, "scale": 1.8,
+                    # 恶意/旧前端残留的 viewport 也不得再生效
                     "viewport": {"x": 384, "y": 180, "width": 1152, "height": 720},
                 },
             },
@@ -3386,54 +3345,19 @@ def test_save_fine_layout_accepts_viewport_field_and_clamps(tmp_path):
     assert r.status_code == 200
     body = r.json()
     assert body["ok"] is True
-    # 响应里应返回夹紧后的 layout.video
-    assert "layout" in body, f"响应应含 layout 字段，实际 {body}"
     v = body["layout"]["video"]
-    # max_scale = min(1152/1920, 720/1080, 2.0) = 0.6
-    assert abs(v["scale"] - 0.6) < 0.001, f"scale 应被夹紧到 0.6，实际 {v['scale']}"
-    # display 1920*0.6=1152, 1080*0.6=648；viewport 1152×720
-    # max_x = 384 + (1152 - 1152) = 384；原 x=5000 被夹到 384
-    # max_y = 180 + (720 - 648) = 252；原 y=5000 被夹到 252
-    assert v["x"] == 384, f"x 应被夹紧到 384，实际 {v['x']}"
-    assert v["y"] == 252, f"y 应被夹紧到 252（max_y），实际 {v['y']}"
-    # viewport 应被保留
-    assert v["viewport"] == {"x": 384, "y": 180, "width": 1152, "height": 720}
+    # x/y/scale 必须原样保存（不夹紧）
+    assert v["x"] == 1500, f"x 应按手工值保存，实际 {v['x']}"
+    assert v["y"] == 900, f"y 应按手工值保存，实际 {v['y']}"
+    assert v["scale"] == 1.8, f"scale 应按手工值保存，实际 {v['scale']}"
+    # viewport 必须被清除（落盘数据也不再携带）
+    assert "viewport" not in v, "viewport 应在保存时被清除"
+    on_disk = json.loads(fc_path.read_text(encoding="utf-8"))
+    assert "viewport" not in on_disk["layout"]["video"], "落盘数据不应残留 viewport"
 
 
-def test_save_fine_layout_keeps_existing_viewport_when_not_submitted(tmp_path):
-    """只改 x/y/scale 不带 viewport 时，旧 viewport 应继续生效（夹紧生效）。"""
-    from fastapi.testclient import TestClient
-    from slirn_home import build_app
-
-    m, video = _make_mgr(tmp_path)
-    t = m.create(name="viewport-keep", original_video=video)
-    client = TestClient(build_app(repo_root=tmp_path).app)
-
-    # 第一次：设 viewport + 极端值
-    client.post(
-        "/slirn/api/save_fine_layout",
-        json={
-            "task_id": t.task_id,
-            "layout": {
-                "video": {
-                    "x": 5000, "y": 5000, "scale": 1.0,
-                    "viewport": {"x": 384, "y": 180, "width": 1152, "height": 720},
-                },
-            },
-        },
-    )
-    # 第二次：只改 scale（不带 viewport）— viewport 应保留，scale 被夹紧到 viewport 内
-    r2 = client.post(
-        "/slirn/api/save_fine_layout",
-        json={"task_id": t.task_id, "layout": {"video": {"scale": 3.0}}},
-    )
-    v = r2.json()["layout"]["video"]
-    assert abs(v["scale"] - 0.6) < 0.001, f"viewport 应保留并夹紧 scale，实际 scale={v['scale']}"
-    assert v["viewport"] == {"x": 384, "y": 180, "width": 1152, "height": 720}
-
-
-def test_bg_detect_apply_sends_viewport_to_backend():
-    """fill handler 应把检测到的 viewport 一起发给 save_fine_layout。"""
+def test_bg_detect_apply_does_not_save_viewport():
+    """fill handler 只填充滑块，不得发送 viewport / save 请求。"""
     js = Path('slirn_home/static/router.js').read_text(encoding='utf-8')
 
     start = js.find('请先点「🔍 检测区域」')
@@ -3441,15 +3365,10 @@ def test_bg_detect_apply_sends_viewport_to_backend():
     end = js.find('\n  }\n  function', start)
     block = js[start:end]
 
-    # viewport fetch 调用
-    assert 'viewport: {' in block, \
-        "fill handler 应构造 viewport 字段"
-    assert 'x: r.x' in block and 'y: r.y' in block, \
-        "viewport x/y 应来自检测结果"
-    assert 'width: r.width' in block and 'height: r.height' in block, \
-        "viewport width/height 应来自检测结果"
-    assert 'save_fine_layout' in block, \
-        "viewport 应通过 save_fine_layout 端点发送"
+    assert "fetch(" not in block, \
+        "fill handler 不应自己发任何保存请求（填充只改滑块显示）"
+    assert "viewport:" not in block and "viewport = " not in block, \
+        "fill handler 不得构造 viewport 对象（限定已移除）"
 
 
 def test_fine_sync_slider_helper_exists():
@@ -4077,7 +3996,7 @@ def test_render_fine_cut_zone_canvas_xy_allow_negative(tmp_path: Path):
         "materials": {"video": {}, "subtitle": {}, "bg": {}, "cover": {}, "audio": {}},
         "layout": {
             "video":    {"x": 0, "y": 0, "scale": 1.0, "crop_x": 0,
-                         "crop_y": 0, "crop_w": 1920, "crop_h": 1080, "enabled": True, "viewport": None},
+                         "crop_y": 0, "crop_w": 1920, "crop_h": 1080, "enabled": True},
             "subtitle": {"x": 672, "y": 972, "scale": 1.0, "enabled": True},
             "cover":    {"enabled": False, "duration": 2.0},
             "bg":       {"x": 0, "y": 0, "scale": 1.0, "enabled": False},
@@ -4218,7 +4137,7 @@ def test_render_fine_cut_zone_has_scale_auto_button():
             "materials": {"video": {}, "subtitle": {}, "bg": {}, "cover": {}, "audio": {}},
             "layout": {
                 "video":    {"x": 0, "y": 0, "scale": 1.0, "crop_x": 0,
-                             "crop_y": 0, "crop_w": 1920, "crop_h": 1080, "enabled": True, "viewport": None},
+                             "crop_y": 0, "crop_w": 1920, "crop_h": 1080, "enabled": True},
                 "subtitle": {"x": 672, "y": 972, "scale": 1.0, "enabled": True},
                 "cover":    {"enabled": False, "duration": 2.0},
                 "bg":       {"x": 0, "y": 0, "scale": 1.0, "enabled": False},
@@ -5227,17 +5146,16 @@ def test_assemble_fine_filter_crop_aspect_720p_canvas(tmp_path: Path):
     )
 
 
-def test_clamp_video_to_viewport_non_16x9_crop(tmp_path: Path):
-    """REQ-20260923-NNN：viewport 夹紧用与渲染一致的显示矩形公式（非 16:9 裁剪）。
+def test_save_fine_layout_keeps_manual_xy_non_16x9_crop(tmp_path: Path):
+    """2026-09-29 viewport 限定移除后：非 16:9 裁剪的手工 x/y/scale 同样原样保存。
 
-    crop 1580×990 + viewport 1152×720：max_scale = min(1152/1920,
-    720×1580/(1920×990)) ≈ 0.5985；disp = 1149×720 → x 夹到 387、y 夹到 180。
+    （原夹紧测试的对照版 — 旧逻辑会按显示矩形公式把值夹回 387/180/0.5985。）
     """
     from fastapi.testclient import TestClient
     from slirn_home import build_app
 
     m, video = _make_mgr(tmp_path)
-    t = m.create(name="viewport-clamp-aspect", original_video=video)
+    t = m.create(name="viewport-aspect-keep", original_video=video)
     client = TestClient(build_app(repo_root=tmp_path).app)
 
     r = client.post(
@@ -5246,7 +5164,7 @@ def test_clamp_video_to_viewport_non_16x9_crop(tmp_path: Path):
             "task_id": t.task_id,
             "layout": {
                 "video": {
-                    "x": 5000, "y": 5000, "scale": 3.0,
+                    "x": 1500, "y": 900, "scale": 1.8,
                     "crop_w": 1580, "crop_h": 990,
                     "viewport": {"x": 384, "y": 180, "width": 1152, "height": 720},
                 },
@@ -5255,12 +5173,10 @@ def test_clamp_video_to_viewport_non_16x9_crop(tmp_path: Path):
     )
     assert r.status_code == 200
     v = r.json()["layout"]["video"]
-    # max_scale = min(0.6, 720*1580/(1920*990)=0.59848...) = 0.59848
-    assert abs(v["scale"] - 0.59848) < 0.001, f"scale 应夹紧到 ≈0.5985，实际 {v['scale']}"
-    # disp_w = round(1920×0.59848) = 1149 → max_x = 384 + (1152-1149) = 387
-    assert v["x"] == 387, f"x 应夹紧到 387，实际 {v['x']}"
-    # disp_h = round(1149×990/1580) = 720 → max_y = 180 + (720-720) = 180
-    assert v["y"] == 180, f"y 应夹紧到 180，实际 {v['y']}"
+    assert v["x"] == 1500, f"x 应按手工值保存，实际 {v['x']}"
+    assert v["y"] == 900, f"y 应按手工值保存，实际 {v['y']}"
+    assert v["scale"] == 1.8, f"scale 应按手工值保存，实际 {v['scale']}"
+    assert "viewport" not in v, "viewport 应在保存时被清除"
 
 
 def test_update_video_disp_js_matches_render_formula():
@@ -5782,6 +5698,397 @@ def test_build_bg_layer_chain_does_not_lose_alpha_for_rgba_bg(tmp_path: Path):
             f"REQ-20260919-063：链段不应强制转 RGB（会丢失 alpha），实际：{seg}"
         assert "format=rgb24" not in seg, \
             f"REQ-20260919-063：链段不应强制转 RGB（会丢失 alpha），实际：{seg}"
+
+
+# ---------- REQ-20260929-NNN：无限源有限化（长导出音频被静默截断） ----------
+
+def test_build_bg_layer_chain_bounds_canvas_when_duration_given(tmp_path: Path):
+    """REQ-20260929-NNN：duration 给定时 color 源必须有限化（有 bg / 无 bg 两分支）。
+
+    背景：20260924-001（4278s）最终导出音频在源 ~1104-1109s 处被 ffmpeg
+    调度器静默截断（exit 0、stderr 无警告、视频流完整）。根因是视频分支
+    无限（color 无 duration + bg -loop 1），有限音频分支在竞争中提前 EOF。
+    画布有限化后输出 -t 只作钳制。
+    """
+    from slirn_home.app import _build_bg_layer_chain
+    # 有 bg 图：黑底 + overlay 分支
+    chain = _build_bg_layer_chain(bg_idx=1, W=1920, H=1080, duration=4276.81)
+    assert "color=size=1920x1080:color=black:rate=30:duration=4276.810[bg_b]" in chain[0], \
+        f"color 源应带 duration=4276.810，实际：{chain[0]}"
+    # 无 bg 图：纯黑底分支同样有限化
+    chain_nb = _build_bg_layer_chain(bg_idx=-1, W=1920, H=1080, duration=100.5)
+    assert chain_nb[0] == "color=size=1920x1080:color=black:rate=30:duration=100.500[bg]", \
+        f"无 bg 时纯黑底也应带 duration，实际：{chain_nb[0]}"
+
+
+def test_build_bg_layer_chain_unbounded_when_duration_none(tmp_path: Path):
+    """REQ-20260929-NNN：duration=None（probe 失败）保持旧行为 — 无限画布。
+
+    expected 未知时渲染退回 -shortest 兜底路径，画布不能有限化
+    （否则比 -shortest 更早掐断视频流）。"""
+    from slirn_home.app import _build_bg_layer_chain
+    for bg_idx in (1, -1):
+        chain = _build_bg_layer_chain(bg_idx=bg_idx, W=1920, H=1080, duration=None)
+        assert "duration=" not in chain[0], \
+            f"duration=None 时 color 源不应带 duration（旧行为），实际：{chain[0]}"
+
+
+def test_assemble_fine_filter_bounds_infinite_sources(tmp_path: Path):
+    """REQ-20260929-NNN：_assemble_fine_filter 产出的图与输入都必须有限化。
+
+    duration=3.0 + cover 2.0（假视频 probe 必失败 → 无钳制）→
+    expected = 5.0，canvas_bound = 5.0 - 2.0 + 0.5 = 3.5：
+    - filter_complex 首段 color 带 duration=3.500
+    - bg 图输入参数含 -t 3.500（-loop 1 有限化）
+    duration=None + probe 失败 → expected=None → 完全保持旧行为。
+    """
+    import sys
+    SLIRN_STANDALONE = Path("d:/Slirn/WorkSpaces/WaytoAGI/ALI/slirn-standalone")
+    if str(SLIRN_STANDALONE) not in sys.path:
+        sys.path.insert(0, str(SLIRN_STANDALONE))
+    from tasklib import TaskManager  # noqa: F401
+    from slirn_home.app import (
+        _assemble_fine_filter, _get_fine_compose, _save_fine_compose,
+    )
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="bounded-src", original_video=video)
+    task_dir = m.tasks_dir / t.task_id
+    bg_abs = _write_white_rect_bg(task_dir, w=200, h=150,
+                                  rect_xy=(0, 0), rect_wh=(10, 10))
+    # _write_white_rect_bg 固定写 bg/bg.png；cover 用同一内容的独立文件
+    cover_abs = task_dir / "upload" / "cover_test.png"
+    cover_abs.parent.mkdir(parents=True, exist_ok=True)
+    cover_abs.write_bytes(bg_abs.read_bytes())
+
+    fc = _get_fine_compose(m, t.task_id)
+    fc["materials"]["video"] = {
+        "path": str(video.relative_to(m.repo_root)),
+        "type": "video", "source": "upload",
+    }
+    fc["materials"]["bg"] = {
+        "path": str(bg_abs.relative_to(m.repo_root)),
+        "type": "image", "source": "upload",
+    }
+    fc["materials"]["cover"] = {
+        "path": str(cover_abs.relative_to(m.repo_root)),
+        "type": "image", "source": "upload",
+    }
+    fc["layout"]["bg"]["enabled"] = True
+    fc["layout"]["cover"]["enabled"] = True
+    fc["layout"]["cover"]["duration"] = 2.0
+    _save_fine_compose(m, t.task_id, fc)
+
+    asm = _assemble_fine_filter(t.task_id, m, duration=3.0)
+    assert asm["ok"], asm
+    assert asm["expected_output_sec"] == 5.0, \
+        f"expected 应为 3.0 + cover 2.0 = 5.0，实际 {asm['expected_output_sec']}"
+    assert "color=size=1920x1080:color=black:rate=30:duration=3.500[bg_b]" \
+        in asm["filter_complex"], \
+        f"画布应有限化 duration=3.500，filter 头：\n{asm['filter_complex'][:200]}"
+
+    # bg 输入参数：-loop 1 -t 3.500 -i <bg>
+    ia = asm["input_args"]
+    bg_rel = str(bg_abs)
+    idx = next(i for i, tok in enumerate(ia)
+               if tok == "-i" and i + 1 < len(ia) and ia[i + 1] == bg_rel)
+    assert ia[idx - 4:idx] == ["-loop", "1", "-t", "3.500"], \
+        f"bg 输入应为 -loop 1 -t 3.500 -i，实际：{ia[idx - 4:idx + 2]}"
+    try:
+        asm["sub_input_tmp"].unlink(missing_ok=True)
+    except Exception:
+        pass
+
+    # duration=None + 假视频（probe 失败）→ 旧行为：无 duration=、bg 无 -t
+    asm2 = _assemble_fine_filter(t.task_id, m, duration=None)
+    assert asm2["ok"], asm2
+    assert asm2["expected_output_sec"] is None, \
+        f"probe 失败时 expected 应为 None（-shortest 兜底），实际 {asm2['expected_output_sec']}"
+    assert "duration=" not in asm2["filter_complex"].split(";")[0], \
+        f"expected=None 时画布不应有限化，实际：{asm2['filter_complex'][:120]}"
+    ia2 = asm2["input_args"]
+    idx2 = next(i for i, tok in enumerate(ia2)
+                if tok == "-i" and i + 1 < len(ia2) and ia2[i + 1] == bg_rel)
+    assert ia2[idx2 - 2:idx2] == ["-loop", "1"], \
+        f"expected=None 时 bg 输入应只有 -loop 1（无 -t），实际：{ia2[idx2 - 3:idx2 + 1]}"
+    try:
+        asm2["sub_input_tmp"].unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def test_assemble_fine_filter_bgm_stream_loop_finite_input(tmp_path: Path):
+    """REQ-20260929-NNN：expected 可得时 BGM 必须走 demux 级循环 + 输入级 -t。
+
+    根因（20260924-001 两次导出失败）：滤镜级 aloop=loop=-1 是无限源，ffmpeg 9
+    调度器在视频支路（x264 编码）慢速并发时把音频支路提前判 EOF —— 音频在
+    1101~1109s 静默截断、exit 0、stderr 无警告、截断点逐次抖动（时序竞态）。
+    修复：-stream_loop -1 -t <expected+0.5> -i bgm（有限化在 demux 层，滤镜图
+    内无无限源；压缩包队列有界，无 amovie 的解码帧队列 OOM 问题），滤镜链
+    去掉 aloop、amix duration=first 保留。
+    """
+    import sys
+    SLIRN_STANDALONE = Path("d:/Slirn/WorkSpaces/WaytoAGI/ALI/slirn-standalone")
+    if str(SLIRN_STANDALONE) not in sys.path:
+        sys.path.insert(0, str(SLIRN_STANDALONE))
+    from slirn_home.app import (
+        _assemble_fine_filter, _get_fine_compose, _save_fine_compose,
+    )
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="bgm-streamloop", original_video=video)
+    task_dir = m.tasks_dir / t.task_id
+    upload = task_dir / "upload"
+    upload.mkdir(parents=True, exist_ok=True)
+    bgm_abs = upload / "bgm.mp3"
+    bgm_abs.write_bytes(b"ID3" + b"\x00" * 64)
+
+    fc = _get_fine_compose(m, t.task_id)
+    fc["materials"]["video"] = {
+        "path": str(video.relative_to(m.repo_root)),
+        "type": "video", "source": "upload",
+    }
+    fc["materials"]["audio"] = {
+        "path": str(bgm_abs.relative_to(m.repo_root)),
+        "type": "audio", "source": "upload",
+    }
+    fc["audio"]["enabled"] = True
+    _save_fine_compose(m, t.task_id, fc)
+
+    # 假视频 probe 失败 + duration=3.0 → expected=3.0 → stream_loop 路径
+    asm = _assemble_fine_filter(t.task_id, m, duration=3.0)
+    assert asm["ok"], asm
+    ia = asm["input_args"]
+    mp3_idx = [i for i, tok in enumerate(ia)
+               if tok == "-i" and i + 1 < len(ia) and ia[i + 1] == str(bgm_abs)]
+    assert mp3_idx, f"BGM 应保留 -i <mp3> 输入，实际 input_args：{ia}"
+    bi = mp3_idx[0]
+    assert ia[bi - 4:bi] == ["-stream_loop", "-1", "-t", "3.500"], \
+        f"BGM 输入应为 -stream_loop -1 -t 3.500 -i（expected+0.5 余量），实际：{ia[bi - 4:bi + 2]}"
+    # 滤镜图：无 aloop（无限源已移除），amix 保留 duration=first
+    fc_text = asm["filter_complex"].replace("\n", "")
+    assert "aloop" not in fc_text, f"stream_loop 路径不应再有 aloop，实际：{fc_text}"
+    assert "[1:a]volume=" in fc_text, f"BGM 链应直接 [1:a]volume=（无 aloop），实际：{fc_text}"
+    assert "amix=inputs=2:duration=first:normalize=0" in fc_text
+    try:
+        asm["sub_input_tmp"].unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def test_assemble_fine_filter_bgm_fallback_keeps_aloop(tmp_path: Path):
+    """REQ-20260929-NNN：expected 不可得（probe 失败）→ 回退旧 -i + aloop。
+
+    回退路径 = 旧行为（无限 aloop + amix duration=first），仅在 probe 失败
+    （-shortest 兜底）时触发，保证 corner case 不劣化。
+    """
+    import sys
+    SLIRN_STANDALONE = Path("d:/Slirn/WorkSpaces/WaytoAGI/ALI/slirn-standalone")
+    if str(SLIRN_STANDALONE) not in sys.path:
+        sys.path.insert(0, str(SLIRN_STANDALONE))
+    from slirn_home.app import (
+        _assemble_fine_filter, _get_fine_compose, _save_fine_compose,
+    )
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="bgm-fallback", original_video=video)
+    task_dir = m.tasks_dir / t.task_id
+    upload = task_dir / "upload"
+    upload.mkdir(parents=True, exist_ok=True)
+    bgm_abs = upload / "bgm.mp3"
+    bgm_abs.write_bytes(b"ID3" + b"\x00" * 64)
+
+    fc = _get_fine_compose(m, t.task_id)
+    fc["materials"]["video"] = {
+        "path": str(video.relative_to(m.repo_root)),
+        "type": "video", "source": "upload",
+    }
+    fc["materials"]["audio"] = {
+        "path": str(bgm_abs.relative_to(m.repo_root)),
+        "type": "audio", "source": "upload",
+    }
+    fc["audio"]["enabled"] = True
+    _save_fine_compose(m, t.task_id, fc)
+
+    # duration=None + 假视频（probe 失败）→ expected=None → 旧 -i + aloop
+    asm = _assemble_fine_filter(t.task_id, m, duration=None)
+    assert asm["ok"], asm
+    assert "-stream_loop" not in asm["input_args"], \
+        f"expected=None 应回退普通 -i 输入（无 stream_loop），实际：{asm['input_args']}"
+    assert "aloop=loop=-1:size=2e9" in asm["filter_complex"], \
+        f"expected=None 应回退 aloop 旧行为，实际：{asm['filter_complex']}"
+    try:
+        asm["sub_input_tmp"].unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+# ---------- REQ-20260929-NNN：两进程导出（BGM 合并图拆音频段/视频段） ----------
+
+def test_split_fine_filter_graphs_separates_closed_subgraphs():
+    """REQ-20260929-NNN：_split_fine_filter_graphs 把 filter_complex 拆成两个闭合子图。
+
+    根因（20260924-001 两次「导出被提前截断」全片终验）：「音频合并图（concat/
+    amix）+ x264 慢速视频支路」同图并发触发 ffmpeg 9 调度器竞态 —— 音频在
+    ~1050-1230s 静默截断、exit 0、stderr 空；单进程内参数级修法全部无效
+    （stream_loop 全片仍截断于 1233.7s）。修复 = 完整导出拆两段：音频子图单独
+    出无损 WAV（全片 4278s 仅 13 秒），视频子图 + [wav:a]anull 直通出最终 mp4。
+    本测试用与真实图（20260924-001 dump）同构的 fixture 验证拆分结果。
+    """
+    from slirn_home.app import _split_fine_filter_graphs
+
+    fc = ";\n".join([
+        "color=size=1920x1080:color=black:rate=30:duration=4276.810[bg_b]",
+        "[1:v]scale=1920:1080,setsar=1[bg_img]",
+        "[bg_b][bg_img]overlay=eof_action=pass[bg]",
+        "[0:v]crop=iw*0.99:ih*0.99:0:0,scale=1900:1068:flags=lanczos,setsar=1[v]",
+        "[bg][v]overlay=x=10:y=6[v1]",
+        "[v1]ass='C:/tmp/sub.ass'[vsub]",
+        "[2:v]scale=1920:1080:force_original_aspect_ratio=decrease,"
+        "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black,"
+        "setpts=PTS-STARTPTS,fps=30,setsar=1[intro]",
+        "[intro][vsub]concat=n=2:v=1:a=0[vout]",
+        "[3:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[ss];"
+        "[0:a]aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo[v_raw];"
+        "[ss][v_raw]concat=n=2:v=0:a=1[voice]",
+        "[4:a]volume=-38.0dB[bgm]",
+        "[voice][bgm]amix=inputs=2:duration=first:normalize=0[aout]",
+    ])
+    split = _split_fine_filter_graphs(fc)
+    assert split is not None, "同构真实图必须能拆出两个闭合子图"
+    fc_audio, fc_video = split
+    # 音频子图：cover 静音 concat（含裸 ; 的整体元素）+ BGM volume + amix 全保留
+    assert "[ss][v_raw]concat=n=2:v=0:a=1[voice]" in fc_audio
+    assert "[4:a]volume=-38.0dB[bgm]" in fc_audio
+    assert "amix=inputs=2:duration=first:normalize=0[aout]" in fc_audio
+    assert "overlay" not in fc_audio, f"音频子图不应含视频元素，实际：{fc_audio}"
+    assert "ass=" not in fc_audio and "concat=n=2:v=1" not in fc_audio
+    # 视频子图：画布/bg/裁剪/overlay/ass/封面 concat 全保留，无音频元素
+    assert "overlay=eof_action=pass[bg]" in fc_video
+    assert "concat=n=2:v=1:a=0[vout]" in fc_video
+    assert "[voice]" not in fc_video and "[bgm]" not in fc_video and "amix" not in fc_video
+
+
+def test_split_fine_filter_graphs_rejects_cross_reference():
+    """跨图 label 引用 → 拆开会产生 dangling pad → 必须返回 None（调用方回退
+    单进程旧路径，宁慢勿错）。"""
+    from slirn_home.app import _split_fine_filter_graphs
+
+    fc = ";\n".join([
+        "color=size=100x100:color=black:rate=30[v]",
+        "[0:a]anull[voice];[v]volume=1.0[aout]",   # 音频元素引用视频 label [v]
+        "[v]null[vout]",
+    ])
+    assert _split_fine_filter_graphs(fc) is None, "跨图引用必须拒拆"
+
+
+def test_split_fine_filter_graphs_rejects_one_sided():
+    """任一侧为空（纯视频图 / 纯音频图）→ 无两段意义 → None。"""
+    from slirn_home.app import _split_fine_filter_graphs
+
+    assert _split_fine_filter_graphs(
+        "color=size=1x1:color=black:rate=30[bg];[bg]null[vout]") is None
+    assert _split_fine_filter_graphs(
+        "[0:a]anull[voice];[voice]volume=1.0[aout]") is None
+
+
+def test_assemble_fine_filter_exposes_two_pass_meta(tmp_path: Path):
+    """REQ-20260929-NNN（两进程导出）：asm 暴露 BGM 合并元信息。
+
+    audio_merge / audio_input_idx / audio_input_span 供 _run_fine_render_locked
+    拆「音频段→WAV + 视频段 WAV 直通」两段用；无 BGM 时三者分别为
+    False / -1 / None。
+    """
+    import sys
+    SLIRN_STANDALONE = Path("d:/Slirn/WorkSpaces/WaytoAGI/ALI/slirn-standalone")
+    if str(SLIRN_STANDALONE) not in sys.path:
+        sys.path.insert(0, str(SLIRN_STANDALONE))
+    from slirn_home.app import (
+        _assemble_fine_filter, _split_fine_filter_graphs,
+        _get_fine_compose, _save_fine_compose,
+    )
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="two-pass-meta", original_video=video)
+    task_dir = m.tasks_dir / t.task_id
+    upload = task_dir / "upload"
+    upload.mkdir(parents=True, exist_ok=True)
+    bgm_abs = upload / "bgm.mp3"
+    bgm_abs.write_bytes(b"ID3" + b"\x00" * 64)
+
+    fc = _get_fine_compose(m, t.task_id)
+    fc["materials"]["video"] = {
+        "path": str(video.relative_to(m.repo_root)),
+        "type": "video", "source": "upload",
+    }
+    fc["materials"]["audio"] = {
+        "path": str(bgm_abs.relative_to(m.repo_root)),
+        "type": "audio", "source": "upload",
+    }
+    fc["audio"]["enabled"] = True
+    _save_fine_compose(m, t.task_id, fc)
+
+    # duration=3.0（probe 失败）→ expected=3.0 → stream_loop 输入 + span 记录
+    asm = _assemble_fine_filter(t.task_id, m, duration=3.0)
+    assert asm["ok"], asm
+    assert asm["audio_merge"] is True, "BGM 启用时图里必有 amix 合并"
+    lo, hi = asm["audio_input_span"]
+    assert asm["input_args"][lo:hi] == \
+        ["-stream_loop", "-1", "-t", "3.500", "-i", str(bgm_abs)], \
+        f"span 切片应精确覆盖 BGM 输入（含 stream_loop/-t 前缀），" \
+        f"实际：{asm['input_args'][lo:hi]}"
+    # audio_input_idx = BGM 输入的序号（span 之前已有的 -i 数量），与滤镜图引用一致
+    n_before = sum(1 for tok in asm["input_args"][:lo] if tok == "-i")
+    assert asm["audio_input_idx"] == n_before, \
+        f"audio_input_idx 应为 {n_before}，实际 {asm['audio_input_idx']}"
+    assert f"[{asm['audio_input_idx']}:a]volume=" in asm["filter_complex"].replace("\n", "")
+    # 完整导出条件的核心保障：真实图必须能拆出闭合子图
+    assert _split_fine_filter_graphs(asm["filter_complex"]) is not None, \
+        f"BGM 图应可拆分，实际：{asm['filter_complex']}"
+    try:
+        asm["sub_input_tmp"].unlink(missing_ok=True)
+    except Exception:
+        pass
+
+    # 无 BGM：audio_merge=False / idx=-1 / span=None
+    fc2 = _get_fine_compose(m, t.task_id)
+    fc2["audio"]["enabled"] = False
+    _save_fine_compose(m, t.task_id, fc2)
+    asm2 = _assemble_fine_filter(t.task_id, m, duration=3.0)
+    assert asm2["ok"], asm2
+    assert asm2["audio_merge"] is False
+    assert asm2["audio_input_idx"] == -1
+    assert asm2["audio_input_span"] is None
+    try:
+        asm2["sub_input_tmp"].unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def test_fine_render_two_pass_wiring():
+    """REQ-20260929-NNN：_run_fine_render_locked 两段导出接线（源码级断言）。
+
+    - 触发条件：完整导出（duration is None）+ BGM 合并 + expected 可得
+    - pass1 音频子图 → pcm_s16le 无损 WAV；pass2 视频子图 + [N:a]anull 直通
+    - 单进程旧路径保留（cmd_audio is None 分支）；finally 必删中间 WAV
+    """
+    import inspect
+    from slirn_home import app as _appmod
+
+    src = inspect.getsource(_appmod._run_fine_render_locked)
+    # 触发条件（预览/区间导出 duration 给定 → 不拆段）
+    assert "duration is None and preview_start == 0.0" in src
+    assert "_split_fine_filter_graphs(" in src
+    # pass1：音频子图 → 无损 WAV
+    assert '"-c:a", "pcm_s16le"' in src
+    # pass2：视频子图 + WAV 直通（音频链单输入，无合并）
+    assert "anull[aout]" in src
+    # 段调度：音频段 0-5%、视频段 5-100%、单段 0-100%
+    assert "_run_stage(cmd_audio, 0.0, 5.0)" in src
+    assert "_run_stage(cmd_video, 5.0, 100.0)" in src
+    assert "_run_stage(cmd, 0.0, 100.0)" in src
+    # finally 清理中间 WAV
+    assert "_wav_path.unlink(missing_ok=True)" in src
 
 
 # ---------- REQ-20260919-064：操作栏拆两行 + 预览开始时间 ----------
@@ -6664,6 +6971,9 @@ def test_render_async_uses_line_buffered_stdout():
     此测试只做源码静态检查（不启动真实 ffmpeg，避免依赖 + 耗时）。
     REQ-20260923-NNN：渲染主体移入 _run_fine_render_locked（async 外壳只挂
     跨任务串行门），静态检查合并两函数源码。
+    REQ-20260929-NNN：渲染主体再封装为段运行器 _run_stage（两进程导出：
+    音频段→WAV + 视频段直通），Popen 局部变量从 proc 改为 _p —— 断言同步
+    改为 _p.stdout（重包行为的实质不变）。
     """
     import inspect
     from slirn_home import app as _appmod
@@ -6686,8 +6996,8 @@ def test_render_async_uses_line_buffered_stdout():
     assert "line_buffering=True" in src, (
         "REQ-077：TextIOWrapper 必须显式 line_buffering=True 才能解决 8KB 缓冲"
     )
-    assert "proc.stdout" in src, (
-        "REQ-077：应重包 proc.stdout"
+    assert "_p.stdout = _io_stage.TextIOWrapper(" in src, (
+        "REQ-077：段运行器 _run_stage 内应重包 Popen 的 stdout"
     )
     # REQ-20260920-089：stderr 已重定向到 DEVNULL（防死锁），不再重包
     # 也不再 proc.stderr.read()，因此 proc.stderr 不应再被引用
@@ -7210,6 +7520,70 @@ def test_upload_fine_material_form_returns_warning_for_oversized(tmp_path):
     assert "8000" in body["warning"] and "4500" in body["warning"]
 
 
+def test_auto_pick_upstream_material_returns_card_html(tmp_path):
+    """自动获取素材 → 局部刷新：响应带服务端重渲染的单素材卡（前端只换卡不刷页）。
+
+    video → rough_compose.mp4；subtitle → optimize_subtitle.json 落盘的
+    tmp/optimized_subs.srt。卡上要有 auto 徽章 / has-file / 就绪的预览详情按钮。"""
+    from fastapi.testclient import TestClient
+
+    from slirn_home.app import build_app
+
+    app = build_app(repo_root=tmp_path)
+    client = TestClient(app.app)
+
+    mgr, video = _make_mgr(tmp_path)
+    t = mgr.create(name="auto-pick", original_video=video)
+    outputs = tmp_path / "tasks" / t.task_id / "outputs"
+    outputs.mkdir(parents=True, exist_ok=True)
+
+    # 无上游 → 如实报错（不写卡）
+    d0 = client.post("/slirn/api/auto_pick_upstream_material",
+                     json={"task_id": t.task_id, "kind": "video"}).json()
+    assert d0["ok"] is False and "粗剪合成" in d0["error"], d0
+
+    # video：粗剪产物就绪 → 成功 + 单卡
+    (outputs / "rough_compose.mp4").write_bytes(b"fake-mp4")
+    d1 = client.post("/slirn/api/auto_pick_upstream_material",
+                     json={"task_id": t.task_id, "kind": "video"}).json()
+    assert d1["ok"] is True, d1
+    assert d1["path"].endswith("rough_compose.mp4")
+    card = d1.get("card_html") or ""
+    assert 'data-kind="video"' in card and 'data-source="auto"' in card
+    assert "slirn-fine-source-badge auto" in card, "卡上应有「📥 自动获取」来源徽章"
+    assert "已从上游获取：rough_compose.mp4" in card
+    assert "slirn-fine-upload-card has-file" in card
+    # 有文件后卡内预览/详情按钮不应再 disabled
+    for act in ("fine-mat-preview", "fine-mat-detail"):
+        pos = card.find(act)
+        assert pos > 0, f"卡上应有 {act} 按钮"
+        assert "disabled" not in card[pos - 80:pos], f"{act} 不应 disabled"
+
+    # subtitle：优化字幕产物就绪 → 成功 + 单卡（srt 已落盘 tmp/）
+    (outputs / "optimize_subtitle.json").write_text(
+        '{"version":1,"saved_at":"2026-09-17T10:00:00",'
+        '"segments":[{"i":1,"start":"00:00:01,000","end":"00:00:02,000","text":"你好"}],'
+        '"occurrences":[]}',
+        encoding="utf-8")
+    d2 = client.post("/slirn/api/auto_pick_upstream_material",
+                     json={"task_id": t.task_id, "kind": "subtitle"}).json()
+    assert d2["ok"] is True, d2
+    assert d2["path"].endswith("optimized_subs.srt")
+    assert (tmp_path / "tasks" / t.task_id / "tmp" / "optimized_subs.srt").exists(), \
+        "subtitle 上游应在自动获取时落盘 tmp/optimized_subs.srt"
+    card2 = d2.get("card_html") or ""
+    assert 'data-kind="subtitle"' in card2
+    assert "已从上游获取：optimized_subs.srt" in card2
+    assert "slirn-fine-source-badge auto" in card2
+
+    # 换回来的卡必须与全量渲染同源（局部换卡后状态 = 整页刷新后的状态）
+    from slirn_home.app import _get_fine_compose, _render_fine_upload_card
+
+    mats = _get_fine_compose(mgr, t.task_id)["materials"]
+    assert _render_fine_upload_card(t.task_id, "video", mgr, mats) == card
+    assert _render_fine_upload_card(t.task_id, "subtitle", mgr, mats) == card2
+
+
 # =====================================================================
 # REQ-20260920-080：修复 BGM filter_complex label 拼接 bug
 # 之前 "[1:a]aloop=...,volume=0.40,[bgm]" 导致 ffmpeg No such filter: '' → 预览/导出失败
@@ -7248,7 +7622,8 @@ def test_assemble_fine_filter_bgm_chain_has_no_comma_before_label(tmp_path):
     # 关键断言：[bgm] 前面不能有逗号
     assert ",[bgm]" not in fc_text, \
         f"REQ-080：[bgm] label 前不应有逗号（导致 ffmpeg 解析失败），filter_complex：\n{fc_text}"
-    # 正向：bgm chain 应是 [...aloop=...,volume=0.40,afade=t=in:...,afade=t=out:...[bgm]
+    # 正向：bgm chain 应是 [...volume=0.40,afade=t=in:...,afade=t=out:...[bgm]
+    # （REQ-20260929-NNN：expected 可得时 aloop 已被 stream_loop 输入替代）
     assert "[bgm]" in fc_text
     assert "amix=inputs=2:duration=first:normalize=0[aout]" in fc_text
 
@@ -9429,10 +9804,14 @@ def test_assemble_fine_filter_voice_silence_concat_no_adelay(tmp_path):
     assert "-f" in cmd and "lavfi" in cmd, f"缺少 lavfi 输入: {cmd}"
     assert any("anullsrc" in a for a in cmd), f"input_args 缺 anullsrc 输入: {cmd}"
     # 输入顺序：video(0) → cover(1) → silence(2) → bgm(3)
-    # amix 的 bgm 应来自 input 3，loop 应引用 [3:a]
-    assert "[3:a]aloop" in fc_text, (
+    # amix 的 bgm 应来自 input 3（REQ-20260929-NNN：expected 可得时 BGM 走
+    # demux 级 stream_loop 有限化，滤镜链无 aloop，直接 [3:a]volume=）
+    assert "[3:a]volume=" in fc_text, (
         f"BGM 必须来自 input 3（silence 之前 bgm 索引为 1，新加 silence 后变 3），"
         f"实际: {fc_text}"
+    )
+    assert "-stream_loop" in cmd, (
+        f"REQ-20260929-NNN：expected 可得时 BGM 应为 stream_loop 输入，实际: {cmd}"
     )
 
     # 3. 无 cover 路径也要带 asetpts（防御性）
@@ -12257,15 +12636,469 @@ def test_opt_final_video_js():
     assert "action === 'opt-final-video'" in src and "optFinalVideoView(target)" in src
 
 
+# ---------- 2026-09-29：处理完的字幕行 / 出现项保持绿色（防重复处理） ----------
+
+def test_opt_occ_done_green_js_css_render():
+    """用户反馈：处理完的字幕要有持久绿色区分（原来只有回车后 0.6s 绿闪就消退，
+    处理过的和没处理的分不清，容易重复处理）。
+    - 服务端 _line_html：本行全部 occ 都 reviewed → 行挂 occ-done（与词行 ✅ 同口径）
+    - 前端 optOccMarkReviewed：回车/✓✕ 后实时传播 occ-done（不等服务端重渲）
+    - CSS：occ[data-reviewed=1] 常绿；行级 occ-done 绿底+绿条（红删/青改写/蓝播放/
+      紫选中/黄定位让位）；绿闪动画终点改为常绿值（绿不再消退）"""
+    # 服务端：done_cls 口径 + 两处父行 class 组装
+    app_src = (FUNCLIP_ROOT / "slirn_home" / "app.py").read_text(encoding="utf-8")
+    assert 'done_cls = " occ-done" if occs and all(bool(o.get("reviewed")) for o in occs) else ""' in app_src, (
+        "_line_html 必须按「全部 occ reviewed」计算 done_cls（与词行 ✅ 同口径）")
+    assert src_count_occ_done_class(app_src) == 2, (
+        "切分父行 + 普通行两处 row class 组装都必须带 done_cls")
+    # 前端：optOccMarkReviewed 传播行级 occ-done
+    src = _router_src()
+    i = src.find("function optOccMarkReviewed")
+    assert i > 0
+    body = src[i:src.find("\n  }\n", i)]
+    assert "closest('.slirn-opt-row')" in body, "必须定位所属字幕行"
+    assert "classList.add('occ-done')" in body, "全部 reviewed 后行必须挂 occ-done"
+    assert "data-reviewed" in body, "判断口径必须是 reviewed"
+    # CSS：occ 常绿 + 行绿态 + 动画终点常绿
+    css = _css_src()
+    assert '.slirn-opt-occ[data-reviewed="1"]' in css, "reviewed 的 occ 必须常绿"
+    assert ".slirn-opt-row.occ-done" in css, "必须有行级 occ-done 样式"
+    assert ":not(.line-deleted)" in css and ":not(.full-edit)" in css, (
+        "红删/青改写是更强终态，绿态必须让位")
+    kf = css.find("@keyframes slirn-opt-occ-done-flash")
+    kf_body = css[kf:css.find("}", css.find("100%", kf))]
+    assert "rgba(34, 197, 94, 0.12)" in kf_body, (
+        "绿闪动画终点必须是 reviewed 常绿值（绿不再退回琥珀）")
+
+
+def src_count_occ_done_class(app_src: str) -> int:
+    return app_src.count("{done_cls}")
+
+
+def test_workbench_opt_rows_render_occ_done(tmp_path: Path):
+    """E2E：全部 occ reviewed 的行渲染 occ-done；有未处理 occ 的行不渲染；
+    无 occ 的行（无事可处理）也不渲染。"""
+    from starlette.testclient import TestClient
+    from slirn_home.app import build_app
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="occ-done", original_video=video)
+    outputs = tmp_path / "tasks" / t.task_id / "outputs"
+    segs = [
+        {"i": 1, "start_ms": 0, "end_ms": 2000, "start": "00:00:00,000",
+         "end": "00:00:02,000", "text": "今天讲一下神精网络"},
+        {"i": 2, "start_ms": 2000, "end_ms": 4000, "start": "00:00:02,000",
+         "end": "00:00:04,000", "text": "第二段也有神精网络"},
+        {"i": 3, "start_ms": 4000, "end_ms": 6000, "start": "00:00:04,000",
+         "end": "00:00:06,000", "text": "这段没有出现项"},
+    ]
+    occs = [
+        {"occ_id": 0, "seg": 1, "pos": 6, "before": "神精网络", "after": "神经网络",
+         "reason": "", "applied": True, "reviewed": True},
+        {"occ_id": 1, "seg": 2, "pos": 5, "before": "神精网络", "after": "神经网络",
+         "reason": "", "applied": True, "reviewed": False},
+    ]
+    _write_min_optimize(outputs, segs=segs, occs=occs)
+    # 优化面板渲染门控：需要粗剪成片产物存在（app.py _render_optimize_zone）
+    (outputs / "rough_compose.mp4").write_bytes(b"fake")
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    r = client.post("/slirn/api/workbench", json={"task_id": t.task_id})
+    assert r.status_code == 200
+    html = r.json().get("html") or ""
+    # seg1：全部 reviewed → occ-done
+    assert 'slirn-opt-row has-occ occ-done" data-id="1"' in html, (
+        "全部 reviewed 的行必须挂 occ-done（绿态）")
+    # seg2：还有未处理 → 无 occ-done
+    assert 'slirn-opt-row has-occ" data-id="2"' in html, (
+        "有未处理 occ 的行不应挂 occ-done")
+    # seg3：无 occ → 无 occ-done（也无需处理）
+    assert 'slirn-opt-row" data-id="3"' in html, "无 occ 行保持默认态"
+
+
+def test_opt_resplit_local_refresh_js():
+    """2026-09-29 用户反馈：行内切分「✂️ 按内容切分」/「↩️ 取消切分」后必须
+    局部换行组（optSwapRows），不得无条件 openWorkbench 整页刷新（会丢滚动/
+    词筛选/焦点，把用户踢出当前优化字幕工作环境）。"""
+    src = _router_src()
+    i = src.find("function optSwapRows")
+    assert i > 0, "缺少 optSwapRows（行组局部刷新助手）"
+    body = src[i:src.find("\n  }\n", i)]
+    assert 'data-parent="' in body, "换行组必须一并移除旧子段行（data-parent 同 rid）"
+    assert "optBindRowClick" in body, "新行必须重绑点击定位播放"
+    assert "optInputOverflowInit" in body, "新替换值输入框需补溢出检测"
+    assert "optRowSearch" in body, "行文本筛选需重放（新行组补 opt-search-miss）"
+    assert "scrollTop +=" in body, "换行后恢复父行视口偏移（视线不跳）"
+    for fn in ("function optDoResplit", "function optUnsplit"):
+        j = src.find(fn)
+        assert j > 0, f"缺少 {fn}"
+        fb = src[j:src.find("\n  }\n", j)]
+        assert "optSwapRows(row, r.row_html" in fb, (
+            f"{fn} 成功后必须走局部换行组（row_html）")
+        # openWorkbench 只允许作为 row_html 缺失的兜底（整刷一次，不再是主路径）
+        assert fb.count("openWorkbench(") == 1, (
+            f"{fn} 不得无条件整页刷新；openWorkbench 仅 row_html 缺失兜底")
+    # bindOptRows 重构为委托 optBindRowClick（单行绑定复用给局部换行）
+    k = src.find("function bindOptRows")
+    kb = src[k:src.find("\n  }\n", k)]
+    assert "optBindRowClick(row, tid)" in kb, "bindOptRows 必须复用 optBindRowClick"
+
+
+def test_optimize_resplit_returns_row_html(tmp_path: Path):
+    """E2E：/optimize_resplit 与 /optimize_unsplit 返回该 seg 重渲后的行组
+    （row_html，父行 + 子段行、不含注释标记）— 前端局部换行的数据源；
+    workbench 渲染里行组带 <!--opt-rows:N--> 标记供抽取。"""
+    from starlette.testclient import TestClient
+    from slirn_home.app import build_app
+
+    m, video = _make_mgr(tmp_path)
+    t = m.create(name="局部刷新", original_video=video)
+    outputs = tmp_path / "tasks" / t.task_id / "outputs"
+    _write_min_optimize(outputs)
+    (outputs / "rough_compose.mp4").write_bytes(b"fake")  # 优化面板渲染门控
+    client = TestClient(build_app(repo_root=tmp_path).app)
+
+    r = client.post("/slirn/api/workbench", json={"task_id": t.task_id})
+    assert r.status_code == 200
+    wb_html = r.json().get("html") or ""
+    assert "<!--opt-rows:1-->" in wb_html, "行组必须有注释标记（抽取锚点）"
+
+    # 切分：保留「今天讲一下」，其余（神精网络）落删除洞
+    resp = client.post("/slirn/api/optimize_resplit", json={
+        "task_id": t.task_id, "seg_id": 1, "target_text": "今天讲一下"})
+    body = resp.json()
+    assert body["ok"] is True, body
+    row_html = body.get("row_html") or ""
+    assert 'data-split="1"' in row_html, "切分后父行必须带 data-split=1"
+    assert "slirn-opt-subrow" in row_html, "切分行组必须含子段行"
+    assert "<!--opt-rows" not in row_html, "row_html 是标记内的内容（不含标记本身）"
+
+    # 取消切分：恢复整行
+    resp2 = client.post("/slirn/api/optimize_unsplit", json={
+        "task_id": t.task_id, "seg_id": 1})
+    body2 = resp2.json()
+    assert body2["ok"] is True, body2
+    row_html2 = body2.get("row_html") or ""
+    assert 'data-id="1"' in row_html2, "取消切分后仍是父行"
+    assert "slirn-opt-subrow" not in row_html2, "取消切分后不应再有子段行"
+    assert 'data-split="1"' not in row_html2, "取消切分后父行不再挂 data-split"
+
+
+def _batch_mgr_with_outputs(tmp_path: Path, segs: list[dict], occs: list[dict],
+                            data_extra: dict | None = None):
+    """REQ-20260929-NNN 批量替换端点测试前置：任务 + optimize.json + 成片门控。"""
+    from slirn_home.app import build_app
+    from fastapi.testclient import TestClient
+
+    m, _ = _make_mgr(tmp_path)
+    t = m.create(name="批量替换", original_video=tmp_path / "lecture.mp4")
+    outputs = tmp_path / "tasks" / t.task_id / "outputs"
+    _write_min_optimize(outputs, segs=segs, occs=occs)
+    if data_extra:
+        import json as _json
+        from slirn_home import optimize_service as osvc
+
+        data = _json.loads((outputs / osvc.OPTIMIZE_JSON).read_text(encoding="utf-8"))
+        data.update(data_extra)
+        (outputs / osvc.OPTIMIZE_JSON).write_text(
+            _json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    (outputs / "rough_compose.mp4").write_bytes(b"fake")  # 优化面板渲染门控
+    client = TestClient(build_app(repo_root=tmp_path).app)
+    return client, t.task_id, outputs
+
+
+def test_opt_batch_search_five_line_context(tmp_path: Path):
+    """REQ-20260929-NNN 查找预览：每处命中的上下文 = 前两行 + 本行 + 后两行
+    共 5 行（列表边界自动截短）；命中位置按原文计；生效文本优先展示。"""
+    segs = [
+        {"i": 1, "start_ms": 0, "end_ms": 1000, "start": "00:00:00,000",
+         "end": "00:00:01,000", "text": "第一行"},
+        {"i": 2, "start_ms": 1000, "end_ms": 2000, "start": "00:00:01,000",
+         "end": "00:00:02,000", "text": "第二行"},
+        {"i": 3, "start_ms": 2000, "end_ms": 3000, "start": "00:00:02,000",
+         "end": "00:00:03,000", "text": "我们说的神精网络是什么"},
+        {"i": 4, "start_ms": 3000, "end_ms": 4000, "start": "00:00:03,000",
+         "end": "00:00:04,000", "text": "第四行"},
+        {"i": 5, "start_ms": 4000, "end_ms": 5000, "start": "00:00:04,000",
+         "end": "00:00:05,000", "text": "第五行"},
+        {"i": 6, "start_ms": 5000, "end_ms": 6000, "start": "00:00:05,000",
+         "end": "00:00:06,000", "text": "结尾再提神精网络"},
+    ]
+    client, tid, _ = _batch_mgr_with_outputs(tmp_path, segs=segs, occs=[])
+
+    r = client.post("/slirn/api/opt_batch_search",
+                    json={"task_id": tid, "word": "神精网络"})
+    body = r.json()
+    assert body["ok"] is True, body
+    s = body["search"]
+    assert s["lines"] == 2 and s["hits"] == 2
+    m3, m6 = s["matches"]
+    assert m3["seg"] == 3
+    assert m3["positions"] == [4], "命中位置按原文 0 基字符位"
+    assert [c["seg"] for c in m3["context"]] == [1, 2, 3, 4, 5], "中间行给满 5 行"
+    assert all(c["seg"] != 3 or c["text"] == "我们说的神精网络是什么"
+               for c in m3["context"])
+    assert [c["seg"] for c in m6["context"]] == [4, 5, 6], "末行只有后向 3 行"
+    assert m3["eligible"] is True and m3["block"] == ""
+
+
+def test_opt_batch_search_blocks_and_case(tmp_path: Path):
+    """整句替换 / 已切分 / 已标记删除的命中行标注阻断原因不给可注入位；
+    查找大小写不敏感（命中给 before 精确切片的落盘基础）。"""
+    segs = [
+        {"i": 10, "start_ms": 0, "end_ms": 1000, "start": "00:00:00,000",
+         "end": "00:00:01,000", "text": "AI 是什么"},
+        {"i": 11, "start_ms": 1000, "end_ms": 2000, "start": "00:00:01,000",
+         "end": "00:00:02,000", "text": "AI 已经整句改写"},
+        {"i": 12, "start_ms": 2000, "end_ms": 3000, "start": "00:00:02,000",
+         "end": "00:00:03,000", "text": "AI 已切分"},
+        {"i": 13, "start_ms": 3000, "end_ms": 4000, "start": "00:00:03,000",
+         "end": "00:00:04,000", "text": "AI 已标记删除"},
+        {"i": 14, "start_ms": 4000, "end_ms": 5000, "start": "00:00:04,000",
+         "end": "00:00:05,000", "text": "ai 小写也命中"},
+    ]
+    extra = {
+        "line_edits": [{"seg": 11, "text": "整句改写后的文本"}],
+        "line_splits": {"12": [{"start_ms": 2000, "end_ms": 2500,
+                                "text": "AI 已切分", "mark": "keep"}]},
+        "line_marks": [13],
+    }
+    client, tid, _ = _batch_mgr_with_outputs(tmp_path, segs=segs, occs=[],
+                                             data_extra=extra)
+
+    r = client.post("/slirn/api/opt_batch_search",
+                    json={"task_id": tid, "word": "AI"})
+    body = r.json()
+    assert body["ok"] is True, body
+    s = body["search"]
+    by_seg = {m["seg"]: m for m in s["matches"]}
+    assert by_seg[11]["block"] == "full_edit" and not by_seg[11]["free_positions"]
+    assert by_seg[12]["block"] == "split" and not by_seg[12]["free_positions"]
+    assert by_seg[13]["block"] == "deleted" and not by_seg[13]["free_positions"]
+    assert by_seg[10]["block"] == "" and by_seg[10]["free_positions"] == [0]
+    assert by_seg[14]["block"] == "" and by_seg[14]["free_positions"] == [0], \
+        "大小写不敏感命中（ai 小写行也给可注入位）"
+    assert s["eligible_lines"] == 2 and s["blocked_lines"] == 3
+    # 已标记删除的上下文行带 deleted 标记（前端划线展示）
+    assert all(c["deleted"] == 1 for c in by_seg[13]["context"] if c["seg"] == 13)
+
+
+def test_opt_batch_replace_injects_and_persists(tmp_path: Path):
+    """确认替换：可注入位各注入一条出现项（reason=批量替换、已采纳已处理、
+    occ_id 接在现有最大值后）；立即写盘重算 new_text/词频；行内多处命中逐处
+    注入；响应带受影响行组 row_html（含新 chip）+ 词频面板 HTML。"""
+    segs = [
+        {"i": 1, "start_ms": 0, "end_ms": 2000, "start": "00:00:00,000",
+         "end": "00:00:02,000", "text": "AI 讲 AI 课"},
+        {"i": 2, "start_ms": 2000, "end_ms": 4000, "start": "00:00:02,000",
+         "end": "00:00:04,000", "text": "旧词在这里"},
+    ]
+    occs = [{"occ_id": 7, "seg": 2, "pos": 0, "before": "旧词",
+             "after": "新词", "reason": "", "applied": True, "reviewed": True}]
+    client, tid, outputs = _batch_mgr_with_outputs(tmp_path, segs=segs, occs=occs)
+
+    r = client.post("/slirn/api/opt_batch_replace",
+                    json={"task_id": tid, "word": "AI", "replacement": "人工智能"})
+    body = r.json()
+    assert body["ok"] is True, body
+    rep = body["replace"]
+    assert rep["replaced"] == 2 and rep["lines"] == 1 and rep["segs"] == [1]
+    assert "2 处" in body["toast"]
+    # 行组 row_html：新 chip 带 occ_id 8/9、已处理标记、批量替换理由
+    rows = body["rows"] or {}
+    assert set(rows) == {"1"}
+    assert 'data-occ="8"' in rows["1"] and 'data-occ="9"' in rows["1"]
+    assert 'data-reviewed="1"' in rows["1"]
+    assert "批量替换" in rows["1"]
+    # 词频面板：新词 chip 可点选筛选
+    assert 'data-word="人工智能"' in (body["words"] or {}).get("list", "")
+    assert 'id="slirn-opt-word-filters"' in (body["words"] or {}).get("filters", "")
+    # 落盘复核：occ 注入 + new_text 生效 + saved_at 不动（阶段确认仍归「确认保存」）
+    import json as _json
+    from slirn_home import optimize_service as osvc
+
+    data = _json.loads((outputs / osvc.OPTIMIZE_JSON).read_text(encoding="utf-8"))
+    new_occs = [o for o in data["occurrences"] if o.get("reason") == "批量替换"]
+    assert len(new_occs) == 2
+    assert [o["occ_id"] for o in new_occs] == [8, 9], "occ_id 接在现有最大值 7 之后"
+    assert all(o["applied"] is True and o["reviewed"] is True
+               and o["before"] == "AI" and o["after"] == "人工智能"
+               for o in new_occs)
+    assert new_occs[0]["pos"] == 0 and new_occs[1]["pos"] == 5
+    seg1 = next(s for s in data["segments"] if s["i"] == 1)
+    assert seg1["new_text"] == "人工智能 讲 人工智能 课", "行内两处命中都要替换"
+    assert any(w.get("word") == "人工智能" or "人工智能" in str(w)
+               for w in data.get("words") or []), "词频聚合包含新词"
+    assert data.get("saved_at") is None
+
+
+def test_opt_batch_replace_validation_and_all_blocked(tmp_path: Path):
+    """校验兜底：缺数据 / 空词 / 空替换 / 替换=原词 / 命中全被阻断 → 明确报错，
+    不落盘。"""
+    segs = [{"i": 1, "start_ms": 0, "end_ms": 1000, "start": "00:00:00,000",
+             "end": "00:00:01,000", "text": "AI 已整句改写"}]
+    extra = {"line_edits": [{"seg": 1, "text": "整句改写后的文本"}]}
+    client, tid, outputs = _batch_mgr_with_outputs(tmp_path, segs=segs, occs=[],
+                                                   data_extra=extra)
+
+    for payload, want in [
+        ({"task_id": tid, "word": " ", "replacement": "x"}, "请输入要查找的词"),
+        ({"task_id": tid, "word": "AI", "replacement": " "}, "请输入替换后的文字"),
+        ({"task_id": tid, "word": "AI", "replacement": "AI"}, "相同"),
+        ({"task_id": tid, "word": "AI", "replacement": "人工智能"},
+         "没有可替换的位置"),
+    ]:
+        r = client.post("/slirn/api/opt_batch_replace", json=payload)
+        body = r.json()
+        assert body["ok"] is False and want in body["error"], (payload, body)
+    # 任务无 optimize.json
+    (tmp_path / "t2").mkdir()
+    m2, _ = _make_mgr(tmp_path / "t2")
+    t2 = m2.create(name="空", original_video=tmp_path / "t2" / "lecture.mp4")
+    from slirn_home.app import build_app
+    from fastapi.testclient import TestClient
+
+    c2 = TestClient(build_app(repo_root=tmp_path / "t2").app)
+    r2 = c2.post("/slirn/api/opt_batch_search",
+                 json={"task_id": t2.task_id, "word": "AI"})
+    assert r2.json()["ok"] is False and "尚无优化字幕数据" in r2.json()["error"]
+
+
+def test_opt_batch_replace_overlap_skip(tmp_path: Path):
+    """与现有生效替换重叠的命中位置跳过（现有替换已占原文区间）— 只注入
+    空闲位置；全重叠时该行不可注入。"""
+    segs = [
+        {"i": 1, "start_ms": 0, "end_ms": 2000, "start": "00:00:00,000",
+         "end": "00:00:02,000", "text": "神精网络真好"},
+        {"i": 2, "start_ms": 2000, "end_ms": 4000, "start": "00:00:02,000",
+         "end": "00:00:04,000", "text": "再讲神精网络"},
+    ]
+    occs = [{"occ_id": 0, "seg": 1, "pos": 0, "before": "神精网络",
+             "after": "神经网络", "reason": "", "applied": True, "reviewed": True}]
+    client, tid, _ = _batch_mgr_with_outputs(tmp_path, segs=segs, occs=occs)
+
+    r = client.post("/slirn/api/opt_batch_search",
+                    json={"task_id": tid, "word": "神精网络"})
+    s = r.json()["search"]
+    by_seg = {m["seg"]: m for m in s["matches"]}
+    assert by_seg[1]["positions"] == [0] and by_seg[1]["free_positions"] == []
+    assert by_seg[1]["skipped_overlap"] == 1, "重叠位计入跳过统计"
+    assert by_seg[2]["free_positions"] == [2]
+
+    r2 = client.post("/slirn/api/opt_batch_replace",
+                     json={"task_id": tid, "word": "神精网络", "replacement": "神经网络"})
+    rep = r2.json()["replace"]
+    assert rep["segs"] == [2] and rep["replaced"] == 1, "只注入空闲位所在行"
+
+
+def test_opt_batch_replace_frontend_wiring():
+    """前端接线：面板动作分支 + 预览渲染（XSS 安全高亮 / 空态 / 阻断徽标）+
+    确认按钮防连点（禁用 + 文案状态机）+ 逐行 optSwapRows 局部刷新（缺失兜底
+    整刷）+ 词频面板同步 + 键盘可用（Enter/Esc）+ CSS。"""
+    src = _router_src()
+    # 动作分支齐全
+    for a in ("opt-batch-open", "opt-batch-close", "opt-batch-search",
+              "opt-batch-replace"):
+        assert f"action === '{a}'" in src, f"缺少动作分支 {a}"
+    # 渲染：escapeHtml 逐段转义 + mark 高亮 + 空态 + 阻断徽标 + 确认区只在有可替换处出现
+    i = src.find("function optBatchRender")
+    assert i > 0, "缺少 optBatchRender"
+    body = src[i:src.find("\n  }\n", i)]  # optBatchRender 函数体（嵌套闭包缩进更深）
+    assert "escapeHtml" in body, "上下文渲染必须 XSS 安全转义"
+    assert "optBatchHi" in body, "当前行用安全高亮（切片逐段转义）"
+    assert "未找到" in body, "空态明确提示"
+    assert "_OPT_BATCH_BLOCK_TXT[m.block]" in body, "阻断行显示跳过原因徽标"
+    assert "apply.style.display = (s.free_hits || 0) > 0" in body, \
+        "确认区只在确有可替换处出现"
+    # 防连点：查找与确认按钮都要禁用 + 状态文案（REQ-091 教训）
+    for fn, busy, idle in [("optBatchSearch", "⏳ 查找中…", "🔍 查找"),
+                           ("optBatchReplace", "⏳ 替换中…", "✅ 确认批量替换")]:
+        j = src.find(f"function {fn}")
+        assert j > 0, f"缺少 {fn}"
+        fb = src[j:src.find("\n  }\n", j)]
+        assert "btn.disabled = true" in fb and busy in fb, f"{fn} 点击即禁用"
+        assert fb.count("btn.disabled = false") >= 2 and idle in fb, \
+            f"{fn} 失败/网络异常都要恢复按钮"
+    # 替换成功：逐行局部刷新 + 缺失兜底整刷 + 词频面板同步
+    k = src.find("function optBatchReplace")
+    rb = src[k:src.find("\n  }\n", k)]
+    assert "optSwapRows(row, rows[rid])" in rb, "受影响行组逐行局部刷新"
+    assert "openWorkbench(tid)" in rb, "行不在 DOM/row_html 缺失兜底整刷"
+    assert "wl.innerHTML = w.list" in rb, "词频列表同步"
+    assert "insertAdjacentHTML('beforebegin', w.filters)" in rb, \
+        "之前零词时补插过滤条"
+    # 键盘：Enter 查找/替换、Esc 清空收起（镜像 bindOptRowSearch）
+    b = src.find("function bindOptBatchInputs")
+    assert b > 0, "缺少 bindOptBatchInputs"
+    bb = src[b:src.find("\n  }\n", b)]
+    assert "optBatchSearch(b)" in bb and "optBatchReplace(b)" in bb
+    assert "bindOptBatchInputs();" in src, "wb 渲染链必须重绑面板输入框"
+    # app.py：面板 + 按钮渲染（优化结果态）
+    app_src = (FUNCLIP_ROOT / "slirn_home" / "app.py").read_text(encoding="utf-8")
+    for frag in ('id="slirn-opt-batchrep"', 'id="slirn-opt-batchrep-word"',
+                 'id="slirn-opt-batchrep-to"', 'data-action="opt-batch-open"',
+                 "/slirn/api/opt_batch_search", "/slirn/api/opt_batch_replace"):
+        assert frag in app_src, f"app.py 缺少 {frag}"
+    # CSS：面板 + 高亮 + 当前行 + 徽标
+    css = _css_src()
+    for sel in (".slirn-opt-batchrep ", ".slirn-opt-batchrep-hit",
+                ".slirn-opt-batchrep-ctx.cur", ".slirn-opt-batchrep-apply"):
+        assert sel in css, f"CSS 缺少 {sel}"
+
+
+
+    """2026-09-29 用户反馈：「🎬 重新拼接视频」缺执行时间和进度反馈。
+    轮询 running 态必须显示 已耗时 + ETA + 内嵌进度条；按钮本身进入
+    ⏳ 状态机（状态条在词频列表上方、按钮在字幕列表末尾，长列表里用户
+    只看得到点击处 — REQ-091 教训）；done toast 带总耗时；失败/清空恢复
+    按钮；网络异常 .catch 也要恢复。"""
+    src = _router_src()
+    # 助手函数齐备（格式化 / 已耗时 / ETA / 按钮状态机）
+    for fn in ("_optCutFmtSec", "_optCutElapsedTxt", "_optCutEtaTxt",
+               "optCutBtnRunning", "optCutBtnRestore"):
+        assert ("function " + fn) in src, f"缺少助手 {fn}"
+    # ETA 只在进度足够时显示（太小不稳），且有合理上界
+    e = src.find("function _optCutEtaTxt")
+    eb = src[e:src.find("\n  }\n", e)]
+    assert "pct < 8" in eb, "ETA 需进度阈值（前 8% 速率不稳不显示）"
+    assert "6 * 3600" in eb, "ETA 需上界（防异常值显示几小时）"
+    # 轮询 running 态：已耗时 + ETA + 进度条 + 按钮状态
+    i = src.find("function startOptCutPolling")
+    assert i > 0
+    body = src[i:src.find("\n  }\n", i)]
+    assert "_optCutElapsedTxt(j.started_at)" in body, "running 态必须显示已耗时"
+    assert "_optCutEtaTxt(j.started_at, pct)" in body, "running 态应显示预计剩余"
+    assert "slirn-opt-cut-prog-bar" in body, "状态条内嵌可视化进度条"
+    assert "optCutBtnRunning(pct, elTxt)" in body, "按钮进入 ⏳ 运行态（点击处反馈）"
+    assert "optCutBtnRestore()" in body, "终态（done/error）必须恢复按钮"
+    assert "'s · 耗时 '" in body, "done toast 必须带总耗时"
+    # 触发入口：点击立刻反馈（不等响应），失败/清空/网络异常都恢复按钮
+    j = src.find("function optCutRekick(btn)")
+    assert j > 0
+    rb = src[j:src.find("\n  }\n", j)]
+    assert "'⏳ 拼接中…'" in rb, "点击立刻变 ⏳（REQ-091：不等响应）"
+    assert "optCutBtnRunning(0, '')" in rb, "started/running 保持禁用、轮询接管文字"
+    assert "dataset.origLabel" in rb, "改写按钮文字前必须暂存原 label（可恢复）"
+    assert ".catch(function() { optCutBtnRestore(); })" in rb, "网络异常恢复按钮"
+    assert "btn.disabled = false" not in rb, "不得在响应后无条件恢复（交给状态机）"
+    # CSS：进度条 + 平滑过渡
+    css = _css_src()
+    assert ".slirn-opt-cut-prog-bar" in css, "缺少进度条样式"
+    assert ".slirn-opt-cut-prog {" in css, "缺少进度条轨道样式"
+    assert "transition: width" in css, "进度条宽度平滑过渡"
+
+
 def test_opt_player_highlight_center_on_hit_change():
-    """REQ-20260925-NNN：优化字幕播放跟随滚动居中 — block:'center' + _optLastHit
-    守卫（命中行变化才滚），去掉 block:'nearest'。"""
+    """REQ-20260925-NNN + 2026-09-29 用户反馈：优化字幕播放跟随滚动居中 —
+    optCenterRowInList（只滚列表容器；scrollIntoView 会连动整页滚动已弃用）
+    + _optLastHit 守卫（命中行变化才滚），去掉 block:'nearest'。"""
     src = _router_src()
     h = src.find("function optPlayerHighlight")
     assert h > 0, "必须有 optPlayerHighlight"
     body = src[h:src.find("\n  }\n", h)]
-    assert "block: 'center'" in body, "播放跟随滚动必须居中（block: 'center'）"
-    assert "block: 'nearest'" not in body, "播放跟随滚动不能再是 nearest"
+    assert "optCenterRowInList" in body, (
+        "播放跟随滚动必须居中于列表容器（optCenterRowInList）")
+    assert "scrollIntoView" not in body, (
+        "scrollIntoView 居中的是视口而非字幕区域，还会拽走页面 — 已弃用")
     assert "_optLastHit" in body, (
         "必须有 _optLastHit 守卫 — 命中行变化才滚，防同一行内每帧回拉用户滚动")
 

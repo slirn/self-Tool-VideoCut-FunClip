@@ -389,14 +389,16 @@ def _render_subtitle_zone(task_id: str, t, mgr: TaskManager) -> str:
     # 字幕列表（已生成时）
     list_html = ""
     if meta and meta.get("segments"):
-        rows = ""
+        # 行 HTML 用 list.append + join 累积：rows += 大字符串是 O(n²) 整串拷贝
+        # （长任务进工作台慢的根因之一，实测千行级 100ms → 10ms）
+        row_parts: list[str] = []
         for s in meta["segments"]:
             spk = s.get("spk")
             badge = (
                 f'<span class="slirn-sub-spk spk-c{(int(spk) - 1) % 6 + 1}">人员{int(spk)}</span>'
                 if spk else ""
             )
-            rows += (
+            row_parts.append(
                 f'<div class="slirn-sub-row{" has-spk" if spk else ""}"'
                 f' data-task-id="{_esc(task_id)}"'
                 f' data-start-ms="{int(s["start_ms"])}" data-end-ms="{int(s["end_ms"])}">'
@@ -406,6 +408,7 @@ def _render_subtitle_zone(task_id: str, t, mgr: TaskManager) -> str:
                 f'<span class="slirn-sub-text">{_esc(s["text"])}</span>'
                 f"</div>"
             )
+        rows = "".join(row_parts)
         n = len(meta["segments"])
         created = _esc(meta.get("created_at", ""))
         src_label = "截取段时间轴" if meta.get("source") == "segment" else "原视频时间轴"
@@ -583,7 +586,9 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
 
     # ---- 状态 3：建议列表（行式与字幕生成列表一致：序号|时间|文本+徽章|决策；
     #      模型分析/建议保留/手动说明收进每行可展开的详情块 — REQ-20260916-002）----
-    rows = ""
+    # 行 HTML 用 list.append + join 累积：rows += 大字符串是 O(n²) 整串拷贝
+    # （长任务进工作台慢的根因之一，实测 924 行 357ms → 7.5ms）
+    row_parts: list[str] = []
     for e in entries:
         cat = e.get("category", "review")
         cat_label = dict(revision_service.LLM_CATEGORIES).get(cat, ("人工复核",))[0]
@@ -629,7 +634,7 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
         _spk = rev_spk_rows.get(_i_str)
         _spk_attr = f' data-spk="{int(_spk)}"' if _spk else ""
         _spk_badge_html = f'👤{int(_spk)}' if _spk else ""
-        rows += (
+        row_parts.append(
             f'<div class="slirn-rev-row{" open" if open_detail else ""}" data-task-id="{_esc(task_id)}"'
             f' data-start-ms="{int(e.get("start_ms", 0))}" data-end-ms="{int(e.get("end_ms", 0))}"'
             f' data-sugg="{_esc(cat)}" data-decision="{_esc(decision)}" data-final="{_esc(final_kind)}"'
@@ -651,6 +656,7 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
             f' placeholder="{_esc(note_ph)}" value="{_esc(note_val)}" />'
             f'</div></div>'
         )
+    rows = "".join(row_parts)
 
     n = len(entries)
     cat_counts = {k: 0 for k in revision_service.LLM_CATEGORIES}
@@ -882,7 +888,9 @@ def _render_cutlist_zone(task_id: str, t, mgr: TaskManager) -> str:
         return (f'<span class="slirn-cut-spk"'
                 f' title="人员 {int(spk)}（时间段重叠最大的字幕段说话人）">👤{int(spk)}</span>')
 
-    rows = ""
+    # 行 HTML 用 list.append + join 累积：rows += 大字符串是 O(n²) 整串拷贝
+    # （长任务进工作台慢的根因之一，实测千行级 450ms → 数十 ms）
+    row_parts: list[str] = []
     for si, its in groups:
         first = its[0]
         is_split_group = any(x.get("sub") is not None for x in its)
@@ -890,7 +898,7 @@ def _render_cutlist_zone(task_id: str, t, mgr: TaskManager) -> str:
         act_attr = f' data-act="{_esc(act)}"' if act else ""
         if is_split_group:
             # 切分组：组头（父编号+原段→切分后文字+决策下拉+重切/试听钮）+ 完整子段表
-            rows += (
+            row_parts.append(
                 f'<div class="slirn-cut-group split" data-source-i="{si}"'
                 f' data-task-id="{_esc(task_id)}"{act_attr}'
                 f' data-target="{_esc(first.get("target_text") or "")}">'
@@ -912,7 +920,7 @@ def _render_cutlist_zone(task_id: str, t, mgr: TaskManager) -> str:
                 mk_label = ("✅ 保留" if mk == "keep" else "❌ 删除") + mk_manual
                 fb_title = ' title="无字级时间戳（旧字幕数据）或切分后文字无法对齐 — 已整段带入，可重新生成字幕后重试"' if it.get("fallback") else ""
                 fb_mark = " ⚠️" if it.get("fallback") else ""
-                rows += (
+                row_parts.append(
                     f'<div class="slirn-cut-row sub mark-{mk}" data-task-id="{_esc(task_id)}"'
                     f' data-id="{_esc(it["id"])}" data-mark="{mk}" data-mark-init="{mk}" data-source-i="{si}"'
                     f' data-start-ms="{int(it["start_ms"])}" data-end-ms="{int(it["end_ms"])}"{_spk_attr(it["id"])}{fb_title}'
@@ -924,7 +932,7 @@ def _render_cutlist_zone(task_id: str, t, mgr: TaskManager) -> str:
                     f'<span class="slirn-sub-text">{_esc(it["text"])}{fb_mark}</span>'
                     f'</div>'
                 )
-            rows += "</div>"
+            row_parts.append("</div>")
         else:
             # 整段组（keep/fix）：单行即组（可预播/键盘选中/改判，无需组头）。
             # 改判切分（act=split）时附 ✂️ 入口 + data-target（修订 user_note 预填）
@@ -939,7 +947,7 @@ def _render_cutlist_zone(task_id: str, t, mgr: TaskManager) -> str:
             resplit_btn = ('<button class="slirn-btn slirn-btn-xs" data-cut-act="resplit"'
                            ' title="填写切分后内容，把本段按新内容重新切分">✂️ 重新切分</button>'
                            ) if act == "split" else ""
-            rows += (
+            row_parts.append(
                 f'<div class="slirn-cut-group" data-source-i="{si}"'
                 f' data-task-id="{_esc(task_id)}"{act_attr}'
                 f' data-orig-text="{_esc(orig_text)}"'
@@ -957,6 +965,7 @@ def _render_cutlist_zone(task_id: str, t, mgr: TaskManager) -> str:
                 f'{resplit_btn}'
                 f'</div></div>'
             )
+    rows = "".join(row_parts)
     # fallback 提示（有降级子段时在统计行下提醒）
     n_fb = stats["fallback"]
     fb_hint = (
@@ -1207,6 +1216,66 @@ def _render_rough_compose_zone(task_id: str, t, mgr: TaskManager) -> str:
     </div>'''
 
 
+def _extract_opt_rows(zone_html: str, seg_id: int) -> str:
+    """从 _render_optimize_zone 的 HTML 里抽出指定 seg 的行组（父行 + 子段行）。
+
+    2026-09-29 用户反馈：行内切分「✂️ 按内容切分」后整页刷新会把用户踢出当前
+    优化字幕工作环境（滚动/词筛选/焦点全丢）。/optimize_resplit 与
+    /optimize_unsplit 成功后重渲 zone、用注释标记抽出该 seg 的新行组返回，
+    前端只换本行组（见 router.js optSwapRows）。抽不到返回空串（前端兜底整刷）。
+    """
+    open_m = f"<!--opt-rows:{int(seg_id)}-->"
+    close_m = f"<!--/opt-rows:{int(seg_id)}-->"
+    i = zone_html.find(open_m)
+    if i < 0:
+        return ""
+    i += len(open_m)
+    j = zone_html.find(close_m, i)
+    return zone_html[i:j] if j >= 0 else ""
+
+
+def _opt_words_panel(data: dict) -> tuple[str, str]:
+    """REQ-038 不明确字词频次面板（词列表 + 状态过滤条）— (words_html,
+    word_filter_html)。REQ-20260929-NNN 抽成模块级：批量替换注入出现项后
+    端点要重渲词频面板（新词 chip 可点选筛选），不能只在 zone 渲染里拼。
+    词身份取分析时的建议替换值（occ.after 落盘值）；每词带「处理完成」标识
+    （全部出现处都已明确处理 = 采纳/不采纳/编辑过）。
+    """
+    word_agg: dict[str, dict] = {}
+    for o in data.get("occurrences") or []:
+        w = str(o.get("after") or "")
+        if not w:
+            continue
+        r = word_agg.setdefault(w, {"total": 0, "done": 0})
+        r["total"] += 1
+        if o.get("reviewed"):
+            r["done"] += 1
+    words_html = "".join(
+        f'<div class="slirn-opt-word" data-word="{_esc(w)}" data-done="{1 if r["done"] >= r["total"] else 0}">'
+        f'<button class="slirn-opt-chip" data-action="opt-word" data-word="{_esc(w)}" '
+        f'title="点按筛选该词的出现行，再点取消">{_esc(w)}<b>×{r["total"]}</b></button>'
+        f'<span class="slirn-opt-word-prog">{r["done"]}/{r["total"]}</span>'
+        f'<span class="slirn-opt-word-badge{" done" if r["done"] >= r["total"] else ""}"'
+        f' title="{"该词全部出现处都已明确处理（采纳或不采纳）" if r["done"] >= r["total"] else "还有 " + str(r["total"] - r["done"]) + " 处未处理 — 逐处切换 ✓/✕ 或编辑替换值即计为已处理"}">'
+        f'{"✅ 已完成" if r["done"] >= r["total"] else "⬜ 未完成"}</span></div>'
+        for w, r in sorted(word_agg.items(), key=lambda kv: (-kv[1]["total"], kv[0]))
+    ) or '<span class="slirn-sub-meta">没有生效的替换（可重新优化或直接保存）</span>'
+    word_filter_html = (
+        '<div class="slirn-opt-word-filters" id="slirn-opt-word-filters">'
+        '<button class="slirn-btn slirn-btn-xs active" data-action="opt-word-filter" data-mode="all">全部</button>'
+        '<button class="slirn-btn slirn-btn-xs" data-action="opt-word-filter" data-mode="todo">⬜ 未完成</button>'
+        '<button class="slirn-btn slirn-btn-xs" data-action="opt-word-filter" data-mode="done">✅ 已完成</button>'
+        # REQ-20260918-057B：文字输入过滤（与状态过滤 AND 组合）
+        '<span class="slirn-opt-word-text-filter">'
+        '<input type="text" id="slirn-opt-word-text" placeholder="🔍 输入词文本过滤" autocomplete="off">'
+        '<button type="button" class="slirn-opt-word-text-clear" data-action="opt-word-text-clear" '
+        'title="清空过滤" style="display:none;">✕</button>'
+        '</span>'
+        '</div>'
+    ) if word_agg else ""
+    return words_html, word_filter_html
+
+
 def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
     """处理剪辑 · 优化字幕（REQ-20260917-030）。
 
@@ -1348,39 +1417,8 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
 
     # REQ-038：不明确字词频次列表 — 按替换目标词分组（全部出现项，含未采纳），
     # 每词带「处理完成」标识（该词全部出现处都已明确处理 = 采纳/不采纳/编辑过），
-    # 可按标识过滤。词身份取分析时的建议替换值（occ.after 落盘值）。
-    word_agg: dict[str, dict] = {}
-    for o in data.get("occurrences") or []:
-        w = str(o.get("after") or "")
-        if not w:
-            continue
-        r = word_agg.setdefault(w, {"total": 0, "done": 0})
-        r["total"] += 1
-        if o.get("reviewed"):
-            r["done"] += 1
-    words_html = "".join(
-        f'<div class="slirn-opt-word" data-word="{_esc(w)}" data-done="{1 if r["done"] >= r["total"] else 0}">'
-        f'<button class="slirn-opt-chip" data-action="opt-word" data-word="{_esc(w)}" '
-        f'title="点按筛选该词的出现行，再点取消">{_esc(w)}<b>×{r["total"]}</b></button>'
-        f'<span class="slirn-opt-word-prog">{r["done"]}/{r["total"]}</span>'
-        f'<span class="slirn-opt-word-badge{" done" if r["done"] >= r["total"] else ""}"'
-        f' title="{"该词全部出现处都已明确处理（采纳或不采纳）" if r["done"] >= r["total"] else "还有 " + str(r["total"] - r["done"]) + " 处未处理 — 逐处切换 ✓/✕ 或编辑替换值即计为已处理"}">'
-        f'{"✅ 已完成" if r["done"] >= r["total"] else "⬜ 未完成"}</span></div>'
-        for w, r in sorted(word_agg.items(), key=lambda kv: (-kv[1]["total"], kv[0]))
-    ) or '<span class="slirn-sub-meta">没有生效的替换（可重新优化或直接保存）</span>'
-    word_filter_html = (
-        '<div class="slirn-opt-word-filters">'
-        '<button class="slirn-btn slirn-btn-xs active" data-action="opt-word-filter" data-mode="all">全部</button>'
-        '<button class="slirn-btn slirn-btn-xs" data-action="opt-word-filter" data-mode="todo">⬜ 未完成</button>'
-        '<button class="slirn-btn slirn-btn-xs" data-action="opt-word-filter" data-mode="done">✅ 已完成</button>'
-        # REQ-20260918-057B：文字输入过滤（与状态过滤 AND 组合）
-        '<span class="slirn-opt-word-text-filter">'
-        '<input type="text" id="slirn-opt-word-text" placeholder="🔍 输入词文本过滤" autocomplete="off">'
-        '<button type="button" class="slirn-opt-word-text-clear" data-action="opt-word-text-clear" '
-        'title="清空过滤" style="display:none;">✕</button>'
-        '</span>'
-        '</div>'
-    ) if word_agg else ""
+    # 可按标识过滤。REQ-20260929-NNN 抽成 _opt_words_panel（批量替换后端点复用）。
+    words_html, word_filter_html = _opt_words_panel(data)
 
     def _line_html(seg: dict) -> str:
         rid = str(seg.get("i"))
@@ -1427,6 +1465,10 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
             occ_chips.append('<span class="slirn-opt-occ-override-hint">整句替换已覆盖本行局部替换</span>')
         row_words = sorted({str(o["after"]) for o in occs if o.get("applied", True)})
         has_occ = " has-occ" if occs else ""
+        # 2026-09-29 用户反馈：处理完的行保持绿色区分（防重复处理）。口径与词行
+        # ✅ 已完成一致：本行全部出现处都已 reviewed（采纳或不采纳都算）。
+        # 前端 optOccMarkReviewed 用同一口径实时传播（回车/✓✕ 后即时变绿）。
+        done_cls = " occ-done" if occs and all(bool(o.get("reviewed")) for o in occs) else ""
         full_cls = " full-edit" if full_edit is not None else ""
         occ_col = f'<div class="slirn-opt-col">{"".join(occ_chips)}</div>' if occ_chips else ''
         edit_btn = (
@@ -1469,7 +1511,7 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
             )
             parts = [f'<span class="slirn-opt-line-badge split">✂️ 已切分 · '
                      f'{len(subs)} 段（删 {n_del}）</span>', _esc(raw)]  # 整句替换在切分行上忽略
-            parent = (f'<div class="slirn-opt-row{has_occ}{del_row_cls}" data-id="{_esc(rid)}" '
+            parent = (f'<div class="slirn-opt-row{has_occ}{done_cls}{del_row_cls}" data-id="{_esc(rid)}" '
                       f'data-split="1" data-split-target="{_esc(targets_by_seg.get(rid) or "")}" '
                       f'data-start-ms="{int(seg.get("start_ms", 0))}" '
                       f'data-end-ms="{int(seg.get("end_ms", 0))}"'
@@ -1509,7 +1551,7 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
                     f'</div>')
             return parent + "".join(sub_rows)
         # REQ-20260918-054：补 data-end-ms，前端 timeupdate 按 [start,end) 命中行
-        return (f'<div class="slirn-opt-row{has_occ}{full_cls}{del_row_cls}" data-id="{_esc(rid)}" '
+        return (f'<div class="slirn-opt-row{has_occ}{full_cls}{done_cls}{del_row_cls}" data-id="{_esc(rid)}" '
                 f'data-start-ms="{int(seg.get("start_ms", 0))}" '
                 f'data-end-ms="{int(seg.get("end_ms", 0))}"'
                 f' data-words="{_esc(chr(10).join(row_words))}"'
@@ -1522,7 +1564,14 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
                 f'<div class="slirn-fw-text">{del_btn}{split_btn}{edit_btn}{"".join(parts)}</div>'
                 f'{occ_col}</div>')
 
-    rows = "".join(_line_html(s) for s in (data.get("segments") or []))
+    # 2026-09-29 用户反馈：切分/取消切分只做行组局部刷新（不再 openWorkbench 整刷）。
+    # 每个 seg 的行组（父行 + 子段行）用 HTML 注释标记包起来 — 注释节点不参与
+    # :last-child / previousElementSibling 等元素语义，_extract_opt_rows 靠它精确抽取。
+    rows = "".join(
+        f"<!--opt-rows:{_esc(str(s.get('i')))}-->" + _line_html(s)
+        + f"<!--/opt-rows:{_esc(str(s.get('i')))}-->"
+        for s in (data.get("segments") or [])
+    )
     save_label = "💾 确认替换并保存" if not confirmed else "✅ 已确认 · 再次保存"
     n_occ_rows = len(occs_by_seg)
     n_lines = est["lines"]
@@ -1581,6 +1630,31 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
         '<span id="slirn-opt-search-count" class="slirn-opt-search-count"></span>'
         '</span>'
     )
+    # REQ-20260929-NNN 批量替换：搜指定词 → 每处命中展示前两行 + 本行 + 后两行
+    # 共 5 行上下文 → 输入替换文字 → 确认一次替换全部（不可替换的行标注跳过原因）。
+    batch_btn = (
+        '<button class="slirn-btn" data-action="opt-batch-open" '
+        'title="搜指定词，预览每处命中的前后各两行上下文，确认后一次替换全部">'
+        '🔁 批量替换</button>'
+    )
+    batch_panel = (
+        '<div class="slirn-opt-batchrep" id="slirn-opt-batchrep" style="display:none;">'
+        '<div class="slirn-opt-batchrep-bar">'
+        '<input type="text" id="slirn-opt-batchrep-word" '
+        'placeholder="要查找的词（不区分大小写）" autocomplete="off">'
+        '<button type="button" class="slirn-btn slirn-btn-xs" id="slirn-opt-batchrep-search-btn" '
+        'data-action="opt-batch-search">🔍 查找</button>'
+        '<button type="button" class="slirn-opt-batchrep-close" data-action="opt-batch-close" '
+        'title="收起批量替换面板">✕</button>'
+        '</div>'
+        '<div class="slirn-opt-batchrep-result" id="slirn-opt-batchrep-result"></div>'
+        '<div class="slirn-opt-batchrep-apply" id="slirn-opt-batchrep-apply" style="display:none;">'
+        '<input type="text" id="slirn-opt-batchrep-to" placeholder="替换为…（输入后点确认）" '
+        'autocomplete="off">'
+        '<button type="button" class="slirn-btn slirn-btn-primary slirn-btn-xs" '
+        'id="slirn-opt-batchrep-go" data-action="opt-batch-replace">✅ 确认批量替换</button>'
+        '</div></div>'
+    )
     return f'''<div class="slirn-card" style="margin-top:16px;">
         <div class="slirn-panel-header"><div class="slirn-panel-title">✨ 优化字幕 · 不明确字词</div></div>
         <div class="slirn-sub-meta">识别 {n_lines} 行 · 不明确 {est["occurrences"]} 处（{est["words"]} 个词）
@@ -1604,8 +1678,10 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
             <button class="slirn-btn" data-action="opt-filter" data-shown="1"
                     data-all-text="🔍 只看有不明确字词的行（{n_occ_rows}/{n_lines}）">🔍 只看有不明确字词的行（{n_occ_rows}/{n_lines}）</button>
             {del_filter_btn}
+            {batch_btn}
             {search_box}
         </div>
+        {batch_panel}
         <div id="slirn-opt-player-wrap" class="slirn-video-wrap slirn-sub-player-wrap" style="display:none;">
             <video id="slirn-opt-player" controls preload="metadata"></video>
         </div>
@@ -1853,11 +1929,9 @@ _FINE_LAYOUT_DEFAULTS = {
                  # 渲染时按源视频实际尺寸等比换算到 iw/ih
                  "crop_x": 0, "crop_y": 0, "crop_w": 1920, "crop_h": 1080,
                  "enabled": True,
-                 # REQ-20260919-062 v5 用户反馈：把视频展示的区域限定在所检测区域之内。
-                 # viewport 是背景图白色区域检测的结果（设计空间像素），
-                 # 设置后 x/y/scale 在 save_fine_layout 时被自动夹紧到 viewport 内。
-                 # None / 缺失 = 不限定（视频可超出画布任意位置）。
-                 "viewport": None,
+                 # （viewport 字段已删除 — 用户反馈：检测区域「应用」只负责填充，
+                 # 填充后 X/Y 需要手工自由调整，不得再夹紧回检测区域；
+                 # 检测结果的持久化走 fc.detected_region / bg_detect_cache）
                  # REQ-20260919-062 v18 用户反馈：「视频源裁剪里的锁定 16:9 比例」也要保存。
                  # True = crop_w/crop_h 拖动时按 16:9 联动（防变形）；
                  # False = 任意调整（1:1 等预设才能任意设 w=h）。
@@ -2470,7 +2544,9 @@ def _maybe_prescale_image(path: Path, target_w: int, target_h: int, label: str,
         return path
 
 
-def _build_bg_layer_chain(bg_idx: int, W: int, H: int) -> list[str]:
+def _build_bg_layer_chain(
+    bg_idx: int, W: int, H: int, duration: float | None = None
+) -> list[str]:
     """REQ-20260919-063：bg 图透明区黑底 alpha 合成链。
 
     - bg_idx >= 0：bg 图是 RGBA 且透明像素 RGB=白色 → 必须用「黑底 + bg 图 overlay」
@@ -2478,15 +2554,21 @@ def _build_bg_layer_chain(bg_idx: int, W: int, H: int) -> list[str]:
       注：ffmpeg 的 format filter 不支持 'auto' 值；PNG 解码默认保留 alpha，
       overlay 会自动按 alpha 合成。
     - bg_idx < 0：纯黑底。
+    - duration（REQ-20260929-NNN）：画布有限化。color 源无限 + bg 图 -loop 1 无限
+      时，视频分支永远等不到自然 EOF，长视频导出（20260924-001, 4278s）中有限
+      的音频分支在源 ~1104s 处被调度器静默截断（exit 0、stderr 无警告）。
+      给 color 源加显式 duration 后视频分支在预期时长附近自然收口，输出 -t
+      只作钳制；duration=None（probe 失败）保持旧行为（无限 + -shortest 兜底）。
     返回：filter_complex chain 片段。
     """
+    d = f":duration={duration:.3f}" if duration else ""
     if bg_idx >= 0:
         return [
-            f"color=size={W}x{H}:color=black:rate=30[bg_b]",
+            f"color=size={W}x{H}:color=black:rate=30{d}[bg_b]",
             f"[{bg_idx}:v]scale={W}:{H},setsar=1[bg_img]",
             "[bg_b][bg_img]overlay=eof_action=pass[bg]",
         ]
-    return [f"color=size={W}x{H}:color=black:rate=30[bg]"]
+    return [f"color=size={W}x{H}:color=black:rate=30{d}[bg]"]
 
 
 def _build_fine_filter(fc: dict, W: int, H: int) -> tuple[list[str], list[str], str]:
@@ -2630,7 +2712,61 @@ def _assemble_fine_filter(
         out_w, out_h = _FINE_DESIGN_W, _FINE_DESIGN_H
     W, H = _FINE_DESIGN_W, _FINE_DESIGN_H
 
-    # 3. 收集 inputs
+    # 3a. REQ-20260929-NNN：先算预期输出时长（原在 filter 组装后算，现提前 —
+    # bg 图输入与 color 画布需要有限化边界，见 _build_bg_layer_chain 注释）。
+    # probe 一次，复用给 expected_output_sec / audio_total_duration（fade_out 起算）。
+    cover_input_enabled = (
+        layout["cover"]["enabled"]
+        and float(layout["cover"].get("duration", 0)) > 0
+        and (materials.get("cover") or {}).get("path")
+    )
+    _probe_sec: float | None = None
+    try:
+        _ms = _probe_video_duration_ms(mgr, task_id)
+        if _ms > 0:
+            _probe_sec = _ms / 1000.0
+    except Exception as e:  # noqa: BLE001
+        log.warning("REQ-095: probe 源视频时长失败，fade_out 起算退回 st=0: %s", e)
+    # REQ-20260923-NNN：预期输出时长（确定性 -t 上界 + 完成后截断校验基准）。
+    # 与实际滤镜图同构：片头 cover（若启用）+ 源贡献段：
+    #   - duration 给定（预览/区间导出）：min(duration, probe - preview_start)
+    #     — start+duration 超源尾时音频分支先结束，不夹紧会在校验时误报「被截断」；
+    #   - duration=None（完整导出）：probe - preview_start。
+    # probe 不可得 → expected_output_sec=None → 渲染退回 -shortest 旧行为并跳过校验。
+    expected_output_sec: float | None = None
+    if duration is not None:
+        _seg_sec = float(duration)
+        if _probe_sec is not None:
+            _seg_sec = min(_seg_sec, max(0.0, _probe_sec - float(preview_start)))
+    elif _probe_sec is not None:
+        _seg_sec = max(0.0, _probe_sec - float(preview_start))
+    else:
+        _seg_sec = None
+    if _seg_sec is not None:
+        if cover_input_enabled:
+            try:
+                _cd = float(layout["cover"].get("duration", 0.0))
+                if _cd > 0:
+                    _seg_sec += _cd
+            except Exception:
+                pass
+        expected_output_sec = round(_seg_sec, 3)
+    # REQ-20260929-NNN：视频画布边界 = 预期时长 - 片头 cover + 0.5s 余量。
+    # 画布只承载主画面段（cover 由 concat 前缀提供，不能重复计入）；余量保证
+    # 画布自然 EOF 落在输出 -t 钳制点之后，视频流不被画布提前掐断。
+    canvas_bound: float | None = None
+    if expected_output_sec is not None:
+        _cover_prefix = 0.0
+        if cover_input_enabled:
+            try:
+                _cp = float(layout["cover"].get("duration", 0.0))
+                if _cp > 0:
+                    _cover_prefix = _cp
+            except Exception:
+                pass
+        canvas_bound = expected_output_sec - _cover_prefix + 0.5
+
+    # 3b. 收集 inputs
     input_args: list[str] = []
     input_args += ["-ss", str(max(0.0, float(preview_start)))]
     if duration is not None:
@@ -2640,16 +2776,17 @@ def _assemble_fine_filter(
     if layout["bg"]["enabled"] and (materials.get("bg") or {}).get("path"):
         bg_path = _resolve_mat_abs(mgr, task_id, materials, "bg")
         if bg_path and bg_path.exists():
-            input_args += ["-loop", "1", "-i", str(bg_path)]
+            # REQ-20260929-NNN：bg 图输入有限化（-loop 1 无限产包的输入线程是
+            # 长导出中音频被静默截断的触发方；边界与画布一致）。canvas_bound
+            # 未知时保持旧行为（无限 loop）。
+            if canvas_bound is not None:
+                input_args += ["-loop", "1", "-t", f"{canvas_bound:.3f}", "-i", str(bg_path)]
+            else:
+                input_args += ["-loop", "1", "-i", str(bg_path)]
         else:
             layout = {**layout, "bg": {**layout["bg"], "enabled": False}}
             fc["layout"] = layout
 
-    cover_input_enabled = (
-        layout["cover"]["enabled"]
-        and float(layout["cover"].get("duration", 0)) > 0
-        and (materials.get("cover") or {}).get("path")
-    )
     # REQ-20260920-096：用 lavfi anullsrc 注入 cover 时长对应的静音前缀，再 concat
     # 原始 [0:a]，绕开 adelay + aloop + amix 在 input-level -ss/-t 下触发的 PTS 错位
     # （"Queue input is backward in time" → audio 被截断到 ~22ms）。aevalsrc=0|0:...
@@ -2683,10 +2820,32 @@ def _assemble_fine_filter(
         audio_cfg.get("enabled")
         and (materials.get("audio") or {}).get("path")
     )
+    bgm_input_bounded = False
+    # REQ-20260929-NNN（两进程导出）：BGM 输入在 input_args 里的切片范围
+    # [lo, hi)（pass2 原位替换成 -i <音频中间WAV>，保持后续输入索引不变）。
+    audio_input_span: tuple[int, int] | None = None
     if audio_input_enabled:
         audio_path = _resolve_mat_abs(mgr, task_id, materials, "audio")
         if audio_path and audio_path.exists():
-            input_args += ["-i", str(audio_path)]
+            # REQ-20260929-NNN：BGM 输入有限化。滤镜级 aloop=loop=-1 是无限源，
+            # ffmpeg 9 调度器在视频支路（x264 编码）慢速并发时会把音频支路提前判
+            # EOF（实测 1101~1109s 处静默截断、exit 0、stderr 空 —— 20260924-001
+            # 两次「导出被提前截断」失败的根因；截断点逐次抖动 = 时序竞态）。
+            # 修复：demux 级循环 + 输入级 -t（有限化在 demux 层，滤镜图内无无限源；
+            # 压缩包队列有界 ≈ 时长×码率，无 amovie 的解码帧队列 OOM 问题）。
+            # expected 不可得（probe 失败）时回退旧 -i + aloop。
+            _audio_input_lo = len(input_args)
+            if expected_output_sec is not None:
+                input_args += [
+                    "-stream_loop", "-1",
+                    "-t", f"{expected_output_sec + 0.5:.3f}",
+                    "-i", str(audio_path),
+                ]
+                bgm_input_bounded = True
+            else:
+                input_args += ["-i", str(audio_path)]
+                bgm_input_bounded = False
+            audio_input_span = (_audio_input_lo, len(input_args))
         else:
             audio_cfg = dict(audio_cfg)
             audio_cfg["enabled"] = False
@@ -2741,7 +2900,7 @@ def _assemble_fine_filter(
     bg_idx = -1
     if layout["bg"]["enabled"]:
         bg_idx = 1 if inputs_count >= 2 else -1
-    chain.extend(_build_bg_layer_chain(bg_idx, W, H))
+    chain.extend(_build_bg_layer_chain(bg_idx, W, H, canvas_bound))
     cur = "[bg]"
 
     vc = layout["video"]
@@ -2900,47 +3059,9 @@ def _assemble_fine_filter(
     # → 加 cover_dur（仅当 cover_input_enabled 时）让 fade_out 起算对齐
     #   「音频总时长 - fade_out」= cover_dur + video_dur - fade_out。
     # preview 时 duration 已经是「预览段」秒数（如 10s），与 cover_dur 无关 → 不加。
-    audio_total_duration: float | None = duration
-    if audio_total_duration is None:
-        try:
-            _ms = _probe_video_duration_ms(mgr, task_id)
-            if _ms > 0:
-                audio_total_duration = _ms / 1000.0
-        except Exception as e:  # noqa: BLE001
-            log.warning("REQ-095: probe 源视频时长失败，fade_out 起算退回 st=0: %s", e)
-    # REQ-20260923-NNN：预期输出时长（确定性 -t 上界 + 完成后截断校验基准）。
-    # 与实际滤镜图同构：片头 cover（若启用）+ 源贡献段：
-    #   - duration 给定（预览/区间导出）：min(duration, probe - preview_start)
-    #     — start+duration 超源尾时音频分支先结束，不夹紧会在校验时误报「被截断」；
-    #   - duration=None（完整导出）：probe - preview_start。
-    # probe 不可得 → expected_output_sec=None → 渲染退回 -shortest 旧行为并跳过校验。
-    # 注意：此处 audio_total_duration 尚未加 cover_dur（下面才加），duration=None
-    # 时它就是纯 probe 值，可直接复用，避免二次 ffprobe。
-    expected_output_sec: float | None = None
-    _probe_sec: float | None = audio_total_duration if duration is None else None
-    if duration is not None:
-        try:
-            _ms_seg = _probe_video_duration_ms(mgr, task_id)
-            _probe_sec = _ms_seg / 1000.0 if _ms_seg > 0 else None
-        except Exception:
-            _probe_sec = None
-    if duration is not None:
-        _seg_sec = float(duration)
-        if _probe_sec is not None:
-            _seg_sec = min(_seg_sec, max(0.0, _probe_sec - float(preview_start)))
-    elif _probe_sec is not None:
-        _seg_sec = max(0.0, _probe_sec - float(preview_start))
-    else:
-        _seg_sec = None
-    if _seg_sec is not None:
-        if cover_input_enabled:
-            try:
-                _cd = float(layout["cover"].get("duration", 0.0))
-                if _cd > 0:
-                    _seg_sec += _cd
-            except Exception:
-                pass
-        expected_output_sec = round(_seg_sec, 3)
+    audio_total_duration: float | None = duration if duration is not None else _probe_sec
+    # expected_output_sec 与 _probe_sec 已在 3a 块提前算好（REQ-20260929-NNN —
+    # bg 图输入 / color 画布有限化需要边界；此处不再重复 probe）。
     # 仅「完整导出 + cover 启用」场景加 cover_dur；预览/区间导出已自带完整长度
     if cover_input_enabled and duration is None:
         try:
@@ -2975,7 +3096,12 @@ def _assemble_fine_filter(
         fade_out = float(audio_cfg.get("fade_out", 0.0))
         # REQ-20260920-080 修复：label [bgm] 必须紧接过滤器链尾部，不能 ",[bgm]"
         # （之前用 list + ",".join 会把 label 当成 filter name → No such filter: ''）
-        bgm_chain = f"[{audio_idx}:a]aloop=loop=-1:size=2e9,volume={vol_db:.1f}dB"
+        # REQ-20260929-NNN：stream_loop 输入已自带 demux 级循环 + 输入级 -t 有限化，
+        # 不再需要（也不能要）滤镜级无限 aloop —— 见上方 BGM 输入块注释。
+        if bgm_input_bounded:
+            bgm_chain = f"[{audio_idx}:a]volume={vol_db:.1f}dB"
+        else:
+            bgm_chain = f"[{audio_idx}:a]aloop=loop=-1:size=2e9,volume={vol_db:.1f}dB"
         if fade_in > 0:
             bgm_chain += f",afade=t=in:st=0:d={fade_in:.2f}"
         if fade_out > 0:
@@ -3001,6 +3127,13 @@ def _assemble_fine_filter(
         "out_h": out_h,
         # REQ-20260923-NNN：预期输出秒数（含 cover 前缀；None = 未知）
         "expected_output_sec": expected_output_sec,
+        # REQ-20260929-NNN（两进程导出）：BGM 合并图元信息。
+        # audio_merge=True（图里有 [voice][bgm]amix）且完整导出且 expected 可得时，
+        # _run_fine_render_locked 拆「音频段→无损WAV + 视频段WAV直通」两段跑，
+        # 根治音频支路被调度器静默截断的竞态（详见 _split_fine_filter_graphs 注释）。
+        "audio_merge": bool(audio_input_enabled and audio_idx >= 0),
+        "audio_input_idx": audio_idx if (audio_input_enabled and audio_idx >= 0) else -1,
+        "audio_input_span": audio_input_span,
     }
 
 
@@ -3100,7 +3233,13 @@ def _predict_audio_path(fc: dict, audio_total_duration: float | None = None) -> 
         fade_in = float(audio_cfg.get("fade_in", 0.0))
         fade_out = float(audio_cfg.get("fade_out", 0.0))
         # REQ-20260920-080：label [bgm] 必须紧接过滤器链尾部，不能 ",[bgm]"
-        bgm_chain = f"[{audio_idx}:a]aloop=loop=-1:size=2e9,volume={vol_db:.1f}dB"
+        # REQ-20260929-NNN：与 assemble 对称 —— stream_loop 输入（expected 可得）
+        # 无 aloop，只有回退路径（probe 失败）才保留无限 aloop。
+        _bgm_bounded_like = effective_audio_total_duration is not None
+        if _bgm_bounded_like:
+            bgm_chain = f"[{audio_idx}:a]volume={vol_db:.1f}dB"
+        else:
+            bgm_chain = f"[{audio_idx}:a]aloop=loop=-1:size=2e9,volume={vol_db:.1f}dB"
         if fade_in > 0:
             bgm_chain += f",afade=t=in:st=0:d={fade_in:.2f}"
         if fade_out > 0:
@@ -3415,6 +3554,54 @@ def _verify_render_duration(out_path: Path, expected_sec: float | None) -> str:
     return ""
 
 
+# REQ-20260929-NNN（两进程导出）：音频子图判别标记 —— 这些 label 只出现在音频链
+# （cover 静音 concat / BGM volume / amix）里；视频链（画布/裁剪/overlay/ass/
+# 封面 concat）不会引用。
+_FINE_AUDIO_GRAPH_MARKERS = ("[voice]", "[bgm]", "[aout]", "[ss]", "[v_raw]")
+# 命名 label（[ss]/[v_raw]/[bg_b] 等；[0:v]/[3:a] 这类输入垫以数字开头，不匹配）
+_FINE_LABEL_RE = re.compile(r"\[[A-Za-z_][A-Za-z0-9_]*\]")
+
+
+def _split_fine_filter_graphs(filter_complex: str) -> tuple[str, str] | None:
+    """REQ-20260929-NNN（两进程导出）：把 filter_complex 拆成音频/视频两个闭合子图。
+
+    背景：ffmpeg 9 在「音频合并图（concat/amix）+ x264 慢速视频支路」同一
+    filter_complex 并发时，调度器会把音频支路提前判 EOF —— 全片（4278s）在
+    ~1050-1230s 静默截断、exit 0、stderr 空、截断点逐次抖动（时序竞态；
+    20260924-001 两次「导出被提前截断」失败的根因，错误提示里的「系统负载过高」
+    是错误归因 —— 空闲机器离线必现）。单进程内所有修法实测无效：线程/队列
+    flags、采样率、atrim、amix duration=longest（假阳性静音续命）；amovie
+    循环全片 OOM；stream_loop 输入 -t 1500 短测通过但全片仍在 1233.7s 截断。
+    唯一经全片实测稳定的架构（本函数服务的目标）：
+      pass1 音频子图单独跑（4278s 仅 13 秒）→ 无损 WAV（pcm_s16le）
+      pass2 视频子图 + [wav:a]anull 直通（音频链单输入、无合并）→ 最终 mp4
+
+    判别规则：含 _FINE_AUDIO_GRAPH_MARKERS 任一 label、或以 [N:a] 输入垫开头
+    的 chain 元素归音频图，其余归视频图。chain 元素以 ";\n" join；音频 cover
+    静音元素内部的裸 ";"（无换行）不会被拆开。
+
+    返回 (fc_audio, fc_video)；任一侧为空、或两图共享 label（跨图依赖，拆开
+    会产生 dangling pad）时返回 None —— 调用方回退单进程旧路径。
+    """
+    segs = [s.strip() for s in filter_complex.split(";\n") if s.strip()]
+    audio: list[str] = []
+    video: list[str] = []
+    for s in segs:
+        if (any(m in s for m in _FINE_AUDIO_GRAPH_MARKERS)
+                or re.match(r"^\[\d+:a\]", s)):
+            audio.append(s)
+        else:
+            video.append(s)
+    if not audio or not video:
+        return None
+    # 闭合校验：一张子图定义/引用的命名 label 出现在另一张里 = 跨图依赖
+    a_labels = set(_FINE_LABEL_RE.findall("".join(audio)))
+    v_labels = set(_FINE_LABEL_RE.findall("".join(video)))
+    if a_labels & v_labels:
+        return None
+    return ";\n".join(audio), ";\n".join(video)
+
+
 def _run_fine_render_async(job: _RenderJob, tid: str, mgr, out_path: Path,
                           exec_id: str = "", outputs_dir: Path | None = None,
                           preview_start: float = 0.0, duration: float | None = None,
@@ -3516,6 +3703,83 @@ def _run_fine_render_locked(job: _RenderJob, tid: str, mgr, out_path: Path,
         str(out_path),
     ]
 
+    # ===== REQ-20260929-NNN（两进程导出）：完整导出 + BGM 合并图拆两段 =====
+    # 根因（20260924-001 两次「导出被提前截断」全片终验结论）：「音频合并图
+    # （concat/amix）+ x264 慢速视频支路」在同一 filter_complex 里并发时，
+    # ffmpeg 9 调度器会把音频支路提前判 EOF（全片 ~1050-1230s 静默截断、
+    # exit 0、stderr 空、截断点逐次抖动 = 时序竞态）。单进程内所有修法实测
+    # 无效：线程/队列 flags、采样率、atrim、amix duration=longest（假阳性
+    # 静音续命）；amovie 循环全片 OOM；stream_loop 输入 -t 1500 短测通过但
+    # 全片仍在 1233.7s 截断（短测通过只是竞态侥幸）。全片实测稳定的架构：
+    #   pass1 音频子图单独跑（4278s 仅 13 秒）→ 无损 WAV（pcm_s16le）
+    #   pass2 视频子图 + [wav:a]anull 直通（音频链单输入、无合并）→ 最终 mp4
+    # 适用条件：完整导出（duration=None）+ BGM 合并 + expected 可得 + 子图闭合
+    # （_split_fine_filter_graphs 判定）。预览/区间导出（时长有限，远低于竞态
+    # 触发区间）、无 BGM、expected 未知或拆分失败 → 走下方单进程旧路径。
+    import tempfile as _tempfile
+    _split = None
+    if (duration is None and preview_start == 0.0
+            and _expected_sec is not None
+            and asm.get("audio_merge")
+            and asm.get("audio_input_span")):
+        _split = _split_fine_filter_graphs(asm["filter_complex"])
+    cmd_audio: list[str] | None = None
+    cmd_video: list[str] | None = None
+    _wav_path: Path | None = None
+    if _split is not None:
+        # 音频中间 WAV 与输出同目录（4278s 立体声 pcm_s16le ≈ 800MB，finally
+        # 删除；进程被硬杀残留时由下次导出前的清扫兜底 —— 导出门 _FINE_RENDER_GATE
+        # 全局串行，清扫时不可能有并行导出在写同前缀文件）
+        try:
+            for _old in out_path.parent.glob("slirn_fine_audio_*.wav"):
+                try:
+                    _old.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            _wav_fd, _wav_name = _tempfile.mkstemp(
+                prefix="slirn_fine_audio_", suffix=".wav", dir=str(out_path.parent))
+            os.close(_wav_fd)
+            _wav_path = Path(_wav_name)
+        except Exception:
+            _wav_path = None
+        if _wav_path is None:
+            _split = None  # WAV 建不出来（磁盘满/权限）→ 回退单进程
+        else:
+            fc_audio, fc_video = _split
+            _lo, _hi = asm["audio_input_span"]
+            # pass2 输入：原位把 BGM 输入切片替换成 -i <wav>（后续输入索引不变，
+            # fc_video 的 [N:v] 垫与 [audio_input_idx:a] 直通链都保持有效）
+            _ia2 = list(asm["input_args"])
+            _ia2[_lo:_hi] = ["-i", str(_wav_path)]
+            cmd_audio = [
+                "ffmpeg", "-y",
+                *asm["input_args"],
+                "-filter_complex", fc_audio,
+                "-map", "[aout]",
+                "-c:a", "pcm_s16le",
+                "-progress", "pipe:1",
+                "-nostats",
+                *_tail_args,
+                str(_wav_path),
+            ]
+            cmd_video = [
+                "ffmpeg", "-y",
+                *_ia2,
+                "-filter_complex",
+                fc_video + f";\n[{asm['audio_input_idx']}:a]anull[aout]",
+                "-map", asm["final_map"],
+                "-map", "[aout]",
+                "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                "-c:a", "aac", "-b:a", "128k",
+                *_tail_args,
+                "-movflags", "+faststart",
+                "-progress", "pipe:1",
+                "-nostats",
+                str(out_path),
+            ]
+            log.info("REQ-20260929-NNN: 两进程导出（BGM 合并图）：pass1 音频→WAV + "
+                     "pass2 视频+WAV 直通，expected=%.3fs", _expected_sec)
+
     # 启动 ffmpeg
     # REQ-20260920-077：解 Windows TextIOWrapper 8KB 缓冲卡死。
     # 原写法 `text=True, bufsize=1` 在 Windows 上无效 — `text=True` 会用
@@ -3530,9 +3794,82 @@ def _run_fine_render_locked(job: _RenderJob, tid: str, mgr, out_path: Path,
     # 全空，排查只能黑盒复现。改为写临时文件：既不阻塞（写盘无缓冲上限）也保留
     # 现场，结束时取末尾 4KB 进 job.stderr_tail，随后删文件。临时文件创建失败时
     # 退回 DEVNULL（不阻塞导出主流程）。
-    import tempfile as _tempfile
     _err_file = None
     _err_path: Path | None = None
+    proc = None  # 当前/最后一段 ffmpeg 进程（cancel 端点 + finally 收尾用）
+
+    def _run_stage(stage_cmd: list[str], pct_lo: float, pct_hi: float) -> int:
+        """跑一段 ffmpeg（stdout = -progress pipe:1），返回 returncode。
+
+        REQ-20260929-NNN（两进程导出）：把原「Popen + 重包 stdout + 进度主循环」
+        封装成段运行器 —— 单进程模式跑一段（pct 0-100 原语义），两段模式跑两段
+        （音频段映射 0-5%、视频段 5-100%）。cancel 端点 kill job.proc 后
+        readline 得 EOF 自然返回非 0 码，state 判定交给调用方；异常时 kill 当段
+        进程再 raise（外层 finally 统一收尾）。
+        """
+        nonlocal proc
+        _p = subprocess.Popen(
+            stage_cmd, stdout=subprocess.PIPE,
+            stderr=_err_file if _err_file is not None else subprocess.DEVNULL,
+            bufsize=0,
+        )
+        proc = _p
+        job.proc = _p
+        # REQ-20260920-077：重包 stdout 为 line-buffered TextIOWrapper（原
+        # `text=True` 的 8KB 默认缓冲会让 out_time_ms 行被积压，进度看似卡死）
+        import io as _io_stage
+        _p.stdout = _io_stage.TextIOWrapper(
+            _p.stdout, encoding="utf-8", newline="\n",
+            line_buffering=True,
+        )
+        _last = 0.0
+        try:
+            while True:
+                line = _p.stdout.readline()
+                if not line:
+                    if _p.poll() is not None:
+                        break
+                    # ffmpeg 已退出但 stdout 关闭
+                    continue
+                line = line.strip()
+                if "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                if key in ("out_time_ms", "out_time_us"):
+                    # 兼容部分 ffmpeg 版本用 out_time_us
+                    try:
+                        _ms = int(val) if key == "out_time_ms" else int(val) // 1000
+                        job.progress_time_ms = _ms
+                        if job.total_duration_ms > 0:
+                            _frac = min(1.0, _ms / job.total_duration_ms)
+                            job.progress_pct = min(
+                                100.0, pct_lo + (pct_hi - pct_lo) * _frac)
+                    except ValueError:
+                        pass
+                elif key == "speed":
+                    try:
+                        job.speed_x = float(val.rstrip("x"))
+                    except ValueError:
+                        pass
+                # 每 0.5 秒刷一次 elapsed/ETA（避免 dict 写太频繁）
+                _now = time.monotonic()
+                if _now - _last > 0.5:
+                    _last = _now
+                    job.elapsed_sec = _now - job.started_at
+                    if job.speed_x > 0 and job.total_duration_ms > 0:
+                        _remaining = max(0, job.total_duration_ms - job.progress_time_ms)
+                        # speed_x = 源时长 / 墙钟时长 → 剩余墙钟 = 剩余源时长 / speed
+                        job.eta_sec = _remaining / 1000.0 / job.speed_x
+        except BaseException:
+            if _p.poll() is None:
+                _kill_proc_with_grace(_p)
+            raise
+        try:
+            _p.wait(timeout=10)
+        except Exception:
+            pass
+        return _p.returncode
+
     try:
         try:
             _fd, _err_name = _tempfile.mkstemp(prefix="slirn_fine_err_", suffix=".log")
@@ -3542,119 +3879,55 @@ def _run_fine_render_locked(job: _RenderJob, tid: str, mgr, out_path: Path,
         except Exception:
             _err_file = None
             _err_path = None
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE,
-            stderr=_err_file if _err_file is not None else subprocess.DEVNULL,
-            bufsize=0,
-        )
-    except FileNotFoundError:
-        job.state = "failed"
-        job.error = "系统未安装 ffmpeg，请先安装并加入 PATH"
-        job.finished_at = time.monotonic()
-        job.wall_finished_at = time.time()
-        # REQ-20260923-NNN：ffmpeg 启动失败也要清理 stderr 临时文件
-        if _err_file is not None:
-            try: _err_file.close()
-            except Exception: pass
-        if _err_path is not None:
-            try: _err_path.unlink(missing_ok=True)
-            except Exception: pass
-        if sub_input_tmp:
-            try: sub_input_tmp.unlink(missing_ok=True)
-            except Exception: pass
-        # REQ-20260920-079：ffmpeg 启动失败也要清理预缩临时文件
-        for _p in image_tmp_paths:
-            try: _p.unlink(missing_ok=True)
-            except Exception: pass
-        # REQ-20260920-081：ffmpeg 不存在也写历史
-        # REQ-20260920-089：本地 import（daemon 线程无模块级 execution_history）
-        from slirn_home import execution_history as _eh_async_ff
-        if exec_id and outputs_dir is not None:
-            try:
-                _eh_async_ff.record_finish(
-                    outputs_dir, exec_id, success=False,
-                    error="系统未安装 ffmpeg，请先安装并加入 PATH",
-                )
-            except Exception:
-                pass
-        # REQ-20260920-084：ffmpeg 不存在删 .export_job.json
-        try: _delete_active_export_job(mgr, tid)
-        except Exception: pass
-        return
-
-    job.proc = proc
-
-    # REQ-20260920-077：重包 stdout 为 line-buffered TextIOWrapper。
-    # 原 `text=True` 在 Windows 上的 8KB 默认缓冲会让 `out_time_ms` 行被积压，
-    # 导致进度看似卡死。改为手动重包并显式 `line_buffering=True`，每行立即 flush。
-    # REQ-20260920-089：stderr 已重定向到 DEVNULL，不需要再重包。
-    import io as _io
-    proc.stdout = _io.TextIOWrapper(
-        proc.stdout, encoding="utf-8", newline="\n",
-        line_buffering=True,
-    )
-
-    # 主循环：读 stdout（progress key=value），算 elapsed + ETA
-    last_update = 0.0
-    try:
-        while True:
-            line = proc.stdout.readline()
-            if not line:
-                if proc.poll() is not None:
-                    break
-                # ffmpeg 已退出但 stdout 关闭
-                continue
-            line = line.strip()
-            if "=" not in line:
-                continue
-            key, _, val = line.partition("=")
-            if key == "out_time_ms":
-                try:
-                    job.progress_time_ms = int(val)
-                    if job.total_duration_ms > 0:
-                        job.progress_pct = min(
-                            100.0,
-                            job.progress_time_ms / job.total_duration_ms * 100,
-                        )
-                except ValueError:
-                    pass
-            elif key == "speed":
-                try:
-                    job.speed_x = float(val.rstrip("x"))
-                except ValueError:
-                    pass
-            elif key == "out_time_us":
-                # 兼容部分 ffmpeg 版本用 out_time_us
-                try:
-                    job.progress_time_ms = int(val) // 1000
-                    if job.total_duration_ms > 0:
-                        job.progress_pct = min(
-                            100.0,
-                            job.progress_time_ms / job.total_duration_ms * 100,
-                        )
-                except ValueError:
-                    pass
-            # 每 0.5 秒刷一次 elapsed/ETA（避免 dict 写太频繁）
-            now = time.monotonic()
-            if now - last_update > 0.5:
-                last_update = now
-                job.elapsed_sec = now - job.started_at
-                if job.speed_x > 0 and job.total_duration_ms > 0:
-                    remaining_ms = max(0, job.total_duration_ms - job.progress_time_ms)
-                    # speed_x = 源时长 / 墙钟时长 → 剩余墙钟 = 剩余源时长 / speed
-                    job.eta_sec = remaining_ms / 1000.0 / job.speed_x
+        try:
+            if cmd_audio is not None:
+                # pass1：音频子图 → 无损 WAV（快，~330x 实时）
+                _rc_a = _run_stage(cmd_audio, 0.0, 5.0)
+                if _rc_a != 0:
+                    # cancel（state=cancelled）优先于 failed，不覆盖
+                    if job.state == "running":
+                        job.state = "failed"
+                        job.error = f"音频合成段 ffmpeg 异常终止（exit code {_rc_a}）"
+                    return
+                if job.state != "running":
+                    # pass1 与 pass2 之间被取消
+                    return
+                # pass1 产物复核（音频段单独跑从未复现截断，fail-fast 兜底：
+                # 避免把 15-25 分钟的视频段烧在一个坏 WAV 上）
+                _wav_trunc = _verify_render_duration(_wav_path, _expected_sec)
+                if _wav_trunc:
+                    job.state = "failed"
+                    job.error = f"音频合成段失败：{_wav_trunc}"
+                    return
+                # pass2：视频子图 + WAV 直通 → 最终 mp4
+                _rc_v = _run_stage(cmd_video, 5.0, 100.0)
+                if _rc_v != 0 and job.state == "running":
+                    job.state = "failed"
+                    job.error = f"ffmpeg 进程异常终止（exit code {_rc_v}）"
+            else:
+                _rc = _run_stage(cmd, 0.0, 100.0)
+                if _rc != 0 and job.state == "running":
+                    job.state = "failed"
+                    job.error = f"ffmpeg 进程异常终止（exit code {_rc}）"
+        except FileNotFoundError:
+            # ffmpeg 不存在：state/error 在此设置，清理由外层 finally 统一处理
+            job.state = "failed"
+            job.error = "系统未安装 ffmpeg，请先安装并加入 PATH"
+            return
     finally:
         # REQ-20260920-089：finally 块统一处理所有终态（cancel / done / failed /
         # 外部 kill / 异常），保证 record_finish 一定被调用，不再漏写。
         # 1) 兜底 kill 未退出的 ffmpeg（cancel / 外部 kill）
-        if proc.poll() is None:
+        #    REQ-20260929-NNN：两段模式下 proc 可能还没启动（FileNotFoundError）
+        if proc is not None and proc.poll() is None:
             _kill_proc_with_grace(proc)
 
         # 2) 等 ffmpeg 真正退出 + 算 elapsed（如果还没设）
-        try:
-            proc.wait(timeout=10)
-        except Exception:
-            pass
+        if proc is not None:
+            try:
+                proc.wait(timeout=10)
+            except Exception:
+                pass
         if not job.finished_at:
             job.finished_at = time.monotonic()
             job.wall_finished_at = time.time()
@@ -3666,6 +3939,10 @@ def _run_fine_render_locked(job: _RenderJob, tid: str, mgr, out_path: Path,
             except Exception: pass
         for _p in image_tmp_paths:
             try: _p.unlink(missing_ok=True)
+            except Exception: pass
+        # 3.6) REQ-20260929-NNN：两段模式的音频中间 WAV（大文件，必删）
+        if _wav_path is not None:
+            try: _wav_path.unlink(missing_ok=True)
             except Exception: pass
 
         # 3.5) REQ-20260923-NNN：提取 stderr 末尾（诊断截断/失败用）后清理临时文件
@@ -3687,7 +3964,12 @@ def _run_fine_render_locked(job: _RenderJob, tid: str, mgr, out_path: Path,
 
         # 4) 推算最终 state（如果主循环因 readline 返回空自然退出但 state 还是 running）
         if job.state == "running":
-            if proc.returncode == 0:
+            if proc is None:
+                # REQ-20260929-NNN：防御 —— state 还是 running 但进程从未启动
+                job.state = "failed"
+                if not job.error:
+                    job.error = "渲染进程未启动（未知错误）"
+            elif proc.returncode == 0:
                 # REQ-20260923-NNN：exit 0 ≠ 完整。无限视频流 + 有限音频流的组合
                 # 在 I/O 拥塞下 -shortest 会提前判音频 EOF：moov 完整、双流可播、
                 # exit 0，但 69 分钟只剩 18 分钟（20260916-004 实测）。必须 ffprobe
@@ -3908,60 +4190,6 @@ def _get_fine_compose(mgr, task_id: str) -> dict:
     return fc
 
 
-def _clamp_video_to_viewport(vc: dict) -> None:
-    """REQ-20260919-062 v5 用户反馈：把视频展示区域限定在所检测区域之内。
-
-    若 vc 含 viewport（设计空间像素 {x,y,width,height}），则把 x/y/scale
-    夹紧到 viewport 内，使得 video 的显示矩形（x, y, x+disp_w, y+disp_h）
-    完全落在 viewport 内（disp 公式见 REQ-20260923-NNN，与渲染 filter 一致）。
-    直接修改入参 dict。
-
-    - viewport 缺失/None/非法 → 不做任何修改
-    - crop_w/h 或 viewport.width/height ≤ 0 → 不做任何修改（避免除零/反向夹紧）
-    - scale 上限 = min(viewport.w / 1920, viewport.h × crop_w / (1920 × crop_h))，
-      再和 _fine_scale_max 取小，保证不会因为 viewport 很小就把视频压成 0
-    """
-    vp = vc.get("viewport") if isinstance(vc, dict) else None
-    if not isinstance(vp, dict):
-        return
-    if not all(k in vp for k in ("x", "y", "width", "height")):
-        return
-    try:
-        rx, ry = int(vp["x"]), int(vp["y"])
-        rw, rh = int(vp["width"]), int(vp["height"])
-        crop_w = int(vc.get("crop_w", _FINE_DESIGN_W))
-        crop_h = int(vc.get("crop_h", _FINE_DESIGN_H))
-        if crop_w <= 0 or crop_h <= 0 or rw <= 0 or rh <= 0:
-            return
-        scale = float(vc.get("scale", 1.0))
-    except (TypeError, ValueError):
-        return
-
-    # REQ-20260923-NNN：显示矩形与渲染 filter / 显示尺寸读数同一公式 —
-    #   disp_w = 1920 × scale（设计空间宽），disp_h = disp_w × crop_h/crop_w
-    # （16:9 裁剪时与旧公式 crop_w×scale / crop_h×scale 数值一致）。
-    # scale 上限：display 完全放进 viewport；同时不超过滑块本身的 max=2.0
-    max_scale = min(rw / _FINE_DESIGN_W,
-                    rh * crop_w / (_FINE_DESIGN_W * crop_h),
-                    2.0)
-    if scale > max_scale:
-        scale = max_scale
-    vc["scale"] = scale
-
-    # 夹紧 x/y：display 矩形 (x, y) → (x + disp_w, y + disp_h) 必须 ⊂ viewport
-    disp_w = int(round(_FINE_DESIGN_W * scale))
-    disp_h = int(round(disp_w * crop_h / crop_w))
-    max_x = rx + max(0, rw - disp_w)
-    max_y = ry + max(0, rh - disp_h)
-    try:
-        cur_x = int(vc.get("x", rx))
-        cur_y = int(vc.get("y", ry))
-    except (TypeError, ValueError):
-        cur_x, cur_y = rx, ry
-    vc["x"] = max(rx, min(max_x, cur_x))
-    vc["y"] = max(ry, min(max_y, cur_y))
-
-
 def _fine_param(
     label: str,
     slider_id: str,
@@ -4065,6 +4293,89 @@ def _save_fine_compose(mgr, task_id: str, fc: dict) -> None:
     )
 
 
+def _render_fine_upload_card(task_id: str, kind: str, mgr: TaskManager, materials: dict) -> str:
+    """精剪视频·单个素材上传卡 HTML（REQ-20260919-061）。
+
+    独立成函数供两处复用：_render_fine_cut_zone 全量渲染 +
+    auto_pick_upstream_material 局部刷新（自动获取成功后前端只换对应
+    素材卡，不整页/整个工作台刷新 — 点击事件全部委托 data-action，
+    换卡后无需重绑）。
+    """
+    icon, label, accept = _FINE_MATERIAL_LABELS[kind]
+    mat = materials.get(kind) or {}
+    path = mat.get("path") or ""
+    filename = Path(path).name if path else ""
+    source = mat.get("source") or ("upload" if path else "")
+    # REQ-20260919-061 用户补充：video/subtitle 可从上游 auto 获取
+    upstream_name = _fine_upstream_label(task_id, kind, mgr) if kind in _FINE_AUTO_KINDS else ""
+    # source=auto 但上游产物已不存在 → 降级回空态（清掉 path）
+    if source == "auto" and not upstream_name:
+        source = ""
+        path = ""
+        filename = ""
+    has = " has-file" if path else ""
+    # REQ-20260919-061 用户反馈：状态显示当前来源 + 文件名；上传/自动获取两个按钮都常驻可用，
+    # 点哪个就用哪个（最后一次操作决定 source 字段），不再禁用对方按钮。
+    if source == "auto":
+        source_badge = '<span class="slirn-fine-source-badge auto">📥 自动获取</span>'
+        status_text = f"✅ 已从上游获取：{_esc(upstream_name)}"
+    elif source == "upload" and filename:
+        source_badge = '<span class="slirn-fine-source-badge upload">📤 手动上传</span>'
+        status_text = f"✅ {_esc(filename)}"
+    else:
+        source_badge = ""
+        status_text = "未上传"
+    # 自动获取按钮：仅当上游存在时显示，且只在未自动获取时高亮（避免反复点）
+    auto_btn_html = ""
+    if kind in _FINE_AUTO_KINDS and upstream_name:
+        auto_btn_html = (
+            f'<button class="slirn-btn slirn-btn-xs" data-action="fine-source-auto" '
+            f'data-kind="{kind}" title="从上游阶段产物自动获取：{_esc(upstream_name)}">'
+            f'📥 自动获取（{_esc(upstream_name)}）</button>'
+        )
+    # REQ-20260920-082：把「系统提供的 BGM」下拉嵌进 audio 上传卡（从参数区迁移）。
+    # REQ-20260921-NNN：改名「系统提供的 BGM」+ 仅显示可用（available=true）项
+    # （missing 的不让选，避免运行时崩溃）。
+    # 只在 audio 卡片里追加；其他 kind 不显示。
+    # class 名复用 REQ-20260920-078 的 .slirn-fine-default-bgm-row，
+    # 避免 router.js / CSS 改动。data-task-id 用于 router.js 的 change 委托拿 tid。
+    default_bgm_html = ""
+    if kind == "audio":
+        default_bgm_html = (
+            f'<div class="slirn-fine-default-bgm-row" data-task-id="{_esc(task_id)}">'
+            f'<span class="slirn-fine-actions-label">📦 系统提供的 BGM</span>'
+            f'<select id="slirn-fine-default-bgm" class="slirn-fine-default-bgm-select">'
+            f'<option value="">— 不选（清空选择）—</option>'
+            f'</select>'
+            f'</div>'
+        )
+    return (
+        f'<div class="slirn-fine-upload-card{has}" data-kind="{kind}" data-source="{source or "none"}">'
+        f'<div class="slirn-fine-upload-label">{icon} {label}{source_badge}</div>'
+        f'<div class="slirn-fine-upload-hint">{accept}</div>'
+        f'<input type="file" class="slirn-fine-file" id="slirn-fine-file-{kind}" '
+        f'accept=".{",".join(accept.split("/"))}" data-kind="{kind}">'
+        f'<button class="slirn-btn slirn-btn-xs" data-action="fine-upload" data-kind="{kind}">📤 上传文件</button>'
+        # REQ-20260919-063 用户反馈：每个素材都要提供预览功能；预览窗口可缩放。
+        # 已有素材（has=has-file）才显示 👁️ 按钮，缺文件时禁用。
+        f'<button class="slirn-btn slirn-btn-xs" data-action="fine-mat-preview" data-kind="{kind}" '
+        f'data-task-id="{_esc(task_id)}" '
+        f'{"disabled" if not has else ""} '
+        f'title="{_esc("请先上传或自动获取素材") if not has else _esc("打开预览窗口（可缩放）")}">'
+        f'👁️ 预览</button>'
+        # REQ-20260920-088：素材路径详情按钮（弹窗显示完整路径 + 来源色块 + 文件元数据）
+        f'<button class="slirn-btn slirn-btn-xs" data-action="fine-mat-detail" '
+        f'data-kind="{kind}" data-task-id="{_esc(task_id)}" '
+        f'{"disabled" if not path else ""} '
+        f'title="{_esc("请先上传或自动获取素材") if not path else _esc("查看完整路径 + 文件元数据")}">'
+        f'🔍 详情</button>'
+        f'{auto_btn_html}'
+        f'<div class="slirn-fine-upload-status" data-status-kind="{kind}">{status_text}</div>'
+        f'{default_bgm_html}'
+        f'</div>'
+    )
+
+
 def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
     """REQ-20260919-061：精剪视频 pane — 5 素材上传 + 位置/缩放 + 字体 5 项 + 输出。"""
     fc = _get_fine_compose(mgr, task_id)
@@ -4085,82 +4396,11 @@ def _render_fine_cut_zone(task_id: str, t, mgr: TaskManager) -> str:
         except (TypeError, ValueError):
             font["offset"] = 0
 
-    # 1. 5 个素材上传卡
-    upload_cards = []
-    for kind in _FINE_MATERIAL_KINDS:
-        icon, label, accept = _FINE_MATERIAL_LABELS[kind]
-        mat = materials.get(kind) or {}
-        path = mat.get("path") or ""
-        filename = Path(path).name if path else ""
-        source = mat.get("source") or ("upload" if path else "")
-        # REQ-20260919-061 用户补充：video/subtitle 可从上游 auto 获取
-        upstream_name = _fine_upstream_label(task_id, kind, mgr) if kind in _FINE_AUTO_KINDS else ""
-        # source=auto 但上游产物已不存在 → 降级回空态（清掉 path）
-        if source == "auto" and not upstream_name:
-            source = ""
-            path = ""
-            filename = ""
-        has = " has-file" if path else ""
-        # REQ-20260919-061 用户反馈：状态显示当前来源 + 文件名；上传/自动获取两个按钮都常驻可用，
-        # 点哪个就用哪个（最后一次操作决定 source 字段），不再禁用对方按钮。
-        if source == "auto":
-            source_badge = '<span class="slirn-fine-source-badge auto">📥 自动获取</span>'
-            status_text = f"✅ 已从上游获取：{_esc(upstream_name)}"
-        elif source == "upload" and filename:
-            source_badge = '<span class="slirn-fine-source-badge upload">📤 手动上传</span>'
-            status_text = f"✅ {_esc(filename)}"
-        else:
-            source_badge = ""
-            status_text = "未上传"
-        # 自动获取按钮：仅当上游存在时显示，且只在未自动获取时高亮（避免反复点）
-        auto_btn_html = ""
-        if kind in _FINE_AUTO_KINDS and upstream_name:
-            auto_btn_html = (
-                f'<button class="slirn-btn slirn-btn-xs" data-action="fine-source-auto" '
-                f'data-kind="{kind}" title="从上游阶段产物自动获取：{_esc(upstream_name)}">'
-                f'📥 自动获取（{_esc(upstream_name)}）</button>'
-            )
-        # REQ-20260920-082：把「系统提供的 BGM」下拉嵌进 audio 上传卡（从参数区迁移）。
-        # REQ-20260921-NNN：改名「系统提供的 BGM」+ 仅显示可用（available=true）项
-        # （missing 的不让选，避免运行时崩溃）。
-        # 只在 audio 卡片里追加；其他 kind 不显示。
-        # class 名复用 REQ-20260920-078 的 .slirn-fine-default-bgm-row，
-        # 避免 router.js / CSS 改动。data-task-id 用于 router.js 的 change 委托拿 tid。
-        default_bgm_html = ""
-        if kind == "audio":
-            default_bgm_html = (
-                f'<div class="slirn-fine-default-bgm-row" data-task-id="{_esc(task_id)}">'
-                f'<span class="slirn-fine-actions-label">📦 系统提供的 BGM</span>'
-                f'<select id="slirn-fine-default-bgm" class="slirn-fine-default-bgm-select">'
-                f'<option value="">— 不选（清空选择）—</option>'
-                f'</select>'
-                f'</div>'
-            )
-        upload_cards.append(
-            f'<div class="slirn-fine-upload-card{has}" data-kind="{kind}" data-source="{source or "none"}">'
-            f'<div class="slirn-fine-upload-label">{icon} {label}{source_badge}</div>'
-            f'<div class="slirn-fine-upload-hint">{accept}</div>'
-            f'<input type="file" class="slirn-fine-file" id="slirn-fine-file-{kind}" '
-            f'accept=".{",".join(accept.split("/"))}" data-kind="{kind}">'
-            f'<button class="slirn-btn slirn-btn-xs" data-action="fine-upload" data-kind="{kind}">📤 上传文件</button>'
-            # REQ-20260919-063 用户反馈：每个素材都要提供预览功能；预览窗口可缩放。
-            # 已有素材（has=has-file）才显示 👁️ 按钮，缺文件时禁用。
-            f'<button class="slirn-btn slirn-btn-xs" data-action="fine-mat-preview" data-kind="{kind}" '
-            f'data-task-id="{_esc(task_id)}" '
-            f'{"disabled" if not has else ""} '
-            f'title="{_esc("请先上传或自动获取素材") if not has else _esc("打开预览窗口（可缩放）")}">'
-            f'👁️ 预览</button>'
-            # REQ-20260920-088：素材路径详情按钮（弹窗显示完整路径 + 来源色块 + 文件元数据）
-            f'<button class="slirn-btn slirn-btn-xs" data-action="fine-mat-detail" '
-            f'data-kind="{kind}" data-task-id="{_esc(task_id)}" '
-            f'{"disabled" if not path else ""} '
-            f'title="{_esc("请先上传或自动获取素材") if not path else _esc("查看完整路径 + 文件元数据")}">'
-            f'🔍 详情</button>'
-            f'{auto_btn_html}'
-            f'<div class="slirn-fine-upload-status" data-status-kind="{kind}">{status_text}</div>'
-            f'{default_bgm_html}'
-            f'</div>'
-        )
+    # 1. 5 个素材上传卡（渲染逻辑在 _render_fine_upload_card，供局部刷新复用）
+    upload_cards = [
+        _render_fine_upload_card(task_id, kind, mgr, materials)
+        for kind in _FINE_MATERIAL_KINDS
+    ]
     upload_html = '<div class="slirn-fine-uploads">' + "".join(upload_cards) + '</div>'
 
     # 2. 3 个素材的位置/缩放控件（video/subtitle/bg）
@@ -6336,10 +6576,14 @@ def _register_slirn_api(
     @app.app.post("/slirn/api/workbench")
     async def workbench(body: dict = Body(default_factory=dict)):
         """剪辑工作台 HTML（REQ-20260915-003）。"""
+        from starlette.concurrency import run_in_threadpool
+
         tid = (body.get("task_id") or "").strip()
         if not tid:
             return _err("缺少 task_id")
-        return _ok(_render_workbench(tid, mgr))
+        # 渲染放线程池：长任务工作台 HTML 数 MB、数百 ms 起，同步跑在事件循环里
+        # 会卡住所有并发请求（anyio 会把 contextvar 拷进线程，鉴权上下文不丢）
+        return _ok(await run_in_threadpool(_render_workbench, tid, mgr))
 
     # ========== REQ-20260919-061：精剪视频·四素材合成器 API ==========
 
@@ -6361,11 +6605,13 @@ def _register_slirn_api(
         if not t:
             return _err(f"任务不存在: {tid}")
         fc = _get_fine_compose(mgr, tid)
-        # 字段白名单（含 crop_* + cover.duration + video.viewport + video.crop_aspect_lock）
+        # 字段白名单（含 crop_* + cover.duration + video.crop_aspect_lock）。
+        # viewport 已废弃：检测区域「应用」只负责填充 x/y/crop_*，填充后允许
+        # 手工自由调整，保存时不再夹紧（历史遗留的 viewport 字段在保存时清除）。
         allowed_keys = (
             "x", "y", "scale", "enabled",
             "crop_x", "crop_y", "crop_w", "crop_h",
-            "duration", "viewport", "crop_aspect_lock",
+            "duration", "crop_aspect_lock",
         )
         for mat_key, val in layout.items():
             if mat_key not in _FINE_LAYOUT_DEFAULTS:
@@ -6373,14 +6619,13 @@ def _register_slirn_api(
             existing = fc["layout"].get(mat_key) or {}
             existing.update({k: v for k, v in val.items() if k in allowed_keys})
             # REQ-20260919-062 v18：crop_aspect_lock 强制 bool（前端可能传 true/"on"/1）
-            if mat_key == "video" and "crop_aspect_lock" in existing:
-                existing["crop_aspect_lock"] = bool(existing["crop_aspect_lock"])
-            # REQ-20260919-062 v5：若 video 有 viewport，则把 x/y/scale 夹紧到 viewport 内
             if mat_key == "video":
-                _clamp_video_to_viewport(existing)
+                if "crop_aspect_lock" in existing:
+                    existing["crop_aspect_lock"] = bool(existing["crop_aspect_lock"])
+                # 旧数据残留的 viewport 清除（夹紧逻辑已删除，字段不再使用）
+                existing.pop("viewport", None)
             fc["layout"][mat_key] = existing
         _save_fine_compose(mgr, tid, fc)
-        # 返回夹紧后的值，前端可据此同步滑块显示
         return _ok(
             toast="位置/缩放已保存",
             layout={k: dict(v) for k, v in fc["layout"].items()},
@@ -6418,7 +6663,14 @@ def _register_slirn_api(
         }
         _save_fine_compose(mgr, tid, fc)
         kind_label = _FINE_MATERIAL_LABELS[kind][1]
-        return _ok(path=fc["materials"][kind]["path"], toast=f"已自动从上游获取 {kind_label}")
+        # 局部刷新（REQ：不做整页/工作台刷新）：返回重渲染后的单个素材卡，
+        # 前端只换 .slirn-fine-upload-card[data-kind=kind] 这一块
+        card_html = _render_fine_upload_card(tid, kind, mgr, fc["materials"])
+        return _ok(
+            path=fc["materials"][kind]["path"],
+            card_html=card_html,
+            toast=f"已自动从上游获取 {kind_label}",
+        )
 
     @app.app.post("/slirn/api/clear_bg_detect_cache")
     async def clear_bg_detect_cache(body: dict = Body(default_factory=dict)):
@@ -9611,9 +9863,11 @@ def _register_slirn_api(
             return _err(err)
         est = optimize_service.effective_stats(optimize_service.load_optimize(outputs_dir) or {})
         fb = "（⚠️ 无字级时间戳，按文本占比估算）" if res.get("fallback") else ""
+        # 2026-09-29 用户反馈：只刷新当前行组（父行 + 新子段行），不再整页刷新
+        row_html = _extract_opt_rows(_render_optimize_zone(tid, mgr.get(tid), mgr), seg_id)
         return _ok("", toast=(f"✂️ 第 {seg_id} 条已切成 {len(res['subs'])} 段"
                               f"（默认删除 {res['deleted_default']} 段）{fb}"),
-                   resplit=res, stats=est)
+                   resplit=res, stats=est, row_html=row_html)
 
     @app.app.post("/slirn/api/optimize_unsplit")
     async def optimize_unsplit(body: dict = Body(default_factory=dict)):
@@ -9636,7 +9890,68 @@ def _register_slirn_api(
         if err:
             return _err(err)
         est = optimize_service.effective_stats(optimize_service.load_optimize(outputs_dir) or {})
-        return _ok("", toast=f"↩️ 第 {seg_id} 条已恢复整行", unsplit=res, stats=est)
+        # 2026-09-29 用户反馈：与切分同款 — 只刷新当前行组，不再整页刷新
+        row_html = _extract_opt_rows(_render_optimize_zone(tid, mgr.get(tid), mgr), seg_id)
+        return _ok("", toast=f"↩️ 第 {seg_id} 条已恢复整行", unsplit=res, stats=est,
+                   row_html=row_html)
+
+    @app.app.post("/slirn/api/opt_batch_search")
+    async def opt_batch_search(body: dict = Body(default_factory=dict)):
+        """批量替换 · 查找预览（REQ-20260929-NNN）：{task_id, word} → 命中行列表。
+
+        每个命中行带前两行 + 本行 + 后两行共 5 行上下文（按 segments 数组序取
+        连续 5 行，边界不足自动截短），让用户替换前看清语境。整句替换 / 已切分 /
+        已标记删除的命中行只展示并给 block 原因（注入会被整句覆盖 / 破坏子段
+        对齐 / 行即将剪除）；与现有生效替换重叠的命中位置标 skipped_overlap。
+        纯读不写盘。"""
+        from slirn_home import optimize_service
+
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            mgr.get(tid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+        res, err = optimize_service.batch_search(
+            mgr.tasks_dir / tid / "outputs", str(body.get("word") or ""))
+        if err:
+            return _err(err)
+        return _ok("", search=res)
+
+    @app.app.post("/slirn/api/opt_batch_replace")
+    async def opt_batch_replace(body: dict = Body(default_factory=dict)):
+        """批量替换 · 确认（REQ-20260929-NNN）：{task_id, word, replacement}。
+
+        每个可注入位置注入出现项（reason=批量替换，已采纳已处理 — 行 chip /
+        词频 / SRT / 后续逐处改判沿用现成管线），立即写盘（与 resplit 同语义，
+        不依赖「确认保存」；saved_at 阶段确认标记不动）。返回受影响行组的
+        row_html 映射（前端 optSwapRows 逐行局部刷新）+ 词频面板 HTML（新词
+        chip 可点选筛选）。服务端重新匹配校验 — 查找与确认之间状态变了也安全。"""
+        from slirn_home import optimize_service
+
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            mgr.get(tid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+        outputs_dir = mgr.tasks_dir / tid / "outputs"
+        res, err = optimize_service.batch_replace(
+            outputs_dir, str(body.get("word") or ""),
+            str(body.get("replacement") or ""))
+        if err:
+            return _err(err)
+        zone = _render_optimize_zone(tid, mgr.get(tid), mgr)
+        rows = {str(seg): _extract_opt_rows(zone, seg) for seg in res["segs"]}
+        data = optimize_service.load_optimize(outputs_dir) or {}
+        words_html, word_filter_html = _opt_words_panel(data)
+        est = optimize_service.effective_stats(data)
+        return _ok("", toast=(f"✅ 批量替换完成：{res['lines']} 行 {res['replaced']} 处"
+                              f"「{res['word']}」→「{res['replacement']}」"),
+                   replace=res, rows=rows, stats=est,
+                   words={"list": words_html, "filters": word_filter_html})
 
     @app.app.post("/slirn/api/optimize_resplice_subs")
     async def optimize_resplice_subs(body: dict = Body(default_factory=dict)):

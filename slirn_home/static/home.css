@@ -2320,6 +2320,9 @@ input[type="checkbox"]:focus-visible {
 @media (prefers-reduced-motion: reduce) {
   .slirn-opt-row.active { animation: none; }
 }
+/* 2026-09-29 用户反馈：当前播放行 = 选中态（kbsel 跟随播放，与 cut/rev 同款） */
+.slirn-opt-row.kbsel { box-shadow: inset 3px 0 0 var(--accent-solid); }
+.slirn-opt-row.kbsel:not(.active) { background: var(--accent-soft); }
 .slirn-opt-filter-hint {
   margin: 10px 0 6px;
   font-size: 12px;
@@ -2368,6 +2371,21 @@ input[type="checkbox"]:focus-visible {
 }
 .slirn-opt-occ input.slirn-opt-after:focus { outline: none;
   border-color: rgba(255, 176, 32, 0.9); }
+/* 2026-09-29 用户反馈：处理完的保持绿色（防重复处理）— 出现项 reviewed 后
+   常绿（原来只有回车后 0.6s 绿闪就退回琥珀）；不采纳（data-applied=0）的
+   灰显规则在后面，同为 (0,2,0) 后者胜 → 明确拒绝的仍显灰，三态清晰：
+   绿=已采纳并处理 / 灰=已拒绝（也算处理）/ 琥珀=未处理。 */
+.slirn-opt-occ[data-reviewed="1"] { background: rgba(34, 197, 94, 0.12); }
+/* 行级：本行全部出现处已处理（.occ-done，服务端 _line_html 与前端
+   optOccMarkReviewed 同口径）→ 绿底 + 左绿条，滚动列表一眼分辨做没做过。
+   line-deleted（红）/ full-edit（青）是更强的持久终态，:not() 让位；
+   active（播放）/ kbsel（选中跟随）/ target（点词定位）是瞬时态，同样让位。 */
+.slirn-opt-row.occ-done:not(.full-edit):not(.line-deleted):not(.kbsel) {
+  box-shadow: inset 3px 0 0 #16a34a;
+}
+.slirn-opt-row.occ-done:not(.active):not(.kbsel):not(.slirn-opt-row-target):not(.full-edit):not(.line-deleted) {
+  background: rgba(34, 197, 94, 0.07);
+}
 .slirn-opt-occ .slirn-opt-toggle { padding: 0 6px; font-size: 11px; line-height: 1.6; }
 /* 不采纳：整项置灰、原文去掉删除线（保留原文即生效文本） */
 .slirn-opt-occ[data-applied="0"] { opacity: 0.55; background: transparent; }
@@ -2380,7 +2398,8 @@ input[type="checkbox"]:focus-visible {
 }
 @keyframes slirn-opt-occ-done-flash {
   0%   { background: rgba(34, 197, 94, 0.45); }
-  100% { background: rgba(255, 176, 32, 0.12); }  /* 还原到默认 adopted 状态 */
+  /* 2026-09-29：绿不再消退 — 动画终点即 reviewed 常绿态（原来是琥珀默认态） */
+  100% { background: rgba(34, 197, 94, 0.12); }
 }
 @media (prefers-reduced-motion: reduce) {
   .slirn-opt-occ.slirn-opt-occ-just-done { animation: none; }
@@ -2494,6 +2513,18 @@ input[type="checkbox"]:focus-visible {
 }
 .slirn-opt-cut-status[data-state="error"] { background: rgba(220, 38, 38, 0.08); }
 .slirn-opt-cut-status[data-state="done"] { background: rgba(22, 163, 74, 0.08); }
+/* 2026-09-29 用户反馈：重新拼接视频要有执行时间 + 进度反馈 — running 态状态条
+   内嵌文字行（% + 已耗时 + ETA + 阶段）+ 可视化进度条，轮询每 2s 刷新 */
+.slirn-opt-cut-status .slirn-opt-cut-line { line-height: 1.7; }
+.slirn-opt-cut-status .slirn-opt-cut-prog {
+  margin-top: 6px; height: 8px; border-radius: 999px;
+  background: rgba(49, 120, 198, 0.15); overflow: hidden;
+}
+.slirn-opt-cut-status .slirn-opt-cut-prog-bar {
+  height: 100%; border-radius: 999px;
+  background: linear-gradient(90deg, #3178c6, #6366f1);
+  transition: width 0.3s linear;
+}
 
 /* ============ REQ-20260923-NNN 行内切分：子段平铺行 + ✂️ 徽章 ============ */
 /* 切分子段：紫条 inset 缩进行（紫 = 切分系，红 = 删除，黄 = occ，青 = 整句替换）；
@@ -2551,6 +2582,68 @@ input[type="checkbox"]:focus-visible {
 .slirn-opt-search-count { font-size: 11.5px; color: var(--text-muted); white-space: nowrap; }
 /* 隐藏规则与 only-occ / only-deleted 的隐藏规则天然叠加 = 交集 */
 .slirn-opt-list.opt-searching .slirn-opt-row.opt-search-miss { display: none; }
+
+/* ============ REQ-20260929-NNN 批量替换：查找（5 行上下文预览）→ 确认替换 ============ */
+.slirn-opt-batchrep {
+  margin-top: 10px; padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent, #3178c6);
+  border-radius: 8px;
+  background: var(--input-bg, rgba(127, 127, 127, 0.06));
+}
+.slirn-opt-batchrep-bar { display: flex; align-items: center; gap: 6px; }
+.slirn-opt-batchrep-bar input#slirn-opt-batchrep-word {
+  flex: 1; min-width: 160px; padding: 3px 8px; font-size: 12.5px;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--input-bg, #fff); color: var(--text);
+}
+.slirn-opt-batchrep-bar input#slirn-opt-batchrep-word:focus {
+  outline: none; border-color: var(--accent, #3178c6);
+  box-shadow: 0 0 0 2px rgba(49, 120, 198, 0.15);
+}
+.slirn-opt-batchrep-close {
+  border: none; background: transparent; cursor: pointer;
+  color: var(--text-muted); font-size: 13px; padding: 0 4px;
+}
+.slirn-opt-batchrep-close:hover { color: var(--text); }
+.slirn-opt-batchrep-head { font-size: 12.5px; color: var(--text-muted); margin: 8px 0 6px 0; }
+.slirn-opt-batchrep-empty { font-size: 12.5px; color: var(--text-muted); margin-top: 8px; }
+.slirn-opt-batchrep-item {
+  margin-top: 8px; padding: 6px 8px;
+  border: 1px solid var(--border); border-radius: 6px;
+}
+.slirn-opt-batchrep-item.blocked { opacity: 0.75; }
+.slirn-opt-batchrep-ctx {
+  display: flex; gap: 8px; align-items: baseline;
+  font-size: 12.5px; line-height: 1.7; color: var(--text-muted);
+}
+.slirn-opt-batchrep-ctx.cur {
+  color: var(--text); font-weight: 500;
+  background: rgba(49, 120, 198, 0.08); border-radius: 4px; padding: 1px 4px;
+}
+.slirn-opt-batchrep-ctx.del .slirn-opt-batchrep-ctx-txt { text-decoration: line-through; }
+.slirn-opt-batchrep-ctx-idx {
+  flex: none; min-width: 30px; text-align: right;
+  font-size: 11px; color: var(--text-muted); font-variant-numeric: tabular-nums;
+}
+.slirn-opt-batchrep-ctx-txt { word-break: break-all; }
+.slirn-opt-batchrep-hit {
+  background: rgba(255, 213, 0, 0.4); color: inherit;
+  border-radius: 2px; padding: 0 1px; font-weight: 600;
+}
+.slirn-opt-batchrep-badge {
+  margin-top: 4px; font-size: 11.5px; color: var(--text-muted);
+}
+.slirn-opt-batchrep-apply { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
+.slirn-opt-batchrep-apply input#slirn-opt-batchrep-to {
+  flex: 1; min-width: 160px; padding: 3px 8px; font-size: 12.5px;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--input-bg, #fff); color: var(--text);
+}
+.slirn-opt-batchrep-apply input#slirn-opt-batchrep-to:focus {
+  outline: none; border-color: var(--accent, #3178c6);
+  box-shadow: 0 0 0 2px rgba(49, 120, 198, 0.15);
+}
 
 /* ============ 粗剪合成 · 有效字幕 SRT 预览（REQ-20260916-019） ============ */
 .slirn-rc-subs {

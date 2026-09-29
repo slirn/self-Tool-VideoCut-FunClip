@@ -985,3 +985,182 @@ def unsplit_line(outputs_dir: Path, seg_id: int) -> tuple[dict | None, str]:
     p = Path(outputs_dir) / OPTIMIZE_JSON
     p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return {"seg": int(seg_id), "subs_left": len(splits)}, ""
+
+
+# ---- 批量替换（REQ-20260929-NNN）：/opt_batch_search、/opt_batch_replace ----
+# 用户需求：搜指定词 → 每处命中展示前两行 + 本行 + 后两行共 5 行上下文 →
+# 输入替换文字 → 确认按钮一次替换全部。复用「出现项」机制注入（reason=批量替换，
+# 已采纳已处理）— 行内 chip / 词频面板 / SRT 生成 / 后续逐处改判全部沿用现成管线。
+
+BATCH_REPLACE_REASON = "批量替换"
+
+
+def _batch_find_positions(text: str, word: str) -> list[int]:
+    """大小写不敏感地找 word 在 text 中的全部不重叠出现位置。
+
+    位置按原文计（供 before 精确切片与 occ.pos 落盘）；.lower() 改变长度的
+    罕见折叠字符（如 İ）会让小写索引错位 → 回退精确匹配保平安。
+    """
+    low_t, low_w = text.lower(), word.lower()
+    if len(low_t) != len(text) or len(low_w) != len(word):
+        out: list[int] = []
+        start = 0
+        while True:
+            p = text.find(word, start)
+            if p < 0:
+                return out
+            out.append(p)
+            start = p + len(word)
+    out = []
+    start = 0
+    while True:
+        p = low_t.find(low_w, start)
+        if p < 0:
+            return out
+        out.append(p)
+        start = p + len(word)
+
+
+def _applied_spans(data: dict) -> dict[int, list[tuple[int, int]]]:
+    """现有**已采纳**出现项在各行原文中占用的区间（镜像 apply_replacements 的
+    占位扫描 — 未采纳项保存时不占文本区间，不算重叠）。"""
+    from slirn_home.fine_service import apply_replacements
+
+    by_seg: dict[str, list[dict]] = {}
+    for o in data.get("occurrences") or []:
+        if o.get("applied", True):
+            by_seg.setdefault(str(o.get("seg")), []).append(o)
+    text_by_seg = {str(s.get("i")): str(s.get("text") or "")
+                   for s in data.get("segments") or []}
+    spans: dict[int, list[tuple[int, int]]] = {}
+    for rid, occs in by_seg.items():
+        text = text_by_seg.get(rid)
+        if text is None:
+            continue
+        reps = [{"before": str(o["before"]), "after": str(o.get("after") or "")}
+                for o in occs if str(o.get("before") or "")]
+        _, applied = apply_replacements(text, reps)
+        spans[int(rid)] = [(a["pos"], a["pos"] + len(a["before"])) for a in applied]
+    return spans
+
+
+def _batch_matches(data: dict, word: str) -> list[dict]:
+    """批量替换的统一匹配口径（search 预览与 replace 注入共用同一份结果）。
+
+    每个命中行：{seg, text(原文), eff(生效文本), positions(全部命中位),
+    free_positions(可注入位 = 排除阻断行与现有替换重叠), block, context(前后
+    各两行 + 本行，按 segments 数组序取连续 5 行)}. 阻断行仍返回（预览需要
+    展示并标注），但 free_positions 为空 → replace 跳过。
+    """
+    segments = data.get("segments") or []
+    edits = {str(int(e.get("seg"))) for e in data.get("line_edits") or []
+             if isinstance(e, dict) and str(e.get("text") or "").strip()}
+    splits = set(_norm_splits(data.get("line_splits")))
+    marks = {str(m) for m in data.get("line_marks") or []}
+    spans = _applied_spans(data)
+    matches: list[dict] = []
+    for k, s in enumerate(segments):
+        try:
+            seg_id = int(s.get("i"))
+        except (TypeError, ValueError):
+            continue
+        rid = str(seg_id)
+        text = str(s.get("text") or "")
+        positions = _batch_find_positions(text, word)
+        if not positions:
+            continue
+        if rid in edits:
+            block = "full_edit"  # 整句替换覆盖本行全部局部替换，注入无意义
+        elif seg_id in splits:
+            block = "split"  # 行已切分子段，occ 与子段文本对齐会被破坏
+        elif rid in marks:
+            block = "deleted"  # 行已标记删除，成片将剪除该行
+        else:
+            block = ""
+        free = [] if block else [
+            p for p in positions
+            if all(p >= e or p + len(word) <= b for b, e in spans.get(seg_id, []))]
+        matches.append({
+            "seg": seg_id, "text": text,
+            "eff": str(s.get("new_text") or text),
+            "positions": positions, "free_positions": free, "block": block,
+            "eligible": bool(free),
+            "skipped_overlap": (len(positions) - len(free)) if not block else 0,
+            "context": [{
+                "seg": int(s2.get("i")),
+                "text": str(s2.get("new_text") or s2.get("text") or ""),
+                "deleted": 1 if str(s2.get("i")) in marks else 0,
+            } for s2 in segments[max(0, k - 2): k + 3]],
+        })
+    return matches
+
+
+def batch_search(outputs_dir: Path, word: str) -> tuple[dict | None, str]:
+    """查找预览：命中行 + 每处前后各两行（共 5 行）上下文，不写盘。"""
+    data = load_optimize(outputs_dir)
+    if data is None:
+        return None, "尚无优化字幕数据 — 请先执行「开始优化字幕」"
+    word = (word or "").strip()
+    if not word:
+        return None, "请输入要查找的词"
+    matches = _batch_matches(data, word)
+    hits = sum(len(m["positions"]) for m in matches)
+    return {
+        "word": word, "matches": matches,
+        "lines": len(matches), "hits": hits,
+        "eligible_lines": sum(1 for m in matches if m["free_positions"]),
+        "free_hits": sum(len(m["free_positions"]) for m in matches),
+        "blocked_lines": sum(1 for m in matches if m["block"]),
+    }, ""
+
+
+def batch_replace(outputs_dir: Path, word: str, replacement: str) -> tuple[dict | None, str]:
+    """确认替换：给每个可注入位注入出现项（reason=批量替换，已采纳已处理），
+    立即写盘（与 resplit 同语义 — 不依赖「确认保存」，阶段确认标记 saved_at
+    不动）。occ_id 接在现有最大值之后递增；重算 new_text / 词频 / 对应关系。"""
+    data = load_optimize(outputs_dir)
+    if data is None:
+        return None, "尚无优化字幕数据 — 请先执行「开始优化字幕」"
+    word = (word or "").strip()
+    replacement = (replacement or "").strip()
+    if not word:
+        return None, "请输入要查找的词"
+    if not replacement:
+        return None, "请输入替换后的文字"
+    if replacement == word:
+        return None, "替换文字与要查找的词相同，无需替换"
+    matches = _batch_matches(data, word)
+    occurrences = list(data.get("occurrences") or [])
+    next_id = 1 + max((int(o["occ_id"]) for o in occurrences
+                       if isinstance(o, dict) and o.get("occ_id") is not None),
+                      default=-1)
+    text_by_seg = {int(s.get("i")): str(s.get("text") or "")
+                   for s in data.get("segments") or [] if s.get("i") is not None}
+    injected = 0
+    segs_touched: list[int] = []
+    for m in matches:
+        if not m["free_positions"]:
+            continue
+        text = text_by_seg.get(m["seg"], "")
+        for p in m["free_positions"]:
+            occurrences.append({
+                "occ_id": next_id, "seg": m["seg"], "pos": p,
+                "before": text[p:p + len(word)], "after": replacement,
+                "reason": BATCH_REPLACE_REASON, "applied": True, "reviewed": True,
+            })
+            next_id += 1
+            injected += 1
+        segs_touched.append(m["seg"])
+    if not injected:
+        return None, ("没有可替换的位置 — 命中行均为整句替换/已切分/已标记删除，"
+                      "或与现有替换重叠")
+    data["occurrences"] = occurrences
+    data["segments"] = apply_to_segments(
+        data.get("segments") or [], occurrences, data.get("line_edits"))
+    data["words"] = aggregate_words(occurrences)
+    data["mapping"] = build_mapping(occurrences)
+    data["stats"] = effective_stats(data)
+    p = Path(outputs_dir) / OPTIMIZE_JSON
+    p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"word": word, "replacement": replacement, "replaced": injected,
+            "lines": len(segs_touched), "segs": segs_touched}, ""

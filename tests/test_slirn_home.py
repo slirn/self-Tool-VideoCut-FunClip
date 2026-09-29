@@ -323,6 +323,103 @@ def test_restore_hash_supports_both_wb_and_edit():
     assert "DOMContentLoaded" in src, "DOMContentLoaded 绑定必须存在"
 
 
+# ---------- 精剪合成·自动获取素材 → 局部刷新（不做整页刷新） ----------
+
+def test_fine_source_auto_local_card_swap_no_reload():
+    """自动获取素材成功 → 局部换卡（card_html + outerHTML），不得整页刷新。
+
+    背景：旧实现 `if (typeof refreshWb === 'function') refreshWb(); else
+    location.reload();` — refreshWb 从未定义，必然 location.reload()，
+    用户反馈「点自动获取整页刷新，体验很不友好」。"""
+    src = (FUNCLIP_ROOT / "slirn_home" / "static" / "router.js").read_text(encoding="utf-8")
+    i = src.find("function fineSourceAuto")
+    assert i > 0, "fineSourceAuto 函数应存在"
+    body = src[i:src.find("\n  }\n", i)]
+    assert "location.reload" not in body, "自动获取后不得整页刷新"
+    assert "refreshWb" not in body, "refreshWb 从未定义（死分支），不得保留"
+    assert "card_html" in body and "outerHTML" in body, (
+        "应使用服务端重渲染的单卡（card_html）做 outerHTML 换卡")
+    assert "fineEnableOutputBtns" in body, "视频就绪应解除「生成预览/导出」按钮"
+
+
+def test_fine_enable_output_btns_helper_exists():
+    """fineEnableOutputBtns 助手存在且覆盖预览/导出两个主按钮；上传路径同样调用。"""
+    src = (FUNCLIP_ROOT / "slirn_home" / "static" / "router.js").read_text(encoding="utf-8")
+    i = src.find("function fineEnableOutputBtns")
+    assert i > 0, "缺少 fineEnableOutputBtns 助手"
+    body = src[i:src.find("\n  }\n", i)]
+    assert "'fine-preview'" in body and "'fine-export'" in body
+    j = src.find("function fineUpload")
+    up = src[j:src.find("\n  }\n", j)]
+    assert "fineEnableOutputBtns" in up, "手动上传视频就绪后同样解除主按钮 disabled"
+
+
+# ---------- 优化字幕：当前播放行居中于字幕区域 + 选中态跟随 ----------
+
+def test_opt_player_highlight_centers_row_in_list_container():
+    """optPlayerHighlight 必须只滚列表容器居中，不得用 scrollIntoView（会连动
+    整页滚动，行居中的是视口而非 560px 字幕框，页面会被拽走）。
+
+    2026-09-29 用户原话：「让当前播放的字幕始终在字幕区域的垂直中间区域」。"""
+    src = (FUNCLIP_ROOT / "slirn_home" / "static" / "router.js").read_text(encoding="utf-8")
+    i = src.find("function optPlayerHighlight")
+    assert i > 0, "optPlayerHighlight 函数应存在"
+    body = src[i:src.find("\n  }\n", i)]
+    assert "scrollIntoView" not in body, (
+        "高亮跟随不得用 scrollIntoView（连动页面滚动）；应调 optCenterRowInList")
+    assert "optCenterRowInList" in body, "命中行变化时应调 optCenterRowInList 居中"
+
+
+def test_opt_center_row_in_list_helper_scrolls_container_only():
+    """optCenterRowInList 只改列表 scrollTop（容器内居中），不碰外层滚动。"""
+    src = (FUNCLIP_ROOT / "slirn_home" / "static" / "router.js").read_text(encoding="utf-8")
+    i = src.find("function optCenterRowInList")
+    assert i > 0, "缺少 optCenterRowInList 助手"
+    body = src[i:src.find("\n  }\n", i)]
+    assert "getBoundingClientRect" in body, "需用矩形差值计算居中偏移"
+    assert "scrollTop +=" in body, "只滚列表容器（scrollTop）"
+    assert "scrollIntoView" not in body, "不得连动页面滚动"
+
+
+def test_opt_player_highlight_marks_kbsel_selection():
+    """当前播放行必须同时置为选中态（kbsel，与 cut/rev 播放跟随同款）。"""
+    src = (FUNCLIP_ROOT / "slirn_home" / "static" / "router.js").read_text(encoding="utf-8")
+    i = src.find("function optPlayerHighlight")
+    assert i > 0
+    body = src[i:src.find("\n  }\n", i)]
+    assert "kbsel" in body, "播放行应挂 kbsel 选中态"
+    # 选中态样式必须存在（与 .slirn-cut-row.kbsel / .slirn-rev-row.kbsel 同款）
+    css = (FUNCLIP_ROOT / "slirn_home" / "static" / "home.css").read_text(encoding="utf-8")
+    assert ".slirn-opt-row.kbsel" in css, "home.css 缺少 .slirn-opt-row.kbsel 选中态样式"
+
+
+# ---------- 2026-09-29：点词筛选 hint 不再被包进「说明」壳（空壳堆积） ----------
+
+def test_opt_filter_hint_marked_skip_col_wrap():
+    """点词筛选的临时 hint（slirn-opt-filter-hint）创建时必须预标 slirnCol，
+    让 colEnhance 跳过 — 否则每次点词它被包进「ℹ️ 说明」折叠壳，删 hint 时
+    壳残留，每处理一个词净增一个空说明区（用户反馈：每次保存都多一个）。"""
+    src = (FUNCLIP_ROOT / "slirn_home" / "static" / "router.js").read_text(encoding="utf-8")
+    i = src.find("hint.className = 'slirn-form-hint slirn-opt-filter-hint'")
+    assert i > 0, "点词筛选 hint 创建处应存在"
+    # 取 hint 创建块（className 赋值起 500 字符内）
+    block = src[i:i + 500]
+    assert "hint.dataset.slirnCol = '1'" in block, (
+        "临时 hint 必须预标 slirnCol 跳过 colEnhance（不产生折叠壳）")
+
+
+def test_col_enhance_removes_empty_col_shells():
+    """colEnhance 必须自愈清扫空壳：内容元素已被移除、只剩胶囊头的 .slirn-col
+    直接删掉 — 兜底所有「动态 hint 删后壳残留」类泄漏。"""
+    src = (FUNCLIP_ROOT / "slirn_home" / "static" / "router.js").read_text(encoding="utf-8")
+    i = src.find("function colEnhance")
+    assert i > 0
+    body = src[i:src.find("\n  }\n", i)]
+    assert "querySelectorAll('.slirn-col')" in body, "必须扫描 .slirn-col 壳"
+    assert "slirn-col-head" in body, "清扫时需排除胶囊头判断是否有内容"
+    assert "removeChild" in body, "空壳必须从 DOM 移除"
+
+
 # ---------- REQ-20260926-NNN：用户管理 + 登录 + 成员守卫 ----------
 
 def test_app_imports_auth_and_routes():
