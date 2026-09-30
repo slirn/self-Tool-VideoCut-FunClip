@@ -501,8 +501,9 @@
     'goto-tasks':     'slirn-tab-tasks',
     'goto-create':    'slirn-tab-create',
     'goto-hotwords':  'slirn-tab-hotwords',
+    'goto-short-video': 'slirn-tab-short-video',
   };
-  var ALL_TABS = ['slirn-tab-dashboard','slirn-tab-tasks','slirn-tab-create','slirn-tab-hotwords','slirn-tab-workbench'];
+  var ALL_TABS = ['slirn-tab-dashboard','slirn-tab-tasks','slirn-tab-create','slirn-tab-hotwords','slirn-tab-workbench','slirn-tab-short-video'];
 
   function showTab(targetCell) {
     ALL_TABS.forEach(function(id) {
@@ -525,6 +526,9 @@
           }
         });
       }
+    }
+    if (targetCell === 'slirn-tab-short-video') {
+      try { window.slirnShortVideoLoad && window.slirnShortVideoLoad(); } catch (e) {}
     }
     window.scrollTo({top: 0, behavior: 'smooth'});
   }
@@ -1362,6 +1366,8 @@
     fine_bg_detect: '检测区域',
     fine_preview: '生成预览',
     fine_export: '最终导出视频',
+    short_video_ai: '短视频分镜',
+    short_video_render: '短视频渲染',
   };
   function _formatLogsDuration(ms) {
     if (!ms || ms < 0) return '-';

@@ -42,6 +42,8 @@ KIND_FINE_AI_LAYOUT = "fine_ai_layout"
 KIND_FINE_BG_DETECT = "fine_bg_detect"
 KIND_FINE_PREVIEW = "fine_preview"
 KIND_FINE_EXPORT = "fine_export"
+KIND_SHORT_VIDEO_AI = "short_video_ai"
+KIND_SHORT_VIDEO_RENDER = "short_video_render"
 
 # 阶段中文标签（前端展示用）
 KIND_LABELS: dict[str, str] = {
@@ -57,6 +59,8 @@ KIND_LABELS: dict[str, str] = {
     KIND_FINE_BG_DETECT: "检测区域",
     KIND_FINE_PREVIEW: "生成预览",
     KIND_FINE_EXPORT: "最终导出视频",
+    KIND_SHORT_VIDEO_AI: "短视频分镜",
+    KIND_SHORT_VIDEO_RENDER: "短视频渲染",
 }
 
 # kind → 所属工作台阶段 key（前端分组 / 颜色）
@@ -73,6 +77,10 @@ KIND_TO_STAGE: dict[str, str] = {
     KIND_FINE_BG_DETECT: "fine_cut",
     KIND_FINE_PREVIEW: "fine_cut",
     KIND_FINE_EXPORT: "fine_cut",
+    # 短视频是独立工作台，不属于长视频六阶段；日志页阶段桶暂归入 fine_cut，
+    # 具体功能仍由 kind/label 区分（短视频分镜 / 短视频渲染）。
+    KIND_SHORT_VIDEO_AI: "fine_cut",
+    KIND_SHORT_VIDEO_RENDER: "fine_cut",
 }
 
 # 默认 description 模板（调用方未传 description 时使用）
@@ -89,6 +97,8 @@ DEFAULT_DESCRIPTIONS: dict[str, str] = {
     KIND_FINE_BG_DETECT: "检测视频主体区域，记录到 detected_region",
     KIND_FINE_PREVIEW: "生成精剪预览切片（可调起止时间）",
     KIND_FINE_EXPORT: "ffmpeg 渲染精剪视频（异步后台任务）",
+    KIND_SHORT_VIDEO_AI: "生成短视频多版本结构化分镜",
+    KIND_SHORT_VIDEO_RENDER: "渲染短视频 9:16 成片",
 }
 
 # 全部合法 kind（路由层校验非法请求）
@@ -96,7 +106,8 @@ ALL_KINDS = {KIND_SUBTITLE_GENERATION, KIND_SUBTITLE_REVIEW,
              KIND_ROUGH_CUT, KIND_ROUGH_CUT_LINK_PERSON,
              KIND_ROUGH_COMPOSE, KIND_ROUGH_COMPOSE_DELETE,
              KIND_OPTIMIZE, KIND_OPTIMIZE_CUT, KIND_FINE_AI_LAYOUT,
-             KIND_FINE_BG_DETECT, KIND_FINE_PREVIEW, KIND_FINE_EXPORT}
+             KIND_FINE_BG_DETECT, KIND_FINE_PREVIEW, KIND_FINE_EXPORT,
+             KIND_SHORT_VIDEO_AI, KIND_SHORT_VIDEO_RENDER}
 
 
 def _now_iso(ts: float) -> str:

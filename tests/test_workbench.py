@@ -9543,31 +9543,34 @@ def test_router_js_cancel_button_toggle():
 
 
 def test_render_async_finally_records_finish():
-    """REQ-089 AC-4：_run_fine_render_async 的 record_finish 必须在 finally 块。
+    """REQ-089 AC-4：精剪渲染主体的 record_finish 必须在 finally 块。
 
     原 BUG：cancel/failed/done 分支各调一次 record_finish，外部 kill 后主循环不
     执行到任何分支 → execution_history 永远 running。
     修复：所有 record_finish + _delete_active_export_job 挪到 finally。
+
+    REQ-20260923-NNN 后实际渲染主体在 _run_fine_render_locked；async 外壳只托管
+    串行门，因此检查必须抓 locked 函数。
     """
     FUNCLIP_ROOT = Path(__file__).resolve().parent.parent
     app_path = FUNCLIP_ROOT / "slirn_home" / "app.py"
     src = app_path.read_text(encoding="utf-8")
     lines = src.splitlines()
 
-    # 找 def _run_fine_render_async 行号
+    # 找 def _run_fine_render_locked 行号
     def_line = -1
     for i, line in enumerate(lines):
-        if line.startswith("def _run_fine_render_async("):
+        if line.startswith("def _run_fine_render_locked("):
             def_line = i
             break
-    assert def_line >= 0, "找不到 _run_fine_render_async 函数"
+    assert def_line >= 0, "找不到 _run_fine_render_locked 函数"
 
     # 找下一个顶层 def 或 async def（函数体结束）
     body_end = len(lines)
     for i in range(def_line + 1, len(lines)):
         stripped = lines[i].lstrip()
         if (stripped.startswith("def ") or stripped.startswith("async def ") or
-                stripped.startswith("@")) and not lines[i].startswith(" " * (def_line == i)):
+                stripped.startswith("@")):
             # 同缩进的 def/async def → 下一个函数
             indent = len(lines[i]) - len(stripped)
             if indent == 0:

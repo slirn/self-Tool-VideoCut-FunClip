@@ -5740,6 +5740,7 @@ def _render_create_task(repo_root: Path, edit=None) -> str:
 ROUTER_JS = '<script defer src="/slirn/static/router.js"></script>'
 # REQ-20260918-047：流程配置 + 自动执行 JS（与 router.js 同模式走静态文件）
 PIPELINE_JS = '<script defer src="/slirn/static/pipeline.js"></script>'
+SHORT_VIDEO_JS = '<script defer src="/slirn/static/short_video.js"></script>'
 # 说明：ROUTER_JS 原本是 ~115KB 的内联 JS 字符串，通过 gr.HTML(head=...) 注入。
 # Gradio 6.17.3 的 head 传输链路会把脚本文本里的反斜杠转义解码
 # （\n -> 换行、\x20 -> 空格、\\ -> \、孤立的 \ 被删除），内联 JS 因此产生
@@ -5780,7 +5781,7 @@ def _build_head() -> str:
     })();
     </script>
     """
-    return theme_js + ROUTER_JS + PIPELINE_JS
+    return theme_js + ROUTER_JS + PIPELINE_JS + SHORT_VIDEO_JS
 
 
 def _inject_css_and_js(app: gr.Blocks) -> None:
@@ -5827,6 +5828,7 @@ def build_app(repo_root: Path | None = None) -> gr.Blocks:
             <span>Video Studio</span>
         </div>
         <div class="slirn-topbar-actions">
+            <button class="slirn-btn" data-action="goto-short-video">短视频混剪</button>
             <button class="slirn-btn-icon" data-action="open-llm-settings" aria-label="大模型设置" title="大模型设置">⚙️</button>
             <button class="slirn-btn-icon" onclick="window.slirnToggleTheme && window.slirnToggleTheme()" aria-label="切换主题" title="切换主题">🌓</button>
             <a class="slirn-btn" href="http://127.0.0.1:7860/" target="_blank">🚀 上游首页</a>
@@ -5847,6 +5849,7 @@ def build_app(repo_root: Path | None = None) -> gr.Blocks:
         <div class="slirn-hero-actions">
             <button class="slirn-btn" data-action="goto-tasks">📋 任务列表</button>
             <button class="slirn-btn" data-action="goto-hotwords">📚 热词库</button>
+            <button class="slirn-btn" data-action="goto-short-video">🎞 短视频混剪</button>
             <button class="slirn-btn slirn-btn-primary" data-action="goto-create">➕ 新建任务</button>
         </div>
     </div>
@@ -5855,6 +5858,9 @@ def build_app(repo_root: Path | None = None) -> gr.Blocks:
     <div id="slirn-tab-tasks" class="slirn-tab-content" style="display:none;">{_render_task_list_skeleton()}</div>
     <div id="slirn-tab-create" class="slirn-tab-content" style="display:none;">{_render_create_task(repo_root)}</div>
     <div id="slirn-tab-hotwords" class="slirn-tab-content" style="display:none;">{_render_hotword_lib(repo_root)}</div>
+    <div id="slirn-tab-short-video" class="slirn-tab-content" style="display:none;">
+        <div id="slirn-short-video-inner" class="slirn-tab-inner"><div class="slirn-empty">短视频混剪加载中…</div></div>
+    </div>
     <div id="slirn-tab-detail" class="slirn-tab-content" style="display:none;"></div>
     <div id="slirn-tab-workbench" class="slirn-tab-content" style="display:none;"></div>
 
@@ -6154,6 +6160,16 @@ def _register_slirn_api(
     async def serve_pipeline_js():
         return FileResponse(
             pipeline_js_path,
+            media_type="text/javascript; charset=utf-8",
+            headers={"Cache-Control": "no-cache"},
+        )
+
+    short_video_js_path = Path(__file__).parent / "static" / "short_video.js"
+
+    @app.app.get("/slirn/static/short_video.js")
+    async def serve_short_video_js():
+        return FileResponse(
+            short_video_js_path,
             media_type="text/javascript; charset=utf-8",
             headers={"Cache-Control": "no-cache"},
         )
@@ -9533,6 +9549,189 @@ def _register_slirn_api(
         if not ok:
             return _err(f"模板不存在或已删除: {profile_id}")
         return _ok(toast="🗑 已删除流程模板")
+
+    # ---------- 短视频多素材混剪 ----------
+    from slirn_home import short_video_render as _sv_render
+    from slirn_home import short_video_service as _sv_service
+    from slirn_home import short_video_ui as _sv_ui
+
+    def _visible_short_video_tasks() -> list[dict]:
+        user = _get_cur_user()
+        if user and user.get("is_admin"):
+            summaries = mgr.list()
+        else:
+            username = (user or {}).get("username", "")
+            memberships = auth.list_user_tasks(username) if username else []
+            summaries = mgr.list_for_user(username, is_admin=False, member_of=memberships)
+        return [{"task_id": s.task_id, "name": s.name} for s in summaries]
+
+    @app.app.post("/slirn/api/short_video_list")
+    async def short_video_list(body: dict = Body(default_factory=dict)):
+        tasks = _visible_short_video_tasks()
+        task_ids = [t["task_id"] for t in tasks]
+        projects = _sv_service.list_projects_for_tasks(repo_root, task_ids)
+        return _ok(html=_sv_ui.render_project_list(tasks, projects))
+
+    @app.app.post("/slirn/api/short_video_create")
+    async def short_video_create(body: dict = Body(default_factory=dict)):
+        tid = (body.get("task_id") or "").strip()
+        if not tid:
+            return _err("缺少 task_id")
+        try:
+            mgr.get(tid)
+            project = _sv_service.create_project(
+                repo_root, tid,
+                str(body.get("name") or "短视频混剪"),
+                str(body.get("brief") or ""),
+                body.get("config") if isinstance(body.get("config"), dict) else {},
+            )
+        except Exception as e:  # noqa: BLE001
+            return _err(f"创建项目失败: {e}")
+        return _ok(project=project, toast="短视频项目已创建")
+
+    @app.app.post("/slirn/api/short_video_get")
+    async def short_video_get(body: dict = Body(default_factory=dict)):
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        if not tid or not pid:
+            return _err("缺少 task_id 或 project_id")
+        try:
+            project = _sv_service.load_project(repo_root, tid, pid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"读取项目失败: {e}")
+        return _ok(project=project, html=_sv_ui.render_project(project))
+
+    @app.app.post("/slirn/api/short_video_save")
+    async def short_video_save(body: dict = Body(default_factory=dict)):
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        if not tid or not pid:
+            return _err("缺少 task_id 或 project_id")
+        try:
+            project = _sv_service.update_project(repo_root, tid, pid, body)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"保存项目失败: {e}")
+        return _ok(project=project, html=_sv_ui.render_project(project), toast="项目已保存")
+
+    @app.app.post("/slirn/api/short_video_ai_storyboard")
+    async def short_video_ai_storyboard(body: dict = Body(default_factory=dict)):
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        if not tid or not pid:
+            return _err("缺少 task_id 或 project_id")
+        try:
+            if "brief" in body or isinstance(body.get("config"), dict):
+                _sv_service.update_project(repo_root, tid, pid, {
+                    "brief": body.get("brief"),
+                    "config": body.get("config"),
+                })
+            project = _sv_service.generate_storyboard(repo_root, tid, pid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"生成分镜失败: {e}")
+        return _ok(
+            project=project,
+            html=_sv_ui.render_project(project),
+            toast=f"分镜已生成（{(project.get('storyboard') or {}).get('model') or 'local'}）",
+        )
+
+    @app.app.post("/slirn/api/short_video_upload_material")
+    async def short_video_upload_material(
+        task_id: str = _Form(...),
+        project_id: str = _Form(...),
+        kind: str = _Form("auto"),
+        file: UploadFile = File(...),
+    ):
+        if not task_id or not project_id:
+            return _err("缺少 task_id 或 project_id")
+        import shutil as _shutil
+        import tempfile as _tempfile
+
+        suffix = Path(file.filename or "").suffix
+        tmp_path: Path | None = None
+        try:
+            with _tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp_path = Path(tmp.name)
+                await file.seek(0)
+                _shutil.copyfileobj(file.file, tmp)
+            material = _sv_service.add_material_path(
+                repo_root, task_id, project_id, tmp_path, kind=kind
+            )
+        except Exception as e:  # noqa: BLE001
+            return _err(f"上传素材失败: {e}")
+        finally:
+            if tmp_path is not None:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except Exception:  # noqa: BLE001
+                    pass
+        return _ok(material=material, toast="素材已上传")
+
+    @app.app.post("/slirn/api/short_video_render")
+    async def short_video_render(body: dict = Body(default_factory=dict)):
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        if not tid or not pid:
+            return _err("缺少 task_id 或 project_id")
+        variant_ids = body.get("variant_ids")
+        if not isinstance(variant_ids, list):
+            variant_ids = []
+        try:
+            job = _sv_render.start_render(repo_root, tid, pid, variant_ids)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"启动渲染失败: {e}")
+        return _ok(job=job, toast="短视频渲染已启动")
+
+    @app.app.post("/slirn/api/short_video_render_status")
+    async def short_video_render_status(body: dict = Body(default_factory=dict)):
+        job_id = (body.get("job_id") or "").strip()
+        if not job_id:
+            return _err("缺少 job_id")
+        job = _sv_render.job_status(job_id)
+        if not job:
+            return _err(f"渲染任务不存在或已过期: {job_id}")
+        return _ok(job=job)
+
+    @app.app.post("/slirn/api/short_video_render_cancel")
+    async def short_video_render_cancel(body: dict = Body(default_factory=dict)):
+        job_id = (body.get("job_id") or "").strip()
+        if not job_id:
+            return _err("缺少 job_id")
+        ok = _sv_render.cancel_render(job_id)
+        if not ok:
+            return _err("渲染任务无法取消或已结束")
+        return _ok(toast="已发送取消请求")
+
+    @app.app.post("/slirn/api/short_video_delete")
+    async def short_video_delete(body: dict = Body(default_factory=dict)):
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        if not tid or not pid:
+            return _err("缺少 task_id 或 project_id")
+        try:
+            deleted = _sv_service.delete_project(repo_root, tid, pid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"删除项目失败: {e}")
+        return _ok(deleted=deleted, toast="项目已删除")
+
+    @app.app.get("/slirn/api/short_video_file")
+    async def short_video_file(task_id: str, project_id: str, kind: str, name: str):
+        from fastapi.responses import FileResponse
+
+        safe_name = Path(name or "").name
+        if not safe_name or safe_name != name:
+            return _err("非法文件名")
+        if kind == "asset":
+            base = _sv_service.assets_dir(repo_root, task_id, project_id)
+        elif kind == "output":
+            base = _sv_service.output_dir(repo_root, task_id, project_id)
+        else:
+            return _err("非法文件类型")
+        target = (base / safe_name).resolve()
+        if not target.is_relative_to(base.resolve()):
+            return _err("非法文件路径")
+        if not target.exists() or not target.is_file():
+            return _err(f"文件不存在: {safe_name}")
+        return FileResponse(target)
 
     @app.app.post("/slirn/api/pipeline_run")
     async def pipeline_run(body: dict = Body(default_factory=dict)):
