@@ -1,11 +1,11 @@
 # Standards Profile — FunClip-main
 
-> 本文件记录本项目对公共规范（Agent-Engineering-Standards v0.17.0）的补充、适配、例外和历史差距，不复制公共规范正文。冲突时按 `.agent/standards/adoption.md` 优先级处理，实质性冲突由项目负责人批准。
+> 本文件记录本项目对公共规范（Agent-Engineering-Standards v0.21.0）的补充、适配、例外和历史差距，不复制公共规范正文。冲突时按 `.agent/standards/adoption.md` 优先级处理，实质性冲突由项目负责人批准。
 
 ## 入口与优先级
 
 - **唯一 Agent 入口**：`AGENTS.md`
-- **公共规范基线**：`.agent/standards/`（v0.17.0，`sourceCommit=5d68778`，installMode=`committed`）
+- **公共规范基线**：`.agent/standards/`（v0.21.0，`sourceCommit=49b78bb4fb4f6e35ef5eb95be8e81e748aa8cb69`，installMode=`committed`）
 - **项目事实**：`.agent/project-context.md`
 - **项目适配与例外**：本文件
 - **冲突优先级**（参见 `standards/adoption.md` §「生效规范与优先级」）：
@@ -30,7 +30,9 @@
 | 规则编号 / 主题 | 公共规范要求 | 项目现状 | 关系 | 处理方案 | 负责人 | 截止时间 |
 | --- | --- | --- | --- | --- | --- | --- |
 | `collaboration.md` 信息分类 | 已确认 / 待确认 / 建议 / 可自主决定 | `docs/sop/01` 隐含但未明确标注 | `adopt` | 在 SOP 中显式标注三类标签 | 项目负责人 | 2026-Q4 |
-| `delivery.md` 分阶段交付 | 需求 → 方案 → 切片 → 验收 | `docs/sop/01..05` 已完整实现 | `adopt` | 保持现有 SOP 不变 | — | — |
+| `delivery.md` 分阶段交付 | 需求 → 方案 → 切片 → 验收；方案先核对复用模式 | `docs/sop/01..05` 已完整实现；项目已有可复用服务模式，但尚无统一模式清单 | `legacy-gap` | 保持现有 SOP；新增模块先复用已验证模式，并逐步建立模式清单 | 项目负责人 | 2026-Q4 |
+| `delivery.md` 功能点清单与使用说明书（v0.20 新增） | 模块开发前先列全功能点；每切片测试通过后同步图文说明书和完成标记 | 现有 REQ / DESIGN / VERIFICATION 与根目录使用说明书未形成“模块清单 ↔ 说明书章节”双向对应 | `legacy-gap` / 新模块 `adopt` | 新模块落 `docs/manual/<module>-checklist.md` 与 `docs/manual/<module>.md`；存量说明书后续迁移 | 项目负责人 | 2026-Q4 |
+| `delivery.md` 编码统一 UTF-8（v0.19 新增） | 新建或修改文件统一 UTF-8，工具写文件显式指定编码 | 历史文件编码来源不统一，当前无法证明全仓库一致 | `legacy-gap` / 新改动 `adopt` | 本次触及文件强制 UTF-8；未触及文件不做批量转换 | 项目负责人 | 持续 |
 | `delivery.md` 根因优先 | 复现 → 定位根因 → 影响面 → 源头修复 → 回归验证 | 5 阶段 SOP 未明确段落 | `legacy-gap` | 在 `docs/sop/04-review.md` 补充根因优先小节 | 项目负责人 | 2026-Q4 |
 | `verification.md` 验收场景 | 每条标准 = 验证方式 + 结果 + 证据 | `docs/sop/05` 已完整实现 | `adopt` | 保持 | — | — |
 | `quality-gates.md` 风险分级评审 | 按 low/medium/high/max 决定评审 effort | `docs/sop/04` 已通过 `/code-review <effort>` skill | `extend` | 在 SOP 中交叉引用 `quality-gates.md`；保持现有 effort 级别 | 项目负责人 | 2026-Q4 |
@@ -41,6 +43,10 @@
 | `knowledge-placement.md`（v0.15 新增） | 项目知识必须入仓库受版本管理位置；用户级记忆只存个人偏好/环境特性；禁止双源；存量须迁移留痕 | 用户级 memory/ 存有 20+ 条项目知识（v0.14 接入前形成，含项目事实/协作规则/REQ 历史/技术坑）；迁移清单已备：`docs/knowledge-migration.md` | `legacy-gap`（存量）/ 新知识立即 `adopt` | 执行迁移清单（A→standards-profile、B→project-context、C→docs/REQM、D→测试优先）；迁移完成前新知识一律直接落仓库 | 项目负责人 | 2026-Q4 |
 | `task-intake.md`（v0.16 新增） | 受理模板（类型/目标/不做什么/风险/验收/事实假设）+ 集中询问（≤3 问）+ 受理卡入库 | `docs/sop/01-requirements.md` 需求澄清 + `requirements/REQ-<id>.md`（每条有验收标准）已等价覆盖大部分；受理卡落点即 REQ 文档 | `specialize` | 以 SOP-01 + REQ 文档为受理机制；Agent 受理时对照受理模板补缺项（不做什么/风险初判/≤3 问集中确认） | — | — |
 | `adoption.md` 安装模式与分发（v0.17 新增） | installMode 三选一并记入锁文件；`committed` = 全部文件含 `.agent/standards/` 入库 | 本仓库 `.agent/standards/` 已入库（v0.14 起）；锁文件已记录 `installMode=committed` | `adopt` | 保持 `committed`（存量项目默认不变）；`.agent/backups/` 已在 .gitignore 受管区块忽略 | — | — |
+| `orchestration.md` 泳道与并行执行（v0.18 新增） | 按触达文件/模块划泳道；写并发 ≤3；隔离工作区；逐条合并和验证 | 当前任务多为单泳道串行，现有 SOP 未定义并行写隔离流程 | `adopt` | 出现多写任务时使用 worktree/等价隔离并记录触达文件；单泳道任务不额外引入并行流程 | — | — |
+| `long-running.md` 长任务监督器与会话内长任务（v0.18 / v0.21 新增） | 监督器续跑、独立预算、租约、停滞检测、监督日志；会话内子 Agent 日志可见 | 项目为本地单进程工具，当前未接入外部监督器；也未形成会话内子 Agent 执行日志 | `not-applicable`（当前）/ 按需 `adopt` | 仅当用户明确要求数小时连续或无人值守执行时评估监督器；主 Agent 派发子 Agent 时补 `logs/<task-id>/progress.md` | 项目负责人 | 触发时 |
+| `testing.md` 不稳定测试治理（v0.18 新增） | 连跑取证、隔离清单、负责人/时限、禁止直接改产品代码消偶发失败 | 当前没有 flaky 隔离清单或固定治理流程 | `adopt` | 发现 flaky 后建立隔离清单；在短视频模块测试中按此规则执行 | — | 持续 |
+| `dev-metrics.md`（v0.18 新增） | 首次验收通过率、返工率、周期时间、每任务回合数从既有记录自动汇总 | 当前有 REQ / VERIFICATION / execution_history，但无统一指标聚合 | `legacy-gap` | 先保留现有记录；后续评估从 REQ/验收记录和任务监督日志中汇总 | 项目负责人 | TBD |
 | `logging.md` 统一日志 | 统一日志 API + 流程追踪 + 诊断页面 | 无统一日志 API；`funclip/` 内置 logging + `slirn_home/` 各服务 logging + `execution_history.py` | `legacy-gap` | 当前通过 memory/ + REQM 追踪；评估是否引入统一日志 | 项目负责人 | TBD |
 | `data-governance.md` 数据治理 | 分类 / 最小化 / 共享 / 保留 / 删除 / 脱敏 / 泄漏响应 | 用户数据 = 本地 JSON（用户名 + pbkdf2 hash + cookie session）；视频数据 = 本地处理 | `extend` | 用户密码 pbkdf2 200000 迭代；session HttpOnly + SameSite=Lax；视频数据零上传 | 项目负责人 | 持续 |
 | `slo-resilience.md` SLO 容灾 | SLI/SLO / 错误预算 / 容量 / 备份恢复 / RTO/RPO / 演练 | 单进程 Gradio 桌面工具 | `not-applicable` | 无 SLO 概念 | — | — |
@@ -96,5 +102,6 @@
 ### 升级记录
 
 - **2026-09-28 v0.14.0 → v0.17.0**：新增 `knowledge-placement.md` / `task-intake.md` 两份规范与 `adoption.md` 安装模式章节；`agent-runtime-security.md` 追加用户级目录写入禁令；映射表新增 3 行、legacy-gap 新增记忆迁移行；installMode 保持 `committed`（存量默认）。`standards verify` 通过。
+- **2026-09-30 v0.17.0 → v0.21.0**：新增 `dev-metrics.md`；`delivery.md` 增加复用优先、UTF-8、功能点清单和图文使用说明书；`orchestration.md` 增加泳道并行；`long-running.md` 增加监督器与会话内长任务；`testing.md` / `quality-gates.md` 增加 flaky 治理。installMode 保持 `committed`，项目上下文与适配表同步更新。
 
-当前锁定版本：`v0.17.0`（sourceCommit `5d68778cfd7d08ac08bfc1d080099c57c8892e21`，installMode `committed`）
+当前锁定版本：`v0.21.0`（sourceCommit `49b78bb4fb4f6e35ef5eb95be8e81e748aa8cb69`，installMode `committed`）

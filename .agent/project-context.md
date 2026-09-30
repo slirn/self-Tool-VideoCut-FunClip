@@ -81,7 +81,7 @@
 ## 规范入口与适配
 
 - **唯一 Agent 入口**：`AGENTS.md`
-- **公共规范基线**：`.agent/standards/`（31 个文件，v0.17.0 锁定，installMode=committed）
+- **公共规范基线**：`.agent/standards/`（32 个文件，v0.21.0 锁定，installMode=committed）
 - **项目事实**：本文件
 - **项目适配与例外**：`.agent/standards-profile.md`
 - **工具适配层**：
@@ -93,6 +93,10 @@
 
 - **提交信息**：Conventional Commits（CLAUDE.md §6）。`type` ∈ {feat, fix, chore, refactor, docs, test, style, perf, revert}。
 - **5 阶段 SOP**：`docs/sop/01..05-*.md`（需求 → 设计 → 实现 → 评审 → 验证）。与 `.agent/standards/delivery.md` 互为 `adopt` 关系。
+- **功能进度与使用说明**：新增模块按 `delivery.md` 维护功能点清单和图文使用说明书；本项目建议落点为 `docs/manual/<module>-checklist.md` 与 `docs/manual/<module>.md`，两者章节双向链接。
+- **复用优先**：实现前先检查现有已验证模式；当前可优先复用 `slirn_home/` 的阶段编排、异步 job、原子 JSON 写入、执行历史和精剪 FFmpeg 渲染模式，不复制相似实现。
+- **文件编码**：新建或修改的源码、文档、配置和脚本统一 UTF-8（推荐无 BOM）；验收发现中文乱码按编码缺陷处理。
+- **不稳定测试**：发现 flaky 测试先重复取证并登记隔离，不直接修改产品代码掩盖偶发失败；隔离测试不冒充合并门禁通过项。
 - **REQ / DESIGN / VERIFICATION 命名约定**：`*-YYYYMMDD-NNN[-<suffix>]-<slug>.md`
   - REQ 存于 `docs/REQM/`（**注意大写后缀**，与 SOP §1 的 `requirements/` 路径约定不一致；历史遗留）
   - DESIGN 存于 `docs/design/`
@@ -151,6 +155,8 @@
 - **代码评审**：使用 `/code-review <effort>` skill，effort 级别（low/medium/high/max）按改动行数与影响面选择
 - **回归测试**：改动后跑 `pytest tests/ -v`（Stop Hook 自动）
 - **跨模块 / 难回滚变更**：必须写 `docs/design/DESIGN-*.md` 并在 commit 中引用
+- **多任务编排**：涉及并行写任务时按 `orchestration.md` 的触达文件清单划分泳道；共享文件修改统一进入集成泳道
+- **长任务**：预计数小时、需要恢复或无人值守时按 `long-running.md` 记录预算、检查点、监督器能力和恢复条件
 
 ## 可靠性、架构与前端
 
