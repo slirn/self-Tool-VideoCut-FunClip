@@ -10120,6 +10120,55 @@ def test_pipeline_js_rough_cut_has_link_person_checkbox():
     )
 
 
+def test_pipeline_checkboxes_default_all_checked():
+    """2026-09-30 用户要求：流程配置所有复选框默认选中。
+
+    覆盖三层：
+    - pipeline_service.default_config：5 个复选框字段默认 True（详见
+      test_pipeline_service.py 的 default_config 断言）
+    - handler cfg.get 兜底值随新默认翻 True（缺键时行为与面板勾选一致）
+    - pipeline.js：readCurrentConfig _checked 兜底 true ×5、sd 标签不再写
+      「默认关」、三套模板 speaker_diarization 统一 true
+    显式保存过 False 的任务不受影响（validate_config 按 user 值合并）。"""
+    svc = (FUNCLIP_ROOT / "slirn_home" / "pipeline_service.py").read_text(encoding="utf-8")
+    pipeline_js = (FUNCLIP_ROOT / "slirn_home" / "static" / "pipeline.js").read_text(encoding="utf-8")
+    # 服务端 default_config：5 个字段 True
+    for frag in (
+        '"speaker_diarization": True',
+        '"accept_all_suggestions": True',
+        '"accept_all_replacements": True',
+    ):
+        assert frag in svc, f"default_config 应含 {frag}（2026-09-30 复选框默认全选）"
+    assert svc.count('"link_person_ids": True') >= 2, (
+        "subtitle_review / rough_cut 的 link_person_ids 默认都应为 True"
+    )
+    # handler cfg.get 兜底 = 新默认 True
+    for frag in (
+        'cfg.get("speaker_diarization", True)',
+        'cfg.get("accept_all_suggestions", True)',
+        'cfg.get("accept_all_replacements", True)',
+    ):
+        assert frag in svc, f"handler 兜底应为新默认 True：{frag}"
+    assert svc.count('cfg.get("link_person_ids", True)') >= 2, (
+        "两个 handler 的 link_person_ids 兜底应为 True"
+    )
+    # 前端 _checked 兜底 true ×5（DOM 元素缺失时与后端默认一致）
+    for frag in (
+        "fieldId('subtitle_generation', 'sd'), true)",
+        "fieldId('subtitle_review', 'accept-all'), true)",
+        "fieldId('subtitle_review', 'link-person'), true)",
+        "fieldId('rough_cut', 'link-person'), true)",
+        "fieldId('optimize', 'accept-rep'), true)",
+    ):
+        assert frag in pipeline_js, f"readCurrentConfig 兜底应为 true：{frag}"
+    # sd 标签不再宣称「默认关」
+    assert "默认关" not in pipeline_js, "区分说话人标签不应再写「默认关」（默认已是选中）"
+    # 三套模板 sd 统一 true（semi/full 的 link_person_ids 依赖 sd）
+    assert "speaker_diarization: false" not in pipeline_js, (
+        "模板里 speaker_diarization 应统一 true（与默认全选一致）"
+    )
+
+
 def test_pipeline_js_fine_cut_section_has_all_fields():
     """REQ-20260921-NNN-radio-mode：fine_cut 阶段改单选卡片组（替代 v4
     双 checkbox），但仍只含 4 类生效字段（params-src / start / dur + 单选）。
@@ -12491,7 +12540,9 @@ def test_opt_deleted_filter_and_final_view_js():
     j = src.find("function optFinalView")
     assert j > 0, "必须有 optFinalView"
     body2 = src[j:src.find("\n  }\n", j)]
-    assert "/optimized_srt" in body2 and "base: 'rough'" in body2
+    assert "/optimized_srt" in body2 and "base: hasCutBase ? 'cut' : 'rough'" in body2, (
+        "2026-09-30 用户反馈：成片已生成时默认打开成片时间基（与 optimize_compose.mp4 "
+        "对位，避免「字幕不是拼接后的」误解），无成片才回落粗剪基")
     assert '[data-action="opt-final-video"]' in body2, (
         "cut 时间基可用性要与「查看最终视频」按钮同源判断（下载按钮已并入弹窗）")
     assert "action === 'opt-final-view'" in src and "optFinalView(target)" in src
@@ -12503,6 +12554,11 @@ def test_opt_deleted_filter_and_final_view_js():
     assert "data-final-base" in body3 and '"cut"' in body3, "cut 就绪时给双时间基切换"
     assert "slirn-opt-final-dl" in body3 and "curBase = base;" in src, (
         "SRT 下载并入弹窗：下载当前所选时间基（REQ-20260923-NNN 操作行去重）")
+    # 2026-09-30 默认成片基三联动：初始 curBase / 初始高亮按钮都要跟默认时间基一致
+    assert "var curBase = hasCutBase ? 'cut' : 'rough';" in src, (
+        "下载文件名/提示要跟随打开时的时间基（默认成片基时下载即成片基）")
+    assert "mark(overlay.querySelector('[data-final-base=\"cut\"]'))" in src, (
+        "初始高亮成片基按钮（本次打开显示的就是它）")
     assert "optSrtDownload" not in src and "opt-srt-download" not in src, (
         "行内 SRT 下载按钮已并入查看弹窗，不留死代码")
     assert "去掉标记删除行" in body3, "弹窗说明必须写明删除行已去掉"
@@ -13045,7 +13101,73 @@ def test_opt_batch_replace_frontend_wiring():
         assert sel in css, f"CSS 缺少 {sel}"
 
 
+def test_opt_final_view_search_confirm():
+    """REQ-20260930-NNN 查看最终字幕 · 搜索确认：替换后的新词应能搜到、被替换
+    的旧词应 0 处。高亮 XSS 安全（切片逐段 escape + 复用 optBatchFind）；计数
+    含「未找到 · 0 处」空态（0 处 = 旧词消失，替换生效的确认信号，完成色）；
+    Enter 步进 + Shift+Enter 回退 + Esc 清空；时间基切换重放搜索；<mark> 不
+    改 textContent → 下载仍取干净 SRT。"""
+    src = _router_src()
+    m = src.find("function _renderOptFinalModal")
+    assert m > 0, "缺少 _renderOptFinalModal"
+    body = src[m:src.find("\n  }\n", m)]
+    # 弹窗 HTML：搜索条（输入 + 计数 + 上下导航 + 清空）在字幕内容之前
+    for frag in ('id="slirn-opt-final-q"', 'id="slirn-opt-final-qcount"',
+                 'id="slirn-opt-final-prev"', 'id="slirn-opt-final-next"',
+                 'id="slirn-opt-final-qclear"', "旧词应 0 处"):
+        assert frag in body, f"弹窗缺少 {frag}"
+    assert body.find('id="slirn-opt-final-q"') < body.find("slirn-opt-final-pre"), \
+        "搜索条应在字幕内容之前"
+    # qApply：复用 optBatchFind + escapeHtml 切片（XSS 安全）+ 空态计数 + 滚动跟随
+    q = body.find("function qApply")
+    assert q > 0, "缺少 qApply"
+    qbody = body[q:body.find("\n    }\n", q)]
+    assert "optBatchFind(text, q)" in qbody, "复用大小写不敏感匹配口径"
+    assert qbody.count("escapeHtml") >= 3, "切片 + 命中段都要 escape"
+    assert "未找到 · 0 处" in qbody, "0 处空态是「旧词已消失」的确认信号"
+    assert "'1/' + n + ' 处'" in qbody, "计数必须明确列出总处数（x/N 处）"
+    assert "scrollIntoView({block: 'center'" in qbody
+    # qStep：wrap-around 步进 + 当前处 cur + 计数刷新
+    s = body.find("function qStep")
+    assert s > 0, "缺少 qStep"
+    sbody = body[s:body.find("\n    }\n", s)]
+    assert "% ms.length" in sbody, "步进必须循环（wrap-around）"
+    assert "classList.toggle('cur'" in sbody
+    assert "qIdx + '/' + ms.length + ' 处'" in sbody, "步进后计数同样带总处数"
+    # 键盘：Enter 新词定位/同词步进、Shift+Enter 上一处、Esc 清空；输入防抖
+    assert "qLast" in body and "!== qLast) qApply(true)" in body, \
+        "Enter 只在新词时重定位，同词直接步进"
+    assert "qStep(ev.shiftKey ? -1 : 1)" in body
+    assert "ev.key === 'Escape'" in body and "qInput.value = ''" in body
+    assert "setTimeout(function() { qApply(true); }, 200)" in body, "输入防抖重放"
+    # 弹窗打开即聚焦搜索框（确认替换是本弹窗的主要动作）
+    assert "qInput.focus()" in body
+    # 时间基切换：新字幕渲染后重放当前搜索
+    t = body.find("pre.textContent = r.srt")
+    assert t > 0 and "qApply(true);" in body[t:t + 400], "切时间基后必须重放搜索"
+    # 下载仍用 textContent（mark 标记不落盘）
+    assert "pre2.textContent" in body, "下载取 textContent（高亮标记不落盘）"
+    # CSS：搜索条 + 命中高亮 + 当前处深色 + 0 处完成色
+    css = _css_src()
+    for sel in (".slirn-opt-final-search", ".slirn-opt-final-qcount.none",
+                ".slirn-opt-final-hit", ".slirn-opt-final-hit.cur"):
+        assert sel in css, f"CSS 缺少 {sel}"
 
+
+def test_opt_final_hint_contrast_light_and_dark():
+    """2026-09-30 用户反馈（截图红框）：最终字幕弹窗说明文字（.slirn-form-hint
+    沿用 --text-muted #94a3b8）在近白卡片上仅 ~2.4:1 看不清。修复 = 弹窗内
+    局部加深（亮 #475569 / 暗 #cbd5e1），不动全局 hint 配色。"""
+    css = _css_src()
+    i = css.find(".slirn-opt-final-card .slirn-form-hint")
+    assert i > 0, "缺少弹窗内 hint 对比度覆盖规则"
+    assert "#475569" in css[i:i + 200], "亮主题须用更深的前景色（≥4.5:1）"
+    j = css.find(':root[data-theme="dark"] .slirn-opt-final-card .slirn-form-hint')
+    assert j > 0, "暗主题须同步覆盖（深卡片上用亮灰）"
+    assert "#cbd5e1" in css[j:j + 250], "暗主题覆盖色缺失"
+
+
+def test_opt_cut_rekick_time_progress_feedback_js_css():
     """2026-09-29 用户反馈：「🎬 重新拼接视频」缺执行时间和进度反馈。
     轮询 running 态必须显示 已耗时 + ETA + 内嵌进度条；按钮本身进入
     ⏳ 状态机（状态条在词频列表上方、按钮在字幕列表末尾，长列表里用户

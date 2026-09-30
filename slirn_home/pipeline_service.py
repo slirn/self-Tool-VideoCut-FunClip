@@ -123,32 +123,35 @@ def default_config() -> dict:
     - fine_cut：精剪合成（封面/背景/背景音乐/设置参数/起点/时长/enabled）
     - 顶层 run_mode：to_end | stop_after（决定 stop_after 是否生效）
 
-    accept_all_suggestions / accept_all_replacements 默认 False：避免「已勾选但
-    用户不知道，第一次点反而被取消」的直觉冲突。第一次勾上才生效。
-    fine_cut.enabled 默认 False — 避免自动跑误触发几小时重编码。
+    2026-09-30 用户要求：流程配置的复选框默认全部选中 — speaker_diarization /
+    accept_all_suggestions / link_person_ids ×2 / accept_all_replacements 一律
+    True（此前默认 False，每项都得手动点开）。已保存过显式 False 的任务不受
+    影响（validate_config 按用户保存值合并，不会被新默认覆盖）。
+    fine_cut 无复选框（导出方式是二选一 radio），enabled 默认 True 见下方
+    radio-mode 注释。
     """
     return {
         "subtitle_generation": {
-            "speaker_diarization": False,
+            "speaker_diarization": True,
         },
         "subtitle_review": {
-            "accept_all_suggestions": False,
+            "accept_all_suggestions": True,
             "skip_categories": [],
             # REQ-20260918-049：大模型分析严谨性级别（pipe 通道支持高/中/低；
             # custom 档需在 pipe-panel 外的工作台才有 textarea，前端降级为 medium）
             "rigor": "medium",
             # REQ-20260921-NNN：自动关联人员ID（调 /rev_speaker_link）
-            "link_person_ids": False,
+            "link_person_ids": True,
         },
         "rough_cut": {
             "delete_speakers": [],
             "default_decision": "keep",
             # REQ-20260921-NNN：自动关联人员ID（调 /cut_speaker_link）
-            "link_person_ids": False,
+            "link_person_ids": True,
         },
         "rough_compose": {},
         "optimize": {
-            "accept_all_replacements": False,
+            "accept_all_replacements": True,
         },
         # REQ-20260921-NNN：精剪合成（最终导出视频）配置
         # v2 用户反馈：cover_image / bg_image / bgm 是死字段 —— handler 不读，
@@ -181,7 +184,7 @@ def validate_config(cfg: dict) -> dict:
     - 阶段 dict 内不再含 stop_after（顶层 stop_after 才是权威源）
     - 顶层 stop_after 是字符串（STAGE_ORDER 的某个 key）或 None
     - 顶层 run_mode ∈ {"to_end", "stop_after"}（v4 无此字段，自动推算）
-    - fine_cut.enabled 默认 False（关键防误跑）
+    - fine_cut.enabled 默认 True（radio 模式：导出方式二选一必跑，跳过走顶层 stop_after）
     - 兼容 v4 旧数据：缺 run_mode 但有 stop_after → "stop_after"；缺且 stop_after=None → "to_end"
 
     返回合法配置（不抛异常 — 任何坏字段都用默认值替换，便于 UI 编辑容错）。
@@ -236,10 +239,10 @@ def validate_config(cfg: dict) -> dict:
     # enabled=True。新 radio UI 已物理保证一致性，本块仅为兼容 legacy pipeline.json。
     if base["fine_cut"].get("range_enabled") is True:
         base["fine_cut"]["enabled"] = True
-    # link_person_ids 兜底为 bool（脏数据 → False）
+    # link_person_ids 兜底为 bool（脏数据 → 新默认 True，2026-09-30 起复选框默认全选）
     for sk in ("subtitle_review", "rough_cut"):
         if not isinstance(base[sk].get("link_person_ids"), bool):
-            base[sk]["link_person_ids"] = False
+            base[sk]["link_person_ids"] = True
     return base
 
 
@@ -625,7 +628,7 @@ def fine_cut_preflight(tid: str, cfg: dict, outputs_dir: Path) -> dict:
 def handler_subtitle_generation(tid: str, cfg: dict, outputs_dir: Path, api: str,
                                 job: PipelineJob) -> tuple[bool, str]:
     """字幕生成阶段 — 调 /gen_subtitle + 等 /subtitle_status。"""
-    sd_on = bool(cfg.get("speaker_diarization", False))
+    sd_on = bool(cfg.get("speaker_diarization", True))
     _log(job, "subtitle_generation", f"启动字幕生成（区分说话人={sd_on}）")
     r = _http_post(api, "/gen_subtitle", {"task_id": tid, "sd": sd_on},
                    auto_session_id=job.auto_session_id)
@@ -685,7 +688,7 @@ def handler_subtitle_review(tid: str, cfg: dict, outputs_dir: Path, api: str,
         # REQ-20260921-NNN：先做 link_person_ids（不依赖 save_revision 全接受 —
         # rev_speaker_link 只读 subtitle.json + revision.json 的入口即可）。
         # 但人工决策模式下 revision.json 已生成（/revise_subtitle 产物），所以两个分支都能跑。
-        if bool(cfg.get("link_person_ids", False)):
+        if bool(cfg.get("link_person_ids", True)):
             _log(job, "subtitle_review", "关联人员ID（rev_speaker_link）")
             r = _http_post(api, "/rev_speaker_link", {"task_id": tid},
                            auto_session_id=job.auto_session_id)
@@ -804,7 +807,7 @@ def handler_rough_cut(tid: str, cfg: dict, outputs_dir: Path, api: str,
             except Exception:
                 pass
         # REQ-20260921-NNN：自动关联人员ID（独立于 delete_speakers — 仅当 cfg.link_person_ids=True）
-        elif bool(cfg.get("link_person_ids", False)):
+        elif bool(cfg.get("link_person_ids", True)):
             _log(job, "rough_cut", "关联人员ID（cut_speaker_link）")
             r = _http_post(api, "/cut_speaker_link", {"task_id": tid},
                            auto_session_id=job.auto_session_id)

@@ -97,10 +97,33 @@ def test_default_config_fine_cut_has_required_keys():
 
 
 def test_default_config_subtitle_review_rough_cut_have_link_person_ids():
-    """v5：subtitle_review / rough_cut 默认含 link_person_ids=False。"""
+    """v5：subtitle_review / rough_cut 默认含 link_person_ids。
+
+    2026-09-30 用户要求复选框默认全选 → 5 个复选框字段默认全部 True；
+    显式保存过 False 的任务由 validate_config 按 user 值合并保留（见
+    test_validate_config_preserves_explicit_false_flags）。"""
     cfg = P.default_config()
-    assert cfg["subtitle_review"]["link_person_ids"] is False
-    assert cfg["rough_cut"]["link_person_ids"] is False
+    assert cfg["subtitle_review"]["link_person_ids"] is True
+    assert cfg["rough_cut"]["link_person_ids"] is True
+    assert cfg["subtitle_generation"]["speaker_diarization"] is True
+    assert cfg["subtitle_review"]["accept_all_suggestions"] is True
+    assert cfg["optimize"]["accept_all_replacements"] is True
+
+
+def test_validate_config_preserves_explicit_false_flags():
+    """2026-09-30 默认全选后：已保存的显式 False 不被新默认覆盖。"""
+    user = P.default_config()
+    user["subtitle_generation"]["speaker_diarization"] = False
+    user["subtitle_review"]["accept_all_suggestions"] = False
+    user["subtitle_review"]["link_person_ids"] = False
+    user["rough_cut"]["link_person_ids"] = False
+    user["optimize"]["accept_all_replacements"] = False
+    out = P.validate_config(user)
+    assert out["subtitle_generation"]["speaker_diarization"] is False
+    assert out["subtitle_review"]["accept_all_suggestions"] is False
+    assert out["subtitle_review"]["link_person_ids"] is False
+    assert out["rough_cut"]["link_person_ids"] is False
+    assert out["optimize"]["accept_all_replacements"] is False
 
 
 def test_default_config_has_flow_level_stop_after():
@@ -261,14 +284,16 @@ def test_validate_config_fine_cut_accepts_full_settings():
     assert "bgm" not in out["fine_cut"]
 
 
-def test_validate_config_link_person_ids_non_bool_falls_back_false():
-    """v5：link_person_ids 非 bool → 回退 False。"""
+def test_validate_config_link_person_ids_non_bool_falls_back_true():
+    """v5：link_person_ids 非 bool → 回退 bool 兜底。
+
+    2026-09-30 起兜底值 = 新默认 True（复选框默认全选），此前为 False。"""
     user = P.default_config()
     user["subtitle_review"]["link_person_ids"] = "yes"
     user["rough_cut"]["link_person_ids"] = 1
     out = P.validate_config(user)
-    assert out["subtitle_review"]["link_person_ids"] is False
-    assert out["rough_cut"]["link_person_ids"] is False
+    assert out["subtitle_review"]["link_person_ids"] is True
+    assert out["rough_cut"]["link_person_ids"] is True
 
 
 def test_validate_config_drops_unknown_fine_cut_keys():

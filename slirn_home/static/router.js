@@ -4811,7 +4811,9 @@
     });
   }
   // REQ-20260922-NNN 查看最终字幕：应用替换 + 去掉删除行 = 成片将使用的字幕内容。
-  // 默认粗剪时间基（原始时间轴）；优化成片已生成时给「优化成片时间基」切换（已前移）。
+  // 2026-09-30 用户反馈：默认粗剪基让人误以为「显示的不是拼接后的字幕」—
+  // 优化成片已生成时默认直接显示成片时间基（与 optimize_compose.mp4 对位），
+  // 粗剪基降为切换项；无成片时仍回落粗剪基。
   function optFinalView(btn) {
     var tid = btn.getAttribute('data-task-id') || '';
     if (!tid) return;
@@ -4819,7 +4821,7 @@
     // 同源渲染；SRT 下载按钮已并入本弹窗 — REQ-20260923-NNN 去重）
     var hasCutBase = !!document.querySelector(
       '[data-action="opt-final-video"]');
-    postJSON(SLIRN_API + '/optimized_srt', {task_id: tid, base: 'rough'})
+    postJSON(SLIRN_API + '/optimized_srt', {task_id: tid, base: hasCutBase ? 'cut' : 'rough'})
       .then(function(r) {
         if (!r || !r.ok) {
           toast('❌ 获取最终字幕失败: ' + ((r && r.error) || '未知错误'), 'error');
@@ -4846,6 +4848,18 @@
             + '<button class="slirn-btn slirn-btn-sm" data-final-base="cut">优化成片时间基（已前移）</button>'
           + '</div>'
           : '') +
+        // REQ-20260930-NNN 搜索确认：替换后的新词应能搜到、被替换的旧词应 0 处
+        '<div class="slirn-opt-final-search">'
+          + '<input type="text" id="slirn-opt-final-q" autocomplete="off" '
+          + 'placeholder="🔍 搜索确认（新词应能找到 · 旧词应 0 处）…">'
+          + '<span id="slirn-opt-final-qcount" class="slirn-opt-final-qcount"></span>'
+          + '<button type="button" class="slirn-opt-final-qnav" id="slirn-opt-final-prev" '
+          + 'title="上一个（Shift+Enter）">↑</button>'
+          + '<button type="button" class="slirn-opt-final-qnav" id="slirn-opt-final-next" '
+          + 'title="下一个（Enter）">↓</button>'
+          + '<button type="button" class="slirn-opt-final-qnav" id="slirn-opt-final-qclear" '
+          + 'title="清空搜索（Esc）">✕</button>'
+        + '</div>' +
         '<pre class="slirn-opt-final-pre">' + escapeHtml(srt) + '</pre>' +
         '<div style="display:flex; gap:10px; justify-content:center;">'
           + '<button class="slirn-btn" id="slirn-opt-final-dl">⬇️ 下载当前时间基 SRT</button>'
@@ -4854,8 +4868,78 @@
     document.body.appendChild(overlay);
     var close = function() { overlay.remove(); };
     document.getElementById('slirn-opt-final-close').onclick = close;
+    var pre = overlay.querySelector('.slirn-opt-final-pre');
+    // REQ-20260930-NNN 搜索确认：高亮全部命中 + 当前处深色 + 计数 + 上下导航。
+    // 复用 optBatchFind（大小写不敏感全位置 + 折叠长度回退）；切片逐段 escape
+    // 保证 XSS 安全；<mark> 不改 textContent → 下载仍取到干净 SRT 原文。
+    var qInput = document.getElementById('slirn-opt-final-q');
+    var qCount = document.getElementById('slirn-opt-final-qcount');
+    var qIdx = 0;      // 当前命中（1 基；0 = 无命中）
+    var qLast = null;  // 上次应用的查询词（Enter 只在新词时重定位，否则步进）
+    function qApply(jump) {
+      var text = pre.textContent || '';  // mark 不污染 textContent，重复调用安全
+      var q = (qInput.value || '').trim();
+      qLast = q;
+      if (!q) {
+        pre.innerHTML = escapeHtml(text);
+        qCount.textContent = '';
+        qCount.classList.remove('none');
+        qIdx = 0;
+        return;
+      }
+      var html = [], cur = 0;
+      optBatchFind(text, q).forEach(function(p, i) {
+        html.push(escapeHtml(text.slice(cur, p)));
+        html.push('<mark class="slirn-opt-final-hit' + (i === 0 ? ' cur' : '') + '">'
+                  + escapeHtml(text.slice(p, p + q.length)) + '</mark>');
+        cur = p + q.length;
+      });
+      html.push(escapeHtml(text.slice(cur)));
+      pre.innerHTML = html.join('');  // 重写即清除旧命中标记
+      var n = pre.querySelectorAll('.slirn-opt-final-hit').length;
+      qIdx = n ? 1 : 0;
+      qCount.textContent = n ? ('1/' + n + ' 处') : '未找到 · 0 处';
+      qCount.classList.toggle('none', !n);
+      var m0 = pre.querySelector('.slirn-opt-final-hit.cur');
+      if (m0 && jump) m0.scrollIntoView({block: 'center', behavior: 'smooth'});
+    }
+    function qStep(d) {  // ±1 循环步进（wrap-around），当前处深色 + 滚动跟随
+      var ms = pre.querySelectorAll('.slirn-opt-final-hit');
+      if (!ms.length) return;
+      qIdx = ((qIdx - 1 + d) % ms.length + ms.length) % ms.length + 1;
+      ms.forEach(function(m, i) { m.classList.toggle('cur', i === qIdx - 1); });
+      qCount.textContent = qIdx + '/' + ms.length + ' 处';
+      ms[qIdx - 1].scrollIntoView({block: 'center', behavior: 'smooth'});
+    }
+    var qTimer = null;
+    qInput.addEventListener('input', function() {
+      if (qTimer) clearTimeout(qTimer);
+      qTimer = setTimeout(function() { qApply(true); }, 200);
+    });
+    qInput.addEventListener('keydown', function(ev) {
+      if (ev.key === 'Enter') {
+        ev.preventDefault();
+        if (qTimer) clearTimeout(qTimer);
+        // 新词 → 定位第 1 处；同词 → Enter 下一处 / Shift+Enter 上一处
+        if ((qInput.value || '').trim() !== qLast) qApply(true);
+        else qStep(ev.shiftKey ? -1 : 1);
+      } else if (ev.key === 'Escape') {
+        ev.preventDefault();
+        qInput.value = '';
+        qApply(false);
+        qInput.focus();
+      }
+    });
+    overlay.querySelector('#slirn-opt-final-next').onclick = function() { qStep(1); };
+    overlay.querySelector('#slirn-opt-final-prev').onclick = function() { qStep(-1); };
+    overlay.querySelector('#slirn-opt-final-qclear').onclick = function() {
+      qInput.value = '';
+      qApply(false);
+      qInput.focus();
+    };
+    try { qInput.focus(); } catch (err) {}
     // 下载当前显示的字幕（时间基随弹窗内切换 — 原 ⬇️ 行内下载按钮并入此处）
-    var curBase = 'rough';
+    var curBase = hasCutBase ? 'cut' : 'rough';  // 下载文件名/提示随打开时的时间基（默认成片基）
     document.getElementById('slirn-opt-final-dl').onclick = function() {
       var pre2 = overlay.querySelector('.slirn-opt-final-pre');
       var blob = new Blob([pre2.textContent || ''], {type: 'text/plain;charset=utf-8'});
@@ -4872,15 +4956,14 @@
       if (e.target === overlay) close();  // 点遮罩关闭
     });
     if (hasCutBase) {
-      var pre = overlay.querySelector('.slirn-opt-final-pre');
       var title = overlay.querySelector('.slirn-modal-title');
       var mark = function(baseBtn) {
         overlay.querySelectorAll('[data-final-base]').forEach(function(b) {
           b.classList.toggle('slirn-btn-primary', b === baseBtn);
         });
       };
-      var roughBtn = overlay.querySelector('[data-final-base="rough"]');
-      mark(roughBtn);
+      // 打开即成片基 → 初始高亮成片按钮（粗剪基是切换项）
+      mark(overlay.querySelector('[data-final-base="cut"]'));
       overlay.querySelectorAll('[data-final-base]').forEach(function(b) {
         b.onclick = function() {
           if (b.classList.contains('slirn-btn-primary')) return;
@@ -4895,6 +4978,7 @@
               pre.textContent = r.srt || '';
               curBase = base;  // 下载随切换（下载的是当前显示内容）
               title.textContent = '📄 最终字幕 · ' + (r.lines || 0) + ' 行';
+              qApply(true);  // 时间基换了重放搜索（新时间轴上重新定位命中）
             });
         };
       });

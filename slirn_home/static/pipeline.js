@@ -47,12 +47,15 @@
   // ---- 3 套内置模板（v5：顶层 run_mode + stop_after；null = 跑到底）----
   // REQ-20260918-049：subtitle_review 加 rigor 字段
   // REQ-20260921-NNN：加 run_mode + fine_cut（默认 enabled=false）+ link_person_ids
+  // 2026-09-30 用户要求复选框默认全选：speaker_diarization 三套模板统一 true
+  //   （旧 false 与新默认矛盾，且 semi/full 的 link_person_ids:true 依赖 sd 开启
+  //   才有说话人字段可关联）。模板间的差异保留在 accept_all / link_person_ids。
   var TEMPLATES = {
     // 人工全审：字幕修订后停（让用户审 LLM 建议；默认严谨性 = medium）
     default_tpl: {
       label: '人工全审（字幕修订后停）',
       config: {
-        subtitle_generation: {speaker_diarization: false},
+        subtitle_generation: {speaker_diarization: true},
         subtitle_review: {accept_all_suggestions: false, skip_categories: [], rigor: 'medium', link_person_ids: false},
         rough_cut: {delete_speakers: [], default_decision: 'keep', link_person_ids: false},
         rough_compose: {},
@@ -66,7 +69,7 @@
     semi: {
       label: '半自动（粗剪合成后停）',
       config: {
-        subtitle_generation: {speaker_diarization: false},
+        subtitle_generation: {speaker_diarization: true},
         subtitle_review: {accept_all_suggestions: true, skip_categories: [], rigor: 'medium', link_person_ids: true},
         rough_cut: {delete_speakers: [], default_decision: 'keep', link_person_ids: true},
         rough_compose: {},
@@ -80,7 +83,7 @@
     full: {
       label: '全自动（跑到底）',
       config: {
-        subtitle_generation: {speaker_diarization: false},
+        subtitle_generation: {speaker_diarization: true},
         subtitle_review: {accept_all_suggestions: true, skip_categories: [], rigor: 'medium', link_person_ids: true},
         rough_cut: {delete_speakers: [], default_decision: 'keep', link_person_ids: true},
         rough_compose: {},
@@ -135,7 +138,7 @@
       return '<div class="slirn-pipe-form">'
         + '<div class="slirn-pipe-desc">' + escapeHtml(stage.desc) + '</div>'
         + '<label class="slirn-pipe-field">'
-        + '<input type="checkbox" id="' + fieldId(stage.key, 'sd') + '"' + sdOn + '> 区分说话人（默认关 — 单人视频减少误分）'
+        + '<input type="checkbox" id="' + fieldId(stage.key, 'sd') + '"' + sdOn + '> 区分说话人（多人视频需要；单人视频可关以减少误分）'
         + '</label>'
         + '</div>';
     }
@@ -546,13 +549,15 @@
     var panel = document.getElementById('slirn-pipe-panel');
     if (!panel) return null;
     var cfg = {};
+    // 2026-09-30 用户要求：复选框默认全选 — DOM 元素缺失时的 _checked 回退值
+    // 与后端 default_config 新默认（True）对齐
     cfg.subtitle_generation = {
-      speaker_diarization: _checked(fieldId('subtitle_generation', 'sd'), false)
+      speaker_diarization: _checked(fieldId('subtitle_generation', 'sd'), true)
     };
     cfg.subtitle_review = {
-      accept_all_suggestions: _checked(fieldId('subtitle_review', 'accept-all'), false),
+      accept_all_suggestions: _checked(fieldId('subtitle_review', 'accept-all'), true),
       // REQ-20260921-NNN：自动关联人员ID（后端 handler_subtitle_review 末尾触发 /rev_speaker_link）
-      link_person_ids: _checked(fieldId('subtitle_review', 'link-person'), false),
+      link_person_ids: _checked(fieldId('subtitle_review', 'link-person'), true),
       skip_categories: _val(fieldId('subtitle_review', 'skip-cats'), '').split(',').map(function(x){return x.trim();}).filter(Boolean),
       // REQ-20260918-049：从 radio cards 读 rigor（pipe 通道对 custom 档降级为 medium，
       // 与后端 handler_subtitle_review 校验一致）
@@ -566,11 +571,11 @@
       delete_speakers: _val(fieldId('rough_cut', 'del-spk'), '').split(',').map(function(x){return parseInt(x.trim(), 10);}).filter(function(x){return !isNaN(x);}),
       default_decision: _val(fieldId('rough_cut', 'def-dec'), 'keep') || 'keep',
       // REQ-20260921-NNN：自动关联人员ID（与 delete_speakers 互斥，handler 优先 delete_speakers）
-      link_person_ids: _checked(fieldId('rough_cut', 'link-person'), false)
+      link_person_ids: _checked(fieldId('rough_cut', 'link-person'), true)
     };
     cfg.rough_compose = {};
     cfg.optimize = {
-      accept_all_replacements: _checked(fieldId('optimize', 'accept-rep'), false)
+      accept_all_replacements: _checked(fieldId('optimize', 'accept-rep'), true)
     };
     // REQ-20260921-NNN-radio-mode：精剪合成改单选卡片组（默认 range）。
     //   - 「出整个片」→ enabled=true, range_enabled=false（全片，1-3h）
