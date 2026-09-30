@@ -1492,6 +1492,97 @@ def test_save_fine_global_profile_saves_detected_region(tmp_path: Path):
     assert prof_loaded["params"]["detected_region"] == fake_region
 
 
+def test_apply_fine_global_profile_backfills_all_six(tmp_path: Path):
+    """REQ-20260930-093：套用模板六组全量回填 — detected_region / preview 也覆盖。
+
+    修复前 PROFILE_PARAM_KEYS 只有 4 组，detected_region/preview 存而不用；
+    修复后六组全部写入目标任务 fine_compose。
+    """
+    from tasklib import TaskManager
+    from slirn_home import fine_profiles as fp
+    from slirn_home.app import build_app, _get_fine_compose
+    from fastapi.testclient import TestClient
+
+    video = tmp_path / "test.mp4"
+    video.write_bytes(b"fake-video")
+    mgr = TaskManager(tmp_path)
+    t = mgr.create(name="apply6-target", original_video=video)
+    # 用完整默认值构造模板 params（真实模板由 save 端点从任务 fc 存出，天然完整；
+    # 部分字段会让工作台渲染 KeyError —— 既有特性，不在本需求范围）
+    base = _get_fine_compose(mgr, t.task_id)
+    fake_region = {"x": 0, "y": 85, "width": 1586, "height": 995,
+                   "center_x": 793, "center_y": 582, "algorithm": "pixel"}
+    prof = fp.save_profile(
+        tmp_path, "六组全回填",
+        {
+            "layout": {**base["layout"], "video": {**base["layout"]["video"], "x": 111}},
+            "font": {**base["font"], "size": 40},
+            "output": {**base["output"], "resolution": "720p"},
+            "audio": {**base["audio"], "volume_db": -12.0},
+            "detected_region": fake_region,
+            "preview": {**base["preview"], "start_m": 1, "start_s": 30, "duration": 20},
+        },
+        task_id_origin=t.task_id,
+    )
+
+    built = build_app(tmp_path)
+    client = TestClient(built.app)
+    resp = client.post("/slirn/api/apply_fine_global_profile",
+                       json={"task_id": t.task_id, "profile_id": prof["id"]})
+    body = resp.json()
+    assert body["ok"] is True, f"套用应成功：{body}"
+
+    fc = _get_fine_compose(mgr, t.task_id)
+    assert fc["layout"]["video"]["x"] == 111
+    assert fc["font"]["size"] == 40
+    assert fc["output"]["resolution"] == "720p"
+    assert fc["audio"]["volume_db"] == -12.0
+    assert fc["detected_region"] == fake_region, \
+        f"detected_region 应被模板回填；实际：{fc['detected_region']}"
+    assert fc["preview"]["start_m"] == 1 and fc["preview"]["duration"] == 20, \
+        f"preview 应被模板回填；实际：{fc['preview']}"
+
+
+def test_apply_fine_global_profile_old_template_skips_missing_keys(tmp_path: Path):
+    """REQ-20260930-093 兼容：旧模板 params 缺 detected_region/preview 键 →
+    套用时 `if key in params` 跳过，不动目标任务这两组；其余组正常回填。"""
+    from tasklib import TaskManager
+    from slirn_home import fine_profiles as fp
+    from slirn_home.app import build_app, _get_fine_compose, _save_fine_compose
+    from fastapi.testclient import TestClient
+
+    video = tmp_path / "test.mp4"
+    video.write_bytes(b"fake-video")
+    mgr = TaskManager(tmp_path)
+    t = mgr.create(name="apply-old-target", original_video=video)
+    base = _get_fine_compose(mgr, t.task_id)
+    prof = fp.save_profile(
+        tmp_path, "旧模板四组",
+        {"font": {**base["font"], "size": 28}},  # 其余键全缺（模拟 REQ-076 时代旧模板）
+    )
+    assert "detected_region" not in prof["params"], "测试前置条件：旧模板无 detected_region"
+    assert "preview" not in prof["params"], "测试前置条件：旧模板无 preview"
+
+    fc0 = _get_fine_compose(mgr, t.task_id)
+    fc0["detected_region"] = {"x": 5, "algorithm": "pixel"}
+    fc0["preview"] = {"start_h": 0, "start_m": 2, "start_s": 0, "duration": 15}
+    _save_fine_compose(mgr, t.task_id, fc0)
+
+    built = build_app(tmp_path)
+    client = TestClient(built.app)
+    resp = client.post("/slirn/api/apply_fine_global_profile",
+                       json={"task_id": t.task_id, "profile_id": prof["id"]})
+    body = resp.json()
+    assert body["ok"] is True, f"旧模板套用应成功：{body}"
+
+    fc = _get_fine_compose(mgr, t.task_id)
+    assert fc["font"]["size"] == 28, "font 应正常回填"
+    assert fc["detected_region"] == {"x": 5, "algorithm": "pixel"}, \
+        "旧模板缺 detected_region 键 → 不覆盖目标任务"
+    assert fc["preview"]["duration"] == 15, \
+        "旧模板缺 preview 键 → 不覆盖目标任务"
+
+
 def test_render_workbench_button_renamed_to_local(tmp_path: Path):
     """REQ-20260919-070：「引用参数」按钮文案改为「引用参数（本地）」。"""
     from slirn_home.app import _render_workbench

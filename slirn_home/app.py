@@ -7612,9 +7612,12 @@ def _register_slirn_api(
 
     @app.app.post("/slirn/api/apply_fine_global_profile")
     async def apply_fine_global_profile(body: dict = Body(default_factory=dict)):
-        """把模板 params 写入当前 task 的 fine_compose（覆盖 layout/font/output/audio）。
+        """把模板 params 写入当前 task 的 fine_compose（六组全量回填）。
 
+        REQ-20260930-093：覆盖 layout/font/output/audio/detected_region/preview 六组
+        （此前 detected_region/preview 只存不回填）。
         不动 materials — 任务自己的素材文件路径保持不变。
+        旧模板 params 里缺的键（如 detected_region/preview）→ 不动目标任务对应字段。
         返回新的 wb HTML，UI 直接替换刷新。
         """
         tid = (body.get("task_id") or "").strip()
@@ -7634,7 +7637,7 @@ def _register_slirn_api(
             return _err(f"模板不存在或已删除: {profile_id}")
         fc = _get_fine_compose(mgr, tid)
         params = profile.get("params") or {}
-        # 只覆盖白名单字段（materials 永不动）
+        # 六组全量回填（materials 永不动；旧模板缺的键自动跳过）
         for key in _fine_profiles.PROFILE_PARAM_KEYS:
             if key in params:
                 fc[key] = params[key]
@@ -9462,6 +9465,74 @@ def _register_slirn_api(
         cfg = body.get("config") or {}
         ts = pipeline_service.save_pipeline(outputs_dir, cfg)
         return _ok("", saved_at=ts, toast="⚙️ 流程配置已保存")
+
+    # ---------- 流程配置·全局模板（REQ-20260930-092：面板全部参数存为可复用模板） ----------
+    # 镜像 fine_profiles 的全局 JSON 模式（tasks/_global_flow_profiles.json）。
+    # config 与任务 pipeline.json 的 config 同构，含完整 config 一起返回（体量小）。
+    from slirn_home import flow_profiles as _flow_profiles
+
+    @app.app.post("/slirn/api/list_flow_profiles")
+    async def list_flow_profiles(body: dict = Body(default_factory=dict)):
+        """列出所有流程配置模板（含 config，前端套用/回显匹配用）。"""
+        profiles = _flow_profiles.list_profiles(repo_root)
+        return _ok(profiles=[
+            {
+                "id": p.get("id"),
+                "name": p.get("name"),
+                "saved_at": p.get("saved_at"),
+                "task_id_origin": p.get("task_id_origin"),
+                "config": p.get("config") or {},
+            }
+            for p in profiles
+        ])
+
+    @app.app.post("/slirn/api/save_flow_profile")
+    async def save_flow_profile(body: dict = Body(default_factory=dict)):
+        """把面板当前整套配置（红框内全部参数）保存为命名模板。
+
+        config 优先取 body.config（面板实时值）；缺失时兜底读任务已保存的
+        pipeline.json（自动保存开启后两者一致）。服务端 normalize 后落盘。
+        """
+        tid = (body.get("task_id") or "").strip()
+        name = (body.get("name") or "").strip()
+        config = body.get("config") or {}
+        if not tid:
+            return _err("缺少 task_id")
+        if not name:
+            return _err("模板名不能为空")
+        if len(name) > 30:
+            return _err("模板名不能超过 30 字")
+        try:
+            mgr.get(tid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"任务不存在: {e}")
+        if not config:
+            outputs_dir = mgr.tasks_dir / tid / "outputs"
+            data = pipeline_service.load_pipeline(outputs_dir)
+            config = (data or {}).get("config") or {}
+        profile = _flow_profiles.save_profile(repo_root, name, config,
+                                              task_id_origin=tid)
+        return _ok(
+            profile={
+                "id": profile["id"],
+                "name": profile["name"],
+                "saved_at": profile["saved_at"],
+                "task_id_origin": profile["task_id_origin"],
+                "config": profile.get("config") or {},
+            },
+            toast=f"✅ 已保存流程模板「{profile['name']}」",
+        )
+
+    @app.app.post("/slirn/api/delete_flow_profile")
+    async def delete_flow_profile(body: dict = Body(default_factory=dict)):
+        """从全局 JSON 移除指定流程模板（不影响已应用的任务）。"""
+        profile_id = (body.get("profile_id") or "").strip()
+        if not profile_id:
+            return _err("缺少 profile_id")
+        ok = _flow_profiles.delete_profile(repo_root, profile_id)
+        if not ok:
+            return _err(f"模板不存在或已删除: {profile_id}")
+        return _ok(toast="🗑 已删除流程模板")
 
     @app.app.post("/slirn/api/pipeline_run")
     async def pipeline_run(body: dict = Body(default_factory=dict)):

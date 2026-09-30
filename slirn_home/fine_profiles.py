@@ -1,7 +1,8 @@
 """精剪视频·全局参数模板（REQ-20260919-061 扩展）。
 
-用户把当前任务的「layout / font / output / audio」参数保存为命名模板，
-可在其他任务一键应用（弹窗确认后覆盖）。素材（materials）不进模板。
+用户把当前任务的「layout / font / output / audio / detected_region / preview」
+六组参数保存为命名模板，可在其他任务一键应用（弹窗确认后覆盖，六组全量回填）。
+素材（materials）不进模板。
 
 存储：``<repo_root>/tasks/_global_fine_profiles.json`` —
 与 llm_config 同级（独立 JSON 文件 + atomic write + 损坏回退默认），
@@ -14,7 +15,8 @@
       "profiles": [
         {"id": "p_20260919_xxx", "name": "教学片头",
          "saved_at": "2026-09-19T15:30:00", "task_id_origin": "task_xxx",
-         "params": {"layout": {...}, "font": {...}, "output": {...}, "audio": {...}}},
+         "params": {"layout": {...}, "font": {...}, "output": {...}, "audio": {...},
+                    "detected_region": {...}|null, "preview": {...}}},
         ...
       ],
       "updated_at": "..."
@@ -37,18 +39,18 @@ log = logging.getLogger(__name__)
 
 GLOBAL_PROFILES_REL = "tasks/_global_fine_profiles.json"
 
-# 模板载荷包含的 4 个子字段（其余 — 如 materials — 不进模板）
-PROFILE_PARAM_KEYS = ("layout", "font", "output", "audio")
+# 模板载荷包含的 6 组子字段（其余 — 如 materials — 不进模板）。
+# REQ-20260930-093：套用模板时六组全量回填（此前 detected_region/preview 只存不回填，
+# 推翻 DESIGN-20260920-076 的「apply 不动 detected_region」决策）。
+# 旧模板（REQ-076 时代保存）params 里没有 detected_region/preview 键 →
+# apply 端 `if key in params` 天然跳过，不动目标任务的这两组，无需数据迁移。
+PROFILE_PARAM_KEYS = ("layout", "font", "output", "audio", "detected_region", "preview")
 
-# REQ-20260920-076：保存到模板时额外携带的字段。
-# 与 PROFILE_PARAM_KEYS 的区别：
-# - PROFILE_PARAM_KEYS 是「应用模板时覆盖哪些字段」白名单（apply 时不动 detected_region
-#   因为它是任务背景图强相关的 4 角点坐标，跨任务复用没意义）。
-# - SAVE_PARAM_KEYS 是「保存到模板时保留哪些字段」白名单（detected_region 也存下来，
-#   这样导出 JSON 与任务级 export 同口径；旧版模板可能没有这个字段，导出时 .get() 返回 None）。
-#   REQ-20260921-NNN-preview-export：与任务级 export_fine_params (v4) 对齐，加 preview
-#   （生成预览参数 start_h/m/s + duration），让全局模板的 params 字段集合与任务级保持一致。
-SAVE_PARAM_KEYS = PROFILE_PARAM_KEYS + ("detected_region", "preview")
+# 保存与套用同口径（六组对称）：save 存多少，apply 就回填多少。
+# 历史：REQ-20260920-076 曾让 SAVE 比 APPLY 多存 detected_region（仅为导出 JSON 与
+# 任务级同口径）；REQ-20260921-NNN-preview-export 再加 preview；2026-09-30 用户
+# 要求六组全部回填，两个白名单合并。
+SAVE_PARAM_KEYS = PROFILE_PARAM_KEYS
 
 
 def _path(repo_root: Path | str) -> Path:
@@ -106,10 +108,10 @@ def _unique_name(existing: Iterable[dict], base: str) -> str:
 
 
 def _sanitize_params(params: dict) -> dict:
-    """只保留 SAVE_PARAM_KEYS 中的子字段，避免塞入 materials 等意外数据。
+    """只保留 SAVE_PARAM_KEYS（= PROFILE_PARAM_KEYS，六组）中的子字段，
+    避免塞入 materials 等意外数据。
 
-    REQ-20260920-076：相比 PROFILE_PARAM_KEYS 多保留 detected_region（save 时存；
-    apply 时由 apply_fine_global_profile 的 PROFILE_PARAM_KEYS 白名单另作限制）。
+    detected_region / preview 缺键的旧模板保持缺键（apply 端 `if key in params` 跳过）。
     """
     return {k: params.get(k) for k in SAVE_PARAM_KEYS if k in params}
 
@@ -138,7 +140,7 @@ def save_profile(
     params: dict,
     task_id_origin: str = "",
 ) -> dict:
-    """把 params (4 子字段) 保存为新模板。重名时自动加 `(2)`。
+    """把 params (6 组子字段) 保存为新模板。重名时自动加 `(2)`。
 
     返回新建的 profile dict（含 id / name / saved_at / params）。
     """

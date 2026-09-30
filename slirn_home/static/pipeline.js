@@ -381,8 +381,15 @@
       + '<option value="default_tpl">内置：人工全审</option>'
       + '<option value="semi">内置：半自动</option>'
       + '<option value="full">内置：全自动</option>'
+      // REQ-20260930-092：用户模板（fp:<id>）由 _populateFlowTemplates 动态插入到
+      // 「另存为模板」之前；整套面板参数（复选框选中/不选中、单选、输入、运行模式）
+      // 可命名保存、跨任务复用
+      + '<option value="fp:_save_as">💾 将当前配置存为模板…</option>'
       + '<option value="custom">自定义</option>'
       + '</select>'
+      + '<button type="button" class="slirn-btn-mini slirn-pipe-tpl-del"'
+      + ' data-action="pipe-flow-tpl-del" hidden'
+      + ' title="删除当前选中的流程模板（不影响已应用的任务）">🗑</button>'
       + '<button type="button" class="slirn-btn slirn-btn-danger slirn-btn-sm" data-action="pipe-stop">⏹ 停止</button>'
       + '<button type="button" class="slirn-btn slirn-btn-sm" data-action="pipe-save">💾 保存配置</button>'
       + '<button type="button" class="slirn-btn slirn-btn-sm" data-action="pipe-status-show" hidden title="显示状态条（点状态条 ▾ 收起后点此恢复）">📊 状态</button>'
@@ -413,6 +420,115 @@
       + '</details>';
     // REQ-20260918-049 v2：渲染完后同步「📊 状态」按钮可见性（status hidden 时显示）
     refreshStatusToggleBtn();
+    // REQ-20260930-092：渲染后拉用户流程模板填下拉 + 按当前 config 回显匹配
+    // （覆盖 loadPanel / 套用模板 / 重置 三种重渲染路径 — 此前模板下拉从不回显）
+    try { _populateFlowTemplates(); } catch (e) { /* 静默：模板拉取失败不挡主流程 */ }
+  }
+
+  // ============================================================
+  // REQ-20260930-092：流程配置·用户模板（跨任务复用）+ 面板自动保存
+  // 红框内全部参数（含每个复选框的选中/不选中）：
+  //   1) 可「💾 存为模板」命名复用（tasks/_global_flow_profiles.json）
+  //   2) 任何改动 800ms 防抖自动写入本任务 pipeline.json（无需点💾保存）
+  // ============================================================
+  var _FLOW_TPL_PROFILES = [];
+  // 最近一次「套用」的模板 value（'fp:<id>' / 内置 key）。
+  // 套用是确定性事实（不等深比较）；用户手改面板任何控件 → 置 null 回「自定义」。
+  var _tplAppliedValue = null;
+
+  // 深子集比较：sub 的每个键在 sup 中都存在且递归相等。
+  // 内置模板 config 是部分字段（duration:null / 无 range_enabled），
+  // readCurrentConfig() 重建的是完整 config → 用子集而非全等，
+  // 用户模板（后端 validate_config 规范化的完整形态）子集匹配 == 全等。
+  function _cfgContains(sup, sub) {
+    if (sup === sub) return true;
+    if (!sub || typeof sub !== 'object') return sup === sub;
+    if (!sup || typeof sup !== 'object') return false;
+    var keys = Object.keys(sub);
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i];
+      if (!(k in sup) || !_cfgContains(sup[k], sub[k])) return false;
+    }
+    return true;
+  }
+
+  // 当前面板应显示的模板 value：套用标记 > 用户模板(子集匹配) > 内置(子集匹配) > custom
+  function _matchTemplateValue(cfg) {
+    if (_tplAppliedValue) return _tplAppliedValue;
+    for (var i = 0; i < _FLOW_TPL_PROFILES.length; i++) {
+      if (_cfgContains(cfg, _FLOW_TPL_PROFILES[i].config)) return 'fp:' + _FLOW_TPL_PROFILES[i].id;
+    }
+    var tkeys = Object.keys(TEMPLATES);
+    for (var j = 0; j < tkeys.length; j++) {
+      if (_cfgContains(cfg, TEMPLATES[tkeys[j]].config)) return tkeys[j];
+    }
+    return 'custom';
+  }
+
+  // 删除按钮仅当选中用户模板时可见
+  function _syncTplDelBtn() {
+    var sel = document.getElementById('slirn-pipe-template');
+    var btn = document.querySelector('#slirn-pipe-panel [data-action="pipe-flow-tpl-del"]');
+    if (!btn) return;
+    var v = sel ? String(sel.value || '') : '';
+    btn.hidden = !(v.indexOf('fp:') === 0 && v !== 'fp:_save_as');
+  }
+
+  // 拉用户模板列表并重建下拉 options；selectValue 强制选中（如刚保存的新模板），
+  // 缺省按 readCurrentConfig() 深比较回显
+  function _populateFlowTemplates(selectValue) {
+    var sel = document.getElementById('slirn-pipe-template');
+    if (!sel) return Promise.resolve();
+    return fetch(SLIRN_API + '/list_flow_profiles', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({})
+    }).then(function(r) { return r.json(); }).then(function(j) {
+      _FLOW_TPL_PROFILES = (j && j.ok && j.profiles) ? j.profiles : [];
+      var html = ''
+        + '<option value="default_tpl">内置：人工全审</option>'
+        + '<option value="semi">内置：半自动</option>'
+        + '<option value="full">内置：全自动</option>';
+      _FLOW_TPL_PROFILES.forEach(function(p) {
+        html += '<option value="fp:' + escapeHtml(p.id) + '">📋 ' + escapeHtml(p.name) + '</option>';
+      });
+      html += '<option value="fp:_save_as">💾 将当前配置存为模板…</option>'
+        + '<option value="custom">自定义</option>';
+      sel.innerHTML = html;
+      var want = selectValue || _matchTemplateValue(readCurrentConfig());
+      sel.value = want;
+      if (sel.value !== want) sel.value = _matchTemplateValue(readCurrentConfig());
+      _syncTplDelBtn();
+    }).catch(function(e) { console.warn('[flow-tpl] 模板列表拉取失败', e); });
+  }
+
+  // ---- 自动保存：面板内任何参数改动即落盘本任务 pipeline.json ----
+  var _autoSaveTimer = null;
+  function _autoSaveSchedule() {
+    if (_autoSaveTimer) clearTimeout(_autoSaveTimer);
+    _autoSaveTimer = setTimeout(_autoSaveNow, 800);
+  }
+  function _autoSaveNow() {
+    if (_autoSaveTimer) { clearTimeout(_autoSaveTimer); _autoSaveTimer = null; }
+    var panel = document.getElementById('slirn-pipe-panel');
+    var taskId = panel ? panel.getAttribute('data-task-id') : null;
+    if (!taskId) return;
+    var cfg = readCurrentConfig();
+    if (!cfg) return;
+    postJSON(SLIRN_API + '/pipeline_save', {task_id: taskId, config: cfg}).then(function(r) {
+      if (r && r.ok) {
+        var u = panel.querySelector('.slirn-pipe-updated');
+        if (u && r.saved_at) u.textContent = '最近保存：' + r.saved_at + '（自动）';
+        // 套用模板后的落盘 → 维持下拉选中该模板；手改路径已同步置「自定义」，
+        // 这里不再重匹配（避免改动不影响模板字段的参数时把下拉翻回内置模板）
+        if (_tplAppliedValue) {
+          var sel = document.getElementById('slirn-pipe-template');
+          if (sel && sel.value !== 'fp:_save_as') sel.value = _tplAppliedValue;
+        }
+        _syncTplDelBtn();
+      } else {
+        console.warn('[pipe-autosave] 保存失败', r && r.error);
+      }
+    }).catch(function(e) { console.warn('[pipe-autosave]', e); });
   }
 
   // ---- v4 兼容：把 v3 per-stage boolean / v2 per-stage string 字段丢弃；顶层 stop_after 保留 ----
@@ -1213,6 +1329,10 @@
 
   // ---- 入口 ----
   function loadPanel(taskId) {
+    // REQ-20260930-092：切任务重置模板态与自动保存防抖（防上个任务的
+    // 套用标记/待写定时器串到新任务）
+    _tplAppliedValue = null;
+    if (_autoSaveTimer) { clearTimeout(_autoSaveTimer); _autoSaveTimer = null; }
     postJSON(SLIRN_API + '/pipeline_get', {task_id: taskId}).then(function(r) {
       if (!r || !r.ok) {
         toast('流程配置读取失败：' + (r && r.error || '未知错误'), 'error');
@@ -1281,10 +1401,16 @@
         toast(r.toast || '⚙️ 已保存');
         var panel = document.getElementById('slirn-pipe-panel');
         if (panel) {
+          // REQ-20260930-092：后端 pipeline_save 返回的是 saved_at（此前误读
+          // updated_at → 「最近保存」时间戳从不更新）；模板下拉按当前配置重匹配，
+          // 而非一律强制「自定义」（恰好等于某模板时保持回显）
           var sel = document.getElementById('slirn-pipe-template');
-          if (sel) sel.value = 'custom';
+          if (sel) sel.value = _matchTemplateValue(cfg);
+          _syncTplDelBtn();
           var u = panel.querySelector('.slirn-pipe-updated');
-          if (u && r.updated_at) u.textContent = '最近保存：' + r.updated_at;
+          if (u && (r.saved_at || r.updated_at)) {
+            u.textContent = '最近保存：' + (r.saved_at || r.updated_at);
+          }
         }
       } else {
         toast('保存失败：' + (r && r.error || '未知错误'), 'error');
@@ -1400,6 +1526,30 @@
     var action = t.getAttribute('data-action');
     if (!action) return;
     if (action === 'pipe-save') { ev.preventDefault(); saveConfig(tid); return; }
+    // REQ-20260930-092：删除当前选中的用户流程模板（仅删库，不动面板/任务配置）
+    if (action === 'pipe-flow-tpl-del') {
+      ev.preventDefault();
+      var tplSel = document.getElementById('slirn-pipe-template');
+      var tv = tplSel ? String(tplSel.value || '') : '';
+      if (tv.indexOf('fp:') !== 0 || tv === 'fp:_save_as') return;
+      var delId = tv.slice(3);
+      var delProf = null;
+      for (var di = 0; di < _FLOW_TPL_PROFILES.length; di++) {
+        if (_FLOW_TPL_PROFILES[di].id === delId) { delProf = _FLOW_TPL_PROFILES[di]; break; }
+      }
+      if (!delProf) return;
+      if (!window.confirm('确认删除流程模板「' + delProf.name + '」？不影响已套用它的任务。')) return;
+      postJSON(SLIRN_API + '/delete_flow_profile', {profile_id: delId}).then(function(r) {
+        if (r && r.ok) {
+          toast(r.toast || '🗑 已删除流程模板');
+          _tplAppliedValue = null;
+          _populateFlowTemplates('custom');
+        } else {
+          toast('删除失败：' + (r && r.error || '未知错误'), 'error');
+        }
+      });
+      return;
+    }
     if (action === 'pipe-run') {
       ev.preventDefault();
       // REQ-20260918-049：智能按钮 data-since 在按钮上（renderPanel 按 history 自适应生成）
@@ -1453,7 +1603,7 @@
     }
   });
 
-  // ---- 模板切换 + run_mode 切换：v4/v5 直接重渲染整个面板 ----
+  // ---- 模板切换（内置/用户/另存为）+ run_mode 切换 + 自动保存 ----
   document.addEventListener('change', function(ev) {
     var t = ev.target;
     if (!t || !t.getAttribute) return;
@@ -1461,11 +1611,50 @@
       var panel = document.getElementById('slirn-pipe-panel');
       if (!panel) return;
       var tplKey = t.value;
+      var taskId = panel.getAttribute('data-task-id');
+      // REQ-20260930-092：💾 把当前整套面板参数存为命名模板（面板不动，仅存库）
+      if (tplKey === 'fp:_save_as') {
+        var name = window.prompt('模板名（保存红框内当前全部参数 — 复选框选中/不选中、单选、输入、运行模式 — 任何任务可套用）：', '');
+        if (!name || !name.trim()) { _populateFlowTemplates(); return; }
+        postJSON(SLIRN_API + '/save_flow_profile', {
+          task_id: taskId, name: name.trim(), config: readCurrentConfig()
+        }).then(function(r) {
+          if (r && r.ok) {
+            toast(r.toast || '✅ 模板已保存');
+            _populateFlowTemplates('fp:' + (r.profile && r.profile.id));
+          } else {
+            toast('保存模板失败：' + (r && r.error || '未知错误'), 'error');
+            _populateFlowTemplates();
+          }
+        });
+        return;
+      }
+      // REQ-20260930-092：套用用户模板 → 重渲染面板 + 自动落盘本任务 + 回选该模板
+      if (tplKey.indexOf('fp:') === 0) {
+        var pid = tplKey.slice(3);
+        var prof = null;
+        for (var i = 0; i < _FLOW_TPL_PROFILES.length; i++) {
+          if (_FLOW_TPL_PROFILES[i].id === pid) { prof = _FLOW_TPL_PROFILES[i]; break; }
+        }
+        if (!prof) {
+          toast('模板不存在（可能已删除），已刷新列表', 'error');
+          _populateFlowTemplates();
+          return;
+        }
+        renderPanel(taskId, {config: prof.config, updated_at: '模板 ' + prof.name, _fromTemplate: true});
+        toast('已载入流程模板：' + prof.name);
+        _tplAppliedValue = 'fp:' + pid;
+        _populateFlowTemplates('fp:' + pid);
+        _autoSaveNow();  // 套用即落盘（自动保存口径）
+        return;
+      }
       if (tplKey !== 'custom' && TEMPLATES[tplKey]) {
         var cfg = TEMPLATES[tplKey].config;
-        var taskId = panel.getAttribute('data-task-id');
         renderPanel(taskId, {config: cfg, updated_at: '模板 ' + TEMPLATES[tplKey].label, _fromTemplate: true});
         toast('已载入模板：' + TEMPLATES[tplKey].label);
+        _tplAppliedValue = tplKey;
+        _populateFlowTemplates(tplKey);
+        _autoSaveNow();
       }
       return;
     }
@@ -1481,6 +1670,37 @@
         flowSel.disabled = false;
         toast('已切到「停在指定阶段」：从下面下拉选择停在哪个阶段');
       }
+      _tplAppliedValue = null;  // 用户手改 → 脱离模板态
+      var rs = document.getElementById('slirn-pipe-template');
+      if (rs) rs.value = 'custom';
+      _syncTplDelBtn();
+      _autoSaveSchedule();
+      return;
+    }
+    // REQ-20260930-092：自动保存 — 面板内任何 input/select/textarea 改动即存。
+    // 模板下拉在上面分支已全部 return，不会进这里；程序性改 DOM 不触发 change，
+    // 不会自触发循环。手改 → 清套用标记、下拉回「自定义」。
+    if (t.closest && t.closest('#slirn-pipe-panel') &&
+        t.matches && t.matches('input, select, textarea')) {
+      _tplAppliedValue = null;
+      var asSel = document.getElementById('slirn-pipe-template');
+      if (asSel) asSel.value = 'custom';
+      _syncTplDelBtn();
+      _autoSaveSchedule();
+    }
+  });
+  // 文本类参数（热词类别 / 删除说话人 / 导出起点 / 时长等）：input 事件 + 防抖，
+  // 不等失焦才存
+  document.addEventListener('input', function(ev) {
+    var t = ev.target;
+    if (!t || !t.closest || !t.matches) return;
+    if (t.closest('#slirn-pipe-panel') &&
+        t.matches('input[type="text"], textarea')) {
+      _tplAppliedValue = null;
+      var tiSel = document.getElementById('slirn-pipe-template');
+      if (tiSel) tiSel.value = 'custom';
+      _syncTplDelBtn();
+      _autoSaveSchedule();
     }
   });
 
