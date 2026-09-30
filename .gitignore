@@ -58,6 +58,7 @@ tmp_test_vid/
 # Local browser/CDP profiles and one-off debug helpers
 /tools/_edge_*/
 /tools/_*.py
+/tools/_*.png
 /tools/__pycache__/
 /docs/images/manual/_*.png
 

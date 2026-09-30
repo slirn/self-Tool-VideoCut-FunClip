@@ -56,7 +56,7 @@
   - `funclip/videoclipper.py` — 上游 `VideoClipper` 核心类（**不可直接修改**）
   - `funclip/llm/` — 4 个 LLM 客户端封装
   - `funclip/utils/` — 工具函数
-  - `slirn_home/` — 本地扩展层（28 个 `.py` 文件：auth / create_task / hotword / pipeline / compose / fine / revision / optimize / cutlist / execution_history / asr_service / cut_speaker / rev_speaker / llm_config / fine_profiles / bootstrap_admin / paths / task_list 等）
+  - `slirn_home/` — 本地扩展层（auth / create_task / hotword / pipeline / compose / fine / revision / optimize / cutlist / execution_history / asr_service / cut_speaker / rev_speaker / llm_config / fine_profiles / short_video_service / short_video_render / short_video_ui / bootstrap_admin / paths / task_list 等）
   - `slirn/skill/` — 通过 submodule 引用的私有 Skill 源（6 个 Skill：video-subtitle-extractor / long-video-subtitle-cleaner / course-content-review / manual-review-finalizer / video-timestamp-cutter / video-subtitle-editing-pipeline）
   - `slirn/tasklib/` — 跨 Skill 共享库（models / schema / time_utils / video / manager / hotword_lib / exceptions）
 
@@ -119,7 +119,7 @@
 
 - **统一验收平台**：暂未接入（`Agent-Acceptance-Platform v0.2.0` 可选）
 - **手动验证流程**：`docs/sop/05-verification.md` + `pytest tests/`
-- **当前测试规模**：27 个 `test_*.py` + 1 个 `conftest.py`；REQM pending-task-execution-log 显示 REQ-094 后达 633 passed / 0 failed
+- **当前测试规模**：26 个 `test_*.py` + 1 个 `conftest.py`；短视频混剪完成后全量 1073 passed / 0 failed
 - **覆盖率**：`pytest-cov>=4.0` 在 `[project.optional-dependencies].dev`，**未配置** `.coveragerc` / `pyproject.toml [tool.coverage.*]`
 - **Linter**：ruff（`pyproject.toml` 配置；`extend-exclude` 排除 `slirn`、`funclip`、`.venv`）
 
@@ -131,6 +131,7 @@
   - `docs/REQM/REQ-*.md` 和 `docs/verification/VERIFICATION-*.md` 作为事件追踪
 - **日志开关**：默认 INFO；`Stop` Hook 跑测试时 `--tb=line -q`（不阻断）
 - **流程追踪**：`execution_history.py`（`slirn_home/`，记录精剪 / 合成 / 任务执行历史）
+- **短视频混剪**：独立项目状态与渲染器（`short_video_service.py` / `short_video_render.py` / `short_video_ui.py`），复用任务素材、LLM、认证和异步 job；不改长视频六阶段
 - **数据库表**：无（用本地 JSON 文件 + `tasks/` 目录）
 - **敏感字段脱敏规则**：用户密码使用 `pbkdf2_sha256$200000$<salt_hex>$<hash_hex>`；session cookie HttpOnly + SameSite=Lax
 - **诊断页面**：Gradio 默认 UI（`/`、`/auth/login`、`/auth/me`、`/auth/bootstrap`）+ `bootstrap_admin.py` CLI 工具
