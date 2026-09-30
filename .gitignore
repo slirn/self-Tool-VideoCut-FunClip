@@ -55,6 +55,12 @@ tmp_test_vid/
 /tasks/
 /slirn_home/tasks/
 
+# Local browser/CDP profiles and one-off debug helpers
+/tools/_edge_*/
+/tools/_*.py
+/tools/__pycache__/
+/docs/images/manual/_*.png
+
 # agent-standards:begin
 .agent/backups/
 # agent-standards:end
