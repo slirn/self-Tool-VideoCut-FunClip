@@ -1,5 +1,10 @@
 # DESIGN-20260920-076 — 全局参数模板导出包含 detected_region
 
+> ⚠️ **2026-09-30 注记**：本文「apply 时不覆盖 detected_region」的决策已被
+> [REQ-20260930-093](../REQM/REQ-20260930-093-fine-template-apply-all-six.md)
+> 推翻 —— 套用模板时六组参数（含 detected_region / preview）全量回填。
+> 保存口径部分（导出同口径）仍然有效。
+
 ## 1. 背景
 
 接 [REQ-20260920-076](REQ-20260920-076-global-template-include-detected-region.md)。任务级和模板级「📤 导出参数」JSON 顶层字段不一致 —— 模板级少了 `detected_region`。
