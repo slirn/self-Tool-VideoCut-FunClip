@@ -4777,11 +4777,75 @@ input[type="checkbox"]:focus-visible {
   grid-column: 1 / -1;
 }
 
-.slirn-sv-check {
+.slirn-sv-toggle {
+  position: relative;
+  display: flex !important;
   flex-direction: row !important;
   align-items: center;
+  gap: 10px;
+  width: fit-content;
+  max-width: 360px;
+  min-height: 40px;
+  box-sizing: border-box;
+  padding: 6px 12px;
+  border: 1px solid var(--border-color, var(--border));
+  border-radius: 8px;
+  cursor: pointer;
+  user-select: none;
   align-self: end;
-  grid-column: 1 / -1;
+  justify-self: start;
+}
+
+.slirn-sv-toggle input[type="checkbox"] {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.slirn-sv-toggle-track {
+  position: relative;
+  flex: 0 0 42px;
+  width: 42px;
+  height: 24px;
+  border-radius: 999px;
+  background: var(--border-color, #cbd5e1);
+  transition: background 0.18s ease;
+}
+
+.slirn-sv-toggle-track::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.24);
+  transition: transform 0.18s ease;
+}
+
+.slirn-sv-toggle input:checked + .slirn-sv-toggle-track {
+  background: #667eea;
+}
+
+.slirn-sv-toggle input:checked + .slirn-sv-toggle-track::after {
+  transform: translateX(18px);
+}
+
+.slirn-sv-toggle input:focus-visible + .slirn-sv-toggle-track {
+  outline: 2px solid #667eea;
+  outline-offset: 3px;
+}
+
+.slirn-sv-create-btn {
+  align-self: end;
+  justify-self: start;
+  width: auto;
 }
 
 .slirn-sv-grid {

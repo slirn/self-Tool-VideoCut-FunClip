@@ -53,8 +53,12 @@ def render_project_list(tasks: list[dict], projects: list[dict]) -> str:
       <label>来源任务<select id="slirn-sv-create-task">{task_options}</select></label>
       <label>项目名<input id="slirn-sv-create-name" placeholder="例如：产品种草混剪"></label>
       <label class="slirn-sv-wide">创作 Brief<textarea id="slirn-sv-create-brief" rows="3" placeholder="说明受众、卖点、语气、必须出现的素材和行动号召"></textarea></label>
-      <label class="slirn-sv-check"><input type="checkbox" id="slirn-sv-create-llm" checked> 允许调用外部 LLM</label>
-      <button class="slirn-btn slirn-btn-primary" data-action="sv-create">创建项目</button>
+      <label class="slirn-sv-toggle">
+        <input type="checkbox" id="slirn-sv-create-llm" checked>
+        <span class="slirn-sv-toggle-track"></span>
+        <span>允许调用外部 LLM</span>
+      </label>
+      <button class="slirn-btn slirn-btn-primary slirn-sv-create-btn" data-action="sv-create">创建项目</button>
     </div>
   </div>
   <div class="slirn-sv-section-title">项目列表</div>
@@ -250,7 +254,11 @@ def render_project(project: dict, all_tasks: list[dict] | None = None) -> str:
     <label>最短秒<input type="number" min="5" data-sv-config="duration_min" value="{esc(cfg.get("duration_min"))}"></label>
     <label>最长秒<input type="number" min="5" data-sv-config="duration_max" value="{esc(cfg.get("duration_max"))}"></label>
     <label>转场时长<input type="number" min="0.1" max="2" step="0.1" data-sv-config="transition_duration" value="{esc(cfg.get("transition_duration"))}"></label>
-    <label class="slirn-sv-check"><input type="checkbox" data-sv-config="allow_external_llm" {"checked" if cfg.get("allow_external_llm") else ""}> 允许外部 LLM</label>
+    <label class="slirn-sv-toggle">
+      <input type="checkbox" data-sv-config="allow_external_llm" {"checked" if cfg.get("allow_external_llm") else ""}>
+      <span class="slirn-sv-toggle-track"></span>
+      <span>允许调用外部 LLM</span>
+    </label>
   </div>
   <div class="slirn-sv-section">
     <div class="slirn-sv-section-title">素材库</div>
