@@ -62,6 +62,6 @@ tmp_test_vid/
 /tools/__pycache__/
 /docs/images/manual/_*.png
 
-# agent-standards:begin
-.agent/backups/
-# agent-standards:end
+# Standards & Agent 入口：项目负责人决定不追踪（2026-10-03）
+AGENTS.md
+.agent/
