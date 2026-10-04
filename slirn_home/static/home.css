@@ -5147,6 +5147,8 @@ input[type="checkbox"]:focus-visible {
   border-radius: 12px;
   margin-bottom: 14px;
   overflow: hidden;
+  min-width: 0;
+  max-width: 100%;
 }
 .slirn-stage-head {
   display: flex;
@@ -5175,6 +5177,9 @@ input[type="checkbox"]:focus-visible {
 }
 .slirn-stage-body {
   padding: 14px 16px 16px;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
 }
 .slirn-stage-error {
   margin-top: 8px;
@@ -5288,6 +5293,8 @@ input[type="checkbox"]:focus-visible {
   background: #fafafa;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
+  box-sizing: border-box;
+  min-width: 0;
 }
 .slirn-stage3-hl-row:hover {
   background: #f5f3ff;
@@ -5297,9 +5304,11 @@ input[type="checkbox"]:focus-visible {
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
 }
 .slirn-stage3-hl-title {
-  flex: 1;
+  flex: 1 1 auto;
+  min-width: 0;
   padding: 4px 8px;
   border: 1px solid #cbd5e1;
   border-radius: 4px;
@@ -5314,8 +5323,10 @@ input[type="checkbox"]:focus-visible {
   box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.15);
 }
 .slirn-stage3-hl-meta {
-  font-size: 12px;
+  font-size: 11px;
+  color: #64748b;
   white-space: nowrap;
+  flex-shrink: 0;
 }
 .slirn-stage3-hl-preview {
   margin-top: 8px;
@@ -5327,10 +5338,14 @@ input[type="checkbox"]:focus-visible {
   line-height: 1.65;
   max-height: 160px;
   overflow-y: auto;
+  overflow-x: hidden;
+  word-break: break-word;
+  box-sizing: border-box;
 }
 .slirn-stage3-hl-sub {
   padding: 2px 0;
   color: #f1f5f9;
+  overflow-wrap: anywhere;
 }
 .slirn-stage3-hl-sub + .slirn-stage3-hl-sub {
   border-top: 1px dashed rgba(148, 163, 184, 0.25);
@@ -5390,21 +5405,6 @@ input[type="checkbox"]:focus-visible {
   display: flex;
   flex-direction: column;
   gap: 6px;
-}
-.slirn-stage3-hl-row {
-  display: grid;
-  grid-template-columns: 36px 1fr auto auto;
-  gap: 10px;
-  align-items: center;
-  padding: 6px 10px;
-  background: var(--bg-soft, #f8fafc);
-  border-radius: 8px;
-}
-.slirn-stage3-hl-row input[data-hl-field="title"] {
-  border: 1px solid var(--border, #e2e8f0);
-  border-radius: 6px;
-  padding: 4px 8px;
-  font-size: 13px;
 }
 .slirn-stage4-list,
 .slirn-stage5-list,
