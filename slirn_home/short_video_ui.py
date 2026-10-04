@@ -286,7 +286,7 @@ def _stage3_analyze(project: dict) -> str:
         err = s3.get("error") or "失败"
         error_html = f'<div class="slirn-stage-error">{esc(err)}</div>'
 
-    # 高亮条目可编辑标题 + 删除 + 显示字幕预览（REQ-20261004-UX：让用户能直接看到拆分结果）
+    # 高亮条目可编辑标题 + 删除 + 完整字幕预览（REQ-20261004-UX：用户要直接看到全部文字）
     hl_rows = []
     for hl in (s3.get("highlights") or []):
         idx = hl.get("index") or len(hl_rows) + 1
@@ -296,21 +296,22 @@ def _stage3_analyze(project: dict) -> str:
         dur = (end - start) / 1000.0
         sub_lines = hl.get("subtitle_lines") or []
         sub_count = len(sub_lines)
-        # 字幕预览：每行 `<src_index> 文本`，最多 5 行；多于则追加 "… 还有 N 行"
+        # 字幕预览：渲染全部行（不再限制 5 行）；每行 `<src_index> 文本`；
+        # 同时把完整字幕文本塞到 data-sub-text 供「复制」按钮用
+        full_text = "\n".join(
+            f"[{int(sl.get('src_index') or 0)}] {str(sl.get('text') or '')}"
+            for sl in sub_lines
+        )
         preview_items = []
-        for sl in sub_lines[:5]:
+        for sl in sub_lines:
             t = esc(str(sl.get("text") or ""))
             src = int(sl.get("src_index") or 0)
             preview_items.append(
                 f'<div class="slirn-stage3-hl-sub"><span class="slirn-stage3-hl-src">[{src}]</span> {t}</div>'
             )
-        if sub_count > 5:
-            preview_items.append(
-                f'<div class="slirn-stage3-hl-more">… 还有 {sub_count - 5} 行字幕</div>'
-            )
         sub_preview = "".join(preview_items) or '<div class="slirn-sv-muted">无字幕</div>'
         hl_rows.append(
-            f'<div class="slirn-stage3-hl-row" data-hl-index="{idx}">'
+            f'<div class="slirn-stage3-hl-row" data-hl-index="{idx}" data-sub-text="{esc(full_text)}">'
             f'<div class="slirn-stage3-hl-head">'
             f'<span class="slirn-sv-row-no">#{idx}</span>'
             f'<input type="text" class="slirn-stage3-hl-title" data-hl-field="title" value="{esc(title)}" placeholder="标题">'

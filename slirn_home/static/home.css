@@ -5336,7 +5336,7 @@ input[type="checkbox"]:focus-visible {
   border-radius: 6px;
   font-size: 12px;
   line-height: 1.65;
-  max-height: 160px;
+  max-height: 480px;
   overflow-y: auto;
   overflow-x: hidden;
   word-break: break-word;
