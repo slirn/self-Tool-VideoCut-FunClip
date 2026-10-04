@@ -4746,6 +4746,23 @@ input[type="checkbox"]:focus-visible {
   margin-bottom: 10px;
 }
 
+/* REQ-20261001-097：区块标题加左侧色条，层级更清晰。
+   标题本身只有纯文本，改 flex-start 防止 space-between 把文字推到最右、
+   与色条分离（副区块 .slirn-sv-subtitle-row 带按钮，保持 space-between） */
+.slirn-sv-section-title {
+  justify-content: flex-start;
+}
+
+.slirn-sv-section-title::before {
+  content: "";
+  flex: none;
+  width: 4px;
+  height: 14px;
+  border-radius: 2px;
+  background: var(--accent-solid, #667eea);
+  margin-right: 8px;
+}
+
 .slirn-sv-form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -4886,8 +4903,32 @@ input[type="checkbox"]:focus-visible {
   margin-bottom: 12px;
 }
 
+/* REQ-20261001-097：上传工具条控件统一外观（此前 select / file 是裸原生样式） */
+.slirn-sv-upload select,
 .slirn-sv-upload input[type="file"] {
-  max-width: 420px;
+  border: 1px solid var(--border-color, var(--border));
+  border-radius: 8px;
+  background: var(--input-bg, var(--card-bg, var(--card, #fff)));
+  color: var(--text-primary, var(--text));
+  padding: 7px 10px;
+  font-size: 13px;
+}
+
+.slirn-sv-upload input[type="file"] {
+  max-width: 380px;
+}
+
+/* 文件选择按钮与整体控件统一（裸原生按钮是灰色大块） */
+.slirn-sv-upload input[type="file"]::file-selector-button {
+  border: none;
+  border-radius: 6px;
+  padding: 4px 10px;
+  margin-right: 8px;
+  background: var(--accent-soft, rgba(102, 126, 234, 0.12));
+  color: var(--accent-solid, #667eea);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
 }
 
 .slirn-sv-materials {
@@ -4896,19 +4937,91 @@ input[type="checkbox"]:focus-visible {
   gap: 10px;
 }
 
+/* REQ-20261001-097：素材卡重排 —— 类型徽章 + 单行文件名 + 元信息 + 底部一行操作按钮 */
 .slirn-sv-material {
   display: flex;
   flex-direction: column;
   gap: 5px;
   border: 1px solid var(--border-color, var(--border));
-  border-radius: 6px;
-  padding: 9px;
+  border-radius: 10px;
+  padding: 10px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
 }
 
-.slirn-sv-material > div:first-child {
+.slirn-sv-material:hover {
+  border-color: var(--accent-solid, #667eea);
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.08);
+  transform: translateY(-1px);
+}
+
+.slirn-sv-material-head {
   display: flex;
-  justify-content: space-between;
-  gap: 8px;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.slirn-sv-material-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.slirn-sv-material-meta {
+  font-size: 11px;
+  color: var(--text-muted, var(--text-secondary, #64748b));
+}
+
+.slirn-sv-material-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: auto;
+  padding-top: 4px;
+}
+
+.slirn-sv-material-actions .slirn-btn-mini {
+  flex: none;
+}
+
+.slirn-sv-kind-badge {
+  flex: none;
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.slirn-sv-kind-video {
+  background: rgba(102, 126, 234, 0.15);
+  color: #667eea;
+}
+
+.slirn-sv-kind-image {
+  background: rgba(168, 85, 247, 0.14);
+  color: #a855f7;
+}
+
+.slirn-sv-kind-audio {
+  background: rgba(245, 158, 11, 0.16);
+  color: #d97706;
+}
+
+.slirn-sv-kind-bg_image {
+  background: rgba(20, 184, 166, 0.15);
+  color: #0d9488;
+}
+
+.slirn-sv-kind-file {
+  background: rgba(148, 163, 184, 0.2);
+  color: var(--text-muted, var(--text-secondary, #64748b));
 }
 
 .slirn-sv-subsection {
@@ -4986,6 +5099,291 @@ input[type="checkbox"]:focus-visible {
 .slirn-sv-status.error {
   border-color: #ef4444;
   color: #ef4444;
+}
+
+/* ============ REQ-20261001-096：素材预览小窗口（页内模态，不开新页签）============ */
+.slirn-sv-preview-card {
+  min-width: 300px;
+  max-width: min(720px, 88vw);
+  padding: 14px 16px 16px;
+  text-align: left;
+}
+
+.slirn-sv-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.slirn-sv-preview-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary, #1e293b);
+  word-break: break-all;
+}
+
+.slirn-sv-preview-body video,
+.slirn-sv-preview-body img {
+  display: block;
+  max-width: 100%;
+  max-height: min(64vh, 640px);
+  border-radius: 10px;
+  background: #000;
+  margin: 0 auto;
+}
+
+.slirn-sv-preview-body audio {
+  display: block;
+  width: min(440px, 70vw);
+  margin: 20px auto;
+}
+
+/* REQ-20261003-098：6 阶段管线 */
+.slirn-stage {
+  background: var(--bg-card, #ffffff);
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 12px;
+  margin-bottom: 14px;
+  overflow: hidden;
+}
+.slirn-stage-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: var(--bg-soft, #f8fafc);
+  border-bottom: 1px solid var(--border, #e2e8f0);
+  font-size: 14px;
+}
+.slirn-stage-head strong {
+  font-size: 15px;
+  color: var(--text-primary, #1e293b);
+}
+.slirn-stage-num {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--primary, #2563eb);
+  color: #fff;
+  font-weight: 600;
+  font-size: 13px;
+}
+.slirn-stage-body {
+  padding: 14px 16px 16px;
+}
+.slirn-stage-error {
+  margin-top: 8px;
+  padding: 8px 10px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  color: #b91c1c;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.slirn-stage-badge {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  border: 1px solid transparent;
+}
+.slirn-stage-badge.slirn-stage-pending {
+  background: #f1f5f9;
+  color: #64748b;
+}
+.slirn-stage-badge.slirn-stage-running,
+.slirn-stage-badge.slirn-stage-running_asr {
+  background: #fef3c7;
+  color: #92400e;
+  border-color: #fcd34d;
+}
+.slirn-stage-badge.slirn-stage-done,
+.slirn-stage-badge.slirn-stage-confirmed {
+  background: #dcfce7;
+  color: #15803d;
+  border-color: #86efac;
+}
+.slirn-stage-badge.slirn-stage-failed {
+  background: #fee2e2;
+  color: #b91c1c;
+  border-color: #fca5a5;
+}
+.slirn-stage-badge.slirn-stage-user_editing {
+  background: #dbeafe;
+  color: #1d4ed8;
+  border-color: #93c5fd;
+}
+
+/* REQ-20261004-UX：阶段「处理中」已用时 + 执行日志 */
+.slirn-stage-elapsed {
+  margin-left: 8px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: var(--text-secondary, #475569);
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: 6px;
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+.slirn-stage-logs {
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--text-secondary, #475569);
+}
+.slirn-stage-logs > summary {
+  cursor: pointer;
+  padding: 4px 8px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  user-select: none;
+  list-style: none;
+  display: inline-block;
+}
+.slirn-stage-logs > summary::-webkit-details-marker {
+  display: none;
+}
+.slirn-stage-logs > summary::before {
+  content: "▶ ";
+  font-size: 10px;
+  margin-right: 4px;
+  color: #64748b;
+}
+.slirn-stage-logs[open] > summary::before {
+  content: "▼ ";
+}
+.slirn-stage-log-body {
+  margin-top: 6px;
+  padding: 8px 10px;
+  background: #0f172a;
+  color: #e2e8f0;
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  max-height: 240px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.slirn-stage-log-row + .slirn-stage-log-row {
+  border-top: 1px solid rgba(148, 163, 184, 0.18);
+}
+.slirn-stage-source-preview {
+  margin-top: 10px;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+.slirn-stage-source-preview video {
+  max-width: 280px;
+  max-height: 160px;
+  border-radius: 8px;
+  background: #000;
+}
+.slirn-stage-source-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--text-secondary, #475569);
+}
+.slirn-stage3-radios {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 4px 0;
+}
+.slirn-stage3-radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.slirn-stage3-hl-list {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.slirn-stage3-hl-row {
+  display: grid;
+  grid-template-columns: 36px 1fr auto auto;
+  gap: 10px;
+  align-items: center;
+  padding: 6px 10px;
+  background: var(--bg-soft, #f8fafc);
+  border-radius: 8px;
+}
+.slirn-stage3-hl-row input[data-hl-field="title"] {
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: 13px;
+}
+.slirn-stage4-list,
+.slirn-stage5-list,
+.slirn-stage6-list {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 10px;
+}
+.slirn-stage4-clip,
+.slirn-stage5-clip,
+.slirn-stage6-clip {
+  background: var(--bg-soft, #f8fafc);
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 8px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.slirn-stage4-clip-head,
+.slirn-stage5-clip-head,
+.slirn-stage6-clip-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.slirn-stage4-clip video,
+.slirn-stage6-clip video {
+  width: 100%;
+  max-height: 200px;
+  border-radius: 6px;
+  background: #000;
+}
+.slirn-stage5-srt {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 6px;
+  padding: 6px;
+  resize: vertical;
+}
+.slirn-srt-pre {
+  margin: 0;
+  padding: 12px;
+  background: #f8fafc;
+  border-radius: 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  max-height: 64vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 @media (max-width: 900px) {
