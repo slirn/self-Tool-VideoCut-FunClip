@@ -5134,6 +5134,14 @@ input[type="checkbox"]:focus-visible {
   margin: 0 auto;
 }
 
+/* REQ-20261004-UX：Stage 3 片段预览 modal 字幕行 */
+.slirn-sv-clip-meta {
+  text-align: center;
+  font-size: 12px;
+  margin-top: 8px;
+  padding: 0 4px;
+}
+
 .slirn-sv-preview-body audio {
   display: block;
   width: min(440px, 70vw);

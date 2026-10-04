@@ -22,6 +22,21 @@ def _file_url(task_id: str, project_id: str, kind: str, name: str) -> str:
     )
 
 
+def _source_video_url(project: dict) -> str:
+    """当前选源视频的可访问 URL；未选源返回空串。"""
+    task_id = str(project.get("task_id") or "")
+    project_id = str(project.get("id") or "")
+    materials = project.get("materials") or []
+    base_id = project.get("base_material_id") or ""
+    src = next(
+        (m for m in materials if m.get("id") == base_id and m.get("kind") == "video"),
+        None,
+    )
+    if not src:
+        return ""
+    return _file_url(task_id, project_id, "material", str(src.get("id") or ""))
+
+
 def _duration_str(seconds: float | None) -> str:
     if not seconds or seconds <= 0:
         return ""
@@ -266,7 +281,7 @@ def _stage2_extract(project: dict) -> str:
 </div>'''
 
 
-def _stage3_analyze(project: dict) -> str:
+def _stage3_analyze(project: dict, source_url: str = "") -> str:
     s3 = project.get("pipeline", {}).get("stage3_analyze", {}) or {}
     n = int(s3.get("n_clips") or 4)
     template = str(s3.get("template") or "hook_first")
@@ -310,12 +325,25 @@ def _stage3_analyze(project: dict) -> str:
                 f'<div class="slirn-stage3-hl-sub"><span class="slirn-stage3-hl-src">[{src}]</span> {t}</div>'
             )
         sub_preview = "".join(preview_items) or '<div class="slirn-sv-muted">无字幕</div>'
+        # 源视频未选 → 预览按钮禁用（避免点了没反应）
+        preview_btn = (
+            f'<button class="slirn-btn-mini slirn-btn-mini-primary" '
+            f'data-action="sv-stage3-preview" '
+            f'data-src-url="{esc(source_url)}" '
+            f'data-start-ms="{int(start)}" data-end-ms="{int(end)}" '
+            f'data-title="{esc(title)}" '
+            f'title="在源视频中截取该片段预览（浏览器 seek，无需生成 mp4）">'
+            f'🎬 预览片段</button>'
+            if source_url else
+            f'<button class="slirn-btn-mini" disabled title="请先在 Stage 1 选源视频">🎬 预览片段</button>'
+        )
         hl_rows.append(
             f'<div class="slirn-stage3-hl-row" data-hl-index="{idx}" data-sub-text="{esc(full_text)}">'
             f'<div class="slirn-stage3-hl-head">'
             f'<span class="slirn-sv-row-no">#{idx}</span>'
             f'<input type="text" class="slirn-stage3-hl-title" data-hl-field="title" value="{esc(title)}" placeholder="标题">'
             f'<span class="slirn-sv-muted slirn-stage3-hl-meta">{_format_ms(start)} - {_format_ms(end)} · {dur:.1f}s · {sub_count} 字幕行</span>'
+            f'{preview_btn}'
             f'<button class="slirn-btn-mini slirn-btn-mini-danger" data-action="sv-stage3-remove-hl" '
             f'data-hl-index="{idx}">删</button>'
             f'</div>'
@@ -516,7 +544,7 @@ def render_project(project: dict, all_tasks: list[dict] | None = None) -> str:
   </div>
   {_stage1_select_source(project)}
   {_stage2_extract(project)}
-  {_stage3_analyze(project)}
+  {_stage3_analyze(project, source_url=_source_video_url(project))}
   {_stage4_coarse(project)}
   {_stage5_refine(project)}
   {_stage6_finalize(project)}

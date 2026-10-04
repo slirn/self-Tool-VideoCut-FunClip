@@ -341,6 +341,52 @@
     previewByUrl(url, name, '<video controls autoplay playsinline src="' + esc(url) + '"></video>');
   }
 
+  // REQ-20261004-UX：Stage 3 高亮片段预览 —— 浏览器侧 seek 到
+  // start_ms 起点、timeupdate 到 end_ms 自动暂停。零服务器开销、即时。
+  function stage3PreviewHl(btn) {
+    var url = btn.getAttribute('data-src-url') || '';
+    if (!url) return toast('请先在 Stage 1 选源视频', 'error');
+    var startMs = parseInt(btn.getAttribute('data-start-ms') || '0', 10) || 0;
+    var endMs = parseInt(btn.getAttribute('data-end-ms') || '0', 10) || 0;
+    var title = btn.getAttribute('data-title') || '预览片段';
+    var startSec = startMs / 1000;
+    var endSec = Math.max(startSec + 0.05, endMs / 1000);
+
+    // modal 内部带 onloadedmetadata 钩子，做 seek + 监听
+    var body =
+      '<video id="slirn-sv-clip-video" controls autoplay playsinline ' +
+      'preload="auto" src="' + esc(url) + '"></video>' +
+      '<div class="slirn-sv-muted slirn-sv-clip-meta">' +
+      '片段：' + esc(title) + ' · ' + startSec.toFixed(2) + 's - ' + endSec.toFixed(2) + 's' +
+      '</div>';
+    previewByUrl(url, title, body);
+
+    // 拿到刚插入的 video，挂上 seek + 监听
+    var v = document.getElementById('slirn-sv-clip-video');
+    if (!v) return;
+    var cleared = false;
+    function onTime() {
+      if (cleared) return;
+      if (v.currentTime >= endSec) {
+        v.pause();
+        cleared = true;
+        v.removeEventListener('timeupdate', onTime);
+      }
+    }
+    function onLoaded() {
+      try {
+        v.currentTime = startSec;
+        v.play().catch(function(){});
+      } catch (e) { /* seek 偶发 NotSupported 忽略 */ }
+      v.addEventListener('timeupdate', onTime);
+    }
+    if (v.readyState >= 1) {
+      onLoaded();
+    } else {
+      v.addEventListener('loadedmetadata', onLoaded, { once: true });
+    }
+  }
+
   // ---------- 点击分发 ----------
 
   document.addEventListener('click', function(ev) {
@@ -367,6 +413,7 @@
     if (action === 'sv-stage2-run') return stage2Run();
     if (action === 'sv-stage2-preview-srt') return previewStage2Srt(btn);
     if (action === 'sv-stage3-run') return stage3Run();
+    if (action === 'sv-stage3-preview') return stage3PreviewHl(btn);
     if (action === 'sv-stage4-run') return stage4Run();
     if (action === 'sv-stage5-asr') return stage5Asr(btn);
     if (action === 'sv-stage5-save') return stage5Save(btn);
