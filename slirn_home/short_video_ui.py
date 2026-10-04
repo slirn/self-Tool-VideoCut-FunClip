@@ -281,7 +281,7 @@ def _stage2_extract(project: dict) -> str:
 </div>'''
 
 
-def _stage3_analyze(project: dict, source_url: str = "") -> str:
+def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None = None) -> str:
     s3 = project.get("pipeline", {}).get("stage3_analyze", {}) or {}
     n = int(s3.get("n_clips") or 4)
     template = str(s3.get("template") or "hook_first")
@@ -301,6 +301,29 @@ def _stage3_analyze(project: dict, source_url: str = "") -> str:
         err = s3.get("error") or "失败"
         error_html = f'<div class="slirn-stage-error">{esc(err)}</div>'
 
+    # REQ-20261004-stage3-restructure：把 srt_lines 转成 {idx → (start_ms, end_ms)} 查表，
+    # 字幕行 UI 改显示 [HH:MM:SS] text + drag handle
+    srt_lines = srt_lines or []
+    srt_index_to_time: dict[int, tuple[int, int]] = {}
+    for ln in srt_lines:
+        try:
+            idx = int(ln.get("index") or 0)
+            sm = int(ln.get("start_ms") or 0)
+            em = int(ln.get("end_ms") or 0)
+        except (TypeError, ValueError):
+            continue
+        if idx > 0:
+            srt_index_to_time[idx] = (sm, em)
+
+    def _ts(ms: int) -> str:
+        # UI 简洁版：mm:ss（行内字幕行只用 mm:ss 就够，省空间）
+        if ms <= 0:
+            return "00:00"
+        sec = ms / 1000.0
+        m = int(sec // 60)
+        s = int(sec % 60)
+        return f"{m:02d}:{s:02d}"
+
     # 高亮条目可编辑标题 + 删除 + 完整字幕预览（REQ-20261004-UX：用户要直接看到全部文字）
     hl_rows = []
     for hl in (s3.get("highlights") or []):
@@ -311,7 +334,7 @@ def _stage3_analyze(project: dict, source_url: str = "") -> str:
         dur = (end - start) / 1000.0
         sub_lines = hl.get("subtitle_lines") or []
         sub_count = len(sub_lines)
-        # 字幕预览：渲染全部行（不再限制 5 行）；每行 `<src_index> 文本`；
+        # 字幕预览：渲染全部行；每行 `<HH:MM:SS> 文本`（REQ-20261004-stage3-restructure）；
         # 同时把完整字幕文本塞到 data-sub-text 供「复制」按钮用
         full_text = "\n".join(
             f"[{int(sl.get('src_index') or 0)}] {str(sl.get('text') or '')}"
@@ -321,10 +344,20 @@ def _stage3_analyze(project: dict, source_url: str = "") -> str:
         for sl in sub_lines:
             t = esc(str(sl.get("text") or ""))
             src = int(sl.get("src_index") or 0)
+            times = srt_index_to_time.get(src)
+            ts_html = _ts(times[0]) if times else "??:??"
+            tip_end = _ts(times[1]) if times else ""
+            tip = f"源字幕 #{src} @ {_ts(times[0])}-{tip_end}" if times else f"源字幕 #{src}"
             preview_items.append(
-                f'<div class="slirn-stage3-hl-sub"><span class="slirn-stage3-hl-src">[{src}]</span> {t}</div>'
+                f'<div class="slirn-stage3-hl-sub" draggable="true" '
+                f'data-hl-index="{idx}" data-src-index="{src}" title="{esc(tip)}">'
+                f'<span class="slirn-stage3-hl-drag" aria-hidden="true">⋮⋮</span>'
+                f'<span class="slirn-stage3-hl-ts">{ts_html}</span>'
+                f'<span class="slirn-stage3-hl-src">#{src}</span>'
+                f'<span class="slirn-stage3-hl-text">{t}</span>'
+                f'</div>'
             )
-        sub_preview = "".join(preview_items) or '<div class="slirn-sv-muted">无字幕</div>'
+        sub_preview = "".join(preview_items) or '<div class="slirn-sv-muted">无字幕（拖拽排序需先有字幕）</div>'
         # 源视频未选 → 预览按钮禁用（避免点了没反应）
         preview_btn = (
             f'<button class="slirn-btn-mini slirn-btn-mini-primary" '
@@ -347,7 +380,8 @@ def _stage3_analyze(project: dict, source_url: str = "") -> str:
             f'<button class="slirn-btn-mini slirn-btn-mini-danger" data-action="sv-stage3-remove-hl" '
             f'data-hl-index="{idx}">删</button>'
             f'</div>'
-            f'<div class="slirn-stage3-hl-preview">{sub_preview}</div>'
+            f'<div class="slirn-stage3-hl-preview" data-hl-index="{idx}">{sub_preview}</div>'
+            f'<div class="slirn-sv-muted slirn-stage3-hl-hint">⋮⋮ 拖动行可调整顺序；最终顺序将决定 Stage 4 切片拼接的时序</div>'
             f'</div>'
         )
     hl_list = "".join(hl_rows) or '<div class="slirn-sv-muted">运行后将列出 3-5 条 highlights</div>'
@@ -652,7 +686,7 @@ def render_project(project: dict, all_tasks: list[dict] | None = None) -> str:
   </div>
   {_stage1_select_source(project)}
   {_stage2_extract(project)}
-  {_stage3_analyze(project, source_url=_source_video_url(project))}
+  {_stage3_analyze(project, source_url=_source_video_url(project), srt_lines=(project.get("pipeline", {}).get("stage3_analyze", {}) or {}).get("srt_lines") or [])}
   {_stage35_verify(project)}
   {_stage4_coarse(project)}
   {_stage5_refine(project)}

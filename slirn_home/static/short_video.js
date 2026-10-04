@@ -117,6 +117,7 @@
       if (r && r.ok) setHTML(r.html);
       else toast((r && r.error) || '打开失败', 'error');
       startElapsedTicker();
+      initSubtitleSortAll();
     });
   }
 
@@ -508,6 +509,103 @@
     if (!fp) return;
     fp.querySelectorAll('video, audio').forEach(function(m) { try { m.pause(); } catch (e) {} });
     fp.remove();
+  }
+
+  // ---------- REQ-20261004-stage3-restructure：字幕行拖拽排序 ----------
+  // 用 HTML5 drag-and-drop API；drop 后立刻调 stage3_reorder_subtitles 端点。
+  // 视觉反馈：拖动中 opacity:0.4；目标行上方加高亮蓝线。
+
+  function _getDragCtx() {
+    return window._slirnSvDragCtx || (window._slirnSvDragCtx = { srcEl: null, hlIndex: null, srcIndex: null });
+  }
+
+  function bindSubtitleSort(container) {
+    // container 是 .slirn-stage3-hl-preview（一个 highlight 内的字幕行容器）
+    var hlIndex = container.getAttribute('data-hl-index');
+    if (!hlIndex) return;
+    // 给每个 .slirn-stage3-hl-sub 注册拖拽事件（一次性注册；后续 DOM 变化由 initSubtitleSortAll 兜底）
+    var subs = container.querySelectorAll('.slirn-stage3-hl-sub');
+    subs.forEach(function(el) {
+      if (el.getAttribute('data-sort-bound') === '1') return;
+      el.setAttribute('data-sort-bound', '1');
+      el.addEventListener('dragstart', function(ev) {
+        var ctx = _getDragCtx();
+        ctx.srcEl = el;
+        ctx.hlIndex = hlIndex;
+        ctx.srcIndex = el.getAttribute('data-src-index');
+        try { ev.dataTransfer.setData('text/plain', String(ctx.srcIndex || '')); } catch (e) {}
+        ev.dataTransfer.effectAllowed = 'move';
+        el.classList.add('slirn-stage3-hl-sub-dragging');
+      });
+      el.addEventListener('dragend', function() {
+        el.classList.remove('slirn-stage3-hl-sub-dragging');
+        container.querySelectorAll('.slirn-stage3-hl-sub-drop-target').forEach(function(x) {
+          x.classList.remove('slirn-stage3-hl-sub-drop-target');
+        });
+        var ctx = _getDragCtx();
+        ctx.srcEl = null;
+      });
+      el.addEventListener('dragover', function(ev) {
+        ev.preventDefault();
+        ev.dataTransfer.dropEffect = 'move';
+        el.classList.add('slirn-stage3-hl-sub-drop-target');
+      });
+      el.addEventListener('dragleave', function() {
+        el.classList.remove('slirn-stage3-hl-sub-drop-target');
+      });
+      el.addEventListener('drop', function(ev) {
+        ev.preventDefault();
+        var ctx = _getDragCtx();
+        if (!ctx.srcEl || !ctx.srcIndex) return;
+        var targetSrc = el.getAttribute('data-src-index');
+        if (String(targetSrc) === String(ctx.srcIndex)) return; // 原地拖动忽略
+        // 立即在 DOM 上重排（乐观更新）—— 失败时 revert
+        var movedEl = ctx.srcEl;
+        var parent = movedEl.parentNode;
+        parent.insertBefore(movedEl, el); // 移到目标之前
+        // 调端点持久化
+        var taskId = (document.querySelector('[data-sv-task-id]') || {}).getAttribute
+          ? (document.querySelector('[data-sv-task-id]') || {}).getAttribute('data-sv-task-id')
+          : '';
+        var projectId = (document.querySelector('[data-sv-project-id]') || {}).getAttribute
+          ? (document.querySelector('[data-sv-project-id]') || {}).getAttribute('data-sv-project-id')
+          : '';
+        if (!taskId || !projectId) {
+          showToast('缺少 task_id / project_id，拖拽未持久化', 'error');
+          return;
+        }
+        fetch('/slirn/api/short_video_stage3_reorder_subtitles', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            task_id: taskId,
+            project_id: projectId,
+            hl_index: parseInt(ctx.hlIndex || '0', 10),
+            src_index: parseInt(ctx.srcIndex || '0', 10),
+            before_src_index: parseInt(targetSrc || '0', 10),
+          })
+        }).then(function(r) { return r.json().then(function(j) { return { ok: r.ok, body: j }; }); })
+          .then(function(data) {
+            if (!data.ok) {
+              // revert DOM
+              parent.insertBefore(movedEl, el.nextSibling);
+              showToast('字幕重排失败：' + (data.body && data.body.error || '未知错误'), 'error');
+            } else {
+              showToast('字幕顺序已更新（下游 Stage 4/5/6 已重置）', 'ok');
+            }
+          })
+          .catch(function(err) {
+            parent.insertBefore(movedEl, el.nextSibling);
+            showToast('字幕重排失败：' + err, 'error');
+          });
+      });
+    });
+  }
+
+  function initSubtitleSortAll() {
+    // 给当前可见的所有 .slirn-stage3-hl-preview 容器绑定拖拽（幂等）
+    document.querySelectorAll('.slirn-stage3-hl-preview').forEach(bindSubtitleSort);
   }
 
   // ---------- 点击分发 ----------

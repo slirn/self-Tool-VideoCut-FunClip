@@ -889,3 +889,219 @@ def test_verify_stage_runs_end_to_end(tmp_path):
     # 至少 verify_dir 应被创建（核验初始化成功）
     verify_dir = svc.stage3_verify_dir(root, tid, pid)
     assert verify_dir.is_dir(), f"verify 目录应被创建: {verify_dir}"
+
+
+# ---------- REQ-20261004-stage3-restructure 新增测试 ----------
+
+
+def test_validate_highlights_density_fallback():
+    """_validate_highlights 应该自动补齐字幕密度到 ≥ 8 行（60s 视频）。
+
+    输入 LLM 只输出 3 行时，应 fallback 用区间内 SRT 行补齐。
+    """
+    from slirn_home.short_video_analyze import _validate_highlights, SrtLine
+
+    srt_lines = [
+        SrtLine(index=i, start_ms=(i - 1) * 1000, end_ms=i * 1000, text=f"第{i}句")
+        for i in range(1, 16)
+    ]  # 15 行 SRT，每行 1s
+
+    payload = {
+        "highlights": [{
+            "id": "h1",
+            "title": "密度测试",
+            "start_ms": 0,
+            "end_ms": 15000,  # 15s 视频，密度要求 ≥ ceil(15/5)=3，但 prompt 要求 ≥ 8
+            "subtitle_lines": [
+                {"src_index": 1, "text": "开头钩子"},
+                {"src_index": 2, "text": "展开"},
+                {"src_index": 3, "text": "收束"},
+            ],  # 只 3 行
+        }]
+    }
+    validated, warnings = _validate_highlights(payload, srt_lines)
+    assert len(validated) == 1
+    hl = validated[0]
+    # 应被 fallback 扩到 ≥ 8 行（10 行以上更稳）
+    assert len(hl["subtitle_lines"]) >= 8, f"期望 ≥ 8 行，实际 {len(hl['subtitle_lines'])}"
+    # fallback warnings 应有提示
+    assert any("density" in w.lower() or "fallback" in w.lower() or "补齐" in w
+               for w in warnings), f"应记录 warning，实际: {warnings}"
+
+
+def test_reorder_subtitle_line_end_to_end(tmp_path):
+    """reorder_subtitle_line：拖拽 src_index=2 到 src_index=4 之前。"""
+    import json as _json
+    from slirn_home.short_video_service import (
+        load_project, save_project, create_project, stage_highlights_path,
+        reorder_subtitle_line, _STAGE_STATE_KEYS, get_stage_state,
+    )
+    from tasklib import TaskManager
+
+    video = tmp_path / "src.mp4"
+    video.write_bytes(b"fake")
+    mgr = TaskManager(tmp_path)
+    task = mgr.create(name="t", original_video=video)
+    tid = task.task_id
+
+    proj = create_project(tmp_path, tid, name="p", brief="")
+    pid = proj["id"]
+
+    # 写一个 highlights.json
+    hl_doc = {
+        "project_id": pid,
+        "highlights": [{
+            "index": 1,
+            "id": "h1",
+            "title": "排序测试",
+            "start_ms": 0,
+            "end_ms": 10000,
+            "subtitle_lines": [
+                {"src_index": 1, "text": "A"},
+                {"src_index": 2, "text": "B"},
+                {"src_index": 3, "text": "C"},
+                {"src_index": 4, "text": "D"},
+                {"src_index": 5, "text": "E"},
+            ],
+        }],
+    }
+    hp = stage_highlights_path(tmp_path, tid, pid)
+    hp.parent.mkdir(parents=True, exist_ok=True)
+    hp.write_text(_json.dumps(hl_doc, ensure_ascii=False), encoding="utf-8")
+
+    # 把 highlights 同步到 project state（模拟 _inject_stage3_highlights）
+    proj = load_project(tmp_path, tid, pid)
+    s3 = get_stage_state(proj, "stage3_analyze")
+    s3["highlights"] = hl_doc["highlights"]
+    save_project(tmp_path, proj)
+
+    # 把 src_index=2 移到 src_index=4 之前
+    updated = reorder_subtitle_line(
+        tmp_path, tid, pid,
+        hl_index=1, src_index=2, before_src_index=4,
+    )
+    new_lines = updated["subtitle_lines"]
+    indices = [int(sl["src_index"]) for sl in new_lines]
+    # 期望：[A, B, C, D, E] → 移除 B → [A, C, D, E] → 在 D 之前插入 B → [A, C, B, D, E]
+    assert indices == [1, 3, 2, 4, 5], f"排序错误：{indices}"
+
+    # 重读 highlights.json 验证
+    with open(hp, "r", encoding="utf-8") as f:
+        saved = _json.load(f)
+    saved_indices = [int(sl["src_index"]) for sl in saved["highlights"][0]["subtitle_lines"]]
+    assert saved_indices == [1, 3, 2, 4, 5]
+
+    # 验证下游 stage 被重置
+    proj2 = load_project(tmp_path, tid, pid)
+    pl = proj2.get("pipeline", {})
+    for stage_key in ["stage3_verify", "stage4_coarse", "stage5_refine", "stage6_finalize"]:
+        s = pl.get(stage_key, {})
+        assert s.get("status") == "pending", f"{stage_key} 应被重置为 pending，实际 {s}"
+
+
+def test_reorder_subtitle_line_to_end(tmp_path):
+    """before_src_index=None 应移到末尾。"""
+    import json as _json
+    from slirn_home.short_video_service import (
+        create_project, stage_highlights_path, reorder_subtitle_line,
+    )
+    from tasklib import TaskManager
+
+    video = tmp_path / "src.mp4"
+    video.write_bytes(b"fake")
+    mgr = TaskManager(tmp_path)
+    task = mgr.create(name="t", original_video=video)
+    tid = task.task_id
+
+    proj = create_project(tmp_path, tid, name="p", brief="")
+    pid = proj["id"]
+
+    hl_doc = {
+        "highlights": [{
+            "index": 1,
+            "id": "h1",
+            "title": "t",
+            "start_ms": 0,
+            "end_ms": 5000,
+            "subtitle_lines": [
+                {"src_index": 1, "text": "A"},
+                {"src_index": 2, "text": "B"},
+                {"src_index": 3, "text": "C"},
+            ],
+        }],
+    }
+    hp = stage_highlights_path(tmp_path, tid, pid)
+    hp.parent.mkdir(parents=True, exist_ok=True)
+    hp.write_text(_json.dumps(hl_doc, ensure_ascii=False), encoding="utf-8")
+
+    updated = reorder_subtitle_line(
+        tmp_path, tid, pid,
+        hl_index=1, src_index=1, before_src_index=None,
+    )
+    indices = [int(sl["src_index"]) for sl in updated["subtitle_lines"]]
+    assert indices == [2, 3, 1], f"src_index=1 应被移到末尾，实际 {indices}"
+
+
+def test_coarse_resolve_segments_from_subtitle_lines(tmp_path):
+    """Stage 4 _resolve_segments 内嵌函数：把 subtitle_lines[].src_index → SRT 时间戳。
+
+    只验证 segments 解析逻辑（不真跑 moviepy）。
+    """
+    import json as _json
+    from slirn_home.short_video_service import (
+        create_project, stage_raw_srt_path, stage_highlights_path,
+    )
+    from slirn_home.short_video_analyze import _parse_srt_lines
+    from tasklib import TaskManager
+
+    video = tmp_path / "src.mp4"
+    video.write_bytes(b"fake")
+    mgr = TaskManager(tmp_path)
+    task = mgr.create(name="t", original_video=video)
+    tid = task.task_id
+
+    proj = create_project(tmp_path, tid, name="p", brief="")
+    pid = proj["id"]
+
+    # 写 raw.srt（5 条字幕，时间不同）
+    raw_srt = (
+        "1\n00:00:01,000 --> 00:00:02,000\n第一句\n\n"
+        "2\n00:00:05,000 --> 00:00:06,000\n第二句\n\n"
+        "3\n00:00:10,000 --> 00:00:11,500\n第三句\n\n"
+        "4\n00:00:15,000 --> 00:00:16,000\n第四句\n\n"
+        "5\n00:00:20,000 --> 00:00:21,000\n第五句\n\n"
+    )
+    rp = stage_raw_srt_path(tmp_path, tid, pid)
+    rp.parent.mkdir(parents=True, exist_ok=True)
+    rp.write_text(raw_srt, encoding="utf-8")
+
+    # 解析 SRT
+    srt_lines = _parse_srt_lines(rp.read_text(encoding="utf-8"))
+    srt_index_to_line = {ln.index: ln for ln in srt_lines}
+
+    # highlight 跨源时间挑 3, 1（验证按 highlight.subtitle_lines 顺序拼）
+    hl = {
+        "subtitle_lines": [
+            {"src_index": 3, "text": "第三句"},  # 10-11.5s
+            {"src_index": 1, "text": "第一句"},  # 1-2s
+        ],
+    }
+
+    # 模拟 _resolve_segments 逻辑（与 short_video_coarse.py 保持一致）
+    def _resolve(hl_dict):
+        out = []
+        for sl in (hl_dict.get("subtitle_lines") or []):
+            idx = int(sl.get("src_index") or 0)
+            ln = srt_index_to_line.get(idx)
+            if ln is None or ln.end_ms <= ln.start_ms:
+                continue
+            out.append((int(ln.start_ms), int(ln.end_ms)))
+        return out
+
+    segs = _resolve(hl)
+    # 期望：[(10000, 11500), (1000, 2000)]
+    assert segs == [(10000, 11500), (1000, 2000)], f"segments 解析错误: {segs}"
+
+    # 也测空 subtitle_lines
+    empty_segs = _resolve({"subtitle_lines": []})
+    assert empty_segs == [], f"空 subtitle_lines 应得空 segments，实际: {empty_segs}"

@@ -1089,6 +1089,103 @@ def reset_downstream_stages(project: dict, after_stage: str) -> None:
             pipeline[stage_key] = {"status": "pending"}
 
 
+def reorder_subtitle_line(
+    repo_root: Path | str,
+    task_id: str,
+    project_id: str,
+    hl_index: int,
+    src_index: int,
+    before_src_index: int | None,
+) -> dict:
+    """REQ-20261004-stage3-restructure：拖拽重排某条字幕行。
+
+    - 读 ``stage3/highlights.json``，找到 ``index == hl_index`` 的 highlight
+    - 把 ``src_index == src_index`` 的 subtitle_line 从原位置移除
+    - 把这条插入到 ``src_index == before_src_index`` 这条**之前**（None = 末尾）
+    - 写回 highlights.json + 同步更新 pipeline.stage3_analyze.highlights 镜像
+    - 触发 ``reset_downstream_stages("stage3_analyze")``（下游 Stage 4/5/6 作废）
+
+    返回更新后的 highlight dict（含新 subtitle_lines 顺序）。
+    """
+    root = Path(repo_root)
+    hp = stage_highlights_path(root, task_id, project_id)
+    if not hp.is_file():
+        raise ShortVideoError("highlights.json 不存在，请先跑 Stage 3")
+    try:
+        doc = json.loads(hp.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001
+        raise ShortVideoError(f"highlights.json 解析失败: {e}") from e
+    hls = doc.get("highlights") or []
+    target = None
+    target_pos = -1
+    for i, h in enumerate(hls):
+        if int(h.get("index") or 0) == int(hl_index):
+            target = h
+            target_pos = i
+            break
+    if target is None:
+        raise ShortVideoError(f"highlight #{hl_index} 不存在")
+
+    lines = target.get("subtitle_lines") or []
+    moving = None
+    moving_pos = -1
+    for i, sl in enumerate(lines):
+        try:
+            if int(sl.get("src_index") or 0) == int(src_index):
+                moving = sl
+                moving_pos = i
+                break
+        except (TypeError, ValueError):
+            continue
+    if moving is None:
+        raise ShortVideoError(f"highlight #{hl_index} 没有 src_index={src_index} 的字幕行")
+    # 移除
+    lines.pop(moving_pos)
+    # 找 before 位置（移除后的位置）
+    insert_at = len(lines)
+    if before_src_index is not None:
+        for i, sl in enumerate(lines):
+            try:
+                if int(sl.get("src_index") or 0) == int(before_src_index):
+                    insert_at = i
+                    break
+            except (TypeError, ValueError):
+                continue
+    lines.insert(insert_at, moving)
+    target["subtitle_lines"] = lines
+    hls[target_pos] = target
+
+    # 写 highlights.json（保留其他字段）
+    doc["highlights"] = hls
+    _write_json_atomic(hp, doc)
+
+    # 同步 project state
+    project = load_project(root, task_id, project_id)
+    pl = project.setdefault("pipeline", {})
+    s3 = pl.setdefault("stage3_analyze", {})
+    state_hls = s3.get("highlights") or []
+    for sh in state_hls:
+        if int(sh.get("index") or 0) == int(hl_index):
+            sh["subtitle_lines"] = list(lines)
+            break
+    else:
+        state_hls.append({
+            "index": int(hl_index),
+            "title": target.get("title"),
+            "start_ms": target.get("start_ms"),
+            "end_ms": target.get("end_ms"),
+            "subtitle_lines": list(lines),
+        })
+        s3["highlights"] = state_hls
+    s3["warnings"] = list(s3.get("warnings") or []) + [
+        f"[{now_iso()}] subtitle_lines 重排：hl #{hl_index} src_index={src_index} → before src_index={before_src_index}",
+    ]
+    # 字幕顺序变了 → 下游全部作废
+    reset_downstream_stages(project, "stage3_analyze")
+    save_project(root, project)
+    return target
+
+
 def find_long_video_state_root(task_dir: Path) -> list[Path]:
     """返回 ``task_dir`` 下所有「长视频 cut_by_srt.py 可能写入」的位置。
 

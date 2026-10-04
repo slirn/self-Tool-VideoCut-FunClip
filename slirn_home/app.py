@@ -9594,6 +9594,7 @@ def _register_slirn_api(
                 repo_root, str(project.get("task_id") or ""), str(project.get("id") or "")
             )
             srt_index_to_line: dict = {}
+            srt_lines_dicts: list[dict] = []
             if srt_path.is_file():
                 try:
                     from slirn_home.short_video_analyze import (
@@ -9601,6 +9602,13 @@ def _register_slirn_api(
                     )
                     srt_lines = _parse_srt_lines(srt_path.read_text(encoding="utf-8"))
                     srt_index_to_line = {ln.index: ln for ln in srt_lines}
+                    # REQ-20261004-stage3-restructure：UI 需要按 src_index 展示时间戳，
+                    # 把 SrtLine 序列化成 dict list 注入 project state（只读）
+                    srt_lines_dicts = [
+                        {"index": ln.index, "start_ms": ln.start_ms,
+                         "end_ms": ln.end_ms, "text": ln.text}
+                        for ln in srt_lines
+                    ]
                     if srt_index_to_line:
                         new_hls = []
                         for h in hls:
@@ -9619,6 +9627,9 @@ def _register_slirn_api(
                 s3["highlights"] = hls
                 if not s3.get("count"):
                     s3["count"] = len(hls)
+            # 注入 srt_lines（只在第一次注入，避免重复覆盖）
+            if srt_lines_dicts and not s3.get("srt_lines"):
+                s3["srt_lines"] = srt_lines_dicts
         except Exception:  # noqa: BLE001 — UI 兜底，不阻断渲染
             pass
 
@@ -9904,6 +9915,53 @@ def _register_slirn_api(
             log.exception("stage3_verify run failed")
             return _err(f"Stage 3.5 执行失败: {e}")
         return _ok(stage3_verify=state, toast=f"Stage 3.5 {state.get('status', '')}")
+
+    @app.app.post("/slirn/api/short_video_stage3_reorder_subtitles")
+    async def short_video_stage3_reorder_subtitles(body: dict = Body(default_factory=dict)):
+        """REQ-20261004-stage3-restructure：拖拽重排字幕行。
+
+        body:
+          - task_id / project_id
+          - hl_index: highlight 序号 (1-based, 与 highlights.json 一致)
+          - src_index: 被拖动行的 src_index
+          - before_src_index: 插入到此行之前；None/0 表示移到末尾
+
+        落地：更新 highlights.json + 同步 project state + 重置下游 Stage 4/5/6。
+        """
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        try:
+            hl_index = int(body.get("hl_index") or 0)
+        except (TypeError, ValueError):
+            return _err("hl_index 无效")
+        try:
+            src_index = int(body.get("src_index") or 0)
+        except (TypeError, ValueError):
+            return _err("src_index 无效")
+        before_raw = body.get("before_src_index")
+        if before_raw is None or before_raw == "" or before_raw == 0:
+            before_src_index = None
+        else:
+            try:
+                before_src_index = int(before_raw)
+            except (TypeError, ValueError):
+                return _err("before_src_index 无效")
+        if not tid or not pid:
+            return _err("缺少 task_id 或 project_id")
+        if hl_index <= 0 or src_index <= 0:
+            return _err("hl_index 和 src_index 必须 > 0")
+
+        try:
+            updated = _sv_service.reorder_subtitle_line(
+                repo_root, tid, pid,
+                hl_index=hl_index,
+                src_index=src_index,
+                before_src_index=before_src_index,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.exception("stage3_reorder_subtitles failed")
+            return _err(f"重排失败: {e}")
+        return _ok(highlight=updated, toast="字幕顺序已更新")
 
     @app.app.post("/slirn/api/short_video_stage4_run")
     async def short_video_stage4_run(body: dict = Body(default_factory=dict)):

@@ -40,23 +40,49 @@ class CoarseClipResult:
 def _write_coarse_srt(
     out_srt: Path,
     highlight: dict,
+    *,
+    segments: list[tuple[int, int]] | None = None,
 ) -> None:
-    """把 highlight.subtitle_lines 写成 SRT 文本（按 src_index 引用 raw.srt 行）。"""
+    """把 highlight.subtitle_lines 写成 SRT 文本。
+
+    - segments 不为 None：按 segments 顺序累加真实时长写时间戳（多窗拼接模式）。
+      subtitle_lines[i] 与 segments[i] 一一对应。
+    - segments 为 None：保留旧行为，时间戳全部 00:00:00,000 占位（Stage 5 重 ASR 后覆盖）。
+    """
     lines = highlight.get("subtitle_lines") or []
     if not lines:
         out_srt.write_text("", encoding="utf-8")
         return
     out_lines: list[str] = []
+    cumulative_ms = 0
     for i, sl in enumerate(lines, start=1):
         text = str(sl.get("text") or "").strip()
         if not text:
             continue
-        out_lines.append(str(i))
-        # 用 src_index 标记占位时间戳 —— Stage 5 重新 ASR 后会用真实时间
-        out_lines.append(f"00:00:00,000 --> 00:00:00,000")
+        if segments is not None and (i - 1) < len(segments):
+            seg_start, seg_end = segments[i - 1]
+            seg_dur = max(0, seg_end - seg_start)
+            sub_start = cumulative_ms
+            sub_end = cumulative_ms + seg_dur
+            cumulative_ms += seg_dur
+            start_s = _fmt_srt_time(sub_start)
+            end_s = _fmt_srt_time(sub_end)
+            out_lines.append(str(i))
+            out_lines.append(f"{start_s} --> {end_s}")
+        else:
+            out_lines.append(str(i))
+            out_lines.append(f"00:00:00,000 --> 00:00:00,000")
         out_lines.append(text)
         out_lines.append("")
     out_srt.write_text("\n".join(out_lines), encoding="utf-8")
+
+
+def _fmt_srt_time(ms: int) -> str:
+    """毫秒 → ``HH:MM:SS,mmm`` 格式。"""
+    h, rem = divmod(max(0, ms), 3600 * 1000)
+    m, rem = divmod(rem, 60 * 1000)
+    s, milli = divmod(rem, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{milli:03d}"
 
 
 def _coarse_one(
@@ -67,39 +93,65 @@ def _coarse_one(
     *,
     start_ost_ms: int = 0,
     end_ost_ms: int = 100,
+    segments: list[tuple[int, int]] | None = None,
 ) -> CoarseClipResult:
-    index = max(1, int(highlight.get("index") or 0))
-    start_ms = max(0, int(highlight.get("start_ms") or 0)) + start_ost_ms
-    end_ms = max(start_ms, int(highlight.get("end_ms") or 0)) + end_ost_ms
-    start_sec = start_ms / 1000.0
-    end_sec = end_ms / 1000.0
+    """粗剪一条 highlight。
 
+    segments 不为 None：按多段（毫秒）顺序切片 + 拼接；用于按 subtitle_lines 时间戳切。
+    segments 为 None：保留旧行为，按 highlight 整体 [start_ms, end_ms] 一刀切。
+    """
+    index = max(1, int(highlight.get("index") or 0))
     out_mp4.parent.mkdir(parents=True, exist_ok=True)
 
     # 先写 srt（即使后面 mp4 失败也落地，方便排查）
-    _write_coarse_srt(out_srt, highlight)
+    _write_coarse_srt(out_srt, highlight, segments=segments)
+
+    # 决定 segments 实际用哪一组
+    if segments is None:
+        start_ms = max(0, int(highlight.get("start_ms") or 0)) + start_ost_ms
+        end_ms = max(start_ms, int(highlight.get("end_ms") or 0)) + end_ost_ms
+        segments = [(start_ms, end_ms)]
 
     t0 = time.time()
     try:
         import moviepy.editor as mpy
         video = mpy.VideoFileClip(str(source_video))
         try:
-            if end_sec > video.duration:
-                end_sec = video.duration
-            if start_sec >= end_sec:
-                raise ValueError(f"start_sec={start_sec} >= end_sec={end_sec}")
-            sub = video.subclip(start_sec, end_sec)
+            # 把所有 segments 限制在 video.duration 内
+            vid_dur = video.duration
+            seg_list: list[tuple[float, float]] = []
+            for s_ms, e_ms in segments:
+                s_sec = max(0, s_ms) / 1000.0
+                e_sec = min(vid_dur, e_ms) / 1000.0
+                if e_sec <= s_sec:
+                    continue
+                seg_list.append((s_sec, e_sec))
+            if not seg_list:
+                raise ValueError("segments 为空或全部无效")
+
+            clips = [video.subclip(s, e) for s, e in seg_list]
             try:
-                sub.write_videofile(
-                    str(out_mp4),
-                    audio_codec="aac",
-                    codec="libx264",
-                    preset="medium",
-                    verbose=False,
-                    logger=None,
-                )
+                if len(clips) == 1:
+                    final = clips[0]
+                else:
+                    final = mpy.concatenate_videoclips(clips)
+                try:
+                    final.write_videofile(
+                        str(out_mp4),
+                        audio_codec="aac",
+                        codec="libx264",
+                        preset="medium",
+                        verbose=False,
+                        logger=None,
+                    )
+                finally:
+                    final.close()
             finally:
-                sub.close()
+                for c in clips:
+                    try:
+                        c.close()
+                    except Exception:  # noqa: BLE001
+                        pass
         finally:
             video.close()
     except Exception as e:  # noqa: BLE001
@@ -107,7 +159,7 @@ def _coarse_one(
             index=index, coarse_mp4=out_mp4, coarse_srt=out_srt,
             status="failed", duration_sec=0.0,
             elapsed_sec=int(time.time() - t0),
-            error=f"moviepy subclip 失败: {e}",
+            error=f"moviepy subclip/concat 失败: {e}",
         )
 
     elapsed = int(time.time() - t0)
@@ -119,8 +171,8 @@ def _coarse_one(
             error="write_videofile 未产出有效 mp4",
         )
 
-    # 读时长做记录
-    duration_sec = end_sec - start_sec
+    # 读时长做记录（实际产出可能与 segments 累加有 PTS 漂移）
+    duration_sec = sum(max(0, e - s) for s, e in segments) / 1000.0
     try:
         import subprocess
         probe = subprocess.run(
@@ -176,6 +228,38 @@ def run_stage4(
     if not raw_highlights:
         raise svc.ShortVideoError("highlights.json 没有有效片段")
 
+    # 解析 raw.srt：subtitle_lines[].src_index → SRT 行 (start_ms, end_ms)
+    # 用于按字幕行时间戳多窗拼接（REQ-20261004-stage3-restructure）。
+    srt_path = svc.stage_raw_srt_path(root, task_id, project_id)
+    srt_lines: list = []
+    if srt_path.is_file():
+        try:
+            from slirn_home.short_video_analyze import _parse_srt_lines
+            srt_lines = _parse_srt_lines(srt_path.read_text(encoding="utf-8"))
+        except Exception as parse_err:  # noqa: BLE001
+            log.warning("[stage4] raw.srt 解析失败: %s", parse_err)
+    srt_index_to_line = {ln.index: ln for ln in srt_lines}
+
+    def _resolve_segments(hl: dict) -> list[tuple[int, int]]:
+        """按 subtitle_lines[].src_index 解析成 [(seg_start_ms, seg_end_ms), ...]。
+
+        - 行内空 src_index / 找不到 / 时间无效 → 跳过
+        - 完全无 segments → 返回 []，由 _coarse_one fallback 到整体区间切
+        """
+        out: list[tuple[int, int]] = []
+        for sl in (hl.get("subtitle_lines") or []):
+            if not isinstance(sl, dict):
+                continue
+            try:
+                idx = int(sl.get("src_index") or 0)
+            except (TypeError, ValueError):
+                continue
+            ln = srt_index_to_line.get(idx)
+            if ln is None or ln.end_ms <= ln.start_ms:
+                continue
+            out.append((int(ln.start_ms), int(ln.end_ms)))
+        return out
+
     state = svc.get_stage_state(project, "stage4_coarse")
     state["status"] = "running"
     state["started_at"] = svc.now_iso()
@@ -196,10 +280,19 @@ def run_stage4(
     for hl in raw_highlights:
         idx = int(hl.get("index") or (len(results) + 1))
         out_mp4, out_srt = svc.stage4_paths(root, task_id, project_id, idx)
-        res = _coarse_one(
-            source_video, hl, out_mp4, out_srt,
-            start_ost_ms=start_ost_ms, end_ost_ms=end_ost_ms,
-        )
+        segs = _resolve_segments(hl)
+        # 优先按字幕行多窗拼接；无有效 segments 时 fallback 到整体区间切
+        if segs:
+            res = _coarse_one(
+                source_video, hl, out_mp4, out_srt,
+                start_ost_ms=start_ost_ms, end_ost_ms=end_ost_ms,
+                segments=segs,
+            )
+        else:
+            res = _coarse_one(
+                source_video, hl, out_mp4, out_srt,
+                start_ost_ms=start_ost_ms, end_ost_ms=end_ost_ms,
+            )
         results.append(res)
         if progress_cb:
             try:

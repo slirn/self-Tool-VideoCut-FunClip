@@ -33,58 +33,85 @@ log = logging.getLogger(__name__)
 # ---------- Prompt 模板 ----------
 
 _TEMPLATE_BASE_SYSTEM = (
-    "你是一个短视频内容导演，输入是一段长视频的 SRT 字幕。你的任务是"
-    "从字幕里找出 {n_clips} 个最适合短视频传播的精彩片段，**每个片段约 60 秒**（±20 秒），"
-    "片段之间相对独立。\n\n"
+    "你是一个短视频内容导演，输入是一段长视频的 SRT 字幕。\n"
+    "你的任务是从字幕里**重新组织和编排** {n_clips} 条**独立短视频**（highlights），\n"
+    "每条约 60 秒（±20 秒）。\n\n"
+    "⚠️ **重要前提**：highlights **不是**源视频的连续切片，而是**独立的短视频**。\n"
+    "每条都要有完整的开场钩子-主体内容-收尾点题；片段之间**不连续**、不重叠、不按源时间顺序排列。\n"
+    "每条 highlight 的 ``start_ms`` / ``end_ms`` 是一个**大致时间窗口**（用于粗剪定位），\n"
+    "但 ``subtitle_lines`` 可以**跨源视频任意位置**挑选，按叙事/传播逻辑自由排序。\n\n"
     "关键要求（务必遵守）：\n"
-    "1. **字幕重组**：每条 highlight 的 ``subtitle_lines`` 不是源字幕的连续区间复制，"
-    "而是把多个零散句按主题/叙事重组；可跨源字幕任意位置挑行。"
-    "2. **重新排序**：highlights 数组的顺序**不按源时间顺序**，按传播效果排序（钩子/主题/故事节奏）。"
-    "3. **时间戳有效**：``start_ms`` / ``end_ms`` 必须是源字幕中真实存在的毫秒（可取子条目实际首尾），"
-    "不能凭空指定。每条覆盖时长 60 秒 ±20。"
-    "4. ``src_index`` 引用源字幕行号（1-based），只能引用实际存在的行；文本字段可微调但要保留原意。\n\n"
+    "1. **非连续区间**：相邻 highlights 的 [start_ms, end_ms] 不应连续或重叠；\n"
+    "   应刻意拉开（如 [30-60s]、[180-240s]、[400-460s]、[800-860s]）。\n"
+    "2. **高密度字幕**：每个 highlight 至少包含 **8 条 subtitle_lines**（60s 视频密度建议 12 条），\n"
+    "   不要只挑 3-5 句。密度 = 短视频可看性。\n"
+    "3. **重组字幕**：subtitle_lines **可跨源字幕任意位置**挑行，**不要求**按 src_index 升序。\n"
+    "   行内顺序由叙事/逻辑决定（开头钩子→主体展开→点题收束）。\n"
+    "4. **时间戳真实**：``start_ms`` / ``end_ms`` 必须是源字幕中真实存在的毫秒；\n"
+    "   ``src_index`` 引用源字幕行号（1-based），只能引用实际存在的行。\n"
+    "5. ``text`` 字段可微调，但应保留原意；不要凭空改写或编造原字幕没有的内容。\n\n"
     "输出严格 JSON：\n"
     "{{\n"
     "  \"highlights\": [\n"
     "    {{\n"
     "      \"id\": \"h1\",\n"
-    "      \"title\": \"短小有钩子的标题\",\n"
-    "      \"start_ms\": 12345,\n"
-    "      \"end_ms\": 72345,\n"
+    "      \"title\": \"短小有钩子的标题（≤ 15 字）\",\n"
+    "      \"start_ms\": 30000,\n"
+    "      \"end_ms\": 90000,\n"
     "      \"subtitle_lines\": [\n"
-    "        {{\"src_index\": 12, \"text\": \"原句 1\"}},\n"
-    "        {{\"src_index\": 5,  \"text\": \"原句 2\"}}\n"
+    "        {{\"src_index\": 5,  \"text\": \"开头钩子句（≤ 15 字）\"}},\n"
+    "        {{\"src_index\": 12, \"text\": \"主体展开句 1\"}},\n"
+    "        {{\"src_index\": 7,  \"text\": \"主体展开句 2\"}},\n"
+    "        {{\"src_index\": 23, \"text\": \"收束点题句\"}},\n"
+    "        {{\"src_index\": 31, \"text\": \"跨片段引用的句子\"}},\n"
+    "        ...至少 8 条\n"
     "      ]\n"
     "    }}, ...\n"
     "  ]\n"
-    "}}"
+    "}}\n\n"
+    "**输出仅 JSON**，不要解释、不要 Markdown 代码块标记外的内容。"
 )
 
 
 _TEMPLATE_HOOK_FIRST = (
     _TEMPLATE_BASE_SYSTEM
-    + "\n\n# 排序策略：Hook-First\n"
-    "第一条放视频里**最抓人、最有冲击力**的一段（往往是把悬念 / 反转 / 痛点浓缩到 60 秒）。\n"
-    "剩下的 highlights 按「情绪强度」或「逻辑递进」排序（不必按源时间顺序）。\n"
-    "适合：推广 / 拉新 / 悬念向 / 卖货向 短视频。"
+    + "\n\n# 排序策略：Hook-First（钩子优先）\n"
+    "**第 1 条 highlight** 必须是视频里**最抓人**的一段：\n"
+    "  - ``start_ms`` 必须在 [0, 30000] 区间（视频前 30s 内）。\n"
+    "  - ``subtitle_lines[0]`` 必须是**单句钩子**：≤ 15 字、有悬念/反差/痛点/惊人事实。\n"
+    "    例：「90% 的人不知道」「这个错误坑了 1000 万人」「看完你会沉默」\n"
+    "  - 第 1 条内部：从钩子→论证→点题（密度建议 12 行）。\n"
+    "**第 2-N 条**：按**情绪强度递进**或**逻辑递进**排序（不必按源时间顺序）。\n"
+    "适合：推广 / 拉新 / 悬念向 / 卖货向 短视频。\n"
+    "**反例（不要这样）**：连续切 [30-60s, 60-90s, 90-120s, 120-150s] —— 这只是平铺直叙。"
 )
 
 
 _TEMPLATE_TOPIC_CLUSTER = (
     _TEMPLATE_BASE_SYSTEM
-    + "\n\n# 排序策略：Topic-Cluster\n"
-    "按字幕里的主题聚成 4-5 个簇，每条 highlight 是一个**独立的知识小卡**。\n"
-    "从不同源字幕位置挑选与该簇主题最相关的句子（可穿插），形成该主题的浓缩讲解。\n"
-    "适合：教程 / 知识科普 / 干货 短视频。"
+    + "\n\n# 排序策略：Topic-Cluster（主题聚类）\n"
+    "把字幕里的主题聚成 4-5 个**独立的知识小卡**：\n"
+    "  - 每条 highlight 的 ``title`` 必须是显式主题词（\"减肥误区\"/\"AI 工具三件套\"/\"新手避坑指南\"），\n"
+    "    让用户一眼看懂这卡片讲什么。\n"
+    "  - 每条内部按**概念-例证-总结**微结构排：\n"
+    "    开场点明主题 → 中间从源字幕不同位置挑选 3-5 个例证 → 收尾总结。\n"
+    "  - 高密度：12+ 行/卡。\n"
+    "适合：教程 / 知识科普 / 干货分享。\n"
+    "**反例（不要这样）**：连续切视频 + 没有明确主题。"
 )
 
 
 _TEMPLATE_STORY_ARC = (
     _TEMPLATE_BASE_SYSTEM
     + "\n\n# 排序策略：Story-Arc（起承转合）\n"
-    "每条 highlight 都是一个**完整的小故事弧**：起承转合四段。\n"
-    "从源视频挑 4 个具备完整叙事弧的段；每条内部的字幕行按起承转合顺序排列。\n"
-    "适合：故事 / 人物访谈 / 案例分享 短视频。"
+    "每条 highlight 都是一个**完整的小故事弧**，至少 12 行字幕，强制 4 段结构：\n"
+    "  - **起（2-3 行铺垫）**：引入人物/情境/冲突，\"从前有个...\"/\"某天，他发现...\"\n"
+    "  - **承（3-4 行展开）**：故事发展、转折前奏、细节堆叠。\n"
+    "  - **转（2-3 行反转/转折）**：核心反转、关键事件、矛盾爆发。\n"
+    "  - **合（2-3 行收束/点题）**：情感落点、金句、行动号召。\n"
+    "从源视频挑 4 个具备完整故事弧的段；每条内部的字幕行严格按 起→承→转→合 顺序。\n"
+    "适合：故事 / 人物访谈 / 案例分享。\n"
+    "**反例（不要这样）**：只是把视频切 4 段，每段都缺起承转合结构。"
 )
 
 
@@ -225,6 +252,35 @@ def _validate_highlights(payload: dict, srt_lines: list[SrtLine]) -> tuple[list[
                 continue
             text = str(sl.get("text") or line.text).strip()
             subtitle_lines.append({"src_index": src_index, "text": text})
+
+        # REQ-20261004-stage3-restructure：密度补齐 —— 短视频 60s 至少 8 行；
+        # 不足时从 raw.srt 区间内按时间顺序补行（保留 LLM 已挑的在前，补齐的在后）。
+        # 仅当 LLM 给了部分行（但密度不够）时跑；完全空的 subtitle_lines 走下面的兜底。
+        if srt_lines and subtitle_lines:
+            duration_sec = max(0, (end_ms - start_ms) / 1000.0)
+            target_lines = max(8, int((duration_sec + 4) // 5))  # ceil(duration/5) 且 ≥ 8
+            if len(subtitle_lines) < target_lines:
+                existing_src = {int(sl.get("src_index") or 0) for sl in subtitle_lines}
+                candidates = [
+                    ln for ln in srt_lines
+                    if ln.start_ms >= start_ms and ln.end_ms <= end_ms
+                    and ln.index not in existing_src
+                ]
+                for ln in candidates:
+                    if len(subtitle_lines) >= target_lines:
+                        break
+                    subtitle_lines.append({"src_index": ln.index, "text": ln.text})
+                    existing_src.add(ln.index)
+                if len(subtitle_lines) >= target_lines:
+                    warnings.append(
+                        f"highlight #{i} 字幕密度不足（{len(subtitle_lines)} < 目标 {target_lines}），"
+                        f"已用区间内 SRT 行补齐到 {len(subtitle_lines)} 行"
+                    )
+                else:
+                    warnings.append(
+                        f"highlight #{i} 字幕密度不足（{len(subtitle_lines)} 行；目标 {target_lines}），"
+                        f"区间内 SRT 行不够，已用尽"
+                    )
 
         if not subtitle_lines:
             # 兜底：直接用 src_index 范围内的所有 srt_lines 行（rearrange fallback）
