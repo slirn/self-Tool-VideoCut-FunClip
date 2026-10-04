@@ -218,6 +218,26 @@
     });
   }
 
+  function stage3VerifyRun() {
+    // REQ-20261004-verify：跑 Stage 3.5 一致性核验（ffmpeg 抽音频 + funasr
+    // 重 ASR + 与 Stage 3 字幕逐行对齐）。每个 highlight 几秒，全跑 ~10-30s；
+    // toast 提示开始，done 后刷新页面看报告。
+    var ctx = innerCtx(); if (!ctx) return;
+    toast('字幕一致性核验中（每条片段几秒）…');
+    postJSON(API + '/short_video_stage3_verify', {
+      task_id: ctx.taskId, project_id: ctx.projectId
+    }).then(function(r) {
+      if (r && r.ok) {
+        var sum = ((r.stage3_verify || {}).summary) || {};
+        toast('核验完成：' + (sum.ok || 0) + ' 一致 / '
+              + (sum.warning || 0) + ' 部分 / '
+              + (sum.failed || 0) + ' 不符');
+        openProject(ctx.taskId, ctx.projectId);
+      }
+      else toast((r && r.error) || 'Stage 3.5 失败', 'error');
+    });
+  }
+
   function stage4Run() {
     var ctx = innerCtx(); if (!ctx) return;
     toast('粗剪合成中…');
@@ -517,6 +537,7 @@
     if (action === 'sv-stage2-preview-srt') return previewStage2Srt(btn);
     if (action === 'sv-stage3-run') return stage3Run();
     if (action === 'sv-stage3-preview') return stage3PreviewHl(btn);
+    if (action === 'sv-stage3-verify-run') return stage3VerifyRun();
     if (action === 'sv-stage4-run') return stage4Run();
     if (action === 'sv-stage5-asr') return stage5Asr(btn);
     if (action === 'sv-stage5-save') return stage5Save(btn);

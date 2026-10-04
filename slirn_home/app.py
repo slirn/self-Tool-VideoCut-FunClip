@@ -9882,6 +9882,29 @@ def _register_slirn_api(
             return _err(f"Stage 3 执行失败: {e}")
         return _ok(stage3=state, toast=f"Stage 3 {state.get('status', '')}")
 
+    @app.app.post("/slirn/api/short_video_stage3_verify")
+    async def short_video_stage3_verify(body: dict = Body(default_factory=dict)):
+        """REQ-20261004-verify：Stage 3.5 字幕一致性核验 — 插入在 Stage 3 和
+        Stage 4 之间。每个 highlight 跑 ffmpeg 抽音频 + funasr 重 ASR，与 Stage 3
+        的 subtitle_lines 做对齐 + 相似度对比，输出每条字幕行的 ok/partial/mismatch/
+        missing 分类 + 建议。仅生成报告，不做任何自动修改。
+        """
+        from slirn_home import short_video_verify as _sv_verify
+
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        if not tid or not pid:
+            return _err("缺少 task_id 或 project_id")
+        try:
+            state = _sv_verify.run_stage3_verify(
+                repo_root, tid, pid,
+                model=str(body.get("model") or "paraformer"),
+            )
+        except Exception as e:  # noqa: BLE001
+            log.exception("stage3_verify run failed")
+            return _err(f"Stage 3.5 执行失败: {e}")
+        return _ok(stage3_verify=state, toast=f"Stage 3.5 {state.get('status', '')}")
+
     @app.app.post("/slirn/api/short_video_stage4_run")
     async def short_video_stage4_run(body: dict = Body(default_factory=dict)):
         """REQ-20261003-098：Stage 4 粗剪合成。"""

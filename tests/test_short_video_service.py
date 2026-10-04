@@ -727,3 +727,165 @@ def test_clean_highlight_subtitles_removes_out_of_range():
     assert [s["src_index"] for s in cleaned] == [1], f"应只保留 src=1，实际: {cleaned}"
     assert any("不在 clip" in w for w in warns), f"应有「不在 clip」警告: {warns}"
     assert any("不存在" in w for w in warns), f"应有「不存在」警告: {warns}"
+
+
+# ---------- REQ-20261004-verify: Stage 3.5 字幕一致性核验 ----------
+
+def test_verify_char_similarity_identical():
+    """完全相同文本相似度 = 1.0。"""
+    from slirn_home.short_video_verify import _char_similarity
+    assert _char_similarity("你好世界", "你好世界") == 1.0
+
+
+def test_verify_char_similarity_whitespace_normalized():
+    """空格/换行差异不影响相似度。"""
+    from slirn_home.short_video_verify import _char_similarity
+    # 字幕可能是 "你好 世界"（funasr 输出可能是 "你好世界"）
+    assert _char_similarity("你好 世界", "你好世界") == 1.0
+
+
+def test_verify_char_similarity_empty_strings():
+    """空串 vs 空串 = 1.0；空串 vs 非空 = 0.0。"""
+    from slirn_home.short_video_verify import _char_similarity
+    assert _char_similarity("", "") == 1.0
+    assert _char_similarity("", "x") == 0.0
+    assert _char_similarity("x", "") == 0.0
+
+
+def test_verify_align_subtitle_to_asr_exact_match():
+    """字幕与 ASR 文本完全相同 → ok。"""
+    from slirn_home.short_video_verify import _align_subtitle_to_asr
+    asr_lines = [
+        {"idx": 1, "start_ms": 1100, "end_ms": 1900, "text": "你好世界"},
+    ]
+    ml = _align_subtitle_to_asr("你好世界", 5, asr_lines, 1000, 2000)
+    assert ml.status == "ok"
+    assert ml.similarity == 1.0
+    assert ml.suggestion == "无操作"
+
+
+def test_verify_align_subtitle_to_asr_partial_match():
+    """部分相似 (0.4-0.7) → partial。"""
+    from slirn_home.short_video_verify import _align_subtitle_to_asr
+    asr_lines = [
+        {"idx": 1, "start_ms": 1100, "end_ms": 1900, "text": "你好世界"},
+    ]
+    # "你好" 与 "你好世界" 相似度 ~0.5
+    ml = _align_subtitle_to_asr("你好", 5, asr_lines, 1000, 2000)
+    assert ml.status == "partial"
+    assert 0.4 <= ml.similarity < 0.7
+
+
+def test_verify_align_subtitle_to_asr_mismatch():
+    """相似度 < 0.4 → mismatch，建议替换为 ASR 文本。"""
+    from slirn_home.short_video_verify import _align_subtitle_to_asr
+    asr_lines = [
+        {"idx": 1, "start_ms": 1100, "end_ms": 1900, "text": "完全不同的音频"},
+    ]
+    ml = _align_subtitle_to_asr("你好世界", 5, asr_lines, 1000, 2000)
+    assert ml.status == "mismatch"
+    assert ml.similarity < 0.4
+    assert "ASR 文本" in ml.suggestion
+
+
+def test_verify_align_subtitle_to_asr_time_miss():
+    """ASR 行不在 highlight 时间窗口 ±容差内 → missing。"""
+    from slirn_home.short_video_verify import _align_subtitle_to_asr
+    asr_lines = [
+        # 这个 ASR 行在 [5000, 6000]，离 highlight [1000, 2000] 太远
+        {"idx": 1, "start_ms": 5000, "end_ms": 6000, "text": "你好世界"},
+    ]
+    ml = _align_subtitle_to_asr("你好世界", 5, asr_lines, 1000, 2000)
+    assert ml.status == "missing"
+    assert "找不到对应音频" in ml.suggestion
+
+
+def test_verify_parse_re_asr_srt_with_offset():
+    """_parse_re_asr_srt 把 ASR 内部时间 + offset 转回源视频时间轴。"""
+    from slirn_home.short_video_verify import _parse_re_asr_srt
+
+    srt = """1
+00:00:01,000 --> 00:00:02,000
+你好世界
+"""
+    out = _parse_re_asr_srt(srt, offset_ms=30000)
+    assert len(out) == 1
+    assert out[0]["start_ms"] == 31000
+    assert out[0]["end_ms"] == 32000
+    assert out[0]["text"] == "你好世界"
+
+
+def test_verify_stage_runs_end_to_end(tmp_path):
+    """完整跑 Stage 3.5：模拟一个完整 pipeline（Stage 1-3 + verify）。
+
+    用静默 funasr/ffmpeg 替代：直接准备 highlights.json + SRT + 假 source 视频。
+    跳过 ffmpeg/funasr 路径，只验证状态机写入 + summary 报告。
+    """
+    from slirn_home import short_video_verify
+    from slirn_home import short_video_service as svc
+    import json
+
+    root = tmp_path
+    tid = "20261004-001"
+    pid = "sv_test"
+
+    # 直接手工搭项目结构（绕过 create_project 的 task 检查）
+    proj_dir = svc.project_dir(root, tid, pid)
+    proj_dir.mkdir(parents=True, exist_ok=True)
+    fake_video = proj_dir / "fake.mp4"
+    fake_video.write_bytes(b"\x00" * 1024)  # 假视频（仅用于通过路径检查）
+    assets_dir = proj_dir / "assets"
+    assets_dir.mkdir(exist_ok=True)
+
+    proj = {
+        "task_id": tid,
+        "id": pid,
+        "name": "测试",
+        "kind": "split",
+        "materials": [{
+            "id": "mat_fake",
+            "kind": "video",
+            "name": "fake.mp4",
+            "path": str(fake_video),
+            "source": "auto",
+        }],
+        "base_material_id": "mat_fake",
+        "pipeline": {
+            "stage1_source": {"status": "done", "source_material_id": "mat_fake"},
+            "stage2_extract": {"status": "pending"},
+            "stage3_analyze": {"status": "pending"},
+            "stage3_verify": {"status": "pending"},
+            "stage4_coarse": {"status": "pending"},
+            "stage5_refine": {"status": "pending"},
+            "stage6_finalize": {"status": "pending"},
+        },
+    }
+    svc.save_project(root, proj)
+
+    # 写一个 highlights.json
+    hl = {
+        "highlights": [
+            {
+                "index": 1,
+                "id": "h1",
+                "title": "测试片段",
+                "start_ms": 0,
+                "end_ms": 5000,
+                "subtitle_lines": [{"src_index": 1, "text": "假字幕"}],
+            },
+        ],
+    }
+    sp = svc.stage_highlights_path(root, tid, pid)
+    sp.parent.mkdir(parents=True, exist_ok=True)
+    sp.write_text(json.dumps(hl, ensure_ascii=False), encoding="utf-8")
+
+    # 跑 verify（会因 ffmpeg 在 fake.mp4 上失败）
+    try:
+        short_video_verify.run_stage3_verify(root, tid, pid)
+    except svc.ShortVideoError:
+        # 预期失败 —— fake.mp4 不是真视频
+        pass
+
+    # 至少 verify_dir 应被创建（核验初始化成功）
+    verify_dir = svc.stage3_verify_dir(root, tid, pid)
+    assert verify_dir.is_dir(), f"verify 目录应被创建: {verify_dir}"

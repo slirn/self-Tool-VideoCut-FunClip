@@ -46,6 +46,7 @@ STAGE6_DIR = "stage6"
 STAGE5_DIR = "stage5"
 STAGE4_DIR = "stage4"
 STAGE3_DIR = "stage3"
+STAGE3_VERIFY_DIR = "stage3_verify"
 STAGE2_DIR = "stage2"
 STAGE1_DIR = "stage1"
 FINAL_MP4_PREFIX = "final"
@@ -223,6 +224,7 @@ def _normalize_project(data: dict, task_id: str, project_id: str) -> dict:
             ("stage1_source", {"status": "pending"}),
             ("stage2_extract", {"status": "pending"}),
             ("stage3_analyze", {"status": "pending"}),
+            ("stage3_verify", {"status": "pending"}),
             ("stage4_coarse", {"status": "pending"}),
             ("stage5_refine", {"status": "pending"}),
             ("stage6_finalize", {"status": "pending"}),
@@ -934,6 +936,10 @@ def stage3_dir(repo_root: Path | str, task_id: str, project_id: str) -> Path:
     return project_dir(repo_root, task_id, project_id) / STAGE3_DIR
 
 
+def stage3_verify_dir(repo_root: Path | str, task_id: str, project_id: str) -> Path:
+    return project_dir(repo_root, task_id, project_id) / STAGE3_VERIFY_DIR
+
+
 def stage2_dir(repo_root: Path | str, task_id: str, project_id: str) -> Path:
     return project_dir(repo_root, task_id, project_id) / STAGE2_DIR
 
@@ -1031,6 +1037,7 @@ _STAGE_STATE_KEYS = {
     "stage1_source": "stage1_source",
     "stage2_extract": "stage2_extract",
     "stage3_analyze": "stage3_analyze",
+    "stage3_verify": "stage3_verify",
     "stage4_coarse": "stage4_coarse",
     "stage5_refine": "stage5_refine",
     "stage6_finalize": "stage6_finalize",
@@ -1068,6 +1075,7 @@ def reset_downstream_stages(project: dict, after_stage: str) -> None:
         "stage1_source",
         "stage2_extract",
         "stage3_analyze",
+        "stage3_verify",
         "stage4_coarse",
         "stage5_refine",
         "stage6_finalize",

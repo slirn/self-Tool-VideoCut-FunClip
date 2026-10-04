@@ -377,6 +377,114 @@ def _stage3_analyze(project: dict, source_url: str = "") -> str:
 </div>'''
 
 
+def _stage35_verify(project: dict) -> str:
+    """REQ-20261004-verify：Stage 3.5 字幕一致性核验。
+
+    仅生成报告，不修改任何数据。报告按 highlight 列出每条字幕行的状态：
+    - ✅ ok（相似度 ≥ 0.7）— 与音频相符
+    - ⚠️ partial（0.4-0.7）— 文本部分相符，建议核对
+    - ❌ mismatch（< 0.4）— 文本错误，建议改用 ASR 文本
+    - ❌ missing — 字幕找不到对应音频（可能切片错位或 funasr 漏识别）
+    - 🆕 extra — ASR 中有但字幕没收录（建议补字幕）
+    """
+    s3v = project.get("pipeline", {}).get("stage3_verify", {}) or {}
+    s3 = project.get("pipeline", {}).get("stage3_analyze", {}) or {}
+    status = s3v.get("status") or "pending"
+    hl_count = s3v.get("count") or 0
+    hl_rows = s3v.get("highlights") or []
+    summary = s3v.get("summary") or {}
+    error_html = ""
+    if status == "failed" and not hl_rows:
+        err = s3v.get("error") or "核验失败"
+        error_html = f'<div class="slirn-stage-error">{esc(err)}</div>'
+
+    # 是否允许运行核验：Stage 3 必须 done 且至少有 1 条 highlight
+    s3_done = s3.get("status") == "done"
+    hl_list = s3.get("highlights") or []
+    can_run = s3_done and bool(hl_list)
+    btn_label = "🔍 重新核验" if status == "done" else "🔍 跑一致性核验"
+    btn_class = "slirn-btn" if status == "done" else "slirn-btn slirn-btn-primary"
+    disabled_attr = "" if can_run else " disabled title=\"请先完成 Stage 3 AI 拆条\""
+    run_btn = (
+        f'<button class="{btn_class}" data-action="sv-stage3-verify-run"{disabled_attr}>'
+        f'{btn_label}</button>'
+    )
+
+    # 报告摘要
+    summary_html = ""
+    if summary:
+        summary_html = (
+            f'<div class="slirn-stage35-summary">'
+            f'<span class="slirn-sv-badge slirn-sv-badge-ok">✅ {summary.get("ok", 0)} 一致</span>'
+            f'<span class="slirn-sv-badge slirn-sv-badge-warning">⚠️ {summary.get("warning", 0)} 部分</span>'
+            f'<span class="slirn-sv-badge slirn-sv-badge-failed">❌ {summary.get("failed", 0)} 不符</span>'
+            f'<span class="slirn-sv-badge slirn-sv-badge-muted">— {summary.get("skipped", 0)} 跳过</span>'
+            f'</div>'
+        )
+
+    # 详细行：每条 highlight 一行
+    detail_rows = []
+    for hl in hl_rows:
+        idx = hl.get("index") or len(detail_rows) + 1
+        st = hl.get("status") or "pending"
+        sub = hl.get("subtitle_count") or 0
+        asr = hl.get("asr_count") or 0
+        matched = hl.get("matched_count") or 0
+        mismatched = hl.get("mismatched_count") or 0
+        missing = hl.get("missing_in_audio") or 0
+        extra = hl.get("extra_in_audio") or 0
+        err = hl.get("error") or ""
+        badge_cls = {
+            "ok": "slirn-sv-badge-ok",
+            "warning": "slirn-sv-badge-warning",
+            "failed": "slirn-sv-badge-failed",
+            "skipped": "slirn-sv-badge-muted",
+        }.get(st, "slirn-sv-badge-muted")
+        badge_text = {
+            "ok": "✅ 一致",
+            "warning": "⚠️ 部分",
+            "failed": "❌ 不符",
+            "skipped": "— 跳过",
+        }.get(st, st)
+        err_html = f'<div class="slirn-stage-error">{esc(err)}</div>' if err else ""
+        detail_rows.append(
+            f'<div class="slirn-stage35-row" data-clip-index="{idx}">'
+            f'<div class="slirn-stage35-row-head">'
+            f'<span class="slirn-sv-row-no">#{idx}</span>'
+            f'<span class="slirn-sv-badge {badge_cls}">{badge_text}</span>'
+            f'<span class="slirn-sv-muted">'
+            f'字幕 {sub} 行 · ASR {asr} 行 · '
+            f'一致 {matched} · 不符 {mismatched} · 缺失 {missing} · 多余 {extra}'
+            f'</span>'
+            f'</div>'
+            f'{err_html}'
+            f'</div>'
+        )
+    detail_html = "".join(detail_rows)
+
+    return f'''<div class="slirn-stage" data-stage="3.5">
+  <div class="slirn-stage-head">
+    <span class="slirn-stage-num">3.5</span>
+    <strong>字幕一致性核验</strong>
+    {_stage_badge(status)}
+    {_stage_elapsed(s3v)}
+  </div>
+  <div class="slirn-stage-body">
+    <div class="slirn-sv-muted slirn-stage35-help">
+      对 Stage 3 的每个 highlight 跑 ffmpeg 抽音频 + funasr 重 ASR，与现有字幕做相似度对比。
+      <strong>仅生成报告</strong>，不修改任何数据；根据报告决定是否调整字幕文本或重新裁剪。
+    </div>
+    <div class="slirn-sv-card-actions">
+      {run_btn}
+      {summary_html}
+    </div>
+    <div class="slirn-stage35-detail">{detail_html}</div>
+    {error_html}
+    {_stage_logs(s3v)}
+  </div>
+</div>'''
+
+
 def _stage4_coarse(project: dict) -> str:
     task_id = str(project.get("task_id") or "")
     project_id = str(project.get("id") or "")
@@ -545,6 +653,7 @@ def render_project(project: dict, all_tasks: list[dict] | None = None) -> str:
   {_stage1_select_source(project)}
   {_stage2_extract(project)}
   {_stage3_analyze(project, source_url=_source_video_url(project))}
+  {_stage35_verify(project)}
   {_stage4_coarse(project)}
   {_stage5_refine(project)}
   {_stage6_finalize(project)}
