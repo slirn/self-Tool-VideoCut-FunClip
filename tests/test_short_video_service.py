@@ -519,3 +519,79 @@ def test_short_video_render_smoke_9x16(tmp_path):
         "-show_entries", "stream=width,height", "-of", "csv=p=0", str(out),
     ], check=True, capture_output=True, text=True)
     assert probe.stdout.strip() == "1080,1920"
+
+
+# ---------- REQ-20261004-bugfix: _strip_json_block 容错 ----------
+
+def test_strip_json_block_single_object():
+    """单对象（标准情况）原样返回。"""
+    from slirn_home.short_video_analyze import _strip_json_block
+    raw = '{"highlights": [{"id": "h1", "start_ms": 0, "end_ms": 1000}]}'
+    out = _strip_json_block(raw)
+    assert out == {"highlights": [{"id": "h1", "start_ms": 0, "end_ms": 1000}]}
+
+
+def test_strip_json_block_strips_code_fence():
+    """容错 Markdown 代码块标记。"""
+    from slirn_home.short_video_analyze import _strip_json_block
+    raw = '```json\n{"highlights": []}\n```'
+    out = _strip_json_block(raw)
+    assert out == {"highlights": []}
+
+
+def test_strip_json_block_multiple_top_level_objects():
+    """多个顶层对象用逗号分隔：合并 highlights 数组。
+
+    REQ-20261004-bugfix：LLM 偶尔把多个 highlights 各包成一个对象再并列，
+    老逻辑只截首尾 {} 会导致 "Extra data" 解析失败。
+    """
+    from slirn_home.short_video_analyze import _strip_json_block
+    raw = (
+        '{"highlights": [{"id": "h1", "start_ms": 0, "end_ms": 1000}]}, '
+        '{"highlights": [{"id": "h2", "start_ms": 2000, "end_ms": 3000}]}'
+    )
+    out = _strip_json_block(raw)
+    assert "highlights" in out
+    assert len(out["highlights"]) == 2
+    assert out["highlights"][0]["id"] == "h1"
+    assert out["highlights"][1]["id"] == "h2"
+
+
+def test_strip_json_block_strips_replacement_char():
+    """U+FFFD（替换字符）从 httpx decode('replace' 产生）应被清掉。"""
+    from slirn_home.short_video_analyze import _strip_json_block
+    raw = '{"highlights": [{"id": "h1", "title": "a�b"}]}'
+    out = _strip_json_block(raw)
+    assert out["highlights"][0]["title"] == "ab"
+
+
+def test_strip_json_block_position_context_on_failure():
+    """解析失败给出 position + context 便于排查（REQ-20261004-bugfix）。"""
+    import pytest
+    from slirn_home.short_video_analyze import _strip_json_block
+    from slirn_home.short_video_service import ShortVideoError
+    # 含有效外层 {} 但内部 unescaped 控制字符（form feed \\x0c）触发 strict 失败
+    raw = '{"highlights": [{"id": "h1", "text": "a' + '\x0c' + 'b"}]}'
+    with pytest.raises(ShortVideoError) as ei:
+        _strip_json_block(raw)
+    msg = str(ei.value)
+    assert "context" in msg, msg
+    assert "pos " in msg, msg
+
+
+def test_strip_json_block_top_level_array():
+    """顶层直接是数组（少数 LLM 的输出风格）也兼容：合并为 highlights。"""
+    from slirn_home.short_video_analyze import _strip_json_block
+    raw = '[{"id": "h1"}, {"id": "h2"}]'
+    out = _strip_json_block(raw)
+    assert "highlights" in out
+    assert len(out["highlights"]) == 2
+
+
+def test_strip_json_block_no_json_raises():
+    """完全没有 JSON 抛 ShortVideoError（不是 json.JSONDecodeError）。"""
+    import pytest
+    from slirn_home.short_video_analyze import _strip_json_block
+    from slirn_home.short_video_service import ShortVideoError
+    with pytest.raises(ShortVideoError):
+        _strip_json_block("just some plain text, no braces")

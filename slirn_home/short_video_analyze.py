@@ -239,13 +239,111 @@ def _validate_highlights(payload: dict, srt_lines: list[SrtLine]) -> tuple[list[
 # ---------- LLM 调度 ----------
 
 def _strip_json_block(raw: str) -> dict:
-    """从 LLM 文本里抠 JSON object；容错代码块标记。"""
+    """从 LLM 文本里抠 JSON object；容错代码块标记。
+
+    REQ-20261004-bugfix：处理三类历史见过的 LLM 输出异常：
+
+    1. 含 U+FFFD（httpx 已用 errors='replace' 替换无效 UTF-8）；
+       直接清掉，通常无害。
+    2. **多个顶层对象用逗号分隔**：`{"highlights":[{h1}]},{"highlights":[{h2}]}`；
+       老逻辑只取首尾 {}，中间对象被截掉 + 出现 "Extra data"。
+       这里尝试「逐个对象切分、合并 highlights 数组」。
+    3. 顶层直接是数组 `[…]` 而非对象；正常 json.loads 即可。
+
+    解析失败时给出 position + context 方便排查。
+    """
     text = re.sub(r"```(?:json)?\s*|\s*```", "", raw or "").strip()
-    start = text.find("{")
-    end = text.rfind("}")
-    if start < 0 or end <= start:
+    text = text.replace("�", "")
+    # 顶层直接是数组：少数 LLM 直接返回 [...]（无外层 {} 包裹）
+    arr0 = text.find("[")
+    brace0 = text.find("{")
+    if arr0 >= 0 and (brace0 < 0 or arr0 < brace0):
+        arr_end = text.rfind("]")
+        if arr_end > arr0:
+            try:
+                arr = json.loads(text[arr0 : arr_end + 1])
+                if isinstance(arr, list):
+                    return {"highlights": arr}
+            except json.JSONDecodeError:
+                pass  # 落到下面的对象路径再试
+    start = brace0
+    if start < 0:
         raise svc.ShortVideoError("LLM 未返回 JSON 对象")
-    return json.loads(text[start:end + 1])
+
+    # 切分多个顶层对象：用 brace 配对逐个截取
+    objs: list[dict] = []
+    i = start
+    n = len(text)
+    while i < n:
+        if text[i] != "{":
+            i += 1
+            continue
+        depth = 0
+        in_str = False
+        esc = False
+        j = i
+        while j < n:
+            c = text[j]
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = not in_str
+            elif not in_str:
+                if c == "{":
+                    depth += 1
+                elif c == "}":
+                    depth -= 1
+                    if depth == 0:
+                        break
+            j += 1
+        if depth != 0 or j >= n:
+            break  # brace 不配对，停止切分
+        try:
+            obj = json.loads(text[i : j + 1])
+            if isinstance(obj, dict):
+                objs.append(obj)
+        except json.JSONDecodeError:
+            # 单个对象解析失败，跳过继续
+            pass
+        i = j + 1
+        # 跳过 , 或空白
+        while i < n and text[i] in " \t\r\n,":
+            i += 1
+
+    if not objs:
+        # 切分不出来：最后试一次整段解析并给出 position context
+        end = text.rfind("}")
+        if end <= start:
+            raise svc.ShortVideoError("LLM 未返回 JSON 对象")
+        try:
+            obj = json.loads(text[start : end + 1])
+            if isinstance(obj, dict):
+                return obj
+        except json.JSONDecodeError as e:
+            ctx_start = max(0, e.pos - 40)
+            ctx_end = min(len(text), e.pos + 40)
+            ctx = text[start + ctx_start : start + ctx_end]
+            raise svc.ShortVideoError(
+                f"LLM 返回值无法解析: {e.msg} (pos {e.pos}, context: …{ctx!r}…)"
+            ) from e
+        raise svc.ShortVideoError("LLM 返回值无法解析（无有效 JSON 对象）")
+
+    # 单对象：直接返回
+    if len(objs) == 1:
+        return objs[0]
+
+    # 多对象：合并 highlights 数组（其它字段取第一个）
+    merged: dict = dict(objs[0])
+    highlights: list = []
+    for o in objs:
+        h = o.get("highlights")
+        if isinstance(h, list):
+            highlights.extend(h)
+    if highlights:
+        merged["highlights"] = highlights
+    return merged
 
 
 def _call_highlights_llm(
@@ -400,6 +498,8 @@ def run_stage3(
     state["highlights_path"] = svc._rel(root, highlights_path)
     state["warnings"] = warnings
     state["count"] = len(validated)
+    # REQ-20261004-bugfix：清掉上一次失败的 error，避免 UI 显示陈旧报错。
+    state.pop("error", None)
     state["logs"] = list(state.get("logs") or []) + [
         f"[{svc.now_iso()}] stage3 done, highlights={len(validated)}, warnings={len(warnings)}, llm={model_id}, elapsed={elapsed}s",
     ]
