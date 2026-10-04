@@ -595,3 +595,135 @@ def test_strip_json_block_no_json_raises():
     from slirn_home.short_video_service import ShortVideoError
     with pytest.raises(ShortVideoError):
         _strip_json_block("just some plain text, no braces")
+
+
+# ---------- REQ-20261004-bugfix: _validate_highlights 字幕区间校验 ----------
+
+def test_validate_highlights_filters_out_of_range_subtitles():
+    """LLM 返回的 src_index 若对应 SRT 行不在 [start_ms, end_ms] 内，必须被剔除。
+
+    复现场景：用户报告「AI拆条的字幕跟视频对不上」——根因就是 _validate_highlights
+    只校验 src_index 存在，未校验时间区间，导致 LLM 把整段视频任意 SRT 行的
+    src_index 都写进 highlight，UI 渲染时显示出来就跟实际播放内容对不上。
+    """
+    from slirn_home.short_video_analyze import _validate_highlights, SrtLine
+
+    srt_lines = [
+        SrtLine(index=1, start_ms=1000, end_ms=2000, text="第一句"),
+        SrtLine(index=2, start_ms=3000, end_ms=4000, text="第二句"),
+        SrtLine(index=3, start_ms=5000, end_ms=6000, text="第三句"),
+        SrtLine(index=4, start_ms=7000, end_ms=8000, text="第四句（clip 外）"),
+    ]
+    payload = {
+        "highlights": [
+            {
+                "id": "h1",
+                "title": "测试片段",
+                "start_ms": 1000,
+                "end_ms": 6000,
+                "subtitle_lines": [
+                    {"src_index": 1, "text": "第一句"},   # in range
+                    {"src_index": 2, "text": "第二句"},   # in range
+                    {"src_index": 3, "text": "第三句"},   # in range
+                    {"src_index": 4, "text": "第四句"},   # out of range → must be filtered
+                ],
+            },
+        ],
+    }
+    validated, warnings = _validate_highlights(payload, srt_lines)
+    assert len(validated) == 1
+    subs = validated[0]["subtitle_lines"]
+    src_indices = [s["src_index"] for s in subs]
+    # 关键断言：src_index=4 (7000-8000ms) 不在 clip [1000-6000] 内，必须被剔除
+    assert 4 not in src_indices, f"clip [1000,6000] 不应包含 7000-8000ms 的字幕行，但保留了: {subs}"
+    assert src_indices == [1, 2, 3], f"应只保留 [1,2,3]，实际: {src_indices}"
+    # 应有警告提示
+    assert any("src_index=4" in w and "不在 clip" in w for w in warnings), \
+        f"应有「不在 clip 内」警告，实际 warnings: {warnings}"
+
+
+def test_validate_highlights_in_range_fallback_when_all_filtered():
+    """LLM 给的 subtitle_lines 全部超界时，回退到区间内的 SRT 行。"""
+    from slirn_home.short_video_analyze import _validate_highlights, SrtLine
+
+    srt_lines = [
+        SrtLine(index=1, start_ms=1000, end_ms=2000, text="第一句"),
+        SrtLine(index=2, start_ms=3000, end_ms=4000, text="第二句"),
+        SrtLine(index=3, start_ms=9000, end_ms=10000, text="第三句（clip 外）"),
+    ]
+    payload = {
+        "highlights": [
+            {
+                "id": "h1",
+                "title": "全错片段",
+                "start_ms": 1000,
+                "end_ms": 4000,
+                "subtitle_lines": [
+                    {"src_index": 3, "text": "第三句"},  # 全部超界
+                ],
+            },
+        ],
+    }
+    validated, warnings = _validate_highlights(payload, srt_lines)
+    assert len(validated) == 1
+    subs = validated[0]["subtitle_lines"]
+    src_indices = [s["src_index"] for s in subs]
+    # 回退应填入 in-range 的 [1, 2]
+    assert src_indices == [1, 2], f"回退应填 [1,2]，实际: {src_indices}"
+    assert any("回退" in w for w in warnings), f"应有回退警告: {warnings}"
+
+
+def test_validate_highlights_tolerance_200ms():
+    """200ms 容差：边界 ±200ms 的字幕行仍被认为在区间内。
+
+    - line1 [1000, 2000] 完全在 clip [2000, 3000] 之前 → 应被剔除
+    - line2 [2150, 3000] 大部分在 clip 内，start_ms=2150 与 start=2000 差 150ms
+      （< 200ms 容差）→ 应保留
+    """
+    from slirn_home.short_video_analyze import _validate_highlights, SrtLine
+
+    srt_lines = [
+        SrtLine(index=1, start_ms=1000, end_ms=2000, text="完全在 clip 前"),
+        SrtLine(index=2, start_ms=2150, end_ms=3000, text="边界 +150ms"),
+    ]
+    payload = {
+        "highlights": [
+            {
+                "id": "h1",
+                "title": "边界测试",
+                "start_ms": 2000,
+                "end_ms": 3000,
+                "subtitle_lines": [
+                    {"src_index": 1, "text": "完全在 clip 前"},
+                    {"src_index": 2, "text": "边界 +150ms"},
+                ],
+            },
+        ],
+    }
+    validated, warnings = _validate_highlights(payload, srt_lines)
+    subs = validated[0]["subtitle_lines"]
+    src_indices = [s["src_index"] for s in subs]
+    assert src_indices == [2], f"line1 在 clip 前应剔除、line2 在 200ms 容差内应保留，实际: {src_indices}"
+
+
+def test_clean_highlight_subtitles_removes_out_of_range():
+    """app.py 的存量清洗：磁盘上的旧 highlights.json 也应被清洗一遍。"""
+    from slirn_home.short_video_analyze import clean_highlight_subtitles, SrtLine
+
+    srt_index_to_line = {
+        1: SrtLine(index=1, start_ms=1000, end_ms=2000, text="在 clip 内"),
+        2: SrtLine(index=2, start_ms=5000, end_ms=6000, text="在 clip 外"),
+    }
+    h = {
+        "start_ms": 1000,
+        "end_ms": 3000,
+        "subtitle_lines": [
+            {"src_index": 1, "text": "在 clip 内"},
+            {"src_index": 2, "text": "在 clip 外（hallucinated）"},
+            {"src_index": 99, "text": "不存在"},
+        ],
+    }
+    cleaned, warns = clean_highlight_subtitles(h, srt_index_to_line)
+    assert [s["src_index"] for s in cleaned] == [1], f"应只保留 src=1，实际: {cleaned}"
+    assert any("不在 clip" in w for w in warns), f"应有「不在 clip」警告: {warns}"
+    assert any("不存在" in w for w in warns), f"应有「不存在」警告: {warns}"

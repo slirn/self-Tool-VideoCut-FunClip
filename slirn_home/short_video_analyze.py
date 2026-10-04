@@ -157,7 +157,7 @@ def _parse_srt_lines(text: str) -> list[SrtLine]:
 
 def _validate_highlights(payload: dict, srt_lines: list[SrtLine]) -> tuple[list[dict], list[str]]:
     """校验 LLM 返回的高亮：要求每条 start_ms/end_ms 对得上 srt_lines，
-    subtitle_lines 的 src_index 引用真实存在。
+    subtitle_lines 的 src_index 引用真实存在 **且时间区间在 [start_ms, end_ms] 内**。
 
     返回 (validated_highlights, warnings)。
     """
@@ -197,7 +197,9 @@ def _validate_highlights(payload: dict, srt_lines: list[SrtLine]) -> tuple[list[
             if abs(snap_end.end_ms - end_ms) < 500:
                 end_ms = snap_end.end_ms
 
-        # 字幕行：每条必须有 src_index；引用合法则采纳
+        # 字幕行：每条必须有 src_index；引用合法 + 时间区间在 [start_ms, end_ms] 内才采纳
+        # 200ms 容差对应 snap 后 start_ms/end_ms 与最近 SRT 行的可能偏差。
+        TOL_MS = 200
         subtitle_lines: list[dict] = []
         for sl in (hl.get("subtitle_lines") or []):
             if not isinstance(sl, dict):
@@ -209,7 +211,19 @@ def _validate_highlights(payload: dict, srt_lines: list[SrtLine]) -> tuple[list[
             if src_index not in valid_srt_indices:
                 warnings.append(f"highlight #{i} 引用了不存在的 src_index={src_index}，跳过该行")
                 continue
-            text = str(sl.get("text") or srt_index_to_line[src_index].text).strip()
+            line = srt_index_to_line[src_index]
+            # 该 SRT 行必须落在 [start_ms - TOL, end_ms + TOL] 内
+            in_range = (
+                line.start_ms >= start_ms - TOL_MS
+                and line.end_ms <= end_ms + TOL_MS
+            )
+            if not in_range:
+                warnings.append(
+                    f"highlight #{i} src_index={src_index} 时间 [{line.start_ms},{line.end_ms}]"
+                    f" 不在 clip [{start_ms},{end_ms}] 内，跳过该行"
+                )
+                continue
+            text = str(sl.get("text") or line.text).strip()
             subtitle_lines.append({"src_index": src_index, "text": text})
 
         if not subtitle_lines:
@@ -234,6 +248,42 @@ def _validate_highlights(payload: dict, srt_lines: list[SrtLine]) -> tuple[list[
     if not validated:
         raise svc.ShortVideoError("LLM 返回的高亮全部无效")
     return validated, warnings
+
+
+def clean_highlight_subtitles(
+    highlight: dict,
+    srt_index_to_line: dict[int, SrtLine],
+    *,
+    tol_ms: int = 200,
+) -> tuple[list[dict], list[str]]:
+    """就地校验一条已存在 highlight 的 subtitle_lines：剔除 src_index 对应 SRT
+    行时间不在 [start_ms, end_ms]（±tol_ms 容差）内的项。
+
+    返回 (cleaned_subtitle_lines, warnings)。Caller 自行决定是否覆盖原数据。
+    """
+    start_ms = int(highlight.get("start_ms") or 0)
+    end_ms = int(highlight.get("end_ms") or 0)
+    cleaned: list[dict] = []
+    warnings: list[str] = []
+    for sl in (highlight.get("subtitle_lines") or []):
+        if not isinstance(sl, dict):
+            continue
+        try:
+            src_index = int(sl.get("src_index") or 0)
+        except (TypeError, ValueError):
+            continue
+        line = srt_index_to_line.get(src_index)
+        if line is None:
+            warnings.append(f"src_index={src_index} 不存在")
+            continue
+        if not (line.start_ms >= start_ms - tol_ms and line.end_ms <= end_ms + tol_ms):
+            warnings.append(
+                f"src_index={src_index} 时间 [{line.start_ms},{line.end_ms}]"
+                f" 不在 clip [{start_ms},{end_ms}] 内"
+            )
+            continue
+        cleaned.append({"src_index": src_index, "text": str(sl.get("text") or line.text).strip()})
+    return cleaned, warnings
 
 
 # ---------- LLM 调度 ----------

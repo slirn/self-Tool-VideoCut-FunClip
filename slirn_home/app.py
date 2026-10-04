@@ -9571,6 +9571,11 @@ def _register_slirn_api(
 
         Why: run_stage3 把 highlights 写到独立 JSON 文件（source of truth），
         不复制到 project state。render_project 只看 state 会拿到空列表。
+
+        REQ-20261004-bugfix：注入前对每条 highlight 做一次字幕区间清洗 ——
+        剔除 src_index 对应 SRT 行不在 [start_ms, end_ms] 内的项（LLM 会
+        hallucinate 不在该 clip 范围内的 src_index，导致 UI 显示的字幕跟视频
+        实际播放内容对不上）。
         """
         try:
             hp = _sv_service.stage_highlights_path(
@@ -9583,6 +9588,31 @@ def _register_slirn_api(
             hls = doc.get("highlights") if isinstance(doc, dict) else None
             if not isinstance(hls, list) or not hls:
                 return
+
+            # 读源 SRT 做清洗（缺 SRT 时跳过清洗，保留原数据）
+            srt_path = _sv_service.stage_raw_srt_path(
+                repo_root, str(project.get("task_id") or ""), str(project.get("id") or "")
+            )
+            srt_index_to_line: dict = {}
+            if srt_path.is_file():
+                try:
+                    from slirn_home.short_video_analyze import (
+                        _parse_srt_lines, clean_highlight_subtitles,
+                    )
+                    srt_lines = _parse_srt_lines(srt_path.read_text(encoding="utf-8"))
+                    srt_index_to_line = {ln.index: ln for ln in srt_lines}
+                    if srt_index_to_line:
+                        new_hls = []
+                        for h in hls:
+                            cleaned, _warns = clean_highlight_subtitles(h, srt_index_to_line)
+                            # 即使 cleaned 为空也保留 highlight（前端不会崩）
+                            nh = dict(h)
+                            nh["subtitle_lines"] = cleaned
+                            new_hls.append(nh)
+                        hls = new_hls
+                except Exception as clean_err:  # noqa: BLE001
+                    log.warning("[short_video] highlights 字幕清洗失败: %s", clean_err)
+
             pl = project.setdefault("pipeline", {})
             s3 = pl.setdefault("stage3_analyze", {})
             if not s3.get("highlights"):
