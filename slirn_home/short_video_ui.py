@@ -286,7 +286,7 @@ def _stage3_analyze(project: dict) -> str:
         err = s3.get("error") or "失败"
         error_html = f'<div class="slirn-stage-error">{esc(err)}</div>'
 
-    # 高亮条目可编辑标题 + 删除
+    # 高亮条目可编辑标题 + 删除 + 显示字幕预览（REQ-20261004-UX：让用户能直接看到拆分结果）
     hl_rows = []
     for hl in (s3.get("highlights") or []):
         idx = hl.get("index") or len(hl_rows) + 1
@@ -294,14 +294,31 @@ def _stage3_analyze(project: dict) -> str:
         start = hl.get("start_ms") or 0
         end = hl.get("end_ms") or 0
         dur = (end - start) / 1000.0
-        sub_count = len(hl.get("subtitle_lines") or [])
+        sub_lines = hl.get("subtitle_lines") or []
+        sub_count = len(sub_lines)
+        # 字幕预览：每行 `<src_index> 文本`，最多 5 行；多于则追加 "… 还有 N 行"
+        preview_items = []
+        for sl in sub_lines[:5]:
+            t = esc(str(sl.get("text") or ""))
+            src = int(sl.get("src_index") or 0)
+            preview_items.append(
+                f'<div class="slirn-stage3-hl-sub"><span class="slirn-stage3-hl-src">[{src}]</span> {t}</div>'
+            )
+        if sub_count > 5:
+            preview_items.append(
+                f'<div class="slirn-stage3-hl-more">… 还有 {sub_count - 5} 行字幕</div>'
+            )
+        sub_preview = "".join(preview_items) or '<div class="slirn-sv-muted">无字幕</div>'
         hl_rows.append(
             f'<div class="slirn-stage3-hl-row" data-hl-index="{idx}">'
+            f'<div class="slirn-stage3-hl-head">'
             f'<span class="slirn-sv-row-no">#{idx}</span>'
-            f'<input type="text" data-hl-field="title" value="{esc(title)}" placeholder="标题">'
-            f'<span class="slirn-sv-muted">{_format_ms(start)} - {_format_ms(end)} · {dur:.1f}s · {sub_count} 字幕行</span>'
+            f'<input type="text" class="slirn-stage3-hl-title" data-hl-field="title" value="{esc(title)}" placeholder="标题">'
+            f'<span class="slirn-sv-muted slirn-stage3-hl-meta">{_format_ms(start)} - {_format_ms(end)} · {dur:.1f}s · {sub_count} 字幕行</span>'
             f'<button class="slirn-btn-mini slirn-btn-mini-danger" data-action="sv-stage3-remove-hl" '
             f'data-hl-index="{idx}">删</button>'
+            f'</div>'
+            f'<div class="slirn-stage3-hl-preview">{sub_preview}</div>'
             f'</div>'
         )
     hl_list = "".join(hl_rows) or '<div class="slirn-sv-muted">运行后将列出 3-5 条 highlights</div>'

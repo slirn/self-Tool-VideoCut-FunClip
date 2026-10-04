@@ -9565,6 +9565,33 @@ def _register_slirn_api(
             summaries = mgr.list_for_user(username, is_admin=False, member_of=memberships)
         return [{"task_id": s.task_id, "name": s.name} for s in summaries]
 
+    def _inject_stage3_highlights(project: dict) -> None:
+        """REQ-20261004-UX：从 stage3/highlights.json 注入 highlights 列表到
+        ``pipeline.stage3_analyze.highlights``，供 UI 渲染可编辑条目。
+
+        Why: run_stage3 把 highlights 写到独立 JSON 文件（source of truth），
+        不复制到 project state。render_project 只看 state 会拿到空列表。
+        """
+        try:
+            hp = _sv_service.stage_highlights_path(
+                repo_root, str(project.get("task_id") or ""), str(project.get("id") or "")
+            )
+            if not hp.is_file():
+                return
+            import json as _json
+            doc = _json.loads(hp.read_text(encoding="utf-8"))
+            hls = doc.get("highlights") if isinstance(doc, dict) else None
+            if not isinstance(hls, list) or not hls:
+                return
+            pl = project.setdefault("pipeline", {})
+            s3 = pl.setdefault("stage3_analyze", {})
+            if not s3.get("highlights"):
+                s3["highlights"] = hls
+                if not s3.get("count"):
+                    s3["count"] = len(hls)
+        except Exception:  # noqa: BLE001 — UI 兜底，不阻断渲染
+            pass
+
     @app.app.post("/slirn/api/short_video_list")
     async def short_video_list(body: dict = Body(default_factory=dict)):
         tasks = _visible_short_video_tasks()
@@ -9599,6 +9626,7 @@ def _register_slirn_api(
             project = _sv_service.load_project(repo_root, tid, pid)
         except Exception as e:  # noqa: BLE001
             return _err(f"读取项目失败: {e}")
+        _inject_stage3_highlights(project)
         return _ok(project=project, html=_sv_ui.render_project(project))
 
     @app.app.post("/slirn/api/short_video_save")
