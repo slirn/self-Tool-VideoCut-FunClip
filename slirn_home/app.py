@@ -9620,12 +9620,20 @@ def _register_slirn_api(
         if not tid or not pid:
             return _err("缺少 task_id 或 project_id")
         try:
+            update_payload: dict = {}
             if "brief" in body or isinstance(body.get("config"), dict):
-                _sv_service.update_project(repo_root, tid, pid, {
+                update_payload = {
                     "brief": body.get("brief"),
                     "config": body.get("config"),
-                })
-            project = _sv_service.generate_storyboard(repo_root, tid, pid)
+                }
+            if "base_material_id" in body:
+                update_payload["base_material_id"] = body.get("base_material_id")
+            if update_payload:
+                _sv_service.update_project(repo_root, tid, pid, update_payload)
+            project = _sv_service.generate_storyboard(
+                repo_root, tid, pid,
+                base_material_id=str(body.get("base_material_id") or ""),
+            )
         except Exception as e:  # noqa: BLE001
             return _err(f"生成分镜失败: {e}")
         return _ok(
@@ -9654,7 +9662,8 @@ def _register_slirn_api(
                 await file.seek(0)
                 _shutil.copyfileobj(file.file, tmp)
             material = _sv_service.add_material_path(
-                repo_root, task_id, project_id, tmp_path, kind=kind
+                repo_root, task_id, project_id, tmp_path, kind=kind,
+                display_name=str(file.filename or ""),
             )
         except Exception as e:  # noqa: BLE001
             return _err(f"上传素材失败: {e}")
@@ -9713,24 +9722,235 @@ def _register_slirn_api(
             return _err(f"删除项目失败: {e}")
         return _ok(deleted=deleted, toast="项目已删除")
 
+    @app.app.post("/slirn/api/short_video_remove_material")
+    async def short_video_remove_material(body: dict = Body(default_factory=dict)):
+        """REQ-20261001-096：删除项目素材（上传素材连文件删，任务导入只删引用）。"""
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        mid = (body.get("material_id") or "").strip()
+        if not tid or not pid:
+            return _err("缺少 task_id 或 project_id")
+        if not mid:
+            return _err("缺少 material_id")
+        try:
+            project = _sv_service.remove_material(repo_root, tid, pid, mid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"删除素材失败: {e}")
+        return _ok(project=project, html=_sv_ui.render_project(project), toast="素材已删除")
+
+    @app.app.post("/slirn/api/short_video_stage6_run")
+    async def short_video_stage6_run(body: dict = Body(default_factory=dict)):
+        """REQ-20261003-098：Stage 6 精剪混编。
+
+        每条 highlight 独立调上游 cut_by_srt.py 子进程，产物落到
+        ``tasks/<tid>/short_video/<pid>/stage6/``。运行结束返回最新
+        pipeline.stage6_finalize 状态。
+        """
+        from slirn_home import short_video_finalize as _sv_finalize
+
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        if not tid or not pid:
+            return _err("缺少 task_id 或 project_id")
+        items = body.get("items")
+        if not isinstance(items, list) or not items:
+            return _err("缺少 items（每项至少含 index/coarse_mp4/refined_srt）")
+        # 兜底允许每个 item 给出 coarse_mp4/refined_srt 的绝对路径
+        try:
+            state = _sv_finalize.run_stage6_batch(repo_root, tid, pid, items)
+        except Exception as e:  # noqa: BLE001
+            log.exception("stage6 run failed")
+            return _err(f"Stage 6 执行失败: {e}")
+        return _ok(stage6=state, toast=f"Stage 6 完成（{len(state.get('highlights') or [])} 条）")
+
+    @app.app.post("/slirn/api/short_video_select_source")
+    async def short_video_select_source(body: dict = Body(default_factory=dict)):
+        """REQ-20261003-098：Stage 1 选源视频。"""
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        mid = (body.get("material_id") or "").strip()
+        if not tid or not pid or not mid:
+            return _err("缺少 task_id / project_id / material_id")
+        try:
+            project = _sv_service.select_source_material(repo_root, tid, pid, mid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"选源失败: {e}")
+        return _ok(project=project, html=_sv_ui.render_project(project), toast="已选源视频")
+
+    @app.app.post("/slirn/api/short_video_stage2_run")
+    async def short_video_stage2_run(body: dict = Body(default_factory=dict)):
+        """REQ-20261003-098：Stage 2 提取字幕。"""
+        from slirn_home import short_video_extract as _sv_extract
+
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        if not tid or not pid:
+            return _err("缺少 task_id 或 project_id")
+        try:
+            state = _sv_extract.run_stage2(
+                repo_root, tid, pid,
+                model=str(body.get("model") or "paraformer"),
+                lang=str(body.get("lang") or "zh"),
+                hotwords=str(body.get("hotwords") or ""),
+                sd_switch=str(body.get("sd_switch") or "no"),
+            )
+        except Exception as e:  # noqa: BLE001
+            log.exception("stage2 run failed")
+            return _err(f"Stage 2 执行失败: {e}")
+        return _ok(stage2=state, toast=f"Stage 2 {state.get('status', '')}")
+
+    @app.app.post("/slirn/api/short_video_stage3_run")
+    async def short_video_stage3_run(body: dict = Body(default_factory=dict)):
+        """REQ-20261003-098：Stage 3 AI 拆条。"""
+        from slirn_home import short_video_analyze as _sv_analyze
+        from slirn_home import llm_config
+
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        if not tid or not pid:
+            return _err("缺少 task_id 或 project_id")
+        template = str(body.get("template") or _sv_service.HIGHLIGHT_TEMPLATE_HOOK_FIRST)
+        n_clips = int(body.get("n_clips") or 4)
+        custom_prompt = str(body.get("custom_prompt") or "")
+        entry = llm_config.get_current_entry(repo_root)
+        try:
+            state = _sv_analyze.run_stage3(
+                repo_root, tid, pid,
+                template=template, n_clips=n_clips,
+                custom_prompt=custom_prompt, entry=entry,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.exception("stage3 run failed")
+            return _err(f"Stage 3 执行失败: {e}")
+        return _ok(stage3=state, toast=f"Stage 3 {state.get('status', '')}")
+
+    @app.app.post("/slirn/api/short_video_stage4_run")
+    async def short_video_stage4_run(body: dict = Body(default_factory=dict)):
+        """REQ-20261003-098：Stage 4 粗剪合成。"""
+        from slirn_home import short_video_coarse as _sv_coarse
+
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        if not tid or not pid:
+            return _err("缺少 task_id 或 project_id")
+        try:
+            state = _sv_coarse.run_stage4(
+                repo_root, tid, pid,
+                start_ost_ms=int(body.get("start_ost") or 0),
+                end_ost_ms=int(body.get("end_ost") or 100),
+            )
+        except Exception as e:  # noqa: BLE001
+            log.exception("stage4 run failed")
+            return _err(f"Stage 4 执行失败: {e}")
+        return _ok(stage4=state, toast=f"Stage 4 {state.get('status', '')}")
+
+    @app.app.post("/slirn/api/short_video_stage5_run")
+    async def short_video_stage5_run(body: dict = Body(default_factory=dict)):
+        """REQ-20261003-098：Stage 5 优化字幕 — 重新 ASR 一条粗剪 mp4。"""
+        from slirn_home import short_video_extract as _sv_extract
+
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        try:
+            index = int(body.get("index") or 0)
+        except (TypeError, ValueError):
+            return _err("index 必须是整数")
+        if not tid or not pid or index <= 0:
+            return _err("缺少 task_id / project_id / index")
+        try:
+            hl = _sv_extract.run_stage5_one(
+                repo_root, tid, pid, index,
+                model=str(body.get("model") or "paraformer"),
+                lang=str(body.get("lang") or "zh"),
+            )
+        except Exception as e:  # noqa: BLE001
+            log.exception("stage5 run failed")
+            return _err(f"Stage 5 执行失败: {e}")
+        return _ok(highlight=hl, toast=f"Stage 5 #{index} {hl.get('status', '')}")
+
+    @app.app.post("/slirn/api/short_video_stage5_save")
+    async def short_video_stage5_save(body: dict = Body(default_factory=dict)):
+        """REQ-20261003-098：Stage 5 优化字幕 — 保存用户修正后的 srt。"""
+        from slirn_home import short_video_extract as _sv_extract
+
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        try:
+            index = int(body.get("index") or 0)
+        except (TypeError, ValueError):
+            return _err("index 必须是整数")
+        srt_text = body.get("srt_text")
+        srt_file = body.get("srt_file")
+        if not tid or not pid or index <= 0:
+            return _err("缺少 task_id / project_id / index")
+        if srt_text is None and not srt_file:
+            return _err("需要 srt_text 或 srt_file")
+        try:
+            hl = _sv_extract.save_stage5_refined(
+                repo_root, tid, pid, index,
+                srt_text=srt_text, srt_file=srt_file,
+            )
+        except Exception as e:  # noqa: BLE001
+            return _err(f"Stage 5 保存失败: {e}")
+        return _ok(highlight=hl, toast=f"Stage 5 #{index} 已保存")
+
     @app.app.get("/slirn/api/short_video_file")
     async def short_video_file(task_id: str, project_id: str, kind: str, name: str):
         from fastapi.responses import FileResponse
 
-        safe_name = Path(name or "").name
-        if not safe_name or safe_name != name:
-            return _err("非法文件名")
-        if kind == "asset":
-            base = _sv_service.assets_dir(repo_root, task_id, project_id)
-        elif kind == "output":
-            base = _sv_service.output_dir(repo_root, task_id, project_id)
+        if kind == "material":
+            # REQ-20261001-096：按素材 id 取文件 —— 上传素材与任务自动导入的
+            # 视频都能取到（asset 只覆盖上传目录，自动导入的源视频不在其中）
+            try:
+                project = _sv_service.load_project(repo_root, task_id, project_id)
+                target = _sv_service.material_abs_path(repo_root, project, name).resolve()
+            except Exception as e:  # noqa: BLE001
+                return _err(f"读取素材失败: {e}")
+            tasks_root = (Path(repo_root) / "tasks").resolve()
+            if not target.is_relative_to(tasks_root):
+                return _err("非法文件路径")
+        elif kind == "stage6":
+            # REQ-20261003-098：Stage 6 产物（final mp4 / continuous srt）
+            safe_name = Path(name or "").name
+            if not safe_name or safe_name != name:
+                return _err("非法文件名")
+            target = (_sv_service.stage6_dir(repo_root, task_id, project_id) / safe_name).resolve()
+            stage_root = _sv_service.stage6_dir(repo_root, task_id, project_id).resolve()
+            if not target.is_relative_to(stage_root):
+                return _err("非法文件路径")
+        elif kind in ("stage2", "stage3", "stage4", "stage5"):
+            # REQ-20261003-098：Stage 2/3/4/5 产物（raw.srt / highlights.json / coarse_NN.* / refined_NN.*）
+            safe_name = Path(name or "").name
+            if not safe_name or safe_name != name:
+                return _err("非法文件名")
+            stage_dir_fn = {
+                "stage2": _sv_service.stage2_dir,
+                "stage3": _sv_service.stage3_dir,
+                "stage4": _sv_service.stage4_dir,
+                "stage5": _sv_service.stage5_dir,
+            }[kind]
+            stage_root = stage_dir_fn(repo_root, task_id, project_id).resolve()
+            target = (stage_root / safe_name).resolve()
+            if not target.is_relative_to(stage_root):
+                return _err("非法文件路径")
         else:
-            return _err("非法文件类型")
-        target = (base / safe_name).resolve()
-        if not target.is_relative_to(base.resolve()):
-            return _err("非法文件路径")
+            safe_name = Path(name or "").name
+            if not safe_name or safe_name != name:
+                return _err("非法文件名")
+            if kind == "asset":
+                base = _sv_service.assets_dir(repo_root, task_id, project_id)
+            elif kind == "output":
+                base = _sv_service.output_dir(repo_root, task_id, project_id)
+            else:
+                return _err("非法文件类型")
+            target = (base / safe_name).resolve()
+            if not target.is_relative_to(base.resolve()):
+                return _err("非法文件路径")
         if not target.exists() or not target.is_file():
-            return _err(f"文件不存在: {safe_name}")
+            return _err(f"文件不存在: {name}")
+        # REQ-20261003-098：srt 用 text/plain 让浏览器可预览（<video>/<audio> 不受影响）
+        if target.suffix.lower() == ".srt":
+            return FileResponse(target, media_type="text/plain; charset=utf-8")
         return FileResponse(target)
 
     @app.app.post("/slirn/api/pipeline_run")

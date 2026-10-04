@@ -151,7 +151,32 @@ def build_render_command(
     chain: list[str] = []
     seg_v_labels: list[str] = []
     seg_durations: list[float] = []
+    seg_input_indices: list[int] = []
     input_index = 0
+    materials = {m.get("id"): m for m in project.get("materials") or []}
+
+    # REQ-20261001-095：变体指定了背景图（bg_image 素材）→ 用它做整幅画布背景，
+    # 替代默认的「模糊放大视频」填充；图片按 cover 方式铺满画布。
+    # 只开一个图片输入（-loop 1），filter 内 split 分发给各段 —— 静态图解码一份，
+    # 每段一个输入会成倍增加解码缓冲（实测多段直接 OOM）。
+    bg_path: Path | None = None
+    bg_mat = materials.get(str(variant.get("bg_material_id") or ""))
+    if bg_mat and bg_mat.get("kind") == "bg_image":
+        candidate = _material_path(root, project, bg_mat["id"])
+        if candidate.exists():
+            bg_path = candidate
+    if bg_path is not None:
+        total_seg = sum(
+            max(0.5, float(seg.get("duration") or 5.0)) for seg in segments
+        )
+        input_args += ["-loop", "1", "-t", f"{total_seg:.3f}", "-i", str(bg_path)]
+        bg_input_idx = input_index
+        input_index += 1
+        chain.append(
+            f"[{bg_input_idx}:v]scale={width}:{height}:force_original_aspect_ratio=increase,"
+            f"crop={width}:{height},setsar=1,"
+            f"split={len(segments)}" + "".join(f"[bgx{i}]" for i in range(len(segments)))
+        )
 
     # Main segments.
     for i, seg in enumerate(segments):
@@ -161,25 +186,34 @@ def build_render_command(
         start = max(0.0, float(seg.get("start") or 0.0))
         duration = max(0.5, float(seg.get("duration") or 5.0))
         input_args += ["-ss", f"{start:.3f}", "-t", f"{duration:.3f}", "-i", str(mat_path)]
-        chain.append(
-            f"[{input_index}:v]trim=duration={duration:.3f},setpts=PTS-STARTPTS,"
-            f"split=2[fg{i}][bg{i}];"
-            f"[bg{i}]scale={width}:{height}:force_original_aspect_ratio=increase,"
-            f"crop={width}:{height},gblur=sigma=24,eq=brightness=-0.16[bgx{i}];"
-            f"[fg{i}]scale={width}:{height}:force_original_aspect_ratio=decrease[fgx{i}];"
-            f"[bgx{i}][fgx{i}]overlay=(W-w)/2:(H-h)/2,fps={fps},setsar=1[v{i}]"
-        )
+        seg_input_indices.append(input_index)
+        if bg_path is not None:
+            chain.append(
+                f"[{input_index}:v]trim=duration={duration:.3f},setpts=PTS-STARTPTS,"
+                f"scale={width}:{height}:force_original_aspect_ratio=decrease[fgx{i}];"
+                f"[bgx{i}][fgx{i}]overlay=(W-w)/2:(H-h)/2,fps={fps},setsar=1[v{i}]"
+            )
+            input_index += 1
+        else:
+            chain.append(
+                f"[{input_index}:v]trim=duration={duration:.3f},setpts=PTS-STARTPTS,"
+                f"split=2[fg{i}][bg{i}];"
+                f"[bg{i}]scale={width}:{height}:force_original_aspect_ratio=increase,"
+                f"crop={width}:{height},gblur=sigma=24,eq=brightness=-0.16[bgx{i}];"
+                f"[fg{i}]scale={width}:{height}:force_original_aspect_ratio=decrease[fgx{i}];"
+                f"[bgx{i}][fgx{i}]overlay=(W-w)/2:(H-h)/2,fps={fps},setsar=1[v{i}]"
+            )
+            input_index += 1
         seg_v_labels.append(f"[v{i}]")
         seg_durations.append(duration)
-        input_index += 1
 
     # Missing audio segments use synthetic silence so one bad source does not break the mix.
     audio_input_indices: list[int] = []
-    materials = {m.get("id"): m for m in project.get("materials") or []}
     for i, seg in enumerate(segments):
         mat = materials.get(seg.get("material_id")) or {}
         if mat.get("has_audio", True):
-            audio_input_indices.append(i)
+            # 视频输入的真实索引（背景图分支会在视频输入后插入图片输入，不能按段号取流）
+            audio_input_indices.append(seg_input_indices[i])
         else:
             duration = seg_durations[i]
             input_args += [

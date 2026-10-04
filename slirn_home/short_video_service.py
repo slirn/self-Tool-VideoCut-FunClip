@@ -28,9 +28,46 @@ log = logging.getLogger(__name__)
 
 SHORT_VIDEO_DIR = "short_video"
 ASSETS_DIR = "assets"
+OUTPUTS_DIRNAME = "outputs"
 OUTPUTS_REL = Path("outputs") / "short_videos"
 PROJECT_FILENAME = "project.json"
 SCHEMA_VERSION = 1
+
+# REQ-20261003-098：单源 AI 拆条工作台
+# - kind="mixcut"（默认）= REQ-094 多素材混剪旧路径
+# - kind="split" = 6 阶段 AI 拆条新路径
+# 旧项目不主动迁移；新项目默认 kind="split"（可由调用方覆盖）。
+PROJECT_KIND_MIXCUT = "mixcut"
+PROJECT_KIND_SPLIT = "split"
+PROJECT_KINDS = {PROJECT_KIND_MIXCUT, PROJECT_KIND_SPLIT}
+
+# Stage 6（精剪混编）目录与产物命名
+STAGE6_DIR = "stage6"
+STAGE5_DIR = "stage5"
+STAGE4_DIR = "stage4"
+STAGE3_DIR = "stage3"
+STAGE2_DIR = "stage2"
+STAGE1_DIR = "stage1"
+FINAL_MP4_PREFIX = "final"
+FINAL_SRT_PREFIX = "final_continuous"
+RAW_SRT_NAME = "raw.srt"
+RAW_JSON_NAME = "raw.json"
+HIGHLIGHTS_JSON_NAME = "highlights.json"
+HIGHLIGHTS_LLM_RAW_NAME = "llm_raw.txt"
+COARSE_MP4_PREFIX = "coarse"
+COARSE_SRT_PREFIX = "coarse"
+REFINED_SRT_PREFIX = "refined"
+STAGE6_JOB_FILENAME = "stage6_jobs.json"
+
+# Stage 3 模板 ID（与模板 prompt 一一对应）
+HIGHLIGHT_TEMPLATE_HOOK_FIRST = "hook_first"
+HIGHLIGHT_TEMPLATE_TOPIC_CLUSTER = "topic_cluster"
+HIGHLIGHT_TEMPLATE_STORY_ARC = "story_arc"
+HIGHLIGHT_TEMPLATES = (
+    HIGHLIGHT_TEMPLATE_HOOK_FIRST,
+    HIGHLIGHT_TEMPLATE_TOPIC_CLUSTER,
+    HIGHLIGHT_TEMPLATE_STORY_ARC,
+)
 
 VIDEO_EXTS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".ts", ".mpeg", ".m4v"}
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp"}
@@ -166,12 +203,32 @@ def _normalize_project(data: dict, task_id: str, project_id: str) -> dict:
     data["task_id"] = task_id
     data.setdefault("name", "未命名短视频")
     data.setdefault("brief", "")
+    data.setdefault("base_material_id", "")
     data.setdefault("created_at", now_iso())
     data.setdefault("updated_at", data["created_at"])
+    # REQ-20261003-098：旧项目（缺 kind）默认 mixcut，新建走 split
+    data.setdefault("kind", PROJECT_KIND_MIXCUT)
+    if data["kind"] not in PROJECT_KINDS:
+        data["kind"] = PROJECT_KIND_MIXCUT
     data["config"] = sanitize_config(data.get("config"))
     data.setdefault("materials", [])
     data.setdefault("storyboard", {"status": "empty", "variants": []})
     data.setdefault("render_jobs", [])
+    # REQ-20261003-098：6 阶段流水线状态机（按 kind 决定是否初始化）
+    pipeline = data.get("pipeline") or {}
+    if not isinstance(pipeline, dict):
+        pipeline = {}
+    if data["kind"] == PROJECT_KIND_SPLIT:
+        for stage_key, defaults in (
+            ("stage1_source", {"status": "pending"}),
+            ("stage2_extract", {"status": "pending"}),
+            ("stage3_analyze", {"status": "pending"}),
+            ("stage4_coarse", {"status": "pending"}),
+            ("stage5_refine", {"status": "pending"}),
+            ("stage6_finalize", {"status": "pending"}),
+        ):
+            pipeline.setdefault(stage_key, dict(defaults))
+        data["pipeline"] = pipeline
     return data
 
 
@@ -291,6 +348,8 @@ def create_project(
     name: str,
     brief: str = "",
     config: dict | None = None,
+    *,
+    kind: str = PROJECT_KIND_SPLIT,
 ) -> dict:
     root = Path(repo_root)
     tid = str(task_id or "").strip()
@@ -298,6 +357,9 @@ def create_project(
         raise ShortVideoError("缺少 task_id")
     if not (root / "tasks" / tid).exists():
         raise ShortVideoError(f"任务不存在: {tid}")
+    project_kind = str(kind or "").strip() or PROJECT_KIND_SPLIT
+    if project_kind not in PROJECT_KINDS:
+        raise ShortVideoError(f"未知项目类型: {project_kind}")
     project_id = new_id("sv")
     project = {
         "_schema": SCHEMA_VERSION,
@@ -305,15 +367,20 @@ def create_project(
         "task_id": tid,
         "name": (name or "短视频混剪").strip()[:80],
         "brief": str(brief or "").strip()[:4000],
+        "kind": project_kind,
         "created_at": now_iso(),
         "updated_at": now_iso(),
         "config": sanitize_config(config),
+        "base_material_id": "",
         "materials": [],
         "storyboard": {"status": "empty", "variants": [], "model": "", "generated_at": ""},
         "render_jobs": [],
     }
-    for path in _auto_source_paths(root, tid):
-        project["materials"].append(_material_from_path(root, path, "video", "auto"))
+    # REQ-20261003-098：仅 split 流程自动导入任务源视频；
+    # mixcut 旧路径继续自动导入多个视频素材供 B-roll。
+    if project_kind == PROJECT_KIND_SPLIT:
+        for path in _auto_source_paths(root, tid):
+            project["materials"].append(_material_from_path(root, path, "video", "auto"))
     save_project(root, project)
     return project
 
@@ -357,48 +424,115 @@ def add_material_path(
     project_id: str,
     source_path: Path | str,
     kind: str = "auto",
+    display_name: str = "",
 ) -> dict:
+    """把一个文件收进项目素材库。
+
+    ``display_name``：用户选文件时的原始文件名（上传链路的临时文件名是一串
+    随机字符，直接用会显示无意义字符串）。素材的 ``name`` 字段展示原始名，
+    磁盘文件名仍做安全化 + 唯一前缀（防穿越 / 防重名覆盖）。
+    """
     root = Path(repo_root)
     project = load_project(root, task_id, project_id)
     src = Path(source_path)
     if not src.exists() or not src.is_file():
         raise ShortVideoError(f"素材文件不存在: {src}")
-    resolved_kind = kind_from_extension(src.name) if kind in ("", "auto") else kind
-    if resolved_kind not in ("video", "image", "audio"):
-        raise ShortVideoError("素材类型仅支持 video / image / audio")
+    original_name = Path(str(display_name or "")).name or src.name
+    resolved_kind = kind_from_extension(original_name) if kind in ("", "auto") else kind
+    if resolved_kind == "bg_image" and Path(original_name).suffix.lower() not in IMAGE_EXTS:
+        raise ShortVideoError("背景图片仅支持图片文件")
+    if resolved_kind not in ("video", "image", "audio", "bg_image"):
+        raise ShortVideoError("素材类型仅支持 video / image / audio / bg_image")
     dst_dir = assets_dir(root, task_id, project_id)
     dst_dir.mkdir(parents=True, exist_ok=True)
-    dst = dst_dir / f"{new_id('asset')}_{_safe_asset_name(src.name)}"
+    dst = dst_dir / f"{new_id('asset')}_{_safe_asset_name(original_name)}"
     if src.resolve() != dst.resolve():
         shutil.copy2(src, dst)
     material = _material_from_path(root, dst, resolved_kind, "upload")
+    material["name"] = original_name
     project.setdefault("materials", []).append(material)
     save_project(root, project)
     return material
 
 
-def _fallback_variant(project: dict, index: int) -> dict:
+def remove_material(
+    repo_root: Path | str,
+    task_id: str,
+    project_id: str,
+    material_id: str,
+) -> dict:
+    """从项目素材库删除一个素材（REQ-20261001-096）。
+
+    - 上传素材（source=upload）：连磁盘文件一起删（仅限本项目 assets 目录内）；
+      任务自动导入的素材（source=auto）源文件属于任务本身，只移除引用不删文件。
+    - 同步清理所有引用：基础视频、分镜 segments / overlays、BGM、背景图。
+      基础视频被删后 ``base_material_id`` 置空，重新生成分镜时要求再选。
+    """
+    root = Path(repo_root)
+    project = load_project(root, task_id, project_id)
+    mid = str(material_id or "").strip()
+    mat = next(
+        (m for m in project.get("materials") or [] if m.get("id") == mid),
+        None,
+    )
+    if not mat:
+        raise ShortVideoError(f"素材不存在: {mid}")
+    project["materials"] = [m for m in project["materials"] if m.get("id") != mid]
+    if str(project.get("base_material_id") or "") == mid:
+        project["base_material_id"] = ""
+    for variant in (project.get("storyboard") or {}).get("variants") or []:
+        if not isinstance(variant, dict):
+            continue
+        variant["segments"] = [
+            s for s in variant.get("segments") or [] if s.get("material_id") != mid
+        ]
+        variant["overlays"] = [
+            o for o in variant.get("overlays") or [] if o.get("material_id") != mid
+        ]
+        if variant.get("bgm_material_id") == mid:
+            variant["bgm_material_id"] = ""
+        if variant.get("bg_material_id") == mid:
+            variant["bg_material_id"] = ""
+    if str(mat.get("source") or "") == "upload":
+        target = _abs(root, mat.get("path") or "")
+        assets_root = assets_dir(root, task_id, project_id).resolve()
+        if _is_relative_to(target, assets_root) and target.is_file():
+            try:
+                target.unlink(missing_ok=True)
+            except OSError as e:  # noqa: PERF203
+                log.warning("[short_video] 素材文件删除失败: %s (%s)", target, e)
+    save_project(root, project)
+    return project
+
+
+def _fallback_variant(project: dict, index: int, base_id: str = "") -> dict:
     materials = project.get("materials") or []
-    videos = [m for m in materials if m.get("kind") == "video"]
     images = [m for m in materials if m.get("kind") == "image"]
     audios = [m for m in materials if m.get("kind") == "audio"]
-    if not videos:
-        raise ShortVideoError("至少需要一个视频素材")
+    # REQ-20261001-095：主片段只用用户选定的基础视频，不再轮询全部视频素材
+    base = next((m for m in materials if m.get("id") == base_id
+                 and m.get("kind") == "video"), None)
+    if not base:
+        raise ShortVideoError("请先选择基础视频素材")
     cfg = sanitize_config(project.get("config"))
     target = min(cfg["duration_max"], max(cfg["duration_min"], 42 + index * 6))
-    n_segments = max(4, min(5, len(videos) + 3))
+    n_segments = 4
     segment_duration = max(3.0, min(8.0, target / n_segments))
+    mat_duration = max(0.0, float(base.get("duration") or 0.0))
+    if mat_duration > 0:
+        segment_duration = min(segment_duration, mat_duration)
+        n_segments = max(1, min(n_segments, int(mat_duration / max(1.0, segment_duration)) or 1))
     segments = []
     for i in range(n_segments):
-        mat = videos[(i + index) % len(videos)]
-        duration = segment_duration
-        if float(mat.get("duration") or 0) > 0:
-            duration = min(duration, float(mat["duration"]))
+        start = 0.0
+        if mat_duration > 0 and n_segments > 1:
+            span = max(0.0, mat_duration - segment_duration)
+            start = round(span * i / (n_segments - 1), 3)
         segments.append({
             "id": f"seg_{index + 1}_{i + 1}",
-            "material_id": mat["id"],
-            "start": 0.0,
-            "duration": round(max(1.0, duration), 3),
+            "material_id": base["id"],
+            "start": start,
+            "duration": round(max(1.0, segment_duration), 3),
             "transition": cfg["transition"],
         })
     overlays = []
@@ -451,7 +585,7 @@ def _extract_json(raw: str) -> dict:
     return data
 
 
-def _llm_storyboard(repo_root: Path, project: dict) -> tuple[dict, str]:
+def _llm_storyboard(repo_root: Path, project: dict, base_id: str = "") -> tuple[dict, str]:
     from slirn_home import llm_config, revision_service
 
     entry = llm_config.get_current_entry(repo_root)
@@ -471,11 +605,14 @@ def _llm_storyboard(repo_root: Path, project: dict) -> tuple[dict, str]:
     system = (
         "你是短视频混剪导演和分镜编辑。根据用户 Brief 与素材清单，输出可执行的"
         "结构化分镜 JSON。不要输出解释或 Markdown。所有素材引用必须使用给定 id。"
+        "用户已指定基础视频（base_material_id）：segments 的 material_id 只能使用"
+        "该基础视频（可在不同起点截取多段）；其余素材只能用于 overlays / BGM。"
     )
     user = json.dumps({
         "brief": project.get("brief") or "",
         "project_name": project.get("name") or "",
         "config": project.get("config") or default_config(),
+        "base_material_id": base_id,
         "materials": mats,
         "required_shape": {
             "variants": [{
@@ -527,7 +664,12 @@ def _normalize_variant(
         "subtitles": [],
         "bgm_material_id": str(v.get("bgm_material_id") or ""),
         "bgm_volume_db": _clamp_float(v.get("bgm_volume_db"), cfg["bgm_volume_db"], -40.0, 0.0),
+        # REQ-20261001-095：背景图只接受 bg_image 素材（普通 image 是 B-roll）
+        "bg_material_id": "",
     }
+    bg_mat = materials.get(str(v.get("bg_material_id") or ""))
+    if bg_mat and bg_mat.get("kind") == "bg_image":
+        result["bg_material_id"] = bg_mat["id"]
     for seg in (v.get("segments") or [])[:6]:
         if not isinstance(seg, dict):
             continue
@@ -597,9 +739,24 @@ def generate_storyboard(
     project_id: str,
     *,
     use_external_llm: bool | None = None,
+    base_material_id: str | None = None,
 ) -> dict:
+    """生成分镜。REQ-20261001-095：必须由用户指定基础视频（不再自动挑选）。
+
+    ``base_material_id`` 显式传参优先，否则读项目里保存的选择；
+    缺失 / 非法 → 抛错（前端提示用户先在下拉里选择）。
+    """
     root = Path(repo_root)
     project = load_project(root, task_id, project_id)
+    base_id = str(base_material_id or "").strip() or str(project.get("base_material_id") or "")
+    base_mat = next(
+        (m for m in project.get("materials") or []
+         if m.get("id") == base_id and m.get("kind") == "video"),
+        None,
+    )
+    if not base_mat:
+        raise ShortVideoError("请先选择基础视频（生成分镜的主素材）")
+    project["base_material_id"] = base_mat["id"]
     outputs_dir = root / "tasks" / task_id / "outputs"
     exec_id = ""
     try:
@@ -619,28 +776,39 @@ def generate_storyboard(
     variants_raw: list[dict] = []
     if allow:
         try:
-            payload, model = _llm_storyboard(root, project)
+            payload, model = _llm_storyboard(root, project, base_mat["id"])
             variants_raw = list(payload.get("variants") or [])
         except Exception as e:  # noqa: BLE001
             error = str(e)
             log.warning("[short_video] LLM 分镜失败，转本地兜底: %s", e)
     if not variants_raw:
         model = "local-rules"
-        variants_raw = [_fallback_variant(project, i) for i in range(cfg["variants"])]
+        variants_raw = [_fallback_variant(project, i, base_mat["id"])
+                        for i in range(cfg["variants"])]
     variants = []
     for i, raw in enumerate(variants_raw[: cfg["variants"]]):
         try:
+            # LLM 违规引用了非基础视频 → 统一替换为基础视频再规范化
+            if isinstance(raw, dict):
+                for seg in raw.get("segments") or []:
+                    if isinstance(seg, dict) and seg.get("material_id") != base_mat["id"]:
+                        seg["material_id"] = base_mat["id"]
             variants.append(_normalize_variant(raw, project, i))
         except ShortVideoError:
-            variants.append(_normalize_variant(_fallback_variant(project, i), project, i))
+            variants.append(
+                _normalize_variant(_fallback_variant(project, i, base_mat["id"]), project, i)
+            )
     if len(variants) < cfg["variants"]:
         for i in range(len(variants), cfg["variants"]):
-            variants.append(_normalize_variant(_fallback_variant(project, i), project, i))
+            variants.append(
+                _normalize_variant(_fallback_variant(project, i, base_mat["id"]), project, i)
+            )
     project["storyboard"] = {
         "status": "ready",
         "model": model,
         "generated_at": now_iso(),
         "error": error,
+        "base_material_id": base_mat["id"],
         "variants": variants,
     }
     save_project(root, project)
@@ -669,6 +837,18 @@ def update_project(
         project["name"] = str(payload.get("name") or project["name"]).strip()[:80]
     if "brief" in payload:
         project["brief"] = str(payload.get("brief") or "").strip()[:4000]
+    if "base_material_id" in payload:
+        value = str(payload.get("base_material_id") or "").strip()
+        if value:
+            mat = next(
+                (m for m in project.get("materials") or []
+                 if m.get("id") == value and m.get("kind") == "video"),
+                None,
+            )
+            if not mat:
+                raise ShortVideoError("基础视频必须是项目里的视频素材")
+            value = mat["id"]
+        project["base_material_id"] = value
     if isinstance(payload.get("config"), dict):
         project["config"] = sanitize_config({**project.get("config", {}), **payload["config"]})
     if isinstance(payload.get("storyboard"), dict):
@@ -692,3 +872,227 @@ def material_abs_path(repo_root: Path | str, project: dict, material_id: str) ->
         if material.get("id") == material_id:
             return _abs(Path(repo_root), material.get("path") or "")
     raise ShortVideoError(f"素材不存在: {material_id}")
+
+
+def select_source_material(
+    repo_root: Path | str,
+    task_id: str,
+    project_id: str,
+    material_id: str,
+) -> dict:
+    """Stage 1：把指定素材标记为「源视频」（split 流程的主素材）。
+
+    与旧 mixcut 的 ``base_material_id`` 共享同一字段（语义上一致），
+    校验素材存在 + kind=video。保存后会自动重置下游阶段。
+    """
+    root = Path(repo_root)
+    project = load_project(root, task_id, project_id)
+    mat = next(
+        (m for m in project.get("materials") or []
+         if m.get("id") == material_id and m.get("kind") == "video"),
+        None,
+    )
+    if not mat:
+        raise ShortVideoError("源视频必须是项目里的视频素材")
+    project["base_material_id"] = mat["id"]
+    pipeline = project.setdefault("pipeline", {})
+    pipeline["stage1_source"] = {
+        "status": "done",
+        "source_material_id": mat["id"],
+        "source_name": mat.get("name") or "",
+        "duration": float(mat.get("duration") or 0.0),
+        "width": int(mat.get("width") or 0),
+        "height": int(mat.get("height") or 0),
+        "set_at": now_iso(),
+    }
+    # 源变了 → 下游 stage 2-6 全部作废
+    reset_downstream_stages(project, "stage1_source")
+    save_project(root, project)
+    return project
+
+
+# ---------- REQ-20261003-098：Stage 6（精剪混编）辅助 ----------
+
+def stage6_dir(repo_root: Path | str, task_id: str, project_id: str) -> Path:
+    """Stage 6 产物目录：``tasks/<tid>/short_video/<pid>/stage6/``。
+
+    与长视频项目目录（``tasks/<tid>/outputs/...``）完全隔离 —— 长视频的
+    cut_by_srt.py 产物不会写到本目录，反之亦然。
+    """
+    return project_dir(repo_root, task_id, project_id) / STAGE6_DIR
+
+
+def stage5_dir(repo_root: Path | str, task_id: str, project_id: str) -> Path:
+    return project_dir(repo_root, task_id, project_id) / STAGE5_DIR
+
+
+def stage4_dir(repo_root: Path | str, task_id: str, project_id: str) -> Path:
+    return project_dir(repo_root, task_id, project_id) / STAGE4_DIR
+
+
+def stage3_dir(repo_root: Path | str, task_id: str, project_id: str) -> Path:
+    return project_dir(repo_root, task_id, project_id) / STAGE3_DIR
+
+
+def stage2_dir(repo_root: Path | str, task_id: str, project_id: str) -> Path:
+    return project_dir(repo_root, task_id, project_id) / STAGE2_DIR
+
+
+def stage1_dir(repo_root: Path | str, task_id: str, project_id: str) -> Path:
+    return project_dir(repo_root, task_id, project_id) / STAGE1_DIR
+
+
+def stage_raw_srt_path(repo_root: Path | str, task_id: str, project_id: str) -> Path:
+    return stage2_dir(repo_root, task_id, project_id) / RAW_SRT_NAME
+
+
+def stage_raw_json_path(repo_root: Path | str, task_id: str, project_id: str) -> Path:
+    return stage2_dir(repo_root, task_id, project_id) / RAW_JSON_NAME
+
+
+def stage_highlights_path(repo_root: Path | str, task_id: str, project_id: str) -> Path:
+    return stage3_dir(repo_root, task_id, project_id) / HIGHLIGHTS_JSON_NAME
+
+
+def stage_llm_raw_path(repo_root: Path | str, task_id: str, project_id: str) -> Path:
+    return stage3_dir(repo_root, task_id, project_id) / HIGHLIGHTS_LLM_RAW_NAME
+
+
+def stage4_paths(
+    repo_root: Path | str,
+    task_id: str,
+    project_id: str,
+    index: int,
+) -> tuple[Path, Path]:
+    """Stage 4 单条 highlight 的 (coarse mp4, coarse srt) 路径。"""
+    base = stage4_dir(repo_root, task_id, project_id)
+    return (
+        base / f"{COARSE_MP4_PREFIX}_{index:02d}.mp4",
+        base / f"{COARSE_SRT_PREFIX}_{index:02d}.srt",
+    )
+
+
+def stage5_refined_srt_path(
+    repo_root: Path | str,
+    task_id: str,
+    project_id: str,
+    index: int,
+) -> Path:
+    return stage5_dir(repo_root, task_id, project_id) / f"{REFINED_SRT_PREFIX}_{index:02d}.srt"
+
+
+def stage5_default_srt_path(
+    repo_root: Path | str,
+    task_id: str,
+    project_id: str,
+    index: int,
+) -> Path:
+    """Stage 5 默认（ASR 原始）字幕；用户未手动修正时使用此文件。"""
+    return stage5_dir(repo_root, task_id, project_id) / f"{REFINED_SRT_PREFIX}_{index:02d}_asr.srt"
+
+
+def stage6_paths(
+    repo_root: Path | str,
+    task_id: str,
+    project_id: str,
+    index: int,
+) -> tuple[Path, Path]:
+    """Stage 6 单条 highlight 的 (final mp4, continuous srt) 路径。
+
+    ``index`` 从 1 开始（与 Stage 4/5 的命名一致）。
+    """
+    base = stage6_dir(repo_root, task_id, project_id)
+    return (
+        base / f"{FINAL_MP4_PREFIX}_{index:02d}.mp4",
+        base / f"{FINAL_SRT_PREFIX}_{index:02d}.srt",
+    )
+
+
+def get_stage6_state(project: dict) -> dict:
+    """读 stage6 状态字段（缺则视为空）。"""
+    pipeline = project.get("pipeline") or {}
+    state = pipeline.get("stage6_finalize") or {}
+    if not isinstance(state, dict):
+        state = {}
+    state.setdefault("status", "pending")
+    state.setdefault("highlights", [])
+    state.setdefault("logs", [])
+    return state
+
+
+def set_stage6_state(project: dict, state: dict) -> None:
+    pipeline = project.setdefault("pipeline", {})
+    pipeline["stage6_finalize"] = state
+
+
+# ---------- 通用阶段状态读写 ----------
+
+_STAGE_STATE_KEYS = {
+    "stage1_source": "stage1_source",
+    "stage2_extract": "stage2_extract",
+    "stage3_analyze": "stage3_analyze",
+    "stage4_coarse": "stage4_coarse",
+    "stage5_refine": "stage5_refine",
+    "stage6_finalize": "stage6_finalize",
+}
+
+
+def get_stage_state(project: dict, stage: str) -> dict:
+    """读某阶段状态字段。"""
+    key = _STAGE_STATE_KEYS.get(stage)
+    if not key:
+        raise ValueError(f"未知阶段: {stage}")
+    pipeline = project.get("pipeline") or {}
+    state = pipeline.get(key) or {}
+    if not isinstance(state, dict):
+        state = {}
+    state.setdefault("status", "pending")
+    return state
+
+
+def set_stage_state(project: dict, stage: str, state: dict) -> None:
+    key = _STAGE_STATE_KEYS.get(stage)
+    if not key:
+        raise ValueError(f"未知阶段: {stage}")
+    pipeline = project.setdefault("pipeline", {})
+    pipeline[key] = state
+
+
+def reset_downstream_stages(project: dict, after_stage: str) -> None:
+    """把指定阶段之后的所有阶段重置为 pending（用于上游阶段重跑时清空下游）。
+
+    ``after_stage`` 应是 "stage1_source" / "stage2_extract" / ... / "stage5_refine"。
+    "stage6_finalize" 之后没有下游，无需重置。
+    """
+    order = [
+        "stage1_source",
+        "stage2_extract",
+        "stage3_analyze",
+        "stage4_coarse",
+        "stage5_refine",
+        "stage6_finalize",
+    ]
+    if after_stage not in order:
+        return
+    idx = order.index(after_stage)
+    pipeline = project.setdefault("pipeline", {})
+    for stage_key in order[idx + 1:]:
+        if stage_key in pipeline:
+            pipeline[stage_key] = {"status": "pending"}
+
+
+def find_long_video_state_root(task_dir: Path) -> list[Path]:
+    """返回 ``task_dir`` 下所有「长视频 cut_by_srt.py 可能写入」的位置。
+
+    Stage 6 必须验证：本次调用的产物**没有**写到这些路径之下。
+    仅用于运行时校验（产物隔离测试），不参与业务逻辑。
+    """
+    roots: list[Path] = []
+    outputs = task_dir / "outputs"
+    if outputs.exists():
+        for child in outputs.iterdir():
+            if child.is_dir():
+                roots.append(child)
+            elif child.is_file() and child.suffix.lower() in {".mp4", ".srt", ".txt"}:
+                roots.append(child)
+    return roots
