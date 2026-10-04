@@ -342,28 +342,123 @@
   }
 
   // REQ-20261004-UX：Stage 3 高亮片段预览 —— 浏览器侧 seek 到
-  // start_ms 起点、timeupdate 到 end_ms 自动暂停。零服务器开销、即时。
+  // start_ms 起点、timeupdate 到 end_ms 自动暂停。
+  // **v2：可拖动悬浮窗口**，无遮盖层，用户可同时看 Stage 3 字幕行比对。
   function stage3PreviewHl(btn) {
     var url = btn.getAttribute('data-src-url') || '';
     if (!url) return toast('请先在 Stage 1 选源视频', 'error');
     var startMs = parseInt(btn.getAttribute('data-start-ms') || '0', 10) || 0;
     var endMs = parseInt(btn.getAttribute('data-end-ms') || '0', 10) || 0;
     var title = btn.getAttribute('data-title') || '预览片段';
+
+    // 取父 hl-row 的 data-sub-text（每条 highlight 的完整字幕文本）
+    var row = btn.closest ? btn.closest('.slirn-stage3-hl-row') : null;
+    var subText = (row && row.getAttribute('data-sub-text')) || '';
+
+    closeFloatingPreview();  // 防止多个悬浮窗叠加
+    var fp = document.createElement('div');
+    fp.className = 'slirn-sv-floating-player';
+    fp.id = 'slirn-sv-floating-player';
+    fp.innerHTML =
+      '<div class="slirn-sv-fp-head">' +
+        '<span class="slirn-sv-fp-title">🎬 ' + esc(title) + '</span>' +
+        '<button class="slirn-sv-fp-close" data-action="sv-fp-close" title="关闭 (Esc)">✕</button>' +
+      '</div>' +
+      '<div class="slirn-sv-fp-body">' +
+        '<video id="slirn-sv-fp-video" class="slirn-sv-fp-video" ' +
+          'controls autoplay playsinline preload="auto" src="' + esc(url) + '"></video>' +
+        '<div class="slirn-sv-fp-subs" id="slirn-sv-fp-subs"></div>' +
+      '</div>';
+    document.body.appendChild(fp);
+
+    // 字幕块：从 data-sub-text 还原成行
+    var subsEl = fp.querySelector('#slirn-sv-fp-subs');
+    var lines = subText.split('\n').filter(function(l) { return l.trim(); });
+    if (lines.length === 0) {
+      subsEl.innerHTML = '<div class="slirn-sv-fp-subs-empty">无字幕</div>';
+    } else {
+      // 解析 `[src] text`，渲染成 <div class="slirn-sv-fp-sub">
+      var html = '';
+      for (var i = 0; i < lines.length; i++) {
+        var line = lines[i];
+        var m = line.match(/^\[(\d+)\]\s*(.*)$/);
+        if (m) {
+          html += '<div class="slirn-sv-fp-sub">' +
+                  '<span class="slirn-sv-fp-sub-src">[' + esc(m[1]) + ']</span>' +
+                  esc(m[2]) + '</div>';
+        } else {
+          html += '<div class="slirn-sv-fp-sub">' + esc(line) + '</div>';
+        }
+      }
+      subsEl.innerHTML = html;
+    }
+
+    // 拖动支持：header 即拖把；持久化位置到 localStorage
+    var head = fp.querySelector('.slirn-sv-fp-head');
+    var storageKey = 'slirn.sv.fp.pos';
+    try {
+      var saved = JSON.parse(localStorage.getItem(storageKey) || 'null');
+      if (saved && typeof saved.left === 'number' && typeof saved.top === 'number') {
+        fp.style.left = saved.left + 'px';
+        fp.style.top = saved.top + 'px';
+        fp.style.right = 'auto';
+      }
+    } catch (e) { /* 持久化失败忽略 */ }
+
+    var dragState = null;
+    head.addEventListener('mousedown', function(ev) {
+      if (ev.target.closest && ev.target.closest('[data-action="sv-fp-close"]')) return;
+      ev.preventDefault();
+      var rect = fp.getBoundingClientRect();
+      dragState = {
+        startX: ev.clientX,
+        startY: ev.clientY,
+        baseLeft: rect.left,
+        baseTop: rect.top,
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+    function onMove(ev) {
+      if (!dragState) return;
+      var dx = ev.clientX - dragState.startX;
+      var dy = ev.clientY - dragState.startY;
+      var left = Math.max(0, Math.min(window.innerWidth - 80, dragState.baseLeft + dx));
+      var top = Math.max(0, Math.min(window.innerHeight - 40, dragState.baseTop + dy));
+      fp.style.left = left + 'px';
+      fp.style.top = top + 'px';
+      fp.style.right = 'auto';
+    }
+    function onUp() {
+      if (!dragState) return;
+      try {
+        var rect = fp.getBoundingClientRect();
+        localStorage.setItem(storageKey, JSON.stringify({ left: rect.left, top: rect.top }));
+      } catch (e) { /* ignore */ }
+      dragState = null;
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    }
+
+    // 关闭按钮（事件冒泡到全局 click 分发，但这里直接绑，省一次查找）
+    fp.querySelector('[data-action="sv-fp-close"]').addEventListener('click', function() {
+      closeFloatingPreview();
+    });
+
+    // Esc 关闭：注册一次性监听（多个悬浮窗叠加时只关最上层——目前已强制唯一）
+    var onEsc = function(ev) {
+      if (ev.key === 'Escape') {
+        closeFloatingPreview();
+        document.removeEventListener('keydown', onEsc);
+      }
+    };
+    document.addEventListener('keydown', onEsc);
+
+    // video seek + pause 逻辑（与之前一致）
+    var v = fp.querySelector('#slirn-sv-fp-video');
+    if (!v) return;
     var startSec = startMs / 1000;
     var endSec = Math.max(startSec + 0.05, endMs / 1000);
-
-    // modal 内部带 onloadedmetadata 钩子，做 seek + 监听
-    var body =
-      '<video id="slirn-sv-clip-video" controls autoplay playsinline ' +
-      'preload="auto" src="' + esc(url) + '"></video>' +
-      '<div class="slirn-sv-muted slirn-sv-clip-meta">' +
-      '片段：' + esc(title) + ' · ' + startSec.toFixed(2) + 's - ' + endSec.toFixed(2) + 's' +
-      '</div>';
-    previewByUrl(url, title, body);
-
-    // 拿到刚插入的 video，挂上 seek + 监听
-    var v = document.getElementById('slirn-sv-clip-video');
-    if (!v) return;
     var cleared = false;
     function onTime() {
       if (cleared) return;
@@ -385,6 +480,14 @@
     } else {
       v.addEventListener('loadedmetadata', onLoaded, { once: true });
     }
+  }
+
+  // 关悬浮窗：拿掉 DOM 并暂停 video
+  function closeFloatingPreview() {
+    var fp = document.getElementById('slirn-sv-floating-player');
+    if (!fp) return;
+    fp.querySelectorAll('video, audio').forEach(function(m) { try { m.pause(); } catch (e) {} });
+    fp.remove();
   }
 
   // ---------- 点击分发 ----------

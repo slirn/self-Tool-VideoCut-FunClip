@@ -5142,6 +5142,91 @@ input[type="checkbox"]:focus-visible {
   padding: 0 4px;
 }
 
+/* REQ-20261004-UX：Stage 3 可拖动悬浮预览窗口（无遮盖，便于同时查看字幕） */
+.slirn-sv-floating-player {
+  position: fixed;
+  top: 80px;
+  right: 24px;
+  width: min(480px, 70vw);
+  max-width: 70vw;
+  background: var(--card-bg, #fff);
+  border: 1px solid var(--card-border, rgba(15, 23, 42, 0.12));
+  border-radius: 12px;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.28);
+  z-index: 9500;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  user-select: none;
+}
+.slirn-sv-fp-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #1e293b;
+  color: #f1f5f9;
+  cursor: move;
+  font-size: 13px;
+  font-weight: 600;
+}
+.slirn-sv-fp-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.slirn-sv-fp-close {
+  background: transparent;
+  border: 0;
+  color: #f1f5f9;
+  font-size: 16px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.slirn-sv-fp-close:hover { background: rgba(255,255,255,0.12); }
+.slirn-sv-fp-body {
+  background: #0f172a;
+  display: flex;
+  flex-direction: column;
+}
+.slirn-sv-fp-video {
+  display: block;
+  width: 100%;
+  max-height: 56vh;
+  background: #000;
+  outline: none;
+}
+.slirn-sv-fp-subs {
+  max-height: 160px;
+  overflow-y: auto;
+  padding: 8px 12px;
+  background: #f8fafc;
+  color: #1e293b;
+  font-size: 12px;
+  line-height: 1.55;
+  border-top: 1px solid #e2e8f0;
+}
+.slirn-sv-fp-subs-empty {
+  color: #94a3b8;
+  font-style: italic;
+}
+.slirn-sv-fp-sub {
+  padding: 2px 0;
+  border-bottom: 1px dashed rgba(148, 163, 184, 0.3);
+}
+.slirn-sv-fp-sub:last-child { border-bottom: 0; }
+.slirn-sv-fp-sub-src {
+  display: inline-block;
+  min-width: 36px;
+  color: #64748b;
+  font-weight: 600;
+  margin-right: 4px;
+}
+
 .slirn-sv-preview-body audio {
   display: block;
   width: min(440px, 70vw);
