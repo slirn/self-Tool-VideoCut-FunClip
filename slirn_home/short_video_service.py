@@ -964,6 +964,75 @@ def stage_llm_raw_path(repo_root: Path | str, task_id: str, project_id: str) -> 
     return stage3_dir(repo_root, task_id, project_id) / HIGHLIGHTS_LLM_RAW_NAME
 
 
+CUSTOM_PROMPTS_NAME = "custom_prompts.json"
+
+
+def custom_prompts_path(repo_root: Path | str, task_id: str, project_id: str) -> Path:
+    """REQ-20261004-stage3-prompt-edit：用户修改后的 3 个模板提示词。"""
+    return stage3_dir(repo_root, task_id, project_id) / CUSTOM_PROMPTS_NAME
+
+
+def load_custom_prompts(repo_root: Path | str, task_id: str, project_id: str) -> dict:
+    """读 custom_prompts.json。文件不存在/损坏 → 返回空 dict。
+
+    返回 {template_name: {"prompt": "...", "updated_at": "..."}}。
+    """
+    p = custom_prompts_path(repo_root, task_id, project_id)
+    if not p.is_file():
+        return {}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return data
+
+
+def save_custom_prompt(
+    repo_root: Path | str,
+    task_id: str,
+    project_id: str,
+    template: str,
+    prompt: str,
+) -> dict:
+    """保存用户对某模板的修改提示词。覆盖同名 key。"""
+    root = Path(repo_root)
+    data = load_custom_prompts(root, task_id, project_id)
+    data[template] = {
+        "prompt": str(prompt or "").strip(),
+        "updated_at": now_iso(),
+    }
+    p = custom_prompts_path(root, task_id, project_id)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    _write_json_atomic(p, data)
+    return data[template]
+
+
+def reset_custom_prompt(
+    repo_root: Path | str,
+    task_id: str,
+    project_id: str,
+    template: str,
+) -> bool:
+    """删除某模板的用户修改（恢复系统默认）。"""
+    root = Path(repo_root)
+    data = load_custom_prompts(root, task_id, project_id)
+    if template not in data:
+        return False
+    del data[template]
+    p = custom_prompts_path(root, task_id, project_id)
+    if data:
+        _write_json_atomic(p, data)
+    else:
+        # 空 dict → 删文件
+        try:
+            p.unlink()
+        except FileNotFoundError:
+            pass
+    return True
+
+
 def stage4_paths(
     repo_root: Path | str,
     task_id: str,

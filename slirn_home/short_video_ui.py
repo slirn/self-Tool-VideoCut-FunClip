@@ -296,6 +296,50 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
         f'<span>{label}</span></label>'
         for v, label in templates
     )
+
+    # REQ-20261004-stage3-prompt-edit：3 个可折叠提示词面板
+    prompt_state = s3.get("prompt_state") or {}
+    custom_prompts = prompt_state.get("custom") or {}
+    default_prompts = prompt_state.get("defaults") or {}
+    prompt_panels = []
+    for tpl_key, tpl_label in templates:
+        # 用户修改过 → 显示修改内容；否则显示系统默认（作为可参考起点）
+        custom_entry = custom_prompts.get(tpl_key) or {}
+        is_custom = bool(custom_entry.get("prompt"))
+        current_text = str(
+            custom_entry.get("prompt")
+            or default_prompts.get(tpl_key)
+            or ""
+        )
+        badge_cls = "slirn-sv-badge-warning" if is_custom else "slirn-sv-badge-muted"
+        badge_text = "已自定义" if is_custom else "系统默认"
+        updated_at = str(custom_entry.get("updated_at") or "")
+        updated_html = (
+            f'<span class="slirn-sv-muted">· 更新于 {esc(updated_at)}</span>'
+            if updated_at else ""
+        )
+        prompt_panels.append(
+            f'<details class="slirn-stage3-prompt-panel">'
+            f'<summary>'
+            f'<span class="slirn-stage3-prompt-label">{esc(tpl_label)}</span>'
+            f'<span class="slirn-sv-badge {badge_cls}">{esc(badge_text)}</span>'
+            f'{updated_html}'
+            f'</summary>'
+            f'<div class="slirn-stage3-prompt-body">'
+            f'<textarea class="slirn-stage3-prompt-text" '
+            f'rows="14" data-template="{tpl_key}" '
+            f'placeholder="系统默认提示词（可在此基础上修改）">{esc(current_text)}</textarea>'
+            f'<div class="slirn-stage3-prompt-actions">'
+            f'<button class="slirn-btn-mini slirn-btn-mini-primary" '
+            f'data-action="sv-save-custom-prompt" data-template="{tpl_key}">💾 保存修改</button>'
+            f'<button class="slirn-btn-mini slirn-btn-mini-danger" '
+            f'data-action="sv-reset-custom-prompt" data-template="{tpl_key}">↺ 恢复默认</button>'
+            f'</div>'
+            f'</div>'
+            f'</details>'
+        )
+    prompt_panels_html = "".join(prompt_panels)
+
     error_html = ""
     if s3.get("status") == "failed":
         err = s3.get("error") or "失败"
@@ -403,7 +447,12 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
     <div class="slirn-sv-card-actions">
       <button class="slirn-btn slirn-btn-primary" data-action="sv-stage3-run">AI 拆条</button>
       <span class="slirn-sv-muted">{int(s3.get("count") or 0)} 条 highlights</span>
+      {f'<span class="slirn-sv-badge slirn-sv-badge-warning">使用自定义提示词</span>' if s3.get("custom_prompt_used") else ""}
     </div>
+    <details class="slirn-stage3-prompts-section">
+      <summary>📝 自定义提示词（默认 3 个模板，可在此基础上修改保存）</summary>
+      <div class="slirn-stage3-prompts-list">{prompt_panels_html}</div>
+    </details>
     <div class="slirn-stage3-hl-list">{hl_list}</div>
     {error_html}
     {_stage_logs(s3)}

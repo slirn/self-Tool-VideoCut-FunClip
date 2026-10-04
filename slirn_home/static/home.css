@@ -5563,6 +5563,77 @@ input[type="checkbox"]:focus-visible {
   color: #64748b;
   font-style: italic;
 }
+
+/* REQ-20261004-stage3-prompt-edit：提示词编辑面板 */
+.slirn-stage3-prompts-section {
+  margin: 10px 0;
+  padding: 8px 12px;
+  background: #f8fafc;
+  border: 1px dashed #cbd5e1;
+  border-radius: 6px;
+}
+.slirn-stage3-prompts-section > summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: #475569;
+  font-weight: 500;
+  user-select: none;
+}
+.slirn-stage3-prompts-list {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.slirn-stage3-prompt-panel {
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 6px 10px;
+}
+.slirn-stage3-prompt-panel[open] {
+  border-color: #38bdf8;
+}
+.slirn-stage3-prompt-panel > summary {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #1e293b;
+  user-select: none;
+}
+.slirn-stage3-prompt-label {
+  font-weight: 500;
+}
+.slirn-stage3-prompt-body {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed #e2e8f0;
+}
+.slirn-stage3-prompt-text {
+  width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 8px;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+  background: #f8fafc;
+  color: #1e293b;
+  resize: vertical;
+  box-sizing: border-box;
+}
+.slirn-stage3-prompt-text:focus {
+  outline: none;
+  border-color: #38bdf8;
+  background: #fff;
+}
+.slirn-stage3-prompt-actions {
+  margin-top: 6px;
+  display: flex;
+  gap: 6px;
+}
 .slirn-stage3-hl-more {
   margin-top: 4px;
   color: #94a3b8;

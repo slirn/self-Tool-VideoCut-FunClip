@@ -9630,6 +9630,22 @@ def _register_slirn_api(
             # 注入 srt_lines（只在第一次注入，避免重复覆盖）
             if srt_lines_dicts and not s3.get("srt_lines"):
                 s3["srt_lines"] = srt_lines_dicts
+            # REQ-20261004-stage3-prompt-edit：注入用户修改过的提示词 + 系统默认
+            # 供 UI 显示「已自定义」/「系统默认」状态。系统默认从 short_video_analyze 拿。
+            try:
+                from slirn_home.short_video_analyze import _PROMPT_TEMPLATES
+                cp_data = _sv_service.load_custom_prompts(
+                    repo_root, str(project.get("task_id") or ""), str(project.get("id") or ""),
+                )
+                prompt_state = {
+                    "custom": cp_data,  # 用户修改过的；不存在 → 空 dict
+                    "defaults": {
+                        name: tmpl for name, tmpl in _PROMPT_TEMPLATES.items()
+                    },
+                }
+                s3["prompt_state"] = prompt_state
+            except Exception as ps_err:  # noqa: BLE001
+                log.warning("[short_video] prompt_state 注入失败: %s", ps_err)
         except Exception:  # noqa: BLE001 — UI 兜底，不阻断渲染
             pass
 
@@ -9962,6 +9978,57 @@ def _register_slirn_api(
             log.exception("stage3_reorder_subtitles failed")
             return _err(f"重排失败: {e}")
         return _ok(highlight=updated, toast="字幕顺序已更新")
+
+    @app.app.post("/slirn/api/short_video_save_custom_prompt")
+    async def short_video_save_custom_prompt(body: dict = Body(default_factory=dict)):
+        """REQ-20261004-stage3-prompt-edit：保存用户对某个模板的修改提示词。
+
+        body:
+          - task_id / project_id
+          - template: hook_first / topic_cluster / story_arc
+          - prompt: 修改后的完整提示词（base + 策略部分整体替换）
+        """
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        template = (body.get("template") or "").strip()
+        prompt = str(body.get("prompt") or "")
+        if not tid or not pid:
+            return _err("缺少 task_id 或 project_id")
+        if template not in {"hook_first", "topic_cluster", "story_arc"}:
+            return _err(f"未知模板: {template}")
+        if not prompt.strip():
+            return _err("prompt 不能为空")
+        try:
+            saved = _sv_service.save_custom_prompt(
+                repo_root, tid, pid,
+                template=template, prompt=prompt,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.exception("save_custom_prompt failed")
+            return _err(f"保存失败: {e}")
+        return _ok(custom_prompt=saved, toast=f"已保存 {template} 提示词")
+
+    @app.app.post("/slirn/api/short_video_reset_custom_prompt")
+    async def short_video_reset_custom_prompt(body: dict = Body(default_factory=dict)):
+        """REQ-20261004-stage3-prompt-edit：恢复某模板到系统默认（删除用户修改）。"""
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        template = (body.get("template") or "").strip()
+        if not tid or not pid:
+            return _err("缺少 task_id 或 project_id")
+        if template not in {"hook_first", "topic_cluster", "story_arc"}:
+            return _err(f"未知模板: {template}")
+        try:
+            removed = _sv_service.reset_custom_prompt(
+                repo_root, tid, pid, template=template,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.exception("reset_custom_prompt failed")
+            return _err(f"重置失败: {e}")
+        return _ok(
+            removed=removed,
+            toast="已恢复默认" if removed else "无需重置",
+        )
 
     @app.app.post("/slirn/api/short_video_stage4_run")
     async def short_video_stage4_run(body: dict = Body(default_factory=dict)):

@@ -564,12 +564,9 @@
         var parent = movedEl.parentNode;
         parent.insertBefore(movedEl, el); // 移到目标之前
         // 调端点持久化
-        var taskId = (document.querySelector('[data-sv-task-id]') || {}).getAttribute
-          ? (document.querySelector('[data-sv-task-id]') || {}).getAttribute('data-sv-task-id')
-          : '';
-        var projectId = (document.querySelector('[data-sv-project-id]') || {}).getAttribute
-          ? (document.querySelector('[data-sv-project-id]') || {}).getAttribute('data-sv-project-id')
-          : '';
+        var root = document.getElementById('slirn-short-video-inner');
+        var taskId = root ? (root.getAttribute('data-task-id') || '') : '';
+        var projectId = root ? (root.getAttribute('data-project-id') || '') : '';
         if (!taskId || !projectId) {
           showToast('缺少 task_id / project_id，拖拽未持久化', 'error');
           return;
@@ -608,6 +605,72 @@
     document.querySelectorAll('.slirn-stage3-hl-preview').forEach(bindSubtitleSort);
   }
 
+  // ---------- REQ-20261004-stage3-prompt-edit：自定义提示词保存/恢复 ----------
+
+  function _svCurrentCtx() {
+    var root = document.getElementById('slirn-short-video-inner');
+    return {
+      taskId: root ? (root.getAttribute('data-task-id') || '') : '',
+      projectId: root ? (root.getAttribute('data-project-id') || '') : '',
+    };
+  }
+
+  function saveCustomPrompt(btn) {
+    var template = btn.getAttribute('data-template') || '';
+    var ta = document.querySelector('.slirn-stage3-prompt-text[data-template="' + template + '"]');
+    if (!ta) return toast('找不到提示词文本框', 'error');
+    var prompt = ta.value || '';
+    if (!prompt.trim()) return toast('提示词不能为空', 'error');
+    var ctx = _svCurrentCtx();
+    if (!ctx.taskId || !ctx.projectId) return toast('缺少 task_id / project_id', 'error');
+    postJSON(API + '/short_video_save_custom_prompt', {
+      task_id: ctx.taskId,
+      project_id: ctx.projectId,
+      template: template,
+      prompt: prompt,
+    }).then(function(r) {
+      if (r && r.ok) {
+        toast('已保存 ' + template + ' 提示词');
+        // 不重载整个页面（用户可能还在改其他模板）
+        // 局部刷新状态徽章
+        var panel = btn.closest('.slirn-stage3-prompt-panel');
+        if (panel) {
+          var summary = panel.querySelector('summary');
+          if (summary) {
+            // 移除旧徽章
+            summary.querySelectorAll('.slirn-sv-badge').forEach(function(x) { x.remove(); });
+            var badge = document.createElement('span');
+            badge.className = 'slirn-sv-badge slirn-sv-badge-warning';
+            badge.textContent = '已自定义';
+            summary.insertBefore(badge, summary.firstChild.nextSibling);
+          }
+        }
+      } else {
+        toast((r && r.error) || '保存失败', 'error');
+      }
+    });
+  }
+
+  function resetCustomPrompt(btn) {
+    var template = btn.getAttribute('data-template') || '';
+    var ctx = _svCurrentCtx();
+    if (!ctx.taskId || !ctx.projectId) return toast('缺少 task_id / project_id', 'error');
+    if (!window.confirm('确认恢复 ' + template + ' 到系统默认？')) return;
+    postJSON(API + '/short_video_reset_custom_prompt', {
+      task_id: ctx.taskId,
+      project_id: ctx.projectId,
+      template: template,
+    }).then(function(r) {
+      if (r && r.ok) {
+        toast('已恢复默认');
+        // 重载页面让 textarea 重新填上系统默认
+        openProject(ctx.taskId, ctx.projectId);
+      } else {
+        toast((r && r.error) || '重置失败', 'error');
+      }
+    });
+  }
+
   // ---------- 点击分发 ----------
 
   document.addEventListener('click', function(ev) {
@@ -636,6 +699,8 @@
     if (action === 'sv-stage3-run') return stage3Run();
     if (action === 'sv-stage3-preview') return stage3PreviewHl(btn);
     if (action === 'sv-stage3-verify-run') return stage3VerifyRun();
+    if (action === 'sv-save-custom-prompt') return saveCustomPrompt(btn);
+    if (action === 'sv-reset-custom-prompt') return resetCustomPrompt(btn);
     if (action === 'sv-stage4-run') return stage4Run();
     if (action === 'sv-stage5-asr') return stage5Asr(btn);
     if (action === 'sv-stage5-save') return stage5Save(btn);

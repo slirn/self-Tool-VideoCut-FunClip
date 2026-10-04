@@ -507,11 +507,19 @@ def run_stage3(
     if not srt_lines:
         raise svc.ShortVideoError("raw.srt 解析后无有效字幕行")
 
-    # 选择模板
+    # 选择模板（REQ-20261004-stage3-prompt-edit：优先用用户自定义提示词）
+    custom_overrides = svc.load_custom_prompts(root, task_id, project_id)
+    using_custom = False
     if template == "custom":
         sys_p = custom_prompt.strip() or _PROMPT_TEMPLATES[svc.HIGHLIGHT_TEMPLATE_HOOK_FIRST]
     elif template in _PROMPT_TEMPLATES:
-        sys_p = _PROMPT_TEMPLATES[template]
+        override = custom_overrides.get(template) or {}
+        override_prompt = str(override.get("prompt") or "").strip()
+        if override_prompt:
+            sys_p = override_prompt
+            using_custom = True
+        else:
+            sys_p = _PROMPT_TEMPLATES[template]
     else:
         raise svc.ShortVideoError(f"未知模板: {template}")
     n_clips = max(3, min(5, int(n_clips or 4)))
@@ -522,8 +530,10 @@ def run_stage3(
     state["started_at"] = svc.now_iso()
     state["template"] = template
     state["n_clips"] = n_clips
+    state["custom_prompt_used"] = using_custom
     state["logs"] = list(state.get("logs") or []) + [
-        f"[{svc.now_iso()}] stage3 start, template={template}, n_clips={n_clips}, srt_lines={len(srt_lines)}",
+        f"[{svc.now_iso()}] stage3 start, template={template}, n_clips={n_clips}, srt_lines={len(srt_lines)}"
+        + (", using custom prompt" if using_custom else ""),
     ]
     svc.set_stage_state(project, "stage3_analyze", state)
     svc.save_project(root, project)

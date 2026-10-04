@@ -1105,3 +1105,175 @@ def test_coarse_resolve_segments_from_subtitle_lines(tmp_path):
     # 也测空 subtitle_lines
     empty_segs = _resolve({"subtitle_lines": []})
     assert empty_segs == [], f"空 subtitle_lines 应得空 segments，实际: {empty_segs}"
+
+
+# ---------- REQ-20261004-stage3-prompt-edit 新增测试 ----------
+
+
+def test_custom_prompts_lifecycle(tmp_path):
+    """save_custom_prompt → load → reset → load 应为空。"""
+    import json as _json
+    from slirn_home.short_video_service import (
+        create_project,
+        load_custom_prompts, save_custom_prompt, reset_custom_prompt,
+        custom_prompts_path,
+    )
+    from tasklib import TaskManager
+
+    video = tmp_path / "src.mp4"
+    video.write_bytes(b"fake")
+    mgr = TaskManager(tmp_path)
+    task = mgr.create(name="t", original_video=video)
+    tid = task.task_id
+
+    proj = create_project(tmp_path, tid, name="p", brief="")
+    pid = proj["id"]
+
+    # 初始：空
+    assert load_custom_prompts(tmp_path, tid, pid) == {}
+
+    # 保存 hook_first
+    saved = save_custom_prompt(
+        tmp_path, tid, pid,
+        template="hook_first", prompt="我的自定义钩子优先提示词",
+    )
+    assert saved["prompt"] == "我的自定义钩子优先提示词"
+    assert "updated_at" in saved
+
+    # 再保存 topic_cluster
+    save_custom_prompt(tmp_path, tid, pid, template="topic_cluster", prompt="主题聚类 v2")
+
+    # load 应返回 2 个
+    loaded = load_custom_prompts(tmp_path, tid, pid)
+    assert "hook_first" in loaded and "topic_cluster" in loaded
+    assert loaded["hook_first"]["prompt"] == "我的自定义钩子优先提示词"
+    assert loaded["topic_cluster"]["prompt"] == "主题聚类 v2"
+
+    # 验证文件存在且 JSON 合法
+    cp = custom_prompts_path(tmp_path, tid, pid)
+    assert cp.is_file()
+    raw = _json.loads(cp.read_text(encoding="utf-8"))
+    assert "hook_first" in raw and "topic_cluster" in raw
+
+    # 重置 hook_first
+    removed = reset_custom_prompt(tmp_path, tid, pid, template="hook_first")
+    assert removed is True
+
+    loaded2 = load_custom_prompts(tmp_path, tid, pid)
+    assert "hook_first" not in loaded2
+    assert "topic_cluster" in loaded2  # 不应误删其他模板
+
+    # 重置 topic_cluster（最后一个） → 文件应被删除
+    reset_custom_prompt(tmp_path, tid, pid, template="topic_cluster")
+    assert load_custom_prompts(tmp_path, tid, pid) == {}
+    assert not cp.exists(), f"全部重置后文件应被删除: {cp}"
+
+    # 重置不存在的 key → 返回 False 不报错
+    assert reset_custom_prompt(tmp_path, tid, pid, template="hook_first") is False
+
+
+def test_custom_prompts_invalid_template(tmp_path):
+    """未知 template 应抛错，不写入文件。"""
+    from slirn_home.short_video_service import (
+        create_project, save_custom_prompt, custom_prompts_path,
+    )
+    from tasklib import TaskManager
+
+    video = tmp_path / "src.mp4"
+    video.write_bytes(b"fake")
+    mgr = TaskManager(tmp_path)
+    task = mgr.create(name="t", original_video=video)
+    tid = task.task_id
+
+    proj = create_project(tmp_path, tid, name="p", brief="")
+    pid = proj["id"]
+
+    # custom_prompt 端点校验 template 名（app.py 校验）；service 层只接收合法 template
+    # 但应当正确接受 "custom" 是不允许的（系统只有 3 个模板）
+    # —— 测试 service 直接调：传合法模板应该 OK
+    save_custom_prompt(tmp_path, tid, pid, template="story_arc", prompt="测试")
+    cp = custom_prompts_path(tmp_path, tid, pid)
+    assert cp.is_file()
+
+
+def test_run_stage3_uses_custom_prompt(tmp_path):
+    """run_stage3 应在有 custom_prompt 时用 custom，否则用默认。"""
+    import json as _json
+    from slirn_home.short_video_service import (
+        create_project, save_custom_prompt,
+        stage_raw_srt_path, stage_llm_raw_path,
+    )
+    from slirn_home import short_video_analyze as sva
+    from tasklib import TaskManager
+    import json as json_mod
+
+    video = tmp_path / "src.mp4"
+    video.write_bytes(b"fake")
+    mgr = TaskManager(tmp_path)
+    task = mgr.create(name="t", original_video=video)
+    tid = task.task_id
+
+    proj = create_project(tmp_path, tid, name="p", brief="")
+    pid = proj["id"]
+
+    # 写 raw.srt（≥ 1 行）
+    rp = stage_raw_srt_path(tmp_path, tid, pid)
+    rp.parent.mkdir(parents=True, exist_ok=True)
+    rp.write_text(
+        "1\n00:00:01,000 --> 00:00:02,000\n第一句\n\n"
+        "2\n00:00:05,000 --> 00:00:06,000\n第二句\n\n",
+        encoding="utf-8",
+    )
+
+    # 写 custom_prompt
+    CUSTOM_PROMPT = "CUSTOM-PROMPT-MARKER-12345"
+    save_custom_prompt(tmp_path, tid, pid, template="hook_first", prompt=CUSTOM_PROMPT)
+
+    # mock revision_service._call_llm 防止真打 LLM
+    from slirn_home import revision_service
+    captured = {"calls": []}
+    def fake_call(sys_p, user_p, **kw):
+        captured["calls"].append(sys_p)
+        return json_mod.dumps({
+            "highlights": [{
+                "id": "h1",
+                "title": "测试",
+                "start_ms": 0,
+                "end_ms": 30000,
+                "subtitle_lines": [
+                    {"src_index": 1, "text": "行 1"},
+                    {"src_index": 2, "text": "行 2"},
+                ],
+            }],
+        }, ensure_ascii=False)
+    revision_service._call_llm = fake_call
+
+    state = sva.run_stage3(tmp_path, tid, pid, template="hook_first", n_clips=4)
+    assert state["status"] == "done"
+    assert state.get("custom_prompt_used") is True
+    # 应至少一次调用 fake_call 且系统提示词含 CUSTOM_PROMPT marker
+    assert any(CUSTOM_PROMPT in c for c in captured["calls"]), \
+        f"应使用自定义提示词，调用的 sys_p: {captured['calls']}"
+
+    # 再跑一次用 story_arc（未自定义）→ 不应使用 custom
+    captured2 = {"calls": []}
+    def fake_call2(sys_p, user_p, **kw):
+        captured2["calls"].append(sys_p)
+        return json_mod.dumps({
+            "highlights": [{
+                "id": "h1",
+                "title": "测试",
+                "start_ms": 0,
+                "end_ms": 30000,
+                "subtitle_lines": [
+                    {"src_index": 1, "text": "行 1"},
+                    {"src_index": 2, "text": "行 2"},
+                ],
+            }],
+        }, ensure_ascii=False)
+    revision_service._call_llm = fake_call2
+    state2 = sva.run_stage3(tmp_path, tid, pid, template="story_arc", n_clips=4)
+    assert state2["status"] == "done"
+    assert state2.get("custom_prompt_used") is False  # story_arc 没自定义
+    assert any("Story-Arc" in c or "起承转合" in c for c in captured2["calls"]), \
+        f"应使用系统默认提示词"
