@@ -290,3 +290,41 @@ OCR 提示）/ `static/short_video.js`（stage3RestoreOrder + 删行拖拽块）
 零新增 / 7861 重启后 CDP 实测：hl-text 计算色 rgb(241,245,249)（修复前
 rgb(31,41,55) 不可见）、时间戳 `[00:34:38,090 → 00:34:39,450]`、srt-pre
 深字浅底、served JS 含拖拽调宽接线。
+
+## 修订八（2026-10-13 验收反馈）：预览逐段播放 + 删除确认 + 重解析提示词按主题重组
+
+用户验收三件事：
+
+1. **预览片段按字幕时间戳逐段播放**：原实现只 seek 到组起点然后连播到组
+   终点（把未选中的空隙也播了，观感=「从第一个字幕顺序播放」）。改为预览
+   按钮 `data-segments` 直接携带逐段切割窗（**当前行序**、行时间戳优先、
+   缺失查源行、end+100ms 词尾——与 `run_stage3_splice` 完全一致），悬浮窗
+   逐段 seek：播完一段跳下一段起点，最后一段结束暂停；用户手动拖进度条
+   （seeking 跳出现段）自动退出逐段推进，不跟手动操作抢。无 segments 数据
+   时回退旧的组起点连播。
+2. **删除按钮**：文案「删」→「删除」；原先**点了没任何反应**——UI 有按钮
+   但 JS 无 handler、后端无端点（本轮补齐 `stage3RemoveHl` 前端 confirm →
+   `POST /slirn/api/short_video_stage3_remove_hl` → `remove_stage3_hl`）。
+   语义：前端弹 confirm（含标题回显），确认后真删；其余条目 **index 不重编**
+   （编号是 rerun/restore/clip 命名的稳定标识，留空洞是刻意行为，重跑解析
+   才整体重编）；doc+镜像整表同步、下游/拼接作废、删光回「解析后将列出」态。
+3. **重新解析提示词重组**：
+   - OCR 参考不再给全量截图文字——`_filter_ocr_for_title` 按标题 2-gram
+     （CJK 滑窗，标点跨界 gram 丢弃）过滤只给相关行，12 行上限，无命中
+     给空串（宁缺毋滥）；节选声明用重解析专用模板（「与主题「X」相关的
+     参考方向（…节选…）」）。
+   - user payload 主题声明前置：「本次任务：只解析主题「{title}」这 1 条
+     短视频」；结尾约束加「选中的字幕行要按叙事逻辑有条理地组织」。
+   - system 定向指令（`_rerun_one_suffix`）升级：只选与该主题直接相关的
+     字幕行、不引入其他主题；**有条理地组织**成有起点/展开/收束的连贯短视频。
+
+涉及：`short_video_ui.py`（data-segments 渲染 + 删除文案）/
+`short_video_analyze.py`（`_filter_ocr_for_title` + `_RERUN_OCR_REFERENCE_TMPL`
++ `_rerun_one_suffix` 重写 + rerun user_payload 重组 + `remove_stage3_hl`）/
+`app.py`（remove_hl 端点）/ `static/short_video.js`（逐段播放引擎 + 手动
+seek 退出 + `stage3RemoveHl` confirm 分发）；测试新增 6 例（OCR 过滤单测 /
+rerun 提示词捕获 / 删除全流程含删光 / segments UI 断言 / JS 接线守卫），
+文件内 34 例。
+
+验证：全量 pytest **1176 passed** / node --check OK / ruff HEAD-vs-worktree
+零新增 / 7861 重启后 served JS 含逐段引擎与 confirm 接线（11 处匹配）。
