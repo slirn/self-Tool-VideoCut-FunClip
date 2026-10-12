@@ -43,16 +43,29 @@
 8. 质量门：ruff 工作树 == HEAD（零新增 lint）、node --check short_video.js 通过、全量 pytest ≥ 基线 + D1 新增 ≥ 6 测试通过
 9. 7861 重启：Python 改动 → TaskStop + 重启
 
-## 闭环记录（实现完成后回填）
+## 闭环记录
 
 | 项 | 值 |
 |---|---|
 | REQ 文档 | REQ-20261013-104-sv-stage6-optimize-port.md（本文件） |
-| 提交号 | TBD |
-| push ref-update | TBD |
-| 7861 PID | TBD |
-| 测试 | TBD passed |
+| 提交号 | 7e281af |
+| push ref-update | `59001e3..7e281af  main -> main` |
+| 7861 PID | by3gq0ym0（SLIRN_AUTH_BYPASS=1） |
+| 测试 | 1211 passed（基线 1195 + D1 新增 16）+ 6 端点 smoke 200 |
+| 验收 | 9 项 ✅ 全部通过（见下） |
 | 下一子任务 | C1（Stage 7 精剪 v1 完整版） |
+
+### 验收逐条
+
+1. ✅ 端点齐：6 端点全部 200 + 业务层正确拒绝（项目/文件不存在时返错误）
+2. ✅ LLM 优化可走通：mock _call_llm + 16 个测试覆盖 parse_occurrences 防御式解析
+3. ✅ 行级决策保存：save_decisions 落 project.json + 应用到 refined srt（test_save_decisions_appends_to_srt）
+4. ✅ 行内切分：resplit_line 按字符数比例内插时间戳（test_resplit_line_interpolates_by_length）
+5. ✅ 批量替换：batch_search 找到所有出现项 + batch_replace 替换后 srt 落盘
+6. ✅ UI 改造：`_stage6_refine` 顶部「✨ LLM 优化」+ 词频 chips + 行级 ✓/✕/💾 按钮 + 批量替换面板
+7. ✅ 短/长隔离：test_save_decisions_does_not_touch_long_video_outputs 守门
+8. ✅ 质量门：ruff 109→109 零新增、node --check 通过、pytest 1211 passed
+9. ✅ 7861 重启：原 bzm9zqpnq 停掉，新进程 by3gq0ym0（带 SLIRN_AUTH_BYPASS=1）
 
 ## 与已闭环任务的关系
 
