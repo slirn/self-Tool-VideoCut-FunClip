@@ -93,3 +93,15 @@
 `render_prompt_history_list`）/ `app.py` / `static/short_video.js` /
 `static/home.css`；测试同步更新（`test_short_video_service.py` 的模板 radio
 断言反转为「不存在」）。
+
+## 修订二（2026-10-12 验收反馈续）
+
+1. **刷新保持当前页面**：router.js `showTab` 记录 `slirn.lastTab`，刷新后
+   `_restoreLastTab`（DOMContentLoaded 时机，等 defer 的 short_video.js 就绪）
+   恢复 5 个主导航 tab 之一；short_video.js 以 `slirn.sv.view` 记忆打开的
+   项目，进入短视频 tab 时直接重进项目编辑页。返回列表 / 项目删除 /
+   打开失败均清空记忆。detail/workbench 依赖导航上下文，不在恢复范围。
+2. **导航改名**：「📋 任务列表」→「📋 长视频任务列表」；「短视频混剪」
+   （顶栏 + hero）→「短视频任务列表」；tab 骨架加载文案同步。
+3. **截图区块标题**改为「智能纪要课程重点截图：」（上一版加在复选框前的
+   重复 label 移除，避免同行出现两遍相同文案）。

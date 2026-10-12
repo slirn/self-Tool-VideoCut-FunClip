@@ -103,19 +103,46 @@
 
   // ---------- 列表 / 创建 / 打开 / 删除 ----------
 
+  // 刷新保持当前页面（2026-10-12 修订）：记住短视频 tab 里最后打开的项目；
+  // 「返回项目列表」/删除项目会清空记忆。router.js 刷新后恢复短视频 tab 时，
+  // slirnShortVideoLoad 会按记忆直接重进项目编辑页而不是列表。
+  var SV_VIEW_KEY = 'slirn.sv.view';
+  function _saveSvView(taskId, projectId) {
+    try {
+      localStorage.setItem(SV_VIEW_KEY,
+        JSON.stringify({t: taskId || '', p: projectId || ''}));
+    } catch (e) { /* localStorage 不可用 → 仅失去记忆功能 */ }
+  }
+  function _readSvView() {
+    try { return JSON.parse(localStorage.getItem(SV_VIEW_KEY) || 'null'); }
+    catch (e) { return null; }
+  }
+
   function loadList() {
+    _saveSvView('', '');
     postJSON(API + '/short_video_list', {}).then(function(r) {
       if (r && r.ok) setHTML(r.html);
       else setHTML('<div class="slirn-empty">' + esc((r && r.error) || '加载失败') + '</div>');
       stopElapsedTickerIfIdle();
     });
   }
-  window.slirnShortVideoLoad = loadList;
+  window.slirnShortVideoLoad = function() {
+    var v = _readSvView();
+    if (v && v.t && v.p) openProject(v.t, v.p);
+    else loadList();
+  };
 
   function openProject(taskId, projectId) {
+    _saveSvView(taskId, projectId);
     postJSON(API + '/short_video_get', {task_id: taskId, project_id: projectId}).then(function(r) {
       if (r && r.ok) setHTML(r.html);
-      else toast((r && r.error) || '打开失败', 'error');
+      else {
+        // 打不开（项目被删 / 无权限 / 会话过期）→ 清记忆并回列表，
+        // 避免刷新后反复卡在打不开的视图上
+        _saveSvView('', '');
+        toast((r && r.error) || '打开失败', 'error');
+        loadList();
+      }
       startElapsedTicker();
       initSubtitleSortAll();
     });

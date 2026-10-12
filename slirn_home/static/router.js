@@ -512,6 +512,8 @@
     });
     var detail = document.getElementById('slirn-tab-detail');
     if (detail) detail.style.display = 'none';
+    // 记住最后所在 tab —— 刷新后恢复（见 _restoreLastTab）
+    try { localStorage.setItem('slirn.lastTab', targetCell); } catch (e) {}
     // 切到「新建任务」时初始化热词选择器（刷新 chip 显示）；
     // 若上次是「编辑任务」占用了本页 → 重新拉取全新建页
     if (targetCell === 'slirn-tab-create') {
@@ -532,6 +534,23 @@
     }
     window.scrollTo({top: 0, behavior: 'smooth'});
   }
+
+  // ===== 刷新保持当前页面（2026-10-12 修订）=====
+  // 离开时停留在哪个主导航 tab，刷新后就回到那个 tab（等价于替用户点一次
+  // 对应导航按钮，无上下文依赖）。仅恢复 5 个主导航 tab —— detail/workbench
+  // 依赖导航链路带入的上下文，不在恢复范围。短视频 tab 额外由 short_video.js
+  // 按记忆恢复到具体项目编辑页：项目页刷新不再跳回首页/列表。
+  function _restoreLastTab() {
+    var last = '';
+    try { last = localStorage.getItem('slirn.lastTab') || ''; } catch (e) {}
+    var navTabs = Object.keys(TAB_BUTTONS).map(function(k) { return TAB_BUTTONS[k]; });
+    if (navTabs.indexOf(last) >= 0) showTab(last);
+  }
+  // router.js 是 defer 脚本，执行时 short_video.js（同为 defer，排在后面）
+  // 还没跑 —— 必须等 DOMContentLoaded（所有 defer 脚本跑完）再恢复，
+  // 否则 showTab 调 slirnShortVideoLoad 时它还不存在。
+  if (document.readyState === 'complete') _restoreLastTab();
+  else document.addEventListener('DOMContentLoaded', _restoreLastTab);
 
   // REQ-20260920-087：任务列表搜索框过滤（client-side）
   // 监听 #slirn-task-search 的 input 事件，按 task_id / name / original_video 文本匹配卡片
