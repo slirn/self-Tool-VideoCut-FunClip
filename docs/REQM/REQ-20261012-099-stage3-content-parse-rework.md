@@ -143,3 +143,48 @@
 `static/short_video.js`（loadList(scope) + change/input 监听 + sv-new）/
 `static/home.css`（`.slirn-sv-header-actions`）；
 新测试 `tests/test_short_video_list_filters.py`（8 例，含非 admin 钳制端点测试）。
+
+## 修订五（2026-10-12 验收反馈五：Stage 3 接入上游「大模型智能剪辑」+ 拖拽排序 + 截取拼接）
+
+用户验收三件事（含图 4.png）：
+
+1. **调用后台功能**：点「解析」复用上游首页「大模型智能剪辑」对应后台链路
+   （`funclip/launch.py` `llm_inference` 同款）——system =「你是一个视频srt
+   字幕分析剪辑器…输出需严格按照如下格式：1. [开始时间-结束时间] 文本」，
+   user =「这是待裁剪的视频srt字幕：」+ raw SRT + 编号列表格式约束
+   （约束拼在 user 尾部，含「忽略上文的其他输出格式要求（包括 JSON）」，
+   防 system 被自定义覆盖后解析器失配）。上游的「不低于 50% 时长」备注
+   **刻意不加**——与拆条（n 条片段）目标冲突。解析按出现顺序**自动重编号**
+   （LLM 自报序号不可信），subtitle_lines 由时间重叠映射回 raw.srt 行，
+   highlights.json schema 不变 → Stage 3.5/4/5/6 零改动。模型仍按旧
+   JSON 输出时走兜底解析（raw 含 "highlights" → 旧 `_strip_json_block`
+   路径）；用户自定义提示词仍最优先。
+2. **拖拽调整顺序（编号不变）**：行首 ⇕ 把柄按下才开启行级 draggable
+   （默认不可拖，避免与标题输入 / 行内字幕行拖拽冲突；事件全走 document
+   代理，重渲染免重绑）。drop 后 DOM 顺序 POST 持久化为 `splice_order`，
+   片段 `index` 永不重编——编号随行移动，原始顺序号天然保持。
+   重排后已拼接结果标记 stale（「拼接顺序已调整，请重新拼接」）。
+3. **片段截取与拼接**：`run_stage3_splice` 按 splice_order 从源视频逐段
+   `subclip`（start +0ms / end +100ms 防切词尾，同 Stage 4 默认）+
+   `concatenate_videoclips`，产物 `stage3/splice.mp4` + 重建的
+   `splice.srt`（按新顺序重编号 + 时间轴按段重定位）；拼接卡显示
+   「拼接顺序：#a → #b → #c」+ 播放 / 字幕预览 + 时长片段数。新管线状态
+   `stage3_splice` 接入三个重置路径（重跑解析 / 单片段重解析 / 拖拽重排）。
+
+附带：导航入口「短视频列表」强制回列表视图（`showTab(target, {forceShortVideoList})`，
+不恢复上次编辑页记忆）。
+
+涉及：`short_video_analyze.py`（上游提示词常量 + `_parse_llm_clip_segments`
+解析器 + `reorder_splice_order`）/ `short_video_coarse.py`
+（`build_splice_plan` + `_render_splice_video` + `run_stage3_splice`）/
+`short_video_service.py`（`stage3_splice` 状态注册）/ `app.py`
+（reorder_highlights / splice 两端点）/ `short_video_ui.py`（⇕ 把柄 +
+拼接卡）/ `short_video.js`（把柄门控行拖拽 + stage3Splice）/
+`static/router.js`（forceShortVideoList）/ `home.css`；
+新测试 `tests/test_short_video_stage3_llm_clip.py`（17 例：
+上游提示词保真 / 解析器变体 / run_stage3 链路 / 拖拽重排 / 拼接含
+SRT 重建 / 端点 / UI 渲染 / JS 接线 + node --check）。
+
+已知无关失败：`test_short_video_render_smoke_9x16` 全量套件下 ffmpeg
+「Cannot allocate memory」（干净 HEAD 同样失败，本机内存压力；单独运行
+通过）——与本次改动无关。
