@@ -188,3 +188,61 @@ SRT 重建 / 端点 / UI 渲染 / JS 接线 + node --check）。
 已知无关失败：`test_short_video_render_smoke_9x16` 全量套件下 ffmpeg
 「Cannot allocate memory」（干净 HEAD 同样失败，本机内存压力；单独运行
 通过）——与本次改动无关。
+
+## 修订六（2026-10-12 验收反馈六：分组短视频解析 + OCR 参考方向 + 还原顺序 + 逐组拼接）
+
+用户验收四件事（含图 5.png）：
+
+1. **N 组 = N 条独立短视频**（修正修订五「合成一条」的误读）：解析产出即
+   最终要剪出的 N 条短视频；每条围绕一个标题展开、全部字幕时长合计约
+   70 秒（后续还会删字，留余量）；组内字幕顺序按该标题的叙事需要排列，
+   **可以与 srt 原顺序不同**。片段数 N（3~5，上游页面同款参数）从 Stage 3
+   「片段数」控件注入提示词。输出格式 = `# 组序号 | 短视频标题` 组头行 +
+   `行号. [HH:MM:SS,mmm-HH:MM:SS,mmm] 文本` 编号行（约束仍拼 user 尾部，
+   含「忽略上文的其他输出格式要求（包括 JSON）」）。
+2. **截图先 OCR 提文字**：解析前先用多模态模型专用调用提取「智能纪要课程
+   重点」截图里的全部文字（`stage3/ocr_text.txt` 落档；同一张图缓存复用，
+   换图重提取），提取文字以「【课程重点参考……仅作为选题与叙事方向的参考，
+   不要求逐字使用】」段头拼进 user payload 头部；**主解析调用始终纯文本**。
+   OCR 失败 → stage3 failed（错误含「截图文字提取失败」）；提取为空 → 告警
+   并跳过参考段。UI 显示「✅ 截图文字已提取（N 字）」+ 查看提取文字入口。
+3. **行唯一编号 + 还原顺序**：组内字幕行按 LLM 输出顺序编 `no` 1..M，
+   用户拖拽重排后 no 随行移动**永不改变**；每行显示编号 + 时间戳
+   （mm:ss → mm:ss）+ 文本。行头「↩️ 还原顺序」按钮按 no 升序稳定排序
+   还原大模型最初顺序（当前已是原序时禁用）；还原写回 highlights.json +
+   state 镜像 + `reset_downstream_stages`（含 stage3_splice 作废）。
+4. **逐组截取拼接**：`run_stage3_splice` 重写——每组按**当前 subtitle_lines
+   行序**逐行切源视频（行自带时间戳优先，缺失查 raw.srt 源行；end +100ms
+   防切词尾）拼接成独立 `stage3/clip_<N>.mp4` + 重编号/时间轴重定位的
+   `clip_<N>.srt`；状态 `stage3_splice.clips` 列出各组产物（index/title/
+   mp4/srt/total_sec），UI 逐条显示「#N 标题 · 时长 [🎬 播放][📖 字幕]」。
+   旧产物（修订五 splice.* + 上轮 clip_*）自动清理。
+
+实现要点：
+- 解析器 `_parse_llm_clip_groups`（替代修订五 `_parse_llm_clip_segments`）：
+  组号按出现顺序重编（LLM 组号不可信）；每行与 raw.srt 做**单行最佳重叠**
+  匹配（时间/文本以源行为准，未匹配上保留 LLM 时间戳并告警）；无组头行时
+  扁平兜底（每行各自成组，修订五格式兼容）；组数超 N 截断告警；组内合计
+  <45s / >110s 告警（目标 70s）。
+- 修订五拼接顺序机制**整体移除**：`splice_order` / `reorder_splice_order` /
+  `build_splice_plan` / 行拖拽 ⇕ 把柄 / `short_video_stage3_reorder_highlights`
+  端点全部删除（N 条独立视频语义下组间顺序无意义）；新端点
+  `POST /slirn/api/short_video_stage3_restore_order`。
+- JSON 兜底路径（raw 含 "highlights"）保留，`_annotate_subtitle_lines`
+  补 no/start_ms/end_ms，旧模型输出不致整跑失败。
+- 单片段重解析 `rerun_stage3_one` 同步升级：同一套分组格式（n=1）+
+  OCR-first 参考方向。
+- highlights.json 顶层加 `flow: "llm_groups"` 溯源；`splice_order` 不再写。
+
+涉及：`short_video_analyze.py`（分组提示词常量 + OCR 常量 + 解析器 +
+`_ocr_stage3_image` + `restore_hl_order` + run/rerun 重构）/
+`short_video_coarse.py`（`run_stage3_splice` 逐组重写 + `_hl_line_window`）/
+`app.py`（restore_order 端点替换 reorder_highlights；splice toast）/
+`short_video_ui.py`（行 no+时间戳渲染 + 还原按钮 + 逐条 clip 列表 +
+OCR 提示）/ `static/short_video.js`（stage3RestoreOrder + 删行拖拽块）/
+`home.css`（hl-no chip / clip 列表 / ocr 提示；删 dragseg 规则）；
+测试 `tests/test_short_video_stage3_llm_clip.py` 全量重写（20 例）+
+`tests/test_short_video_stage3_rework.py` 视觉测试改 OCR-first（38 例全过）。
+
+验证：全量 pytest 1165 passed / node --check OK / ruff HEAD-vs-worktree
+无新增违规 / 7861 重启后实测（新 JS 已上、旧拖拽 JS 已清、新 CSS 类注入）。
