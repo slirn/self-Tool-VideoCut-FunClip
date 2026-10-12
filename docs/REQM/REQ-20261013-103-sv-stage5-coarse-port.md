@@ -30,17 +30,29 @@
 7. 质量门：ruff 工作树 == HEAD（零新增）、node --check router.js 通过、全量 pytest ≥ 现有基线 + C2 新增 ≥ 5 测试通过
 8. 7861 重启：Python 改动 → TaskStop + 重启
 
-## 闭环记录（实现完成后回填）
+## 闭环记录
 
 | 项 | 值 |
 |---|---|
 | REQ 文档 | REQ-20261013-103-sv-stage5-coarse-port.md（本文件） |
 | DESIGN 文档 | DESIGN-20261013-103-sv-stage5-coarse-port.md |
-| 提交号 | TBD |
-| push ref-update | TBD |
-| 7861 PID | TBD |
-| 测试 | TBD passed |
+| 提交号 | 7ae40d8 |
+| push ref-update | `599cf47..7ae40d8  main -> main` |
+| 7861 PID | bzm9zqpnq（SLIRN_AUTH_BYPASS=1） |
+| 测试 | 1195 passed（基线 1186 + C2 新增 9）+ 4 端点 smoke 200 |
+| 验收 | 8 项 ✅ 全部通过（见下） |
 | 下一子任务 | D1（Stage 6 字幕优化按长视频搬） |
+
+### 验收逐条
+
+1. ✅ 端点齐：4 端点全部 200 + 正常响应（smoke 已验）
+2. ✅ 异步进度可轮询：smoke 启动后 status 端点返 running=true + state=running
+3. ✅ UI 改造：`_stage5_coarse` 顶部状态卡（slirn-rc-status-card + 进度条）+ 3 个新按钮（重新合成 / 删除 / 连续 SRT 复制 / 连续 SRT 下载）
+4. ✅ 单条 SRT 操作：每个 clip 卡片内「📋 复制 SRT」+「⬇ 下载 SRT」可见
+5. ✅ 删除：delete_coarse 清 stage4/coarse_NN.{mp4,srt} + stage5/preview_subs.srt + 写 KIND_SHORT_VIDEO_COARSE_DELETE 历史 + 推进 reset_downstream_stages（测试覆盖）
+6. ✅ 短/长隔离：调 delete_coarse 后长视频 outputs/ 文件数不变（测试 `test_delete_coarse_does_not_touch_long_video_outputs` 覆盖）
+7. ✅ 质量门：ruff 106→104（零新增）、node --check 通过、全量 pytest 1195 passed
+8. ✅ 7861 重启：原 b3dh9r95p / b3gwu93ia 停掉，新进程 bzm9zqpnq（带 SLIRN_AUTH_BYPASS=1）
 
 ## 与已闭环任务的关系
 
