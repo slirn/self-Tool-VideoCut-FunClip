@@ -118,6 +118,7 @@
       else toast((r && r.error) || '打开失败', 'error');
       startElapsedTicker();
       initSubtitleSortAll();
+      bindStage3TemplateRadios();
     });
   }
 
@@ -203,19 +204,176 @@
     });
   }
 
+  // ---------- REQ-20261012-099：Stage 3 解析短视频内容 ----------
+
+  function _stage3PromptText() {
+    var ta = document.getElementById('slirn-stage3-prompt');
+    return ta ? String(ta.value || '').trim() : '';
+  }
+
+  function _stage3UseImage() {
+    var cb = document.getElementById('slirn-stage3-use-image');
+    // 无复选框（没上传过图）→ false；有则按勾选
+    return !!(cb && cb.checked);
+  }
+
   function stage3Run() {
     var ctx = innerCtx(); if (!ctx) return;
     var radios = document.querySelectorAll('input[name="sv-stage3-template"]');
     var template = 'hook_first';
     radios.forEach(function(r) { if (r.checked) template = r.value; });
     var n = parseInt((document.getElementById('slirn-stage3-n') || {}).value || '4', 10);
-    toast('AI 拆条中…');
+    var prompt = _stage3PromptText();
+    var useImage = _stage3UseImage();
+    toast('解析短视频内容中…（字幕' + (useImage ? ' + 截图' : '') + ' + 提示词发给 AI）');
     postJSON(API + '/short_video_stage3_run', {
       task_id: ctx.taskId, project_id: ctx.projectId,
-      template: template, n_clips: n
+      template: template, n_clips: n,
+      prompt: prompt, use_image: useImage
     }).then(function(r) {
-      if (r && r.ok) { toast('Stage 3 完成'); openProject(ctx.taskId, ctx.projectId); }
+      if (r && r.ok) { toast('解析完成'); openProject(ctx.taskId, ctx.projectId); }
       else toast((r && r.error) || 'Stage 3 失败', 'error');
+    });
+  }
+
+  function stage3RerunOne(btn) {
+    var ctx = innerCtx(); if (!ctx) return;
+    var hlIndex = parseInt(btn.getAttribute('data-hl-index') || '0', 10);
+    if (!hlIndex) return toast('片段序号无效', 'error');
+    var title = '';
+    var row = btn.closest ? btn.closest('.slirn-stage3-hl-row') : null;
+    var titleEl = row ? row.querySelector('.slirn-stage3-hl-title') : null;
+    if (titleEl) title = titleEl.value || '';
+    if (!window.confirm('针对「' + (title || '#' + hlIndex) + '」单独重新解析？\n'
+        + '该片段的时间段与字幕内容将被替换，下游 Stage 4/5/6 重置。')) return;
+    toast('片段 #' + hlIndex + ' 重新解析中…');
+    postJSON(API + '/short_video_stage3_rerun_one', {
+      task_id: ctx.taskId, project_id: ctx.projectId,
+      hl_index: hlIndex,
+      prompt: _stage3PromptText(),
+      use_image: _stage3UseImage()
+    }).then(function(r) {
+      if (r && r.ok) { toast('片段 #' + hlIndex + ' 已更新'); openProject(ctx.taskId, ctx.projectId); }
+      else toast((r && r.error) || '重新解析失败', 'error');
+    });
+  }
+
+  // 快速模板 radio：change 时把该模板生效文本填进提示词文本域
+  function bindStage3TemplateRadios() {
+    var radios = document.querySelectorAll('input[name="sv-stage3-template"]');
+    radios.forEach(function(r) {
+      if (r.getAttribute('data-tpl-bound') === '1') return;
+      r.setAttribute('data-tpl-bound', '1');
+      r.addEventListener('change', function() {
+        if (!r.checked) return;
+        var ta = document.getElementById('slirn-stage3-prompt');
+        var text = r.getAttribute('data-prompt') || '';
+        if (!ta || !text) return;
+        if (ta.value && ta.value.trim() && !window.confirm(
+            '文本域已有内容，用「快速模板」文本覆盖它？')) return;
+        ta.value = text;
+        toast('已填充快速模板提示词（可继续修改）');
+      });
+    });
+  }
+
+  function stage3SaveDefault() {
+    var prompt = _stage3PromptText();
+    if (!prompt) return toast('提示词为空，无法设为默认', 'error');
+    postJSON(API + '/short_video_save_default_prompt', { prompt: prompt })
+      .then(function(r) {
+        if (r && r.ok) toast('已设为默认提示词（新项目初始填充）');
+        else toast((r && r.error) || '保存失败', 'error');
+      });
+  }
+
+  function stage3SaveHistory() {
+    var prompt = _stage3PromptText();
+    if (!prompt) return toast('提示词为空，无法存入列表', 'error');
+    _postPromptHistory(prompt, false);
+  }
+
+  function _postPromptHistory(prompt, confirmOverwrite) {
+    postJSON(API + '/short_video_prompt_history_save', {
+      prompt: prompt, confirm: !!confirmOverwrite
+    }).then(function(r) {
+      if (!r || !r.ok) return toast((r && r.error) || '保存失败', 'error');
+      if (r.status === 'need_confirm') {
+        // 已满 10 条：由用户决定是否覆盖最旧一条
+        if (window.confirm('提示词列表已满 ' + (r.max || 10) + ' 条。\n'
+            + '继续保存将覆盖最旧的一条，是否覆盖？')) {
+          _postPromptHistory(prompt, true);
+        } else {
+          toast('已取消保存');
+        }
+        return;
+      }
+      toast('已存入提示词列表（刷新页面可见）');
+    });
+  }
+
+  function stage3LoadPrompt(btn) {
+    var ta = document.getElementById('slirn-stage3-prompt');
+    if (!ta) return;
+    var text = btn.getAttribute('data-prompt') || '';
+    if (!text) return;
+    if (ta.value && ta.value.trim() && !window.confirm(
+        '文本域已有内容，用这条历史提示词覆盖它？')) return;
+    ta.value = text;
+    toast('已载入历史提示词');
+  }
+
+  function stage3ClearPrompt() {
+    var ta = document.getElementById('slirn-stage3-prompt');
+    if (!ta) return;
+    if (ta.value && !window.confirm('清空当前提示词文本域？')) return;
+    ta.value = '';
+  }
+
+  // 历史遗留的每模板自定义覆盖（REQ-20261004-stage3-prompt-edit）在新 UI 里
+  // 只会静默影响快速模板预填；这里给一个恢复系统默认的出口。
+  function stage3ResetTemplates() {
+    var ctx = innerCtx(); if (!ctx) return;
+    if (!window.confirm('清除 3 个快速模板的自定义覆盖，恢复系统默认？')) return;
+    var templates = ['hook_first', 'topic_cluster', 'story_arc'];
+    var done = 0, fail = 0;
+    templates.forEach(function(tpl) {
+      postJSON(API + '/short_video_reset_custom_prompt', {
+        task_id: ctx.taskId, project_id: ctx.projectId, template: tpl,
+      }).then(function(r) {
+        if (r && r.ok) done++; else fail++;
+        if (done + fail === templates.length) {
+          if (fail) toast(fail + ' 个模板重置失败', 'error');
+          else { toast('已恢复系统默认模板'); openProject(ctx.taskId, ctx.projectId); }
+        }
+      });
+    });
+  }
+
+  function stage3UploadImage() {
+    var ctx = innerCtx(); if (!ctx) return;
+    var fileEl = document.getElementById('slirn-stage3-image-file');
+    var file = fileEl && fileEl.files && fileEl.files[0];
+    if (!file) return toast('请先选择截图文件', 'error');
+    var fd = new FormData();
+    fd.append('task_id', ctx.taskId);
+    fd.append('project_id', ctx.projectId);
+    fd.append('file', file);
+    toast('截图上传中…');
+    postForm(API + '/short_video_stage3_upload_image', fd).then(function(r) {
+      if (r && r.ok) { toast('截图已上传'); openProject(ctx.taskId, ctx.projectId); }
+      else toast((r && r.error) || '上传失败', 'error');
+    });
+  }
+
+  function stage3RemoveImage() {
+    var ctx = innerCtx(); if (!ctx) return;
+    if (!window.confirm('移除当前截图？之后解析将不再携带图片。')) return;
+    postJSON(API + '/short_video_stage3_remove_image', {
+      task_id: ctx.taskId, project_id: ctx.projectId
+    }).then(function(r) {
+      if (r && r.ok) { toast('截图已移除'); openProject(ctx.taskId, ctx.projectId); }
+      else toast((r && r.error) || '移除失败', 'error');
     });
   }
 
@@ -605,72 +763,6 @@
     document.querySelectorAll('.slirn-stage3-hl-preview').forEach(bindSubtitleSort);
   }
 
-  // ---------- REQ-20261004-stage3-prompt-edit：自定义提示词保存/恢复 ----------
-
-  function _svCurrentCtx() {
-    var root = document.getElementById('slirn-short-video-inner');
-    return {
-      taskId: root ? (root.getAttribute('data-task-id') || '') : '',
-      projectId: root ? (root.getAttribute('data-project-id') || '') : '',
-    };
-  }
-
-  function saveCustomPrompt(btn) {
-    var template = btn.getAttribute('data-template') || '';
-    var ta = document.querySelector('.slirn-stage3-prompt-text[data-template="' + template + '"]');
-    if (!ta) return toast('找不到提示词文本框', 'error');
-    var prompt = ta.value || '';
-    if (!prompt.trim()) return toast('提示词不能为空', 'error');
-    var ctx = _svCurrentCtx();
-    if (!ctx.taskId || !ctx.projectId) return toast('缺少 task_id / project_id', 'error');
-    postJSON(API + '/short_video_save_custom_prompt', {
-      task_id: ctx.taskId,
-      project_id: ctx.projectId,
-      template: template,
-      prompt: prompt,
-    }).then(function(r) {
-      if (r && r.ok) {
-        toast('已保存 ' + template + ' 提示词');
-        // 不重载整个页面（用户可能还在改其他模板）
-        // 局部刷新状态徽章
-        var panel = btn.closest('.slirn-stage3-prompt-panel');
-        if (panel) {
-          var summary = panel.querySelector('summary');
-          if (summary) {
-            // 移除旧徽章
-            summary.querySelectorAll('.slirn-sv-badge').forEach(function(x) { x.remove(); });
-            var badge = document.createElement('span');
-            badge.className = 'slirn-sv-badge slirn-sv-badge-warning';
-            badge.textContent = '已自定义';
-            summary.insertBefore(badge, summary.firstChild.nextSibling);
-          }
-        }
-      } else {
-        toast((r && r.error) || '保存失败', 'error');
-      }
-    });
-  }
-
-  function resetCustomPrompt(btn) {
-    var template = btn.getAttribute('data-template') || '';
-    var ctx = _svCurrentCtx();
-    if (!ctx.taskId || !ctx.projectId) return toast('缺少 task_id / project_id', 'error');
-    if (!window.confirm('确认恢复 ' + template + ' 到系统默认？')) return;
-    postJSON(API + '/short_video_reset_custom_prompt', {
-      task_id: ctx.taskId,
-      project_id: ctx.projectId,
-      template: template,
-    }).then(function(r) {
-      if (r && r.ok) {
-        toast('已恢复默认');
-        // 重载页面让 textarea 重新填上系统默认
-        openProject(ctx.taskId, ctx.projectId);
-      } else {
-        toast((r && r.error) || '重置失败', 'error');
-      }
-    });
-  }
-
   // ---------- 点击分发 ----------
 
   document.addEventListener('click', function(ev) {
@@ -699,8 +791,14 @@
     if (action === 'sv-stage3-run') return stage3Run();
     if (action === 'sv-stage3-preview') return stage3PreviewHl(btn);
     if (action === 'sv-stage3-verify-run') return stage3VerifyRun();
-    if (action === 'sv-save-custom-prompt') return saveCustomPrompt(btn);
-    if (action === 'sv-reset-custom-prompt') return resetCustomPrompt(btn);
+    if (action === 'sv-stage3-rerun') return stage3RerunOne(btn);
+    if (action === 'sv-stage3-save-default') return stage3SaveDefault();
+    if (action === 'sv-stage3-save-history') return stage3SaveHistory();
+    if (action === 'sv-stage3-load-prompt') return stage3LoadPrompt(btn);
+    if (action === 'sv-stage3-clear-prompt') return stage3ClearPrompt();
+    if (action === 'sv-stage3-reset-templates') return stage3ResetTemplates();
+    if (action === 'sv-stage3-upload-image') return stage3UploadImage();
+    if (action === 'sv-stage3-remove-image') return stage3RemoveImage();
     if (action === 'sv-stage4-run') return stage4Run();
     if (action === 'sv-stage5-asr') return stage5Asr(btn);
     if (action === 'sv-stage5-save') return stage5Save(btn);

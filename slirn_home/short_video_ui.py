@@ -1,6 +1,8 @@
 """短视频单源 AI 拆条工作台的服务端 HTML 渲染。
 
-REQ-20261003-098：6 阶段管线（选源 → 抽字幕 → AI 拆条 → 粗剪 → 字幕优化 → 精剪混编）。
+REQ-20261003-098：6 阶段管线（选源 → 抽字幕 → 解析短视频内容 → 粗剪 → 字幕优化 → 精剪混编）。
+REQ-20261012-099：Stage 3 由「AI 拆条」改名并改版 —— 用户录入解析提示词（默认 +
+最新 10 条历史两级复用）、可选上传截图一起发给多模态 AI；每个片段可单独重新解析。
 """
 
 from __future__ import annotations
@@ -290,55 +292,82 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
         ("topic_cluster", "主题聚类"),
         ("story_arc", "起承转合"),
     ]
+    prompt_state = s3.get("prompt_state") or {}
+    custom_prompts = prompt_state.get("custom") or {}
+    default_prompts = prompt_state.get("defaults") or {}
+
+    # REQ-20261012-099：每个模板的「生效文本」—— 用户自定义覆盖优先，放 radio 的
+    # data-prompt 上，前端点击快速模板时直接填充提示词文本域。
+    def _tpl_effective_text(key: str) -> str:
+        custom_entry = custom_prompts.get(key) or {}
+        return str(custom_entry.get("prompt") or default_prompts.get(key) or "")
+
     template_radios = "".join(
         f'<label class="slirn-stage3-radio">'
-        f'<input type="radio" name="sv-stage3-template" value="{v}"{" checked" if template == v else ""}>'
+        f'<input type="radio" name="sv-stage3-template" value="{v}"'
+        f'{" checked" if template == v else ""} data-prompt="{esc(_tpl_effective_text(v))}">'
         f'<span>{label}</span></label>'
         for v, label in templates
     )
 
-    # REQ-20261004-stage3-prompt-edit：3 个可折叠提示词面板
-    prompt_state = s3.get("prompt_state") or {}
-    custom_prompts = prompt_state.get("custom") or {}
-    default_prompts = prompt_state.get("defaults") or {}
-    prompt_panels = []
-    for tpl_key, tpl_label in templates:
-        # 用户修改过 → 显示修改内容；否则显示系统默认（作为可参考起点）
-        custom_entry = custom_prompts.get(tpl_key) or {}
-        is_custom = bool(custom_entry.get("prompt"))
-        current_text = str(
-            custom_entry.get("prompt")
-            or default_prompts.get(tpl_key)
-            or ""
+    # REQ-20261012-099：提示词文本域初始值 — 全局默认提示词 → 当前模板生效文本
+    prompt_settings = s3.get("prompt_settings") or {}
+    global_default = prompt_settings.get("default_prompt") or {}
+    initial_prompt = str(global_default.get("prompt") or "") or _tpl_effective_text(template)
+    default_badge = (
+        '<span class="slirn-sv-badge slirn-sv-badge-muted">初始已填默认提示词</span>'
+        if global_default.get("prompt") else ""
+    )
+
+    # 历史提示词列表（≤ 10 条，最新在前；点击载入文本域）
+    has_custom_override = any(
+        (custom_prompts.get(k) or {}).get("prompt") for k, _ in templates
+    )
+    reset_tpl_btn = (
+        '<button class="slirn-btn-mini" data-action="sv-stage3-reset-templates" '
+        'title="清除历史遗留的模板提示词自定义覆盖，恢复系统默认">'
+        '↺ 重置模板</button>'
+        if has_custom_override else ""
+    )
+    hist_items = []
+    for i, item in enumerate(prompt_settings.get("history") or []):
+        p = str(item.get("prompt") or "")
+        if not p.strip():
+            continue
+        head = p.strip().replace("\n", " ")
+        head = head[:80] + ("…" if len(head) > 80 else "")
+        when = str(item.get("updated_at") or "")[:16].replace("T", " ")
+        hist_items.append(
+            f'<button type="button" class="slirn-stage3-hist-item" '
+            f'data-action="sv-stage3-load-prompt" data-prompt="{esc(p)}" '
+            f'title="{esc(p[:200])}">{esc(head)}'
+            f'<span class="slirn-sv-muted slirn-stage3-hist-time">{esc(when)}</span></button>'
         )
-        badge_cls = "slirn-sv-badge-warning" if is_custom else "slirn-sv-badge-muted"
-        badge_text = "已自定义" if is_custom else "系统默认"
-        updated_at = str(custom_entry.get("updated_at") or "")
-        updated_html = (
-            f'<span class="slirn-sv-muted">· 更新于 {esc(updated_at)}</span>'
-            if updated_at else ""
-        )
-        prompt_panels.append(
-            f'<details class="slirn-stage3-prompt-panel">'
-            f'<summary>'
-            f'<span class="slirn-stage3-prompt-label">{esc(tpl_label)}</span>'
-            f'<span class="slirn-sv-badge {badge_cls}">{esc(badge_text)}</span>'
-            f'{updated_html}'
-            f'</summary>'
-            f'<div class="slirn-stage3-prompt-body">'
-            f'<textarea class="slirn-stage3-prompt-text" '
-            f'rows="14" data-template="{tpl_key}" '
-            f'placeholder="系统默认提示词（可在此基础上修改）">{esc(current_text)}</textarea>'
-            f'<div class="slirn-stage3-prompt-actions">'
-            f'<button class="slirn-btn-mini slirn-btn-mini-primary" '
-            f'data-action="sv-save-custom-prompt" data-template="{tpl_key}">💾 保存修改</button>'
+    hist_html = "".join(hist_items) or '<div class="slirn-sv-muted">尚无保存的提示词</div>'
+
+    # REQ-20261012-099：截图（上传 / 缩略图 / 移除 / 发送开关）
+    cur_image = s3.get("image") or {}
+    img_name = str(cur_image.get("name") or "")
+    task_id = str(project.get("task_id") or "")
+    project_id = str(project.get("id") or "")
+    if img_name:
+        img_url = _file_url(task_id, project_id, "stage3", img_name)
+        image_area = (
+            f'<div class="slirn-stage3-image-row">'
+            f'<a href="{esc(img_url)}" target="_blank" rel="noopener" title="查看大图">'
+            f'<img class="slirn-stage3-image-thumb" src="{esc(img_url)}" alt="解析截图"></a>'
+            f'<label class="slirn-stage3-image-send">'
+            f'<input type="checkbox" id="slirn-stage3-use-image" checked> 发送截图给 AI</label>'
             f'<button class="slirn-btn-mini slirn-btn-mini-danger" '
-            f'data-action="sv-reset-custom-prompt" data-template="{tpl_key}">↺ 恢复默认</button>'
+            f'data-action="sv-stage3-remove-image">✖ 移除截图</button>'
             f'</div>'
-            f'</div>'
-            f'</details>'
         )
-    prompt_panels_html = "".join(prompt_panels)
+    else:
+        image_area = (
+            '<div class="slirn-stage3-image-row">'
+            '<span class="slirn-sv-muted">未上传截图（可选：上传后与字幕一起发给多模态 AI）</span>'
+            '</div>'
+        )
 
     error_html = ""
     if s3.get("status") == "failed":
@@ -412,7 +441,7 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
             f'title="在源视频中截取该片段预览（浏览器 seek，无需生成 mp4）">'
             f'🎬 预览片段</button>'
             if source_url else
-            f'<button class="slirn-btn-mini" disabled title="请先在 Stage 1 选源视频">🎬 预览片段</button>'
+            '<button class="slirn-btn-mini" disabled title="请先在 Stage 1 选源视频">🎬 预览片段</button>'
         )
         hl_rows.append(
             f'<div class="slirn-stage3-hl-row" data-hl-index="{idx}" data-sub-text="{esc(full_text)}">'
@@ -421,6 +450,9 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
             f'<input type="text" class="slirn-stage3-hl-title" data-hl-field="title" value="{esc(title)}" placeholder="标题">'
             f'<span class="slirn-sv-muted slirn-stage3-hl-meta">{_format_ms(start)} - {_format_ms(end)} · {dur:.1f}s · {sub_count} 字幕行</span>'
             f'{preview_btn}'
+            f'<button class="slirn-btn-mini" data-action="sv-stage3-rerun" data-hl-index="{idx}" '
+            f'title="针对该片段的标题/主题，用当前提示词+截图单独重新解析（时间段与字幕内容会替换）">'
+            f'🔄 重新解析</button>'
             f'<button class="slirn-btn-mini slirn-btn-mini-danger" data-action="sv-stage3-remove-hl" '
             f'data-hl-index="{idx}">删</button>'
             f'</div>'
@@ -428,31 +460,60 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
             f'<div class="slirn-sv-muted slirn-stage3-hl-hint">⋮⋮ 拖动行可调整顺序；最终顺序将决定 Stage 4 切片拼接的时序</div>'
             f'</div>'
         )
-    hl_list = "".join(hl_rows) or '<div class="slirn-sv-muted">运行后将列出 3-5 条 highlights</div>'
+    hl_list = "".join(hl_rows) or '<div class="slirn-sv-muted">解析后将列出各内容片段</div>'
+
+    prompt_badge = ""
+    if s3.get("prompt_source") == "user" or s3.get("custom_prompt_used"):
+        prompt_badge = '<span class="slirn-sv-badge slirn-sv-badge-warning">使用自定义提示词</span>'
+    img_used_badge = (
+        '<span class="slirn-sv-badge slirn-sv-badge-warning">已带截图</span>'
+        if s3.get("image_used") else ""
+    )
 
     return f'''<div class="slirn-stage" data-stage="3">
   <div class="slirn-stage-head">
     <span class="slirn-stage-num">3</span>
-    <strong>AI 拆条</strong>
+    <strong>解析短视频内容</strong>
     {_stage_badge(s3.get("status"))}
     {_stage_elapsed(s3)}
   </div>
   <div class="slirn-stage-body">
+    <label class="slirn-sv-wide slirn-stage3-prompt-label2">解析提示词 {default_badge}
+      <textarea id="slirn-stage3-prompt" class="slirn-stage3-prompt-input" rows="8"
+        placeholder="录入提取短视频内容所用的提示词（可点快速模板填充起点，再按需修改）">{esc(initial_prompt)}</textarea>
+    </label>
+    <div class="slirn-stage3-prompt-toolbar">
+      <div class="slirn-stage3-radios">
+        <span class="slirn-sv-muted">快速模板：</span>{template_radios}
+      </div>
+      <div class="slirn-stage3-prompt-actions2">
+        <button class="slirn-btn-mini slirn-btn-mini-primary" data-action="sv-stage3-save-default"
+          title="把当前文本域提示词保存为默认提示词（全局生效，新项目初始填充）">💾 设为默认</button>
+        <button class="slirn-btn-mini" data-action="sv-stage3-save-history"
+          title="存入提示词列表（最多保留最新 10 条）">📜 存入列表</button>
+        <button class="slirn-btn-mini" data-action="sv-stage3-clear-prompt"
+          title="清空文本域">🧹 清空</button>
+        {reset_tpl_btn}
+      </div>
+    </div>
+    <details class="slirn-stage3-prompts-section">
+      <summary>📜 历史提示词（最新 10 条，点击载入）</summary>
+      <div class="slirn-stage3-hist-list">{hist_html}</div>
+    </details>
+    <div class="slirn-stage3-image-block">
+      <span class="slirn-sv-muted">截图（可选）：</span>
+      <input type="file" id="slirn-stage3-image-file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp">
+      <button class="slirn-btn-mini" data-action="sv-stage3-upload-image">📤 上传</button>
+      {image_area}
+    </div>
     <div class="slirn-sv-form-grid">
-      <label class="slirn-sv-wide">模板
-        <div class="slirn-stage3-radios">{template_radios}</div>
-      </label>
       <label>片段数<input type="number" min="3" max="5" id="slirn-stage3-n" value="{n}"></label>
     </div>
     <div class="slirn-sv-card-actions">
-      <button class="slirn-btn slirn-btn-primary" data-action="sv-stage3-run">AI 拆条</button>
-      <span class="slirn-sv-muted">{int(s3.get("count") or 0)} 条 highlights</span>
-      {f'<span class="slirn-sv-badge slirn-sv-badge-warning">使用自定义提示词</span>' if s3.get("custom_prompt_used") else ""}
+      <button class="slirn-btn slirn-btn-primary" data-action="sv-stage3-run">🔍 解析</button>
+      <span class="slirn-sv-muted">{int(s3.get("count") or 0)} 条内容片段</span>
+      {prompt_badge}{img_used_badge}
     </div>
-    <details class="slirn-stage3-prompts-section">
-      <summary>📝 自定义提示词（默认 3 个模板，可在此基础上修改保存）</summary>
-      <div class="slirn-stage3-prompts-list">{prompt_panels_html}</div>
-    </details>
     <div class="slirn-stage3-hl-list">{hl_list}</div>
     {error_html}
     {_stage_logs(s3)}
@@ -487,7 +548,7 @@ def _stage35_verify(project: dict) -> str:
     can_run = s3_done and bool(hl_list)
     btn_label = "🔍 重新核验" if status == "done" else "🔍 跑一致性核验"
     btn_class = "slirn-btn" if status == "done" else "slirn-btn slirn-btn-primary"
-    disabled_attr = "" if can_run else " disabled title=\"请先完成 Stage 3 AI 拆条\""
+    disabled_attr = "" if can_run else " disabled title=\"请先完成 Stage 3 解析短视频内容\""
     run_btn = (
         f'<button class="{btn_class}" data-action="sv-stage3-verify-run"{disabled_attr}>'
         f'{btn_label}</button>'

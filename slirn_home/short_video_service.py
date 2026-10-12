@@ -1033,6 +1033,171 @@ def reset_custom_prompt(
     return True
 
 
+# ---------- REQ-20261012-099：全局提示词两级存储（默认 + 最新 10 条历史） ----------
+
+PROMPT_SETTINGS_REL = Path("config") / "short_video_prompts.json"
+PROMPT_HISTORY_MAX = 10
+STAGE3_IMAGE_BASENAME = "input_image"
+ALLOWED_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
+
+
+def prompt_settings_path(repo_root: Path | str) -> Path:
+    """全局提示词设置文件（config/short_video_prompts.json，机器本地运行时状态）。"""
+    return Path(repo_root) / PROMPT_SETTINGS_REL
+
+
+def load_prompt_settings(repo_root: Path | str) -> dict:
+    """读全局提示词设置。损坏/不存在 → 空结构。
+
+    返回 ``{"default_prompt": None | {prompt, updated_at},
+    "history": [{prompt, updated_at}]}``（history 最新在前，≤ 10 条）。
+    """
+    p = prompt_settings_path(repo_root)
+    empty = {"default_prompt": None, "history": []}
+    if not p.is_file():
+        return empty
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return empty
+    if not isinstance(data, dict):
+        return empty
+    out = {"default_prompt": None, "history": []}
+    dp = data.get("default_prompt")
+    if isinstance(dp, dict) and str(dp.get("prompt") or "").strip():
+        out["default_prompt"] = {
+            "prompt": str(dp.get("prompt")),
+            "updated_at": str(dp.get("updated_at") or ""),
+        }
+    hist = data.get("history")
+    if isinstance(hist, list):
+        for item in hist[:PROMPT_HISTORY_MAX]:
+            if isinstance(item, dict) and str(item.get("prompt") or "").strip():
+                out["history"].append({
+                    "prompt": str(item.get("prompt")),
+                    "updated_at": str(item.get("updated_at") or ""),
+                })
+    return out
+
+
+def save_default_prompt(repo_root: Path | str, prompt: str) -> dict:
+    """把当前提示词保存为全局默认（覆盖旧值）。"""
+    text = str(prompt or "").strip()
+    if not text:
+        raise ShortVideoError("提示词不能为空")
+    root = Path(repo_root)
+    data = load_prompt_settings(root)
+    entry = {"prompt": text, "updated_at": now_iso()}
+    data["default_prompt"] = entry
+    _write_json_atomic(prompt_settings_path(root), data)
+    return entry
+
+
+def save_prompt_history(repo_root: Path | str, prompt: str, *, confirm: bool = False) -> dict:
+    """提示词存入历史列表（最新在前，上限 10 条）。
+
+    - 已存在相同提示词（strip 后相等）→ 更新时间戳并置顶，直接 saved；
+    - 未满 10 条 → 插入最前，saved；
+    - 已满 10 条的新提示词 → confirm=False 返回 ``{"status": "need_confirm"}``（前端
+      弹窗由用户决定）；confirm=True → 丢弃最旧一条后插入，saved。
+    """
+    text = str(prompt or "").strip()
+    if not text:
+        raise ShortVideoError("提示词不能为空")
+    root = Path(repo_root)
+    data = load_prompt_settings(root)
+    hist = data["history"]
+    # 去重置顶（不算新增，无需确认）
+    for i, item in enumerate(hist):
+        if item["prompt"].strip() == text:
+            hist.pop(i)
+            break
+    else:
+        if len(hist) >= PROMPT_HISTORY_MAX and not confirm:
+            return {"status": "need_confirm", "history": hist,
+                    "max": PROMPT_HISTORY_MAX}
+        if len(hist) >= PROMPT_HISTORY_MAX:
+            hist.pop()  # 丢弃最旧（末尾）
+    hist.insert(0, {"prompt": text, "updated_at": now_iso()})
+    _write_json_atomic(prompt_settings_path(root), data)
+    return {"status": "saved", "history": hist, "max": PROMPT_HISTORY_MAX}
+
+
+# ---------- REQ-20261012-099：Stage 3 截图（解析短视频内容的输入图） ----------
+# 文件落在 stage3/ 下（统一名 input_image.*）→ 浏览器经 short_video_file?kind=stage3
+# 访问，复用既有安全校验。
+
+def save_stage3_image(repo_root: Path | str, task_id: str, project_id: str,
+                      src_path: Path | str) -> dict:
+    """保存/覆盖 Stage 3 截图（统一名 input_image，保留原扩展名）+ 更新 state。"""
+    suffix = Path(src_path).suffix.lower()
+    if suffix not in ALLOWED_IMAGE_SUFFIXES:
+        raise ShortVideoError(
+            f"不支持的图片格式 {suffix or '(无扩展名)'}，允许: {sorted(ALLOWED_IMAGE_SUFFIXES)}"
+        )
+    root = Path(repo_root)
+    name = STAGE3_IMAGE_BASENAME + suffix
+    target = stage3_dir(root, task_id, project_id) / name
+    target.parent.mkdir(parents=True, exist_ok=True)
+    # 覆盖旧扩展名不同的历史截图，避免残留多张
+    for old in stage3_dir(root, task_id, project_id).glob(STAGE3_IMAGE_BASENAME + ".*"):
+        if old.name != name:
+            try:
+                old.unlink()
+            except FileNotFoundError:
+                pass
+    shutil.copyfile(Path(src_path), target)
+    entry = {"name": name, "updated_at": now_iso()}
+    project = load_project(root, task_id, project_id)
+    s3 = get_stage_state(project, "stage3_analyze")
+    s3["image"] = entry
+    set_stage_state(project, "stage3_analyze", s3)
+    save_project(root, project)
+    return entry
+
+
+def remove_stage3_image(repo_root: Path | str, task_id: str, project_id: str) -> bool:
+    """移除 Stage 3 截图（删文件 + 清 state 引用）。无图返回 False。"""
+    root = Path(repo_root)
+    project = load_project(root, task_id, project_id)
+    s3 = get_stage_state(project, "stage3_analyze")
+    cur = s3.get("image") or {}
+    name = str(cur.get("name") or "")
+    removed = False
+    for old in stage3_dir(root, task_id, project_id).glob(STAGE3_IMAGE_BASENAME + ".*"):
+        try:
+            old.unlink()
+            removed = True
+        except FileNotFoundError:
+            pass
+        except OSError:
+            continue
+    if name or removed:
+        s3.pop("image", None)
+        set_stage_state(project, "stage3_analyze", s3)
+        save_project(root, project)
+        return True
+    return False
+
+
+def stage3_current_image(repo_root: Path | str, task_id: str, project_id: str,
+                         project: dict | None = None) -> dict | None:
+    """返回 state 中记录且磁盘上确实存在的截图信息；否则 None（防悬空引用）。
+
+    文件名净化：state 被手改出 ``../`` 之类路径时直接视为无图——本函数的
+    返回值会拼进 stage3_dir 发给 LLM（base64），必须与 short_video_file
+    端点的 ``Path(name).name == name`` 校验同级防护。
+    """
+    project = project or load_project(repo_root, task_id, project_id)
+    cur = (get_stage_state(project, "stage3_analyze") or {}).get("image") or {}
+    name = str(cur.get("name") or "")
+    if not name or Path(name).name != name:
+        return None
+    if not (stage3_dir(repo_root, task_id, project_id) / name).is_file():
+        return None
+    return {"name": name, "updated_at": str(cur.get("updated_at") or "")}
+
+
 def stage4_paths(
     repo_root: Path | str,
     task_id: str,

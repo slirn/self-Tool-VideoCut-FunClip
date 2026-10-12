@@ -182,9 +182,17 @@ def _parse_srt_lines(text: str) -> list[SrtLine]:
     return out
 
 
-def _validate_highlights(payload: dict, srt_lines: list[SrtLine]) -> tuple[list[dict], list[str]]:
+def _validate_highlights(
+    payload: dict,
+    srt_lines: list[SrtLine],
+    *,
+    title_fallback: str = "",
+) -> tuple[list[dict], list[str]]:
     """校验 LLM 返回的高亮：要求每条 start_ms/end_ms 对得上 srt_lines，
     subtitle_lines 的 src_index 引用真实存在 **且时间区间在 [start_ms, end_ms] 内**。
+
+    title_fallback（REQ-20261012-099）：非空时，LLM 未给 title 的条目用它
+    （单片段重解析时 = 旧 title，保住用户改过的标题）而不是「片段 {i}」。
 
     返回 (validated_highlights, warnings)。
     """
@@ -295,7 +303,10 @@ def _validate_highlights(payload: dict, srt_lines: list[SrtLine]) -> tuple[list[
         validated.append({
             "index": i,
             "id": str(hl.get("id") or f"h{i}")[:40],
-            "title": str(hl.get("title") or f"片段 {i}")[:80],
+            "title": str(
+                hl.get("title")
+                or (title_fallback if title_fallback.strip() else f"片段 {i}")
+            )[:80],
             "start_ms": start_ms,
             "end_ms": end_ms,
             "duration_ms": end_ms - start_ms,
@@ -477,6 +488,104 @@ class AnalyzeResult:
     elapsed_sec: int
 
 
+# REQ-20261012-099：输出格式约束固定拼在 user payload 尾部。
+# Why：用户自定义提示词（作为 system）不会自带「输出 JSON」要求；把 schema
+# 放 user 侧，无论 system 换成什么，输出都可被 _strip_json_block 解析。
+# 注意：本常量不经过 .format()，直接单花括号（勿从 _TEMPLATE_BASE_SYSTEM
+# 复制双花括号版本）。
+_OUTPUT_FORMAT_CONSTRAINT = (
+    "输出严格 JSON（不要解释、不要 Markdown 代码块标记外的内容）：\n"
+    "{\n"
+    "  \"highlights\": [\n"
+    "    {\n"
+    "      \"id\": \"h1\",\n"
+    "      \"title\": \"短小有钩子的标题（≤ 15 字）\",\n"
+    "      \"start_ms\": 30000,\n"
+    "      \"end_ms\": 90000,\n"
+    "      \"subtitle_lines\": [\n"
+    "        {\"src_index\": 5, \"text\": \"开头句\"},\n"
+    "        {\"src_index\": 12, \"text\": \"主体句 1\"},\n"
+    "        ...至少 8 条\n"
+    "      ]\n"
+    "    }, ...\n"
+    "  ]\n"
+    "}\n"
+    "start_ms / end_ms 必须是源字幕中真实存在的毫秒；src_index 引用源字幕行号"
+    "（1-based，按上方 [序号]），只能引用实际存在的行。"
+)
+
+
+def _resolve_stage3_system_prompt(
+    repo_root: Path,
+    task_id: str,
+    project_id: str,
+    *,
+    template: str,
+    custom_prompt: str,
+    prompt: str,
+) -> tuple[str, str]:
+    """决定 Stage 3 的 system 提示词。
+
+    REQ-20261012-099 优先级（高 → 低）：
+
+    1. ``prompt``（用户在「解析提示词」文本域录入的完整提示词）——但若与
+       template 生效文本完全相同（UI 初始值未改直接点解析），按模板路径归类，
+       不算 "user"（badge/doc 溯源不失真）
+    2. template 对应的用户自定义覆盖（custom_prompts.json）
+    3. template 系统默认 / custom_prompt（template="custom" 时）
+
+    返回 (system_prompt, source)——source 取 "user" / "custom_override" /
+    "template" / "custom"，写入 state 溯源。
+    """
+    custom_overrides = svc.load_custom_prompts(repo_root, task_id, project_id)
+    template_effective = ""
+    if template in _PROMPT_TEMPLATES:
+        override = custom_overrides.get(template) or {}
+        template_effective = str(override.get("prompt") or "").strip() \
+            or _PROMPT_TEMPLATES[template]
+
+    user_prompt = str(prompt or "").strip()
+    if user_prompt and user_prompt != template_effective:
+        return user_prompt, "user"
+    if template == "custom":
+        sys_p = custom_prompt.strip() or _PROMPT_TEMPLATES[svc.HIGHLIGHT_TEMPLATE_HOOK_FIRST]
+        return sys_p, "custom"
+    if template in _PROMPT_TEMPLATES:
+        if template_effective != _PROMPT_TEMPLATES[template]:
+            return template_effective, "custom_override"
+        return _PROMPT_TEMPLATES[template], "template"
+    raise svc.ShortVideoError(f"未知模板: {template}")
+
+
+def _resolve_stage3_image(
+    repo_root: Path,
+    task_id: str,
+    project_id: str,
+    *,
+    use_image: bool,
+    entry: dict | None,
+) -> Path | None:
+    """REQ-20261012-099：解析要发的截图。
+
+    use_image=False → None；state 有图且文件存在 → 路径；
+    否则报错（用户勾了发图却没图，是 UI/状态不一致，明确指出）。
+    有图但当前模型不支持视觉 → 显式报错，不静默降级（REQ C-3）。
+    """
+    if not use_image:
+        return None
+    cur = svc.stage3_current_image(repo_root, task_id, project_id)
+    if not cur:
+        raise svc.ShortVideoError("未找到截图：请先在 Stage 3 上传截图（或取消勾选「发送截图」）")
+    from slirn_home import revision_service
+    if entry is not None and not revision_service._is_vision_entry(entry):
+        raise svc.ShortVideoError(
+            f"当前模型 [{entry.get('id', '?')}] 不支持图片输入，无法把截图发给 AI。"
+            "请到 ⚙️ 大模型设置切换多模态模型（或在模型条目里声明 vision=true），"
+            "或取消勾选「发送截图」。"
+        )
+    return svc.stage3_dir(repo_root, task_id, project_id) / cur["name"]
+
+
 def run_stage3(
     repo_root: Path | str,
     task_id: str,
@@ -485,14 +594,19 @@ def run_stage3(
     template: str = svc.HIGHLIGHT_TEMPLATE_HOOK_FIRST,
     n_clips: int = 4,
     custom_prompt: str = "",
+    prompt: str = "",
+    use_image: bool = False,
     entry: dict | None = None,
 ) -> dict:
-    """Stage 3: LLM 读 raw.srt → ``stage3/highlights.json`` + ``stage3/llm_raw.txt``。
+    """Stage 3「解析短视频内容」：LLM 读 raw.srt（+ 截图）→
+    ``stage3/highlights.json`` + ``stage3/llm_raw.txt``。
 
     Args:
-        template: hook_first / topic_cluster / story_arc / custom
+        template: hook_first / topic_cluster / story_arc / custom（快速模板）
         n_clips: 期望生成的片段数（3-5），写到 prompt 里
-        custom_prompt: 当 template="custom" 时使用；否则忽略
+        custom_prompt: 当 template="custom" 时使用；否则忽略（向后兼容）
+        prompt: REQ-20261012-099 用户录入的解析提示词；非空时优先作为 system
+        use_image: 把 Stage 3 上传的截图一并发给多模态模型
         entry: llm_config 注册项；None 时用当前默认模型
     """
     root = Path(repo_root)
@@ -507,21 +621,13 @@ def run_stage3(
     if not srt_lines:
         raise svc.ShortVideoError("raw.srt 解析后无有效字幕行")
 
-    # 选择模板（REQ-20261004-stage3-prompt-edit：优先用用户自定义提示词）
-    custom_overrides = svc.load_custom_prompts(root, task_id, project_id)
-    using_custom = False
-    if template == "custom":
-        sys_p = custom_prompt.strip() or _PROMPT_TEMPLATES[svc.HIGHLIGHT_TEMPLATE_HOOK_FIRST]
-    elif template in _PROMPT_TEMPLATES:
-        override = custom_overrides.get(template) or {}
-        override_prompt = str(override.get("prompt") or "").strip()
-        if override_prompt:
-            sys_p = override_prompt
-            using_custom = True
-        else:
-            sys_p = _PROMPT_TEMPLATES[template]
-    else:
-        raise svc.ShortVideoError(f"未知模板: {template}")
+    sys_p, prompt_source = _resolve_stage3_system_prompt(
+        root, task_id, project_id,
+        template=template, custom_prompt=custom_prompt, prompt=prompt,
+    )
+    image_path = _resolve_stage3_image(
+        root, task_id, project_id, use_image=use_image, entry=entry,
+    )
     n_clips = max(3, min(5, int(n_clips or 4)))
 
     # 写状态
@@ -530,10 +636,16 @@ def run_stage3(
     state["started_at"] = svc.now_iso()
     state["template"] = template
     state["n_clips"] = n_clips
-    state["custom_prompt_used"] = using_custom
+    state["prompt_source"] = prompt_source
+    state["custom_prompt_used"] = prompt_source in ("custom", "custom_override")
+    if image_path is not None:
+        state["image_used"] = svc._rel(root, image_path)
+    else:
+        state.pop("image_used", None)
     state["logs"] = list(state.get("logs") or []) + [
-        f"[{svc.now_iso()}] stage3 start, template={template}, n_clips={n_clips}, srt_lines={len(srt_lines)}"
-        + (", using custom prompt" if using_custom else ""),
+        f"[{svc.now_iso()}] stage3 start, template={template}, n_clips={n_clips}, "
+        f"srt_lines={len(srt_lines)}, prompt_source={prompt_source}"
+        + (f", image={image_path.name}" if image_path is not None else ""),
     ]
     svc.set_stage_state(project, "stage3_analyze", state)
     svc.save_project(root, project)
@@ -546,13 +658,25 @@ def run_stage3(
     user_payload = (
         f"以下是源视频的 SRT（每行 ``[序号] HH:MM:SS,mmm-HH:MM:SS,mmm 文本``）：\n\n"
         f"{srt_for_llm}\n\n"
-        f"请生成 {n_clips} 条 highlights。**输出仅 JSON**（不要解释、不要 Markdown 代码块标记外的内容）。"
+        f"请生成 {n_clips} 条 highlights（解析出 {n_clips} 个内容片段）。\n\n"
+        + _OUTPUT_FORMAT_CONSTRAINT
     )
+    if image_path is not None:
+        user_payload = (
+            "随字幕附带一张源视频截图，请结合画面信息一起解析短视频内容。\n\n"
+            + user_payload
+        )
 
     t0 = time.time()
     raw = ""
     try:
-        raw = _call_highlights_llm(sys_p, user_payload, entry=entry)
+        if image_path is not None:
+            from slirn_home import revision_service
+            raw = revision_service._call_llm_vision(
+                sys_p, user_payload, [image_path], entry=entry,
+            )
+        else:
+            raw = _call_highlights_llm(sys_p, user_payload, entry=entry)
     except Exception as e:  # noqa: BLE001
         log.exception("LLM 调用失败")
         state = svc.get_stage_state(project, "stage3_analyze")
@@ -597,6 +721,8 @@ def run_stage3(
         "source_srt": svc._rel(root, raw_srt),
         "model": model_id,
         "template": template,
+        "prompt": sys_p if prompt_source == "user" else "",
+        "image": image_path.name if image_path is not None else "",
         "n_clips": len(validated),
         "highlights": validated,
         "warnings": warnings,
@@ -626,6 +752,211 @@ def run_stage3(
     svc.reset_downstream_stages(project, "stage3_analyze")
     svc.save_project(root, project)
 
+    return state
+
+
+# ---------- REQ-20261012-099：单片段重新解析 ----------
+
+def _rerun_one_suffix(title: str) -> str:
+    """定向指令。title 用户可编辑（可能含 { }），不用 .format 防 KeyError。"""
+    return (
+        "\n\n# 本次任务：单片段重新解析\n"
+        f"只针对主题「{title}」重新解析 **1 条** highlight（JSON 数组里只有 1 个元素）：\n"
+        "- 重新划定该主题的时间段（start_ms / end_ms，源字幕真实毫秒）\n"
+        "- 重新挑选该时间段内的字幕行（subtitle_lines，src_index 必须落在时间段内）\n"
+        f"- title 给出更准确的表达（保留原意）；无更优表达时沿用「{title}」"
+    )
+
+
+def rerun_stage3_one(
+    repo_root: Path | str,
+    task_id: str,
+    project_id: str,
+    hl_index: int,
+    *,
+    prompt: str = "",
+    use_image: bool = False,
+    entry: dict | None = None,
+) -> dict:
+    """针对单个片段（按其标题/主题）重新解析，原位替换。
+
+    - system = 用户提示词（空则回退 highlights.json 里上次整跑的 prompt，
+      再空回退当前模板生效文本——与整跑同一优先级链）
+    - 定向指令拼在 system 尾部（只出 1 条、围绕该主题）
+    - 校验取第 1 条 validated；title 为空时保留旧 title
+    - 替换 highlights.json 中 ``index == hl_index`` 的条目 + 同步 state 镜像
+      + ``reset_downstream_stages("stage3_analyze")``
+    - LLM 原文落 ``stage3/llm_raw_hl<N>.txt``（不覆盖整跑的 llm_raw.txt）
+    """
+    root = Path(repo_root)
+    hp = svc.stage_highlights_path(root, task_id, project_id)
+    if not hp.is_file():
+        raise svc.ShortVideoError("highlights.json 不存在，请先运行整体解析")
+    try:
+        doc = json.loads(hp.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001
+        raise svc.ShortVideoError(f"highlights.json 解析失败: {e}") from e
+    hls = doc.get("highlights") or []
+    target = next((h for h in hls if int(h.get("index") or 0) == int(hl_index)), None)
+    if target is None:
+        raise svc.ShortVideoError(f"片段 #{hl_index} 不存在")
+
+    raw_srt = svc.stage_raw_srt_path(root, task_id, project_id)
+    if not raw_srt.is_file() or raw_srt.stat().st_size < 4:
+        raise svc.ShortVideoError("重新解析需要 Stage 2 的 raw.srt")
+    srt_lines = _parse_srt_lines(raw_srt.read_text(encoding="utf-8", errors="replace"))
+    if not srt_lines:
+        raise svc.ShortVideoError("raw.srt 解析后无有效字幕行")
+
+    title = str(target.get("title") or f"片段 {hl_index}").strip()
+    # system：用户提示词 → 上次整跑 prompt → 模板生效文本
+    template = str(doc.get("template") or svc.HIGHLIGHT_TEMPLATE_HOOK_FIRST)
+    if template not in _PROMPT_TEMPLATES and template != "custom":
+        template = svc.HIGHLIGHT_TEMPLATE_HOOK_FIRST
+    sys_p, prompt_source = _resolve_stage3_system_prompt(
+        root, task_id, project_id,
+        template=template, custom_prompt="", prompt=prompt,
+    )
+    if not str(prompt or "").strip():
+        last_prompt = str(doc.get("prompt") or "").strip()
+        if last_prompt:
+            sys_p = last_prompt
+            prompt_source = "last_run"
+    sys_p = sys_p + _rerun_one_suffix(title)
+
+    image_path = _resolve_stage3_image(
+        root, task_id, project_id, use_image=use_image, entry=entry,
+    )
+
+    # state：running
+    project = svc.load_project(root, task_id, project_id)
+    state = svc.get_stage_state(project, "stage3_analyze")
+    state["status"] = "running"
+    state["started_at"] = svc.now_iso()
+    state["logs"] = list(state.get("logs") or []) + [
+        f"[{svc.now_iso()}] stage3 rerun-one #{hl_index} start, prompt_source={prompt_source}"
+        + (f", image={image_path.name}" if image_path is not None else ""),
+    ]
+    svc.set_stage_state(project, "stage3_analyze", state)
+    svc.save_project(root, project)
+
+    srt_for_llm = "\n".join(
+        f"[{ln.index}] {_fmt_ms(ln.start_ms)}-{_fmt_ms(ln.end_ms)} {ln.text}"
+        for ln in srt_lines
+    )
+    user_payload = (
+        f"以下是源视频的 SRT（每行 ``[序号] HH:MM:SS,mmm-HH:MM:SS,mmm 文本``）：\n\n"
+        f"{srt_for_llm}\n\n"
+        "请只输出 1 条 highlight（highlights 数组仅 1 个元素）。\n\n"
+        + _OUTPUT_FORMAT_CONSTRAINT
+    )
+    if image_path is not None:
+        user_payload = (
+            "随字幕附带一张源视频截图，请结合画面信息一起解析。\n\n" + user_payload
+        )
+
+    t0 = time.time()
+    try:
+        if image_path is not None:
+            from slirn_home import revision_service
+            raw = revision_service._call_llm_vision(
+                sys_p, user_payload, [image_path], entry=entry,
+            )
+        else:
+            raw = _call_highlights_llm(sys_p, user_payload, entry=entry)
+    except Exception as e:  # noqa: BLE001
+        log.exception("LLM 调用失败（rerun-one）")
+        project = svc.load_project(root, task_id, project_id)
+        state = svc.get_stage_state(project, "stage3_analyze")
+        state["status"] = "failed"
+        state["finished_at"] = svc.now_iso()
+        state["error"] = f"片段 #{hl_index} 重新解析 LLM 调用失败: {e}"
+        state["logs"] = list(state.get("logs") or []) + [
+            f"[{svc.now_iso()}] stage3 rerun-one #{hl_index} failed: {e}",
+        ]
+        svc.set_stage_state(project, "stage3_analyze", state)
+        svc.save_project(root, project)
+        return state
+    elapsed = int(time.time() - t0)
+
+    # 原文落档（单片段独立文件）
+    raw_path = svc.stage3_dir(root, task_id, project_id) / f"llm_raw_hl{int(hl_index)}.txt"
+    raw_path.parent.mkdir(parents=True, exist_ok=True)
+    raw_path.write_text(raw, encoding="utf-8")
+
+    try:
+        payload = _strip_json_block(raw)
+        validated, warnings = _validate_highlights(
+            payload, srt_lines, title_fallback=title,
+        )
+    except Exception as e:  # noqa: BLE001
+        project = svc.load_project(root, task_id, project_id)
+        state = svc.get_stage_state(project, "stage3_analyze")
+        state["status"] = "failed"
+        state["finished_at"] = svc.now_iso()
+        state["error"] = f"片段 #{hl_index} 重新解析返回值无法解析: {e}"
+        state["elapsed_sec"] = elapsed
+        state["logs"] = list(state.get("logs") or []) + [
+            f"[{svc.now_iso()}] stage3 rerun-one #{hl_index} failed: 解析失败 ({elapsed}s)",
+        ]
+        svc.set_stage_state(project, "stage3_analyze", state)
+        svc.save_project(root, project)
+        return state
+
+    # index 保持不变；title 由 title_fallback 兜底（LLM 未给 → 保留旧 title）
+    new_hl = validated[0]
+    new_hl["index"] = int(hl_index)
+    new_hl["title"] = str(new_hl.get("title") or title)[:80]
+
+    # 原位替换 highlights.json
+    replaced = False
+    for i, h in enumerate(hls):
+        if int(h.get("index") or 0) == int(hl_index):
+            hls[i] = new_hl
+            replaced = True
+            break
+    if not replaced:
+        hls.append(new_hl)
+    doc["highlights"] = hls
+    # rerun 记录条数设上限：反复调参重跑时 warnings 不无限膨胀
+    doc["warnings"] = (list(doc.get("warnings") or []) + [
+        f"[{svc.now_iso()}] 片段 #{hl_index} 已单独重新解析（prompt_source={prompt_source}）",
+    ])[-20:]
+    if prompt_source == "user":
+        doc["prompt"] = str(prompt or "").strip()
+    # 镜像同步（多入口写同一份状态必须对称）：rerun 是否带了截图
+    doc["image"] = image_path.name if image_path is not None else ""
+    svc._write_json_atomic(hp, doc)
+
+    # 同步 state 镜像 + 下游作废
+    project = svc.load_project(root, task_id, project_id)
+    state = svc.get_stage_state(project, "stage3_analyze")
+    state["status"] = "done"
+    state["finished_at"] = svc.now_iso()
+    state["elapsed_sec"] = elapsed
+    state["count"] = len(hls)
+    state["prompt_source"] = prompt_source
+    if image_path is not None:
+        state["image_used"] = svc._rel(root, image_path)
+    else:
+        state.pop("image_used", None)
+    state.pop("error", None)
+    state["warnings"] = (list(state.get("warnings") or []) + warnings)[-20:]
+    state["logs"] = list(state.get("logs") or []) + [
+        f"[{svc.now_iso()}] stage3 rerun-one #{hl_index} done, "
+        f"lines={len(new_hl.get('subtitle_lines') or [])}, elapsed={elapsed}s",
+    ]
+    state_hls = state.get("highlights") or []
+    for i, sh in enumerate(state_hls):
+        if int(sh.get("index") or 0) == int(hl_index):
+            state_hls[i] = new_hl
+            break
+    else:
+        state_hls.append(new_hl)
+    state["highlights"] = state_hls
+    svc.set_stage_state(project, "stage3_analyze", state)
+    svc.reset_downstream_stages(project, "stage3_analyze")
+    svc.save_project(root, project)
     return state
 
 

@@ -5634,6 +5634,117 @@ input[type="checkbox"]:focus-visible {
   display: flex;
   gap: 6px;
 }
+
+/* REQ-20261012-099：Stage 3 解析短视频内容 — 提示词录入 / 历史 / 截图 */
+.slirn-stage3-prompt-label2 {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  color: #1e293b;
+}
+.slirn-stage3-prompt-input {
+  margin-top: 6px;
+  width: 100%;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 8px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #1e293b;
+  resize: vertical;
+  box-sizing: border-box;
+}
+.slirn-stage3-prompt-input:focus {
+  outline: none;
+  border-color: #38bdf8;
+  background: #fff;
+}
+.slirn-stage3-prompt-toolbar {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.slirn-stage3-prompt-toolbar .slirn-stage3-radios {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.slirn-stage3-prompt-actions2 {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.slirn-stage3-hist-list {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.slirn-stage3-hist-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  text-align: left;
+  font-size: 12px;
+  color: #1e293b;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 6px 10px;
+  cursor: pointer;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.slirn-stage3-hist-item:hover {
+  border-color: #38bdf8;
+  background: #f0f9ff;
+}
+.slirn-stage3-hist-time {
+  flex: none;
+  font-size: 11px;
+}
+.slirn-stage3-image-block {
+  margin: 10px 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px 12px;
+  background: #f8fafc;
+  border: 1px dashed #cbd5e1;
+  border-radius: 6px;
+  font-size: 13px;
+}
+.slirn-stage3-image-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.slirn-stage3-image-thumb {
+  height: 64px;
+  max-width: 160px;
+  object-fit: contain;
+  border: 1px solid #e2e8f0;
+  border-radius: 4px;
+  background: #fff;
+}
+.slirn-stage3-image-send {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: #475569;
+  user-select: none;
+}
 .slirn-stage3-hl-more {
   margin-top: 4px;
   color: #94a3b8;

@@ -9576,7 +9576,39 @@ def _register_slirn_api(
         剔除 src_index 对应 SRT 行不在 [start_ms, end_ms] 内的项（LLM 会
         hallucinate 不在该 clip 范围内的 src_index，导致 UI 显示的字幕跟视频
         实际播放内容对不上）。
+
+        REQ-20261012-099：全局提示词设置 + 当前截图注入**不依赖 highlights.json
+        存在**（未跑过 Stage 3 的项目也要显示默认提示词/截图上传区）。
         """
+        pl = project.setdefault("pipeline", {})
+        s3 = pl.setdefault("stage3_analyze", {})
+        try:
+            s3["prompt_settings"] = _sv_service.load_prompt_settings(repo_root)
+            cur_img = _sv_service.stage3_current_image(
+                repo_root,
+                str(project.get("task_id") or ""),
+                str(project.get("id") or ""),
+                project=project,
+            )
+            s3["image"] = cur_img or {}
+        except Exception as ps_err:  # noqa: BLE001
+            log.warning("[short_video] prompt_settings/image 注入失败: %s", ps_err)
+
+        # REQ-20261004-stage3-prompt-edit + REQ-20261012-099：模板生效文本注入
+        # （radio 的 data-prompt 预填）。不依赖 highlights.json 存在——新项目
+        # 也要能点快速模板填充提示词。
+        try:
+            from slirn_home.short_video_analyze import _PROMPT_TEMPLATES
+            cp_data = _sv_service.load_custom_prompts(
+                repo_root, str(project.get("task_id") or ""), str(project.get("id") or ""),
+            )
+            s3["prompt_state"] = {
+                "custom": cp_data,  # 用户修改过的；不存在 → 空 dict
+                "defaults": {name: tmpl for name, tmpl in _PROMPT_TEMPLATES.items()},
+            }
+        except Exception as ps_err:  # noqa: BLE001
+            log.warning("[short_video] prompt_state 注入失败: %s", ps_err)
+
         try:
             hp = _sv_service.stage_highlights_path(
                 repo_root, str(project.get("task_id") or ""), str(project.get("id") or "")
@@ -9630,22 +9662,6 @@ def _register_slirn_api(
             # 注入 srt_lines（只在第一次注入，避免重复覆盖）
             if srt_lines_dicts and not s3.get("srt_lines"):
                 s3["srt_lines"] = srt_lines_dicts
-            # REQ-20261004-stage3-prompt-edit：注入用户修改过的提示词 + 系统默认
-            # 供 UI 显示「已自定义」/「系统默认」状态。系统默认从 short_video_analyze 拿。
-            try:
-                from slirn_home.short_video_analyze import _PROMPT_TEMPLATES
-                cp_data = _sv_service.load_custom_prompts(
-                    repo_root, str(project.get("task_id") or ""), str(project.get("id") or ""),
-                )
-                prompt_state = {
-                    "custom": cp_data,  # 用户修改过的；不存在 → 空 dict
-                    "defaults": {
-                        name: tmpl for name, tmpl in _PROMPT_TEMPLATES.items()
-                    },
-                }
-                s3["prompt_state"] = prompt_state
-            except Exception as ps_err:  # noqa: BLE001
-                log.warning("[short_video] prompt_state 注入失败: %s", ps_err)
         except Exception:  # noqa: BLE001 — UI 兜底，不阻断渲染
             pass
 
@@ -9886,9 +9902,9 @@ def _register_slirn_api(
 
     @app.app.post("/slirn/api/short_video_stage3_run")
     async def short_video_stage3_run(body: dict = Body(default_factory=dict)):
-        """REQ-20261003-098：Stage 3 AI 拆条。"""
-        from slirn_home import short_video_analyze as _sv_analyze
+        """REQ-20261012-099：Stage 3 解析短视频内容（字幕 + 用户提示词 + 截图 → AI）。"""
         from slirn_home import llm_config
+        from slirn_home import short_video_analyze as _sv_analyze
 
         tid = (body.get("task_id") or "").strip()
         pid = (body.get("project_id") or "").strip()
@@ -9897,17 +9913,143 @@ def _register_slirn_api(
         template = str(body.get("template") or _sv_service.HIGHLIGHT_TEMPLATE_HOOK_FIRST)
         n_clips = int(body.get("n_clips") or 4)
         custom_prompt = str(body.get("custom_prompt") or "")
+        prompt = str(body.get("prompt") or "")
+        use_image = bool(body.get("use_image"))
         entry = llm_config.get_current_entry(repo_root)
         try:
             state = _sv_analyze.run_stage3(
                 repo_root, tid, pid,
                 template=template, n_clips=n_clips,
                 custom_prompt=custom_prompt, entry=entry,
+                prompt=prompt, use_image=use_image,
             )
         except Exception as e:  # noqa: BLE001
             log.exception("stage3 run failed")
             return _err(f"Stage 3 执行失败: {e}")
         return _ok(stage3=state, toast=f"Stage 3 {state.get('status', '')}")
+
+    @app.app.post("/slirn/api/short_video_stage3_rerun_one")
+    async def short_video_stage3_rerun_one(body: dict = Body(default_factory=dict)):
+        """REQ-20261012-099：单片段重新解析。
+
+        body: task_id / project_id / hl_index / prompt（当前文本域）/
+        use_image（是否带截图）。替换该片段的时间段与字幕内容，
+        下游 Stage 4/5/6 重置。
+        """
+        from slirn_home import llm_config
+        from slirn_home import short_video_analyze as _sv_analyze
+
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        if not tid or not pid:
+            return _err("缺少 task_id 或 project_id")
+        try:
+            hl_index = int(body.get("hl_index") or 0)
+        except (TypeError, ValueError):
+            return _err("hl_index 无效")
+        if hl_index <= 0:
+            return _err("hl_index 无效")
+        entry = llm_config.get_current_entry(repo_root)
+        try:
+            state = _sv_analyze.rerun_stage3_one(
+                repo_root, tid, pid, hl_index,
+                prompt=str(body.get("prompt") or ""),
+                use_image=bool(body.get("use_image")),
+                entry=entry,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.exception("stage3 rerun-one failed")
+            return _err(f"片段 #{hl_index} 重新解析失败: {e}")
+        return _ok(stage3=state, toast=f"片段 #{hl_index} 重新解析 {state.get('status', '')}")
+
+    @app.app.post("/slirn/api/short_video_stage3_upload_image")
+    async def short_video_stage3_upload_image(
+        task_id: str = _Form(...),
+        project_id: str = _Form(...),
+        file: UploadFile = File(...),
+    ):
+        """REQ-20261012-099：上传/覆盖 Stage 3 截图（解析短视频内容的输入图）。"""
+        if not task_id or not project_id:
+            return _err("缺少 task_id 或 project_id")
+        import shutil as _shutil
+        import tempfile as _tempfile
+
+        suffix = Path(file.filename or "").suffix
+        tmp_path: Path | None = None
+        try:
+            with _tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp_path = Path(tmp.name)
+                await file.seek(0)
+                _shutil.copyfileobj(file.file, tmp)
+            entry = _sv_service.save_stage3_image(repo_root, task_id, project_id, tmp_path)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"截图上传失败: {e}")
+        finally:
+            if tmp_path is not None:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except Exception:  # noqa: BLE001
+                    pass
+        project = _sv_service.load_project(repo_root, task_id, project_id)
+        _inject_stage3_highlights(project)
+        return _ok(
+            image=entry, project=project,
+            html=_sv_ui.render_project(project), toast="截图已上传",
+        )
+
+    @app.app.post("/slirn/api/short_video_stage3_remove_image")
+    async def short_video_stage3_remove_image(body: dict = Body(default_factory=dict)):
+        """REQ-20261012-099：移除 Stage 3 截图。"""
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        if not tid or not pid:
+            return _err("缺少 task_id 或 project_id")
+        try:
+            removed = _sv_service.remove_stage3_image(repo_root, tid, pid)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"移除截图失败: {e}")
+        project = _sv_service.load_project(repo_root, tid, pid)
+        _inject_stage3_highlights(project)
+        return _ok(
+            removed=removed, project=project,
+            html=_sv_ui.render_project(project),
+            toast="截图已移除" if removed else "本就没有截图",
+        )
+
+    @app.app.post("/slirn/api/short_video_save_default_prompt")
+    async def short_video_save_default_prompt(body: dict = Body(default_factory=dict)):
+        """REQ-20261012-099：把当前提示词保存为全局默认提示词。"""
+        prompt = str(body.get("prompt") or "")
+        if not prompt.strip():
+            return _err("提示词不能为空")
+        try:
+            entry = _sv_service.save_default_prompt(repo_root, prompt)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"保存默认提示词失败: {e}")
+        return _ok(default_prompt=entry, toast="已设为默认提示词")
+
+    @app.app.post("/slirn/api/short_video_prompt_history_save")
+    async def short_video_prompt_history_save(body: dict = Body(default_factory=dict)):
+        """REQ-20261012-099：提示词存入历史列表（≤ 10 条最新）。
+
+        已满且新提示词 → ``status=need_confirm``；前端确认后带
+        ``confirm=true`` 重发（覆盖最旧）。
+        """
+        prompt = str(body.get("prompt") or "")
+        if not prompt.strip():
+            return _err("提示词不能为空")
+        confirm = bool(body.get("confirm"))
+        try:
+            result = _sv_service.save_prompt_history(repo_root, prompt, confirm=confirm)
+        except Exception as e:  # noqa: BLE001
+            return _err(f"保存提示词列表失败: {e}")
+        if result.get("status") == "need_confirm":
+            return _ok(
+                status="need_confirm", history=result.get("history"),
+                max=result.get("max"),
+                toast=f"列表已满 {result.get('max')} 条，是否覆盖最旧一条？",
+            )
+        return _ok(status="saved", history=result.get("history"), toast="已存入提示词列表")
 
     @app.app.post("/slirn/api/short_video_stage3_verify")
     async def short_video_stage3_verify(body: dict = Body(default_factory=dict)):
