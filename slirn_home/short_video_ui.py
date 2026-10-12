@@ -877,6 +877,10 @@ def _stage5_coarse(project: dict) -> str:
 
 
 def _stage6_refine(project: dict) -> str:
+    """Stage 6 字幕优化 UI（REQ-20261013-104）：每条 clip 加「✨ LLM 优化」+ 词频 chips
+    + 行级 ✓/✕/✏/🗑/✂ 5 按钮（行级渲染由前端 JS 拉 occurrences 后填）；
+    顶部加批量替换面板（🔍 搜索 → 预览 → ✅ 全部替换）。
+    """
     task_id = str(project.get("task_id") or "")
     project_id = str(project.get("id") or "")
     s5 = project.get("pipeline", {}).get("stage6_refine", {}) or {}
@@ -914,7 +918,11 @@ def _stage6_refine(project: dict) -> str:
             f'<button class="slirn-btn-mini" data-action="sv-stage5-asr" data-clip-index="{idx}">重新 ASR</button>'
             f'<button class="slirn-btn-mini" data-action="sv-stage5-save" data-clip-index="{idx}">保存修正</button>'
             f'<button class="slirn-btn-mini" data-action="sv-preview-srt" data-url="{esc(asr_url)}">查看 ASR 字幕</button>'
+            f'<button class="slirn-btn slirn-btn-primary" data-action="sv-stage6-optimize" '
+            f'data-clip-index="{idx}">✨ LLM 优化</button>'
             f'</div>'
+            f'<div class="slirn-sv-stage6-words" data-clip-index="{idx}"></div>'
+            f'<div class="slirn-sv-stage6-rows" data-clip-index="{idx}"></div>'
             f'<textarea rows="6" class="slirn-stage5-srt" data-clip-index="{idx}" '
             f'placeholder="点击「重新 ASR」后再编辑">{srt_inline}</textarea>'
             f'{err_html}'
@@ -927,7 +935,16 @@ def _stage6_refine(project: dict) -> str:
     {_stage_badge(s5.get("status"))}
   </div>
   <div class="slirn-stage-body">
-    <div class="slirn-sv-muted">每条独立处理：先重新 ASR → 编辑文本 → 保存</div>
+    <div class="slirn-sv-muted">每条独立处理：先重新 ASR → LLM 优化 → 行级采纳/拒绝/编辑 → 保存</div>
+    <div class="slirn-sv-card-actions" style="margin:10px 0; padding:8px; background:rgba(0,0,0,.04); border-radius:6px;">
+      <strong>🔍 批量替换（按当前项目所有 clip）</strong>
+      <input type="text" class="slirn-sv-batch-word" placeholder="搜索词" style="margin:0 6px; padding:4px 8px;">
+      <span class="slirn-sv-muted">→</span>
+      <input type="text" class="slirn-sv-batch-replacement" placeholder="替换为" style="margin:0 6px; padding:4px 8px;">
+      <button class="slirn-btn-mini" data-action="sv-stage6-batch-search">🔍 搜索</button>
+      <button class="slirn-btn-mini" data-action="sv-stage6-batch-replace">✅ 全部替换</button>
+      <div class="slirn-sv-batch-result" style="margin-top:6px;"></div>
+    </div>
     <div class="slirn-stage5-list">{"".join(rows) or '<div class="slirn-sv-muted">先完成 Stage 5 粗剪</div>'}</div>
     {_stage_logs(s5)}
   </div>

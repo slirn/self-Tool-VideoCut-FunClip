@@ -667,6 +667,197 @@
     });
   }
 
+  // REQ-20261013-104：Stage 6 字幕优化（行级 + 词频 + 批量替换 + 行内切分）
+  // 单条 LLM 优化：调 optimize 端点 → 渲染 chips + 行级建议
+  function stage6Optimize(btn) {
+    var ctx = innerCtx(); if (!ctx) return;
+    var idx = parseInt(btn.getAttribute('data-clip-index') || '0', 10);
+    if (!idx) return;
+    btn.disabled = true;
+    var oldText = btn.textContent;
+    btn.textContent = '✨ 优化中…';
+    postJSON(API + '/short_video_stage6_optimize', {
+      task_id: ctx.taskId, project_id: ctx.projectId, index: idx
+    }).then(function(r) {
+      btn.disabled = false;
+      btn.textContent = oldText;
+      if (!r || !r.ok) return toast('❌ ' + (r && r.error ? r.error : 'LLM 优化失败'), 'error');
+      toast(r.toast || '✨ LLM 优化完成');
+      _renderStage6Words(idx, r.words || []);
+      _renderStage6Rows(idx, r.occurrences || {});
+    });
+  }
+  // 词频 chips 渲染
+  function _renderStage6Rows(clipIdx, occurrences) {
+    var wrap = document.querySelector('.slirn-sv-stage6-rows[data-clip-index="' + clipIdx + '"]');
+    if (!wrap) return;
+    var rows = [];
+    Object.keys(occurrences).forEach(function(rid) {
+      var occs = occurrences[rid] || [];
+      occs.forEach(function(o, i) {
+        rows.push(
+          '<div class="slirn-sv-stage6-row" data-rid="' + rid + '" data-oi="' + i + '">'
+          + '<span class="slirn-sv-muted">行 ' + rid + '</span> '
+          + '<code>' + _escHtml(o.before) + '</code> → '
+          + '<input type="text" class="slirn-sv-stage6-edit" value="' + _escHtml(o.after) + '" '
+          + 'data-rid="' + rid + '" data-oi="' + i + '" style="width:160px; padding:2px 6px;"> '
+          + '<button class="slirn-btn-mini" data-action="sv-stage6-row-accept" '
+          + 'data-clip-index="' + clipIdx + '" data-rid="' + rid + '" data-oi="' + i + '">✓ 采纳</button> '
+          + '<button class="slirn-btn-mini" data-action="sv-stage6-row-reject" '
+          + 'data-clip-index="' + clipIdx + '" data-rid="' + rid + '" data-oi="' + i + '">✕ 拒绝</button> '
+          + '<button class="slirn-btn-mini" data-action="sv-stage6-row-save" '
+          + 'data-clip-index="' + clipIdx + '" data-rid="' + rid + '" data-oi="' + i + '">💾 保存</button>'
+          + '</div>'
+        );
+      });
+    });
+    wrap.innerHTML = rows.length
+      ? rows.join('') + '<button class="slirn-btn slirn-btn-primary" data-action="sv-stage6-save-decisions" '
+        + 'data-clip-index="' + clipIdx + '" style="margin-top:6px;">💾 保存本条全部决定</button>'
+      : '<div class="slirn-sv-muted">无建议</div>';
+  }
+  function _escHtml(s) {
+    return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+  function _renderStage6Words(clipIdx, words) {
+    var wrap = document.querySelector('.slirn-sv-stage6-words[data-clip-index="' + clipIdx + '"]');
+    if (!wrap) return;
+    if (!words.length) { wrap.innerHTML = ''; return; }
+    var chips = words.slice(0, 12).map(function(w) {
+      return '<span class="slirn-sv-chip" title="出现 ' + w.count + ' 次 · 行 ' + (w.lines || []).join(',') + '">'
+        + _escHtml(w.after) + ' <small>×' + w.count + '</small></span>';
+    });
+    wrap.innerHTML = '<div class="slirn-sv-chips">' + chips.join('') + '</div>';
+  }
+  // 单条 row 保存（直接后端 save_decisions 接受）
+  function _stage6RowSave(btn, accept) {
+    var ctx = innerCtx(); if (!ctx) return;
+    var clipIdx = parseInt(btn.getAttribute('data-clip-index') || '0', 10);
+    var rid = btn.getAttribute('data-rid') || '';
+    var editInput = document.querySelector(
+      '.slirn-sv-stage6-edit[data-rid="' + rid + '"][data-oi="' + btn.getAttribute('data-oi') + '"]');
+    var edit = editInput ? editInput.value : '';
+    var decisions = {};
+    decisions[rid] = {accept: !!accept, edit: edit};
+    postJSON(API + '/short_video_stage6_save_decisions', {
+      task_id: ctx.taskId, project_id: ctx.projectId, index: clipIdx, decisions: decisions
+    }).then(function(r) {
+      if (r && r.ok) { toast('💾 行 ' + rid + ' 已' + (accept ? '采纳' : '拒绝')); }
+      else toast('❌ ' + (r && r.error ? r.error : '保存失败'), 'error');
+    });
+  }
+  // 本条全部保存（收集所有 row 的当前 edit + accept 默认 True）
+  function stage6SaveDecisions(btn) {
+    var ctx = innerCtx(); if (!ctx) return;
+    var clipIdx = parseInt(btn.getAttribute('data-clip-index') || '0', 10);
+    if (!clipIdx) return;
+    var decisions = {};
+    document.querySelectorAll('.slirn-sv-stage6-rows[data-clip-index="' + clipIdx + '"] .slirn-sv-stage6-row').forEach(function(r) {
+      var rid = r.getAttribute('data-rid');
+      var edit = r.querySelector('.slirn-sv-stage6-edit');
+      if (rid && edit) decisions[rid] = {accept: true, edit: edit.value};
+    });
+    postJSON(API + '/short_video_stage6_save_decisions', {
+      task_id: ctx.taskId, project_id: ctx.projectId, index: clipIdx, decisions: decisions
+    }).then(function(r) {
+      if (r && r.ok) { toast(r.toast || '💾 已保存'); openProject(ctx.taskId, ctx.projectId); }
+      else toast('❌ ' + (r && r.error ? r.error : '保存失败'), 'error');
+    });
+  }
+  // 行内切分（占位 — 由前端 prompt 拿 splits 后调后端）
+  function stage6Resplit(btn) {
+    var ctx = innerCtx(); if (!ctx) return;
+    var segId = btn.getAttribute('data-seg-id') || prompt('切分行 id（数字）');
+    if (!segId) return;
+    var splits = prompt('切分子文本（用 | 分隔）', '前半|后半');
+    if (!splits) return;
+    var clipIdx = parseInt(btn.getAttribute('data-clip-index') || '0', 10);
+    postJSON(API + '/short_video_stage6_resplit', {
+      task_id: ctx.taskId, project_id: ctx.projectId, index: clipIdx,
+      seg_id: String(segId), splits: splits.split('|').map(function(s) { return s.trim(); })
+    }).then(function(r) {
+      if (r && r.ok) { toast(r.toast || '✂️ 已切分'); openProject(ctx.taskId, ctx.projectId); }
+      else toast('❌ ' + (r && r.error ? r.error : '切分失败'), 'error');
+    });
+  }
+  // 取消切分
+  function stage6Unsplit(btn) {
+    var ctx = innerCtx(); if (!ctx) return;
+    var segId = btn.getAttribute('data-seg-id') || prompt('取消切分的行 id');
+    if (!segId) return;
+    var clipIdx = parseInt(btn.getAttribute('data-clip-index') || '0', 10);
+    postJSON(API + '/short_video_stage6_unsplit', {
+      task_id: ctx.taskId, project_id: ctx.projectId, index: clipIdx, seg_id: String(segId)
+    }).then(function(r) {
+      if (r && r.ok) { toast(r.toast || '↩ 已取消'); openProject(ctx.taskId, ctx.projectId); }
+      else toast('❌ ' + (r && r.error ? r.error : '取消失败'), 'error');
+    });
+  }
+  // 批量搜索
+  function stage6BatchSearch(btn) {
+    var ctx = innerCtx(); if (!ctx) return;
+    var word = (document.querySelector('.slirn-sv-batch-word') || {}).value || '';
+    if (!word.trim()) return toast('请输入搜索词', 'error');
+    // 当前 clip 数（取当前项目下所有 highlights）
+    postJSON(API + '/short_video_get', {task_id: ctx.taskId, project_id: ctx.projectId}).then(function(r) {
+      if (!r || !r.ok) return toast('读取项目失败', 'error');
+      var hls = ((r.project || {}).pipeline || {}).stage6_refine || {};
+      var list = (hls.highlights || []);
+      var promises = list.map(function(hl) {
+        return postJSON(API + '/short_video_stage6_batch_search', {
+          task_id: ctx.taskId, project_id: ctx.projectId,
+          index: hl.index || 0, word: word
+        });
+      });
+      Promise.all(promises).then(function(results) {
+        var total = 0;
+        var lines = [];
+        results.forEach(function(r2, i) {
+          if (r2 && r2.matches) {
+            total += r2.count || 0;
+            if (r2.matches.length) lines.push('Clip ' + (i + 1) + ': ' + r2.matches.length + ' 处');
+          }
+        });
+        var out = document.querySelector('.slirn-sv-batch-result');
+        if (out) out.innerHTML = '<div class="slirn-sv-muted">共 ' + total + ' 处 · ' + (lines.join(' / ') || '无') + '</div>';
+        toast('🔍 找到 ' + total + ' 处');
+      });
+    });
+  }
+  // 批量替换（按当前所有 clip 逐条替换）
+  function stage6BatchReplace(btn) {
+    var ctx = innerCtx(); if (!ctx) return;
+    var word = (document.querySelector('.slirn-sv-batch-word') || {}).value || '';
+    var rep = (document.querySelector('.slirn-sv-batch-replacement') || {}).value || '';
+    if (!word.trim()) return toast('请输入搜索词', 'error');
+    if (!window.confirm('把当前所有 clip 的 refined srt 中「' + word + '」全部替换为「' + (rep || '（空）') + '」？')) return;
+    postJSON(API + '/short_video_get', {task_id: ctx.taskId, project_id: ctx.projectId}).then(function(r) {
+      if (!r || !r.ok) return toast('读取项目失败', 'error');
+      var hls = (((r.project || {}).pipeline || {}).stage6_refine || {}).highlights || [];
+      var promises = hls.map(function(hl) {
+        return postJSON(API + '/short_video_stage6_batch_replace', {
+          task_id: ctx.taskId, project_id: ctx.projectId,
+          index: hl.index || 0, word: word, replacement: rep
+        });
+      });
+      Promise.all(promises).then(function(results) {
+        var total = 0;
+        results.forEach(function(r2) { if (r2) total += r2.replaced || 0; });
+        toast('✅ 替换完成 · ' + total + ' 处');
+        openProject(ctx.taskId, ctx.projectId);
+      });
+    });
+  }
+  // 行级 row 采纳/拒绝（派发 — 用 data-action 委托）
+  document.addEventListener('click', function(ev) {
+    var a = ev.target.closest && ev.target.closest('[data-action]');
+    if (!a) return;
+    var act = a.getAttribute('data-action');
+    if (act === 'sv-stage6-row-accept') { ev.preventDefault(); _stage6RowSave(a, true); }
+    else if (act === 'sv-stage6-row-reject') { ev.preventDefault(); _stage6RowSave(a, false); }
+  });
+
   function stage5Asr(btn) {
     var ctx = innerCtx(); if (!ctx) return;
     var index = parseInt(btn.getAttribute('data-clip-index') || '0', 10);
@@ -1298,6 +1489,13 @@
     if (action === 'sv-stage5-subs-download') return stage5SubsDownload(btn);
     if (action === 'sv-stage5-clip-subs-copy') return stage5ClipSubsCopy(btn);
     if (action === 'sv-stage5-clip-subs-download') return stage5ClipSubsDownload(btn);
+    // REQ-20261013-104：Stage 6 字幕优化（行级 + 词频 + 批量替换 + 行内切分）
+    if (action === 'sv-stage6-optimize') return stage6Optimize(btn);
+    if (action === 'sv-stage6-save-decisions') return stage6SaveDecisions(btn);
+    if (action === 'sv-stage6-resplit') return stage6Resplit(btn);
+    if (action === 'sv-stage6-unsplit') return stage6Unsplit(btn);
+    if (action === 'sv-stage6-batch-search') return stage6BatchSearch(btn);
+    if (action === 'sv-stage6-batch-replace') return stage6BatchReplace(btn);
 
     // 预览 / 素材
     if (action === 'sv-preview') return previewVideo(btn);

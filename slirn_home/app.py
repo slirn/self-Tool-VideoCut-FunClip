@@ -10419,6 +10419,121 @@ def _register_slirn_api(
             "", srt=res["srt"], clips=res["clips"], cached=res["cached"],
         )
 
+    # REQ-20261013-104：Stage 6 字幕优化按长视频 optimize_service 整套搬
+    # 6 端点：optimize / save_decisions / resplit / unsplit / batch_search / batch_replace
+    @app.app.post("/slirn/api/short_video_stage6_optimize")
+    async def short_video_stage6_optimize(body: dict = Body(default_factory=dict)):
+        """单条 LLM 优化（按 index），返回 occurrences + words chips。"""
+        from slirn_home import short_video_opt_review as _opt
+
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        idx = int(body.get("index") or 0)
+        if not tid or not pid or not idx:
+            return _err("缺少 task_id / project_id / index")
+        try:
+            res = _opt.run_optimize_one(repo_root, tid, pid, idx)
+        except Exception as e:  # noqa: BLE001
+            log.exception("stage6 optimize failed")
+            return _err(f"Stage 6 LLM 优化失败: {e}")
+        return _ok(
+            "", occurrences=res["occurrences"], words=res["words"],
+            lines=res["lines"], index=res["index"],
+            toast="✨ LLM 优化完成 — 请逐行采纳",
+        )
+
+    @app.app.post("/slirn/api/short_video_stage6_save_decisions")
+    async def short_video_stage6_save_decisions(body: dict = Body(default_factory=dict)):
+        """保存行级 accept/edit 决策 + 应用到 refined srt。"""
+        from slirn_home import short_video_opt_review as _opt
+
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        idx = int(body.get("index") or 0)
+        decisions = body.get("decisions") or {}
+        if not tid or not pid or not idx:
+            return _err("缺少 task_id / project_id / index")
+        try:
+            res = _opt.save_decisions(repo_root, tid, pid, idx, decisions)
+        except Exception as e:  # noqa: BLE001
+            log.exception("stage6 save decisions failed")
+            return _err(f"Stage 6 保存决策失败: {e}")
+        return _ok("", applied=res["applied"], toast="💾 已保存并应用到 SRT")
+
+    @app.app.post("/slirn/api/short_video_stage6_resplit")
+    async def short_video_stage6_resplit(body: dict = Body(default_factory=dict)):
+        """行内切分：把 seg_id 行切为多段。"""
+        from slirn_home import short_video_opt_review as _opt
+
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        idx = int(body.get("index") or 0)
+        seg_id = str(body.get("seg_id") or "").strip()
+        splits = body.get("splits") or []
+        if not tid or not pid or not idx or not seg_id:
+            return _err("缺少 task_id / project_id / index / seg_id")
+        try:
+            res = _opt.resplit(repo_root, tid, pid, idx, seg_id, splits)
+        except Exception as e:  # noqa: BLE001
+            log.exception("stage6 resplit failed")
+            return _err(f"Stage 6 切分失败: {e}")
+        return _ok("", applied=res["applied"], lines=res["lines"], toast="✂️ 已切分")
+
+    @app.app.post("/slirn/api/short_video_stage6_unsplit")
+    async def short_video_stage6_unsplit(body: dict = Body(default_factory=dict)):
+        """取消行内切分。"""
+        from slirn_home import short_video_opt_review as _opt
+
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        idx = int(body.get("index") or 0)
+        seg_id = str(body.get("seg_id") or "").strip()
+        if not tid or not pid or not idx or not seg_id:
+            return _err("缺少 task_id / project_id / index / seg_id")
+        try:
+            res = _opt.unsplit(repo_root, tid, pid, idx, seg_id)
+        except Exception as e:  # noqa: BLE001
+            log.exception("stage6 unsplit failed")
+            return _err(f"Stage 6 取消切分失败: {e}")
+        return _ok("", cleared=res["cleared"], toast="↩ 已取消切分")
+
+    @app.app.post("/slirn/api/short_video_stage6_batch_search")
+    async def short_video_stage6_batch_search(body: dict = Body(default_factory=dict)):
+        """批量搜索词。"""
+        from slirn_home import short_video_opt_review as _opt
+
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        idx = int(body.get("index") or 0)
+        word = str(body.get("word") or "").strip()
+        if not tid or not pid or not idx or not word:
+            return _err("缺少 task_id / project_id / index / word")
+        try:
+            res = _opt.search_word(repo_root, tid, pid, idx, word)
+        except Exception as e:  # noqa: BLE001
+            log.exception("stage6 batch search failed")
+            return _err(f"Stage 6 搜索失败: {e}")
+        return _ok("", word=res["word"], matches=res["matches"], count=res["count"])
+
+    @app.app.post("/slirn/api/short_video_stage6_batch_replace")
+    async def short_video_stage6_batch_replace(body: dict = Body(default_factory=dict)):
+        """批量替换词 → 落盘。"""
+        from slirn_home import short_video_opt_review as _opt
+
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        idx = int(body.get("index") or 0)
+        word = str(body.get("word") or "").strip()
+        replacement = str(body.get("replacement") or "")
+        if not tid or not pid or not idx or not word:
+            return _err("缺少 task_id / project_id / index / word")
+        try:
+            res = _opt.replace_word(repo_root, tid, pid, idx, word, replacement)
+        except Exception as e:  # noqa: BLE001
+            log.exception("stage6 batch replace failed")
+            return _err(f"Stage 6 替换失败: {e}")
+        return _ok("", replaced=res["replaced"], lines=res["lines"], toast="✅ 替换完成")
+
     @app.app.post("/slirn/api/short_video_stage5_run")
     async def short_video_stage5_run(body: dict = Body(default_factory=dict)):
         """REQ-20261003-098：Stage 5 优化字幕 — 重新 ASR 一条粗剪 mp4。"""
