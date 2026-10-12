@@ -10150,12 +10150,12 @@ def _register_slirn_api(
             return _err(f"重排失败: {e}")
         return _ok(highlight=updated, toast="字幕顺序已更新")
 
-    @app.app.post("/slirn/api/short_video_stage3_reorder_highlights")
-    async def short_video_stage3_reorder_highlights(body: dict = Body(default_factory=dict)):
-        """REQ-20261012-099 修订五：拖拽调整片段顺序（编号不变，只改拼接顺序）。
+    @app.app.post("/slirn/api/short_video_stage3_restore_order")
+    async def short_video_stage3_restore_order(body: dict = Body(default_factory=dict)):
+        """REQ-20261012-099 修订六：还原某条短视频的字幕顺序。
 
-        body: task_id / project_id / order（片段编号数组 = 新拼接顺序，
-        必须为当前全部片段编号的一个排列）。
+        body: task_id / project_id / hl_index。把该组 subtitle_lines 按
+        初始编号（no）升序排回大模型最初给出的顺序，下游/拼接作废。
         """
         from slirn_home import short_video_analyze as _sv_analyze
 
@@ -10163,29 +10163,25 @@ def _register_slirn_api(
         pid = (body.get("project_id") or "").strip()
         if not tid or not pid:
             return _err("缺少 task_id 或 project_id")
-        order_raw = body.get("order") or []
-        if not isinstance(order_raw, list) or not order_raw:
-            return _err("order 需为片段编号数组")
         try:
-            order = [int(x) for x in order_raw]
+            hl_index = int(body.get("hl_index") or 0)
         except (TypeError, ValueError):
-            return _err("order 需为片段编号数组")
+            return _err("hl_index 无效")
+        if hl_index <= 0:
+            return _err("hl_index 必须 > 0")
         try:
-            state = _sv_analyze.reorder_splice_order(repo_root, tid, pid, order)
+            updated = _sv_analyze.restore_hl_order(repo_root, tid, pid, hl_index)
         except Exception as e:  # noqa: BLE001
-            log.exception("stage3_reorder_highlights failed")
-            return _err(f"顺序保存失败: {e}")
-        return _ok(
-            splice_order=state.get("splice_order") or order,
-            toast="拼接顺序已更新（片段编号不变）",
-        )
+            log.exception("stage3_restore_order failed")
+            return _err(f"还原失败: {e}")
+        return _ok(highlight=updated, toast=f"#{hl_index} 已还原为大模型最初顺序")
 
     @app.app.post("/slirn/api/short_video_stage3_splice")
     async def short_video_stage3_splice(body: dict = Body(default_factory=dict)):
-        """REQ-20261012-099 修订五：按调整后的顺序截取片段并拼接成一条视频。
+        """REQ-20261012-099 修订六：逐组截取拼接 —— 每条短视频各自成片。
 
-        body: task_id / project_id。读 highlights.json 的 splice_order（无则
-        自然序），从源视频逐段截取后拼接 → stage3/splice.mp4 + splice.srt。
+        body: task_id / project_id。按 highlights.json 各组当前字幕行顺序
+        从源视频逐行截取并拼接 → stage3/clip_<N>.mp4 + clip_<N>.srt。
         """
         from slirn_home import short_video_coarse as _sv_coarse
 
@@ -10202,7 +10198,7 @@ def _register_slirn_api(
             return _err(f"拼接失败: {state.get('error') or state.get('status')}")
         return _ok(
             stage3_splice=state,
-            toast=f"拼接完成（{state.get('count', '?')} 段 · "
+            toast=f"已生成 {state.get('count', '?')} 条短视频（合计 "
                   f"{state.get('total_sec', 0)}s）",
         )
 

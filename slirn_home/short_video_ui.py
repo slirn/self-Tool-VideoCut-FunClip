@@ -397,8 +397,24 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
     else:
         image_area = (
             '<div class="slirn-stage3-image-row">'
-            '<span class="slirn-sv-muted">未上传截图（可选：上传后与字幕一起发给多模态 AI）</span>'
+            '<span class="slirn-sv-muted">未上传截图（可选：上传后解析时先提取文字作为参考方向）</span>'
             '</div>'
+        )
+
+    # 修订六：截图 OCR 提取结果提示（提取到的文字已作为参考方向拼进提示词）
+    ocr_info = s3.get("ocr") or {}
+    ocr_note = ""
+    if ocr_info.get("source_image"):
+        ocr_chars = int(ocr_info.get("chars") or 0)
+        ocr_cached = "（缓存复用）" if ocr_info.get("cached") else ""
+        ocr_note = (
+            f'<div class="slirn-stage3-ocr-note">'
+            f'<span class="slirn-sv-badge slirn-sv-badge-ok">✅ 截图文字已提取{ocr_cached}</span>'
+            f'<span class="slirn-sv-muted">{ocr_chars} 字 · 作为参考方向拼入提示词</span>'
+            f'<button class="slirn-btn-mini" data-action="sv-preview-srt" '
+            f'data-url="{_file_url(task_id, project_id, "stage3", "ocr_text.txt")}" '
+            f'title="查看从截图提取出的全部文字">📖 查看提取文字</button>'
+            f'</div>'
         )
 
     error_html = ""
@@ -430,46 +446,61 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
         return f"{m:02d}:{s:02d}"
 
     # 高亮条目可编辑标题 + 删除 + 完整字幕预览（REQ-20261004-UX：用户要直接看到全部文字）
-    # 修订五：渲染顺序按 splice_order（拖拽拼接顺序）；编号 #idx = 原始顺序号不变
-    try:
-        _splice_order = [int(x) for x in (s3.get("splice_order") or [])]
-    except (TypeError, ValueError):
-        _splice_order = []
-    _hl_all = list(s3.get("highlights") or [])
-    if _splice_order:
-        from slirn_home.short_video_coarse import build_splice_plan
-        _ordered_hls, _splice_order = build_splice_plan(_hl_all, _splice_order)
-    else:
-        _ordered_hls = _hl_all
+    # 修订六：一组 = 一条短视频（围绕一个标题，字幕合计约 70s）；组内每行带
+    # 唯一编号 no + 时间戳（拖拽重排后编号随行移动不变，「还原顺序」按 no 升序）
     hl_rows = []
-    for hl in _ordered_hls:
+    for hl in s3.get("highlights") or []:
         idx = hl.get("index") or len(hl_rows) + 1
-        title = hl.get("title") or f"片段 #{idx}"
+        title = hl.get("title") or f"短视频 #{idx}"
         start = hl.get("start_ms") or 0
         end = hl.get("end_ms") or 0
-        dur = (end - start) / 1000.0
         sub_lines = hl.get("subtitle_lines") or []
         sub_count = len(sub_lines)
-        # 字幕预览：渲染全部行；每行 `<HH:MM:SS> 文本`（REQ-20261004-stage3-restructure）；
-        # 同时把完整字幕文本塞到 data-sub-text 供「复制」按钮用
+        # 字幕合计时长（修订六验收：每条约 70 秒）——行级时间戳优先，缺失查源行
+        total_ms = 0
+        nos: list[int] = []
+        for pos, sl in enumerate(sub_lines, start=1):
+            no = int(sl.get("no") or pos)
+            nos.append(no)
+            times = None
+            try:
+                _s = int(sl.get("start_ms") or 0)
+                _e = int(sl.get("end_ms") or 0)
+                if _e > _s:
+                    times = (_s, _e)
+            except (TypeError, ValueError):
+                times = None
+            if times is None:
+                times = srt_index_to_time.get(int(sl.get("src_index") or 0))
+            if times:
+                total_ms += max(0, times[1] - times[0])
         full_text = "\n".join(
             f"[{int(sl.get('src_index') or 0)}] {str(sl.get('text') or '')}"
             for sl in sub_lines
         )
         preview_items = []
-        for sl in sub_lines:
+        for pos, sl in enumerate(sub_lines, start=1):
             t = esc(str(sl.get("text") or ""))
             src = int(sl.get("src_index") or 0)
-            times = srt_index_to_time.get(src)
-            ts_html = _ts(times[0]) if times else "??:??"
-            tip_end = _ts(times[1]) if times else ""
-            tip = f"源字幕 #{src} @ {_ts(times[0])}-{tip_end}" if times else f"源字幕 #{src}"
+            no = int(sl.get("no") or pos)
+            try:
+                _s = int(sl.get("start_ms") or 0)
+                _e = int(sl.get("end_ms") or 0)
+                times = (_s, _e) if _e > _s else srt_index_to_time.get(src)
+            except (TypeError, ValueError):
+                times = srt_index_to_time.get(src)
+            if times:
+                range_html = f'{_ts(times[0])} → {_ts(times[1])}'
+                tip = f"源字幕 #{src} @ {_ts(times[0])}-{_ts(times[1])}"
+            else:
+                range_html = "??:??"
+                tip = f"源字幕 #{src}"
             preview_items.append(
                 f'<div class="slirn-stage3-hl-sub" draggable="true" '
                 f'data-hl-index="{idx}" data-src-index="{src}" title="{esc(tip)}">'
                 f'<span class="slirn-stage3-hl-drag" aria-hidden="true">⋮⋮</span>'
-                f'<span class="slirn-stage3-hl-ts">{ts_html}</span>'
-                f'<span class="slirn-stage3-hl-src">#{src}</span>'
+                f'<span class="slirn-stage3-hl-no">{no}.</span>'
+                f'<span class="slirn-stage3-hl-ts">{range_html}</span>'
                 f'<span class="slirn-stage3-hl-text">{t}</span>'
                 f'</div>'
             )
@@ -486,60 +517,77 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
             if source_url else
             '<button class="slirn-btn-mini" disabled title="请先在 Stage 1 选源视频">🎬 预览片段</button>'
         )
+        # 还原顺序：当前行序 == 初始编号序（no 升序）时无需还原 → 禁用
+        is_original = nos == sorted(nos)
+        restore_btn = (
+            f'<button class="slirn-btn-mini" data-action="sv-stage3-restore-order" '
+            f'data-hl-index="{idx}" '
+            f'title="把该条短视频的字幕行还原为大模型最初给出的顺序（编号不变）">'
+            f'↩️ 还原顺序</button>'
+            if not is_original else
+            f'<button class="slirn-btn-mini" data-action="sv-stage3-restore-order" '
+            f'data-hl-index="{idx}" disabled title="当前已是大模型最初顺序">↩️ 还原顺序</button>'
+        )
         hl_rows.append(
             f'<div class="slirn-stage3-hl-row" data-hl-index="{idx}" data-sub-text="{esc(full_text)}">'
             f'<div class="slirn-stage3-hl-head">'
-            f'<span class="slirn-stage3-hl-dragseg" data-hl-index="{idx}" '
-            f'title="按住拖动整行调整拼接顺序（编号保持原始序号不变）">⇕</span>'
             f'<span class="slirn-sv-row-no">#{idx}</span>'
             f'<input type="text" class="slirn-stage3-hl-title" data-hl-field="title" value="{esc(title)}" placeholder="标题">'
-            f'<span class="slirn-sv-muted slirn-stage3-hl-meta">{_format_ms(start)} - {_format_ms(end)} · {dur:.1f}s · {sub_count} 字幕行</span>'
+            f'<span class="slirn-sv-muted slirn-stage3-hl-meta">{_format_ms(start)} - {_format_ms(end)} · 字幕合计 {total_ms / 1000:.0f}s · {sub_count} 行</span>'
             f'{preview_btn}'
+            f'{restore_btn}'
             f'<button class="slirn-btn-mini" data-action="sv-stage3-rerun" data-hl-index="{idx}" '
-            f'title="针对该片段的标题/主题，用当前提示词+截图单独重新解析（时间段与字幕内容会替换）">'
+            f'title="针对该条的标题/主题，用当前提示词+截图参考单独重新解析（时间段与字幕内容会替换）">'
             f'🔄 重新解析</button>'
             f'<button class="slirn-btn-mini slirn-btn-mini-danger" data-action="sv-stage3-remove-hl" '
             f'data-hl-index="{idx}">删</button>'
             f'</div>'
             f'<div class="slirn-stage3-hl-preview" data-hl-index="{idx}">{sub_preview}</div>'
-            f'<div class="slirn-sv-muted slirn-stage3-hl-hint">⇕ 按住行首拖动调整片段拼接顺序（编号保持原始序号）；⋮⋮ 拖动行内句子调整片段内部顺序（决定 Stage 4 切片时序）</div>'
+            f'<div class="slirn-sv-muted slirn-stage3-hl-hint">⋮⋮ 拖动调整本条短视频内字幕的先后顺序（行首编号保持不变，拼接按当前行序）；↩️ 还原顺序 = 恢复大模型最初给出的顺序</div>'
             f'</div>'
         )
-    hl_list = "".join(hl_rows) or '<div class="slirn-sv-muted">解析后将列出各内容片段</div>'
+    hl_list = "".join(hl_rows) or '<div class="slirn-sv-muted">解析后将列出各条短视频</div>'
 
-    # 修订五：片段截取拼接卡 —— 按拖拽后的顺序从源视频截取片段并拼接成一条视频
+    # 修订六：短视频生成卡 —— 每条（组）按其字幕行时间戳截取拼接成独立 mp4
     splice = project.get("pipeline", {}).get("stage3_splice") or {}
-    order_display = " → ".join(f"#{i}" for i in _splice_order) if _splice_order else ""
-    can_splice = bool(_ordered_hls) and bool(source_url)
+    can_splice = bool(hl_rows) and bool(source_url)
     splice_btn = (
-        '<button class="slirn-btn slirn-btn-primary" data-action="sv-stage3-splice">✂️ 截取拼接</button>'
+        f'<button class="slirn-btn slirn-btn-primary" data-action="sv-stage3-splice" '
+        f'title="按各条短视频当前字幕行的时间戳，从源视频逐行截取并拼接成独立视频">'
+        f'✂️ 截取拼接（生成 {len(hl_rows)} 条）</button>'
         if can_splice else
         '<button class="slirn-btn slirn-btn-primary" data-action="sv-stage3-splice" disabled '
         'title="需先在 Stage 1 选源视频并完成 Stage 3 解析">✂️ 截取拼接</button>'
     )
-    splice_result = ""
-    if splice.get("status") == "done":
-        splice_result = (
+    clip_items = []
+    for c in splice.get("clips") or []:
+        clip_items.append(
+            f'<div class="slirn-stage3-clip-item">'
+            f'<span class="slirn-sv-row-no">#{int(c.get("index") or 0)}</span>'
+            f'<span class="slirn-stage3-clip-title">{esc(str(c.get("title") or ""))}</span>'
+            f'<span class="slirn-sv-muted">{_duration_str(float(c.get("total_sec") or 0))}</span>'
             f'<button class="slirn-btn-mini slirn-btn-mini-primary" data-action="sv-preview" '
-            f'data-url="{_file_url(task_id, project_id, "stage3", "splice.mp4")}" '
-            f'data-name="Stage 3 拼接结果">🎬 播放拼接结果</button>'
+            f'data-url="{_file_url(task_id, project_id, "stage3", str(c.get("mp4") or ""))}" '
+            f'data-name="短视频 #{c.get("index")} {c.get("title") or ""}">🎬 播放</button>'
             f'<button class="slirn-btn-mini" data-action="sv-preview-srt" '
-            f'data-url="{_file_url(task_id, project_id, "stage3", "splice.srt")}">📖 拼接字幕</button>'
-            f'<span class="slirn-sv-muted">{splice.get("count", 0)} 段 · '
-            f'{_duration_str(float(splice.get("total_sec") or 0))}</span>'
+            f'data-url="{_file_url(task_id, project_id, "stage3", str(c.get("srt") or ""))}">📖 字幕</button>'
+            f'</div>'
         )
+    splice_result = (
+        f'<div class="slirn-stage3-clip-list">{"".join(clip_items)}</div>'
+        if clip_items else ""
+    )
     splice_note = ""
-    if splice.get("status") == "pending" and splice.get("stale_reason"):
-        splice_note = f'<div class="slirn-sv-muted">⚠️ {esc(splice["stale_reason"])}</div>'
-    elif splice.get("status") == "failed" and splice.get("error"):
+    if splice.get("status") == "failed" and splice.get("error"):
         splice_note = f'<div class="slirn-stage-error">{esc(splice["error"])}</div>'
     splice_card = (
         '<div class="slirn-stage3-splice-card">'
-        f'<div class="slirn-stage3-splice-head"><strong>🎞 片段截取拼接</strong>'
+        f'<div class="slirn-stage3-splice-head"><strong>🎞 短视频截取拼接</strong>'
         f'{_stage_badge(splice.get("status"))}</div>'
-        f'<div class="slirn-sv-muted slirn-stage3-splice-order">拼接顺序：'
-        f'{order_display or "解析后按编号顺序"}（拖动上方片段行调整，编号保持原始序号）</div>'
-        f'<div class="slirn-stage3-splice-actions">{splice_btn}{splice_result}</div>'
+        f'<div class="slirn-sv-muted">每组（一条短视频）按当前字幕行的时间戳从源视频'
+        f'逐行截取并拼接为独立视频（行序即拼接顺序）</div>'
+        f'<div class="slirn-stage3-splice-actions">{splice_btn}</div>'
+        f'{splice_result}'
         f'{splice_note}'
         '</div>'
     )
@@ -583,6 +631,7 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
       <input type="file" id="slirn-stage3-image-file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp">
       <button class="slirn-btn-mini" data-action="sv-stage3-upload-image">📤 上传</button>
       {image_area}
+      {ocr_note}
     </div>
     <div class="slirn-sv-form-grid">
       <label>片段数<input type="number" min="3" max="5" id="slirn-stage3-n" value="{n}"></label>

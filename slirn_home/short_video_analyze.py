@@ -515,36 +515,49 @@ _OUTPUT_FORMAT_CONSTRAINT = (
 )
 
 
-# ---------- REQ-20261012-099 修订五：上游「大模型智能剪辑」同款后台流程 ----------
+# ---------- REQ-20261012-099 修订六：分组短视频解析（上游「大模型智能剪辑」同款链路） ----------
 #
-# 用户验收：Stage 3「解析」按钮改为调用上游 FunClip 首页「🧠 LLM智能裁剪」
-# 对应的后台功能（funclip/launch.py llm_inference + utils/trans_utils.
-# extract_timestamps）：system = 上游 prompt_head（按片段数模板化），user =
-# 「这是待裁剪的视频srt字幕：」+ raw.srt，LLM 输出编号字幕列表
-# `1. [开始时间-结束时间] 文本`，再按时间戳从源视频截取拼接。
+# 用户验收（修订五基础上的语义修正）：解析产出 = 最终要剪出的 N 条短视频
+# （不是合成一条）；每条围绕一个标题、全部字幕时长合计约 70 秒；组内字幕
+# 顺序按叙事需要排列（可与 srt 原序不同）。截图改为 **先 OCR 提取文字**，
+# 作为参考方向拼进提示词（主调用纯文本，不再把图直接发给多模态模型）。
 #
 # 偏离点：不拼上游 llm_inference 里的「视频实际时长 / 不低于 50% 时长」
-# 注记 —— 那是上游「全片摘要」取向，与拆条（n 条以内）目标冲突。
+# 注记 —— 那是上游「全片摘要」取向，与拆条（n 条）目标冲突。
 _UPSTREAM_CLIP_SYSTEM_PROMPT = (
     "你是一个视频srt字幕分析剪辑器，输入视频的srt字幕，"
-    "分析其中的精彩且尽可能连续的片段并裁剪出来，输出{n}条以内的片段，"
-    "将片段中在时间上连续的多个句子及它们的时间戳合并为一条，"
-    "注意确保文字与时间戳的正确匹配。"
-    "输出需严格按照如下格式：1. [开始时间-结束时间] 文本，"
-    '注意其中的连接符是"-"。开始/结束时间使用 HH:MM:SS,mmm 格式'
-    "（与 srt 字幕时间戳一致）。"
+    "从中整理出{n}条独立的短视频：每条围绕一个标题展开，由若干条字幕组成，"
+    "全部字幕的时长合计约70秒；各条字幕按该标题的叙事需要排序，"
+    "可以与srt原顺序不同。注意确保文字与时间戳的正确匹配，"
+    "时间戳必须取自srt中真实存在的时间。"
+    "输出需严格按照规定的分组格式（组标题行 + 编号字幕行），"
+    '时间连接符是"-"，开始/结束时间使用 HH:MM:SS,mmm 格式。'
 )
 
 # 上游 user 侧固定前缀（funclip/launch.py prompt_head2 原文）
 _UPSTREAM_CLIP_USER_PREFIX = "这是待裁剪的视频srt字幕："
 
 # 输出格式约束固定拼在 user payload 尾部（与旧 JSON schema 同理：system 被
-# 用户自定义提示词替换时，输出仍可被 _parse_llm_clip_segments 解析）。
-_UPSTREAM_CLIP_OUTPUT_CONSTRAINT = (
+# 用户自定义提示词替换时，输出仍可被 _parse_llm_clip_groups 解析）。
+_GROUPS_OUTPUT_CONSTRAINT = (
     "\n\n【输出格式（必须遵守）】忽略上文的其他输出格式要求（包括 JSON）：\n"
-    "只输出片段列表，每条一行，格式为：序号. [开始时间-结束时间] 该片段的完整字幕文本。\n"
-    "序号从 1 连续编号；时间戳取自上方 srt 中真实存在的时间（HH:MM:SS,mmm），"
-    '连接符为"-"；最多输出 {n} 条，除此之外不要输出任何内容。'
+    "只输出 {n} 组，每组对应一条短视频，组标题行格式：# 组序号 | 短视频标题\n"
+    "组内每行一条字幕，格式为：行号. [开始时间-结束时间] 该行字幕文本。\n"
+    "要求：组序号 1~{n}；行号从 1 连续编号；时间戳取自上方 srt 中真实存在的"
+    '时间（HH:MM:SS,mmm），连接符为"-"；行顺序按该组标题的叙事需要排列'
+    "（可以与 srt 原顺序不同）；每组全部字幕的时长合计约 70 秒。"
+    "除此之外不要输出任何内容。"
+)
+
+# 修订六：截图先 OCR 提文字，再作为「参考方向」拼进 user payload
+_OCR_SYSTEM_PROMPT = "你是图片文字提取助手。"
+_OCR_USER_PROMPT = (
+    "请提取这张图片里的全部文字内容，按原有行序原样输出；"
+    "不要解释、不要总结、不要添加任何标题。"
+)
+_OCR_REFERENCE_TMPL = (
+    "【课程重点参考（来自「智能纪要课程重点」截图的文字提取，"
+    "仅作为选题与叙事方向的参考，不要求逐字使用）】\n{ocr_text}\n\n"
 )
 
 # `1. [00:00:01,000-00:00:05,500] 文本`（上游 extract_timestamps 的逐行版，
@@ -553,6 +566,13 @@ _CLIP_LINE_RE = re.compile(
     r"^\s*(?:\d+[\.\、)]|[-*•])?\s*\["
     r"(\d{1,2}:\d{2}(?::\d{2})?[,.]\d{1,3})\s*-\s*"
     r"(\d{1,2}:\d{2}(?::\d{2})?[,.]\d{1,3})\s*\]\s*(.*)$"
+)
+
+# 组标题行：`# 1 | 标题` / `## 第 2 组：标题` / `组3：标题` / `片段 1：标题`
+# （宽松匹配 markdown 的 # 与 ** 加粗；组序号本身不信任，按出现顺序重编）
+_CLIP_GROUP_HASH_RE = re.compile(r"^#{1,3}\s*(.+)$")
+_CLIP_GROUP_LABEL_RE = re.compile(
+    r"^(?:第\s*\d+\s*组|组\s*\d+|片段\s*\d+)\s*[|｜:：]\s*(.+)$"
 )
 
 
@@ -572,74 +592,163 @@ def _parse_llm_time(token: str) -> int:
     return (h * 3600 + m * 60 + s) * 1000 + ms
 
 
-def _parse_llm_clip_segments(
+def _match_group_title(line: str) -> str | None:
+    """识别组标题行，返回标题文本（空标题 → ""，非标题行 → None）。"""
+    s = line.strip()
+    if not s or s.startswith("["):
+        return None
+    core = s.strip("*").strip()
+    m = _CLIP_GROUP_HASH_RE.match(core)
+    if m:
+        rest = re.sub(
+            r"^(?:第\s*\d+\s*组|组\s*\d+|\d+\s*[.、)）]?)\s*",
+            "", m.group(1).strip(), count=1,
+        )
+        return rest.strip(" |｜:：-–—").strip()
+    m = _CLIP_GROUP_LABEL_RE.match(core)
+    if m:
+        return m.group(1).strip()
+    return None
+
+
+def _best_overlap_src(
+    start_ms: int, end_ms: int, srt_sorted: list[SrtLine],
+) -> SrtLine | None:
+    """取与 [start, end] 重叠毫秒数最大的源字幕行（修订六一行对一行）。"""
+    best: SrtLine | None = None
+    best_ov = 0
+    for ln in srt_sorted:
+        ov = min(end_ms, ln.end_ms) - max(start_ms, ln.start_ms)
+        if ov > best_ov:
+            best, best_ov = ln, ov
+    return best
+
+
+def _parse_llm_clip_groups(
     raw: str,
     srt_lines: list[SrtLine],
     *,
-    n_clips: int = 4,
+    n_groups: int = 4,
     title_fallback: str = "",
 ) -> tuple[list[dict], list[str]]:
-    """解析上游「大模型智能剪辑」编号字幕列表 → highlights 同构列表。
+    """解析「分组短视频」编号字幕列表 → highlights 同构列表（一组 = 一条短视频）。
 
-    - **自动编号**：按出现顺序重编 1..N（不信任 LLM 写的序号），编号即原始
-      顺序号，后续拖拽重排时保持不变
-    - 时间重叠映射：每个片段 [start, end] 与 raw.srt 行取交集 →
-      subtitle_lines（src_index 引用真实行），下游 Stage 3.5/4/5/6 零改动
-    - 超出 n_clips 截断并告警；时间戳非法 / 区间内无字幕行的条目跳过并告警
+    - **组自动编号**：按组标题行出现顺序重编 1..N（不信任 LLM 写的组序号）
+    - **行唯一编号**：组内字幕行按出现顺序编 ``no`` 1..M，后续用户拖拽重排
+      时 no 随行移动保持不变（「还原顺序」= 按 no 升序）
+    - 每行时间戳与 raw.srt 行做**单行最佳重叠匹配**（时间/文本以源行为准）；
+      未匹配上的行保留 LLM 时间戳并告警
+    - 无任何组标题行时兜底：每条编号行视为独立一组（修订五扁平格式兼容）
+    - 组数超 n_groups 截断告警；组内合计时长偏离 70s（<45s 或 >110s）告警
+    - subtitle_lines 带 no/start_ms/end_ms（UI 显示时间戳 + Stage 3 拼接用）
 
-    Raises: ShortVideoError —— 整个返回里没有可识别的片段行。
+    Raises: ShortVideoError —— 整个返回里没有可识别的字幕行。
     """
     warnings: list[str] = []
     max_ms = max((ln.end_ms for ln in srt_lines), default=0)
     srt_sorted = sorted(srt_lines, key=lambda ln: ln.index)
-    cap = max(1, int(n_clips or 4))
+    cap = max(1, int(n_groups or 4))
 
-    segments: list[dict] = []
+    raw_groups: list[tuple[str, list[dict]]] = []  # (title, [line dicts])
+    header_seen = False
     matched = 0
     for lineno, line in enumerate(raw.splitlines(), start=1):
         m = _CLIP_LINE_RE.match(line)
-        if not m:
+        if m:
+            matched += 1
+            start_ms = _parse_llm_time(m.group(1))
+            end_ms = _parse_llm_time(m.group(2))
+            if start_ms < 0 or end_ms < 0:
+                warnings.append(f"第 {lineno} 行时间戳无法解析，已跳过")
+                continue
+            start_ms = max(0, min(start_ms, max_ms))
+            end_ms = max(0, min(end_ms, max_ms))
+            if end_ms <= start_ms:
+                warnings.append(f"第 {lineno} 行结束时间不晚于开始时间，已跳过")
+                continue
+            text = m.group(3).strip()
+            src = _best_overlap_src(start_ms, end_ms, srt_sorted)
+            if src is not None:
+                entry = {
+                    "src_index": src.index, "text": src.text or text,
+                    "start_ms": src.start_ms, "end_ms": src.end_ms,
+                }
+            else:
+                entry = {"src_index": 0, "text": text,
+                         "start_ms": start_ms, "end_ms": end_ms}
+                warnings.append(
+                    f"第 {lineno} 行时间段内没有可匹配的源字幕行（时间戳可能错误）"
+                )
+            if header_seen:
+                raw_groups[-1][1].append(entry)
+            else:
+                # 组标题行之前出现的编号行 → 兜底：各自独立成组（修订五扁平格式兼容）
+                raw_groups.append(((text or title_fallback).strip()[:80], [entry]))
             continue
-        matched += 1
-        start_ms = _parse_llm_time(m.group(1))
-        end_ms = _parse_llm_time(m.group(2))
-        if start_ms < 0 or end_ms < 0:
-            warnings.append(f"第 {lineno} 行时间戳无法解析，已跳过")
-            continue
-        start_ms = max(0, min(start_ms, max_ms))
-        end_ms = max(0, min(end_ms, max_ms))
-        if end_ms <= start_ms:
-            warnings.append(f"第 {lineno} 行结束时间不晚于开始时间，已跳过")
-            continue
-        text = m.group(3).strip()
-        sub_lines = [
-            {"src_index": ln.index, "text": ln.text}
-            for ln in srt_sorted
-            if ln.start_ms < end_ms and ln.end_ms > start_ms
-        ]
-        if not sub_lines:
-            warnings.append(f"第 {lineno} 行时间段内没有源字幕行（时间戳可能错误）")
-        title = (text or title_fallback).strip()[:80] or f"片段 {len(segments) + 1}"
-        segments.append({
-            "id": f"h{len(segments) + 1}",
-            "index": len(segments) + 1,
+        title = _match_group_title(line)
+        if title is not None:
+            header_seen = True
+            # 跳过空组（连续组标题行只保留最后一个有内容的组）
+            if raw_groups and not raw_groups[-1][1]:
+                raw_groups[-1] = (title, [])
+            else:
+                raw_groups.append((title, []))
+
+    raw_groups = [(t, ls) for t, ls in raw_groups if ls]
+    if not raw_groups:
+        preview = raw.strip().replace("\n", " ")[:120]
+        raise svc.ShortVideoError(
+            "LLM 返回值里没有可识别的字幕行（期望组标题行 + `1. [开始-结束] 文本`）。"
+            "返回开头：" + (preview or "<空>")
+        )
+    if len(raw_groups) > cap:
+        warnings.append(
+            f"LLM 输出了 {len(raw_groups)} 组，超出 {cap} 组上限，已截取前 {cap} 组"
+        )
+        raw_groups = raw_groups[:cap]
+
+    groups: list[dict] = []
+    for gi, (gtitle, entries) in enumerate(raw_groups, start=1):
+        lines = []
+        for pos, e in enumerate(entries, start=1):
+            e["no"] = pos
+            lines.append(e)
+        title = (gtitle or title_fallback).strip()[:80] or f"短视频 {gi}"
+        start_ms = min(e["start_ms"] for e in lines)
+        end_ms = max(e["end_ms"] for e in lines)
+        total_ms = sum(max(0, e["end_ms"] - e["start_ms"]) for e in lines)
+        if total_ms < 45_000:
+            warnings.append(f"组 #{gi}「{title}」字幕合计仅 {total_ms / 1000:.0f}s（目标约 70s）")
+        elif total_ms > 110_000:
+            warnings.append(f"组 #{gi}「{title}」字幕合计 {total_ms / 1000:.0f}s，明显超过 70s 目标")
+        groups.append({
+            "id": f"h{gi}",
+            "index": gi,
             "title": title,
             "start_ms": start_ms,
             "end_ms": end_ms,
-            "subtitle_lines": sub_lines,
+            "total_ms": total_ms,
+            "subtitle_lines": lines,
         })
-        if len(segments) >= cap:
-            break
+    return groups, warnings
 
-    if not segments:
-        preview = raw.strip().replace("\n", " ")[:120]
-        raise svc.ShortVideoError(
-            "LLM 返回值里没有可识别的片段行（期望 `1. [开始-结束] 文本`）。返回开头："
-            + (preview or "<空>")
-        )
-    if matched > len(segments):
-        warnings.append(f"LLM 输出了 {matched} 条片段，超出 {cap} 条上限，已截取前 {len(segments)} 条")
-    return segments, warnings
+
+def _annotate_subtitle_lines(highlights: list[dict], srt_lines: list[SrtLine]) -> None:
+    """给（JSON 兜底等）来源的 subtitle_lines 补 no/start_ms/end_ms（原地）。
+
+    修订六：UI 的时间戳展示与「还原顺序」、Stage 3 拼接都依赖行级 no/时间戳；
+    分组解析路径自带这些字段，此函数只兜旧数据/JSON 路径。
+    """
+    lookup = {ln.index: ln for ln in srt_lines}
+    for h in highlights:
+        for pos, sl in enumerate(h.get("subtitle_lines") or [], start=1):
+            if not sl.get("no"):
+                sl["no"] = pos
+            if "start_ms" not in sl or "end_ms" not in sl:
+                ln = lookup.get(int(sl.get("src_index") or 0))
+                if ln is not None:
+                    sl.setdefault("start_ms", ln.start_ms)
+                    sl.setdefault("end_ms", ln.end_ms)
 
 
 def _resolve_stage3_system_prompt(
@@ -712,6 +821,37 @@ def _resolve_stage3_image(
     return svc.stage3_dir(repo_root, task_id, project_id) / cur["name"]
 
 
+def _ocr_stage3_image(
+    repo_root: Path | str,
+    task_id: str,
+    project_id: str,
+    image_path: Path,
+    *,
+    entry: dict | None,
+) -> tuple[str, bool]:
+    """REQ-20261012-099 修订六：先 OCR 提取截图文字（多模态模型专用调用）。
+
+    - 同一张截图只 OCR 一次：``stage3/ocr_text.txt`` 存在且 state.ocr 的
+      source_image 与当前图一致 → 直接复用（换图重新上传会清缓存）
+    - 返回 (ocr_text, used_cache)；提取失败/为空由调用方决定告警或失败
+    """
+    root = Path(repo_root)
+    ocr_path = svc.stage3_dir(root, task_id, project_id) / "ocr_text.txt"
+    project = svc.load_project(root, task_id, project_id)
+    cached = ((svc.get_stage_state(project, "stage3_analyze").get("ocr") or {})
+              .get("source_image"))
+    if ocr_path.is_file() and cached == image_path.name:
+        return ocr_path.read_text(encoding="utf-8", errors="replace").strip(), True
+
+    from slirn_home import revision_service
+    text = revision_service._call_llm_vision(
+        _OCR_SYSTEM_PROMPT, _OCR_USER_PROMPT, [image_path], entry=entry,
+    ).strip()
+    ocr_path.parent.mkdir(parents=True, exist_ok=True)
+    ocr_path.write_text(text, encoding="utf-8")
+    return text, False
+
+
 def run_stage3(
     repo_root: Path | str,
     task_id: str,
@@ -777,29 +917,59 @@ def run_stage3(
     svc.set_stage_state(project, "stage3_analyze", state)
     svc.save_project(root, project)
 
-    # 修订五：上游「大模型智能剪辑」——user 侧 = 上游固定前缀 + 原始 SRT
-    # 整文（上游 llm_inference 发的就是整段 srt 文本，不是逐行重组格式）
-    user_payload = (
-        _UPSTREAM_CLIP_USER_PREFIX + "\n\n" + srt_text.strip()
-        + f"\n\n请从上述字幕中裁剪出不超过 {n_clips} 条片段。"
-        + _UPSTREAM_CLIP_OUTPUT_CONSTRAINT.format(n=n_clips)
-    )
+    # 修订六：截图先 OCR 提文字（视觉模型专用调用，同图缓存复用），
+    # 提取文字作为「参考方向」拼在 user payload 头部；主调用始终纯文本。
+    ocr_text = ""
+    ocr_cached = False
+    pre_warnings: list[str] = []
     if image_path is not None:
-        user_payload = (
-            "随字幕附带一张源视频截图，请结合画面信息一起挑选片段。\n\n"
-            + user_payload
-        )
+        try:
+            ocr_text, ocr_cached = _ocr_stage3_image(
+                root, task_id, project_id, image_path, entry=entry,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.exception("Stage 3 截图 OCR 失败")
+            state = svc.get_stage_state(project, "stage3_analyze")
+            state["status"] = "failed"
+            state["finished_at"] = svc.now_iso()
+            state["error"] = f"截图文字提取失败: {e}"
+            state["logs"] = list(state.get("logs") or []) + [
+                f"[{svc.now_iso()}] stage3 failed: OCR 失败: {e}",
+            ]
+            svc.set_stage_state(project, "stage3_analyze", state)
+            svc.save_project(root, project)
+            return state
+        if ocr_text:
+            state = svc.get_stage_state(project, "stage3_analyze")
+            state["ocr"] = {
+                "source_image": image_path.name,
+                "chars": len(ocr_text),
+                "updated_at": svc.now_iso(),
+                "cached": ocr_cached,
+            }
+            svc.set_stage_state(project, "stage3_analyze", state)
+            svc.save_project(root, project)
+        else:
+            pre_warnings.append("截图未提取到文字，已跳过参考方向注入")
+            state = svc.get_stage_state(project, "stage3_analyze")
+            state.pop("ocr", None)
+            state["warnings"] = list(pre_warnings)
+            svc.set_stage_state(project, "stage3_analyze", state)
+            svc.save_project(root, project)
+
+    # user 侧 = [截图参考方向] + 上游固定前缀 + 原始 SRT 整文 + 分组要求
+    user_payload = (
+        (_OCR_REFERENCE_TMPL.format(ocr_text=ocr_text) if ocr_text else "")
+        + _UPSTREAM_CLIP_USER_PREFIX + "\n\n" + srt_text.strip()
+        + f"\n\n请从上述字幕中整理出 {n_clips} 条短视频"
+          "（每条围绕一个标题，全部字幕时长合计约 70 秒）。"
+        + _GROUPS_OUTPUT_CONSTRAINT.format(n=n_clips)
+    )
 
     t0 = time.time()
     raw = ""
     try:
-        if image_path is not None:
-            from slirn_home import revision_service
-            raw = revision_service._call_llm_vision(
-                sys_p, user_payload, [image_path], entry=entry,
-            )
-        else:
-            raw = _call_highlights_llm(sys_p, user_payload, entry=entry)
+        raw = _call_highlights_llm(sys_p, user_payload, entry=entry)
     except Exception as e:  # noqa: BLE001
         log.exception("LLM 调用失败")
         state = svc.get_stage_state(project, "stage3_analyze")
@@ -819,17 +989,19 @@ def run_stage3(
     llm_raw_path.parent.mkdir(parents=True, exist_ok=True)
     llm_raw_path.write_text(raw, encoding="utf-8")
 
-    # 解析 + 校验：优先上游编号字幕列表格式；模型仍按旧 JSON 输出时兜底旧解析
+    # 解析 + 校验：优先分组编号字幕列表；模型仍按旧 JSON 输出时兜底旧解析
     try:
         try:
-            validated, warnings = _parse_llm_clip_segments(
-                raw, srt_lines, n_clips=n_clips,
+            validated, warnings = _parse_llm_clip_groups(
+                raw, srt_lines, n_groups=n_clips,
             )
         except svc.ShortVideoError:
             if "highlights" not in raw:
                 raise
             payload = _strip_json_block(raw)
             validated, warnings = _validate_highlights(payload, srt_lines)
+            _annotate_subtitle_lines(validated, srt_lines)
+        warnings = pre_warnings + list(warnings)
     except Exception as e:  # noqa: BLE001
         state = svc.get_stage_state(project, "stage3_analyze")
         state["status"] = "failed"
@@ -843,20 +1015,18 @@ def run_stage3(
         svc.save_project(root, project)
         return state
 
-    # 写 highlights.json（修订五：+ flow 溯源 + splice_order 拼接顺序基线）
+    # 写 highlights.json（修订六：flow=llm_groups 溯源；一组 = 一条短视频）
     highlights_path = svc.stage_highlights_path(root, task_id, project_id)
     model_id = (entry or {}).get("id") or "default"
-    splice_order = [int(h.get("index") or i + 1) for i, h in enumerate(validated)]
     out_doc = {
         "project_id": project_id,
         "source_srt": svc._rel(root, raw_srt),
         "model": model_id,
         "template": template,
-        "flow": "llm_clip",
+        "flow": "llm_groups",
         "prompt": sys_p if prompt_source == "user" else "",
         "image": image_path.name if image_path is not None else "",
         "n_clips": len(validated),
-        "splice_order": splice_order,
         "highlights": validated,
         "warnings": warnings,
         "created_at": svc.now_iso(),
@@ -873,9 +1043,8 @@ def run_stage3(
     state["highlights_path"] = svc._rel(root, highlights_path)
     state["warnings"] = warnings
     state["count"] = len(validated)
-    # 修订五：编号字幕列表 + 拼接顺序基线（自然序）镜像进 state 供 UI 渲染
-    state["flow"] = "llm_clip"
-    state["splice_order"] = splice_order
+    state["flow"] = "llm_groups"
+    state.pop("splice_order", None)
     # REQ-20261004-bugfix：清掉上一次失败的 error，避免 UI 显示陈旧报错。
     state.pop("error", None)
     state["logs"] = list(state.get("logs") or []) + [
@@ -896,14 +1065,14 @@ def run_stage3(
 def _rerun_one_suffix(title: str) -> str:
     """定向指令。title 用户可编辑（可能含 { }），不用 .format 防 KeyError。
 
-    修订五：与整跑同一套上游「大模型智能剪辑」输出格式（编号字幕行）。
+    修订六：与整跑同一套分组输出格式（1 组 = 1 条短视频，组内多行）。
     """
     return (
         "\n\n# 本次任务：单片段重新解析\n"
-        f"只针对主题「{title}」重新裁剪 **1 条**片段（列表里只有 1 行）：\n"
-        "- 重新划定该主题的时间段（时间戳取自源字幕真实时间）\n"
-        "- 输出该片段的完整字幕文本\n"
-        f"- 无更优表达时文本围绕「{title}」"
+        f"只针对主题「{title}」重新整理 **1 组**（一条短视频）：\n"
+        "- 组内各字幕行的时间戳取自源字幕真实时间\n"
+        "- 行顺序按该主题的叙事需要排列（可以与 srt 原顺序不同）\n"
+        "- 全部字幕时长合计约 70 秒，文本围绕该主题"
     )
 
 
@@ -980,26 +1149,23 @@ def rerun_stage3_one(
     svc.set_stage_state(project, "stage3_analyze", state)
     svc.save_project(root, project)
 
-    # 修订五：与整跑同一套上游「大模型智能剪辑」user payload（只裁 1 条）
-    user_payload = (
-        _UPSTREAM_CLIP_USER_PREFIX + "\n\n" + srt_text.strip()
-        + "\n\n请从上述字幕中只裁剪出 1 条片段（围绕上述主题）。"
-        + _UPSTREAM_CLIP_OUTPUT_CONSTRAINT.format(n=1)
-    )
+    # 修订六：与整跑同一套流程 —— 截图先 OCR 提文字作参考方向，主调用纯文本
+    ocr_text = ""
     if image_path is not None:
-        user_payload = (
-            "随字幕附带一张源视频截图，请结合画面信息一起挑选片段。\n\n" + user_payload
+        ocr_text, _cached = _ocr_stage3_image(
+            root, task_id, project_id, image_path, entry=entry,
         )
+    user_payload = (
+        (_OCR_REFERENCE_TMPL.format(ocr_text=ocr_text) if ocr_text else "")
+        + _UPSTREAM_CLIP_USER_PREFIX + "\n\n" + srt_text.strip()
+        + "\n\n请从上述字幕中只整理出 1 组短视频（围绕上述主题，全部字幕"
+          "时长合计约 70 秒）。"
+        + _GROUPS_OUTPUT_CONSTRAINT.format(n=1)
+    )
 
     t0 = time.time()
     try:
-        if image_path is not None:
-            from slirn_home import revision_service
-            raw = revision_service._call_llm_vision(
-                sys_p, user_payload, [image_path], entry=entry,
-            )
-        else:
-            raw = _call_highlights_llm(sys_p, user_payload, entry=entry)
+        raw = _call_highlights_llm(sys_p, user_payload, entry=entry)
     except Exception as e:  # noqa: BLE001
         log.exception("LLM 调用失败（rerun-one）")
         project = svc.load_project(root, task_id, project_id)
@@ -1022,9 +1188,9 @@ def rerun_stage3_one(
 
     try:
         try:
-            # 修订五：优先上游编号字幕行格式（单片段 = 取第 1 行）
-            validated, warnings = _parse_llm_clip_segments(
-                raw, srt_lines, n_clips=1, title_fallback=title,
+            # 修订六：分组格式（单片段重解析 = 取第 1 组）
+            validated, warnings = _parse_llm_clip_groups(
+                raw, srt_lines, n_groups=1, title_fallback=title,
             )
         except svc.ShortVideoError:
             if "highlights" not in raw:
@@ -1033,6 +1199,7 @@ def rerun_stage3_one(
             validated, warnings = _validate_highlights(
                 payload, srt_lines, title_fallback=title,
             )
+            _annotate_subtitle_lines(validated, srt_lines)
     except Exception as e:  # noqa: BLE001
         project = svc.load_project(root, task_id, project_id)
         state = svc.get_stage_state(project, "stage3_analyze")
@@ -1104,58 +1271,68 @@ def rerun_stage3_one(
     return state
 
 
-# ---------- REQ-20261012-099 修订五：拖拽调整拼接顺序（编号不变） ----------
+# ---------- REQ-20261012-099 修订六：还原字幕顺序（按初始编号升序） ----------
 
-def reorder_splice_order(
+def restore_hl_order(
     repo_root: Path | str,
     task_id: str,
     project_id: str,
-    order: list[int],
+    hl_index: int,
 ) -> dict:
-    """写入 ``highlights.json`` 顶层 ``splice_order``（拼接顺序）。
+    """把某条短视频（highlight）的字幕行还原为大模型最初给出的顺序。
 
-    - 片段编号（index）是**原始顺序号**，重排永远不重编——只改拼接顺序
-    - ``order`` 必须恰好包含当前全部片段编号各一次（排列校验）
-    - 顺序变更后，上次拼接产物作废（stage3_splice → pending，带 stale_reason）
+    - 行的 ``no`` 是解析时按 LLM 输出顺序分配的**唯一编号**，用户拖拽重排
+      后保持不变 → 还原 = 按 no 升序稳定排序（缺 no 的旧数据按当前位置兜底）
+    - 写回 highlights.json + 同步 state 镜像 + 下游/拼接作废
+      （``reset_downstream_stages("stage3_analyze")``）
+
+    返回更新后的 highlight dict。
     """
     root = Path(repo_root)
     hp = svc.stage_highlights_path(root, task_id, project_id)
     if not hp.is_file():
-        raise svc.ShortVideoError("请先运行 Stage 3 解析生成片段列表")
+        raise svc.ShortVideoError("highlights.json 不存在，请先跑 Stage 3")
     try:
         doc = json.loads(hp.read_text(encoding="utf-8"))
     except Exception as e:  # noqa: BLE001
         raise svc.ShortVideoError(f"highlights.json 解析失败: {e}") from e
+    hls = doc.get("highlights") or []
+    target_pos = -1
+    for i, h in enumerate(hls):
+        if int(h.get("index") or 0) == int(hl_index):
+            target_pos = i
+            break
+    if target_pos < 0:
+        raise svc.ShortVideoError(f"短视频 #{hl_index} 不存在")
 
-    cur: list[int] = []
-    for h in doc.get("highlights") or []:
-        try:
-            i = int(h.get("index") or 0)
-        except (TypeError, ValueError):
-            continue
-        if i > 0:
-            cur.append(i)
-    cur.sort()
-    if sorted(int(x) for x in order) != cur:
-        raise svc.ShortVideoError(
-            "order 必须恰好包含全部片段编号各一次（当前片段："
-            + "、".join(f"#{i}" for i in cur) + "）"
-        )
-
-    doc["splice_order"] = [int(x) for x in order]
+    lines = list(hls[target_pos].get("subtitle_lines") or [])
+    ordered = sorted(
+        enumerate(lines),
+        key=lambda pair: (pair[1].get("no") is None,
+                          int(pair[1].get("no") or 0) or pair[0] + 1),
+    )
+    lines = [sl for _pos, sl in ordered]
+    hls[target_pos]["subtitle_lines"] = lines
+    doc["highlights"] = hls
     svc._write_json_atomic(hp, doc)
 
     project = svc.load_project(root, task_id, project_id)
     state = svc.get_stage_state(project, "stage3_analyze")
-    state["splice_order"] = [int(x) for x in order]
+    state_hls = state.get("highlights") or []
+    for sh in state_hls:
+        if int(sh.get("index") or 0) == int(hl_index):
+            sh["subtitle_lines"] = list(lines)
+            break
+    else:
+        state_hls.append(hls[target_pos])
+        state["highlights"] = state_hls
+    state["warnings"] = list(state.get("warnings") or []) + [
+        f"[{svc.now_iso()}] 短视频 #{hl_index} 字幕顺序已还原为大模型最初顺序",
+    ]
     svc.set_stage_state(project, "stage3_analyze", state)
-    # 顺序变了 → 上一次拼接结果不再对应新顺序，标记待重拼
-    splice = svc.get_stage_state(project, "stage3_splice")
-    if splice.get("status") == "done":
-        splice.update({"status": "pending", "stale_reason": "拼接顺序已调整，请重新拼接"})
-        svc.set_stage_state(project, "stage3_splice", splice)
+    svc.reset_downstream_stages(project, "stage3_analyze")
     svc.save_project(root, project)
-    return state
+    return hls[target_pos]
 
 
 def _fmt_ms(ms: int) -> str:

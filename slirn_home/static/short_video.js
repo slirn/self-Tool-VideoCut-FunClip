@@ -791,94 +791,26 @@
     document.querySelectorAll('.slirn-stage3-hl-preview').forEach(bindSubtitleSort);
   }
 
-  // ---------- REQ-20261012-099 修订五：片段行拖拽调整拼接顺序（编号不变） ----------
-  // 行默认不可拖（避免与标题输入 / 行内字幕拖拽冲突）；按住行首 ⇕ 把柄时才
-  // 开启行级 draggable。drop 后把 DOM 顺序 POST 给后端持久化为 splice_order；
-  // 行内 #编号 随行移动 → 原始顺序号天然保持不变。事件全走 document 代理，
-  // 列表整块 innerHTML 重渲染后无需重绑。
-  document.addEventListener('mousedown', function(e) {
-    var handle = e.target.closest ? e.target.closest('.slirn-stage3-hl-dragseg') : null;
-    if (!handle) return;
-    var row = handle.closest ? handle.closest('.slirn-stage3-hl-row') : null;
-    if (row) row.setAttribute('draggable', 'true');
-  });
-  document.addEventListener('mouseup', function() {
-    document.querySelectorAll('.slirn-stage3-hl-row[draggable="true"]').forEach(function(r) {
-      // 拖拽进行中（dragging 类）的行留给 dragend 收尾
-      if (!r.classList.contains('slirn-seg-dragging')) r.removeAttribute('draggable');
-    });
-  });
-  document.addEventListener('dragstart', function(e) {
-    var row = e.target.closest ? e.target.closest('.slirn-stage3-hl-row') : null;
-    if (!row || row.getAttribute('draggable') !== 'true') return;
-    window._slirnSegDragRow = row;
-    row.classList.add('slirn-seg-dragging');
-    try { e.dataTransfer.setData('text/plain', row.getAttribute('data-hl-index') || ''); } catch (err) {}
-    e.dataTransfer.effectAllowed = 'move';
-  });
-  document.addEventListener('dragend', function(e) {
-    var row = e.target.closest ? e.target.closest('.slirn-stage3-hl-row') : null;
-    if (row) {
-      row.classList.remove('slirn-seg-dragging');
-      row.removeAttribute('draggable');
-    }
-    document.querySelectorAll('.slirn-stage3-hl-row.seg-drop-target').forEach(function(r) {
-      r.classList.remove('seg-drop-target');
-    });
-    window._slirnSegDragRow = null;
-  });
-  document.addEventListener('dragover', function(e) {
-    var row = e.target.closest ? e.target.closest('.slirn-stage3-hl-row') : null;
-    if (!row || !window._slirnSegDragRow || row === window._slirnSegDragRow) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = 'move';
-    row.classList.add('seg-drop-target');
-  });
-  document.addEventListener('dragleave', function(e) {
-    var row = e.target.closest ? e.target.closest('.slirn-stage3-hl-row') : null;
-    if (row) row.classList.remove('seg-drop-target');
-  });
-  document.addEventListener('drop', function(e) {
-    var row = e.target.closest ? e.target.closest('.slirn-stage3-hl-row') : null;
-    var src = window._slirnSegDragRow;
-    if (!row || !src || row === src) return;
-    e.preventDefault();
-    row.classList.remove('seg-drop-target');
-    // 按目标行上下半区决定插前 / 插后（更符合直觉）
-    var rect = row.getBoundingClientRect();
-    var after = e.clientY > rect.top + rect.height / 2;
-    row.parentNode.insertBefore(src, after ? row.nextSibling : row);
-    // DOM 顺序 → 片段编号数组 → 持久化 splice_order
-    var list = document.querySelector('.slirn-stage3-hl-list');
-    if (!list) return;
-    var order = [];
-    list.querySelectorAll('.slirn-stage3-hl-row').forEach(function(r) {
-      var v = parseInt(r.getAttribute('data-hl-index') || '0', 10);
-      if (v) order.push(v);
-    });
-    var ctx = innerCtx();
-    if (!ctx) { toast('缺少 task_id / project_id，拖拽未持久化', 'error'); return; }
-    postJSON(API + '/short_video_stage3_reorder_highlights', {
-      task_id: ctx.taskId, project_id: ctx.projectId, order: order
+  // ---------- REQ-20261012-099 修订六：还原字幕顺序（回到大模型最初顺序） ----------
+  // 修订五的「片段行 ⇕ 拖拽拼接」已随「N 组 = N 条独立短视频」语义移除；
+  // 组间没有拼接顺序，组内行拖拽（bindSubtitleSortAll）保留。
+  function stage3RestoreOrder(btn) {
+    var ctx = innerCtx(); if (!ctx) return;
+    var hlIndex = parseInt(btn.getAttribute('data-hl-index') || '0', 10);
+    if (!hlIndex) { toast('缺少片段编号，未执行还原', 'error'); return; }
+    postJSON(API + '/short_video_stage3_restore_order', {
+      task_id: ctx.taskId, project_id: ctx.projectId, hl_index: hlIndex
     }).then(function(r) {
       if (r && r.ok) {
-        toast('拼接顺序已更新（片段编号不变）');
-        // 同步下方拼接顺序展示（不整页刷新，避免丢文本域编辑中内容）
-        var orderEl = document.querySelector('.slirn-stage3-splice-order');
-        if (orderEl) {
-          orderEl.innerHTML = '拼接顺序：' + order.map(function(i) { return '#' + i; }).join(' → ')
-            + '（拖动上方片段行调整，编号保持原始序号）';
-        }
-      } else {
-        toast((r && r.error) || '顺序保存失败，已还原', 'error');
+        toast(r.toast || ('#' + hlIndex + ' 已还原为大模型最初顺序'));
         openProject(ctx.taskId, ctx.projectId);
-      }
+      } else toast((r && r.error) || '还原顺序失败', 'error');
     });
-  });
+  }
 
   function stage3Splice() {
     var ctx = innerCtx(); if (!ctx) return;
-    toast('截取拼接中…（按当前顺序从源视频切片并拼接）');
+    toast('截取拼接中…（每条短视频按其字幕行时间戳独立切片拼接）');
     postJSON(API + '/short_video_stage3_splice', {
       task_id: ctx.taskId, project_id: ctx.projectId
     }).then(function(r) {
@@ -973,6 +905,7 @@
     if (action === 'sv-stage2-preview-srt') return previewStage2Srt(btn);
     if (action === 'sv-stage3-run') return stage3Run();
     if (action === 'sv-stage3-splice') return stage3Splice();
+    if (action === 'sv-stage3-restore-order') return stage3RestoreOrder(btn);
     if (action === 'sv-stage3-preview') return stage3PreviewHl(btn);
     if (action === 'sv-stage3-verify-run') return stage3VerifyRun();
     if (action === 'sv-stage3-rerun') return stage3RerunOne(btn);

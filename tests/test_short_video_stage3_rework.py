@@ -235,36 +235,46 @@ def test_run_stage3_use_image_errors(tmp_path):
 
 
 def test_run_stage3_vision_call(tmp_path):
+    """修订六：有图 → vision 调用只做 OCR；主解析调用纯文本但 payload 带参考方向。"""
     tid, pid = _make_project(tmp_path)
     img = tmp_path / "shot.png"
     img.write_bytes(b"\x89PNG-fake")
     svc.save_stage3_image(tmp_path, tid, pid, img)
     vision_entry = {"id": "qwen-vl-max", "provider": "dashscope", "protocol": "openai"}
 
-    captured = {}
+    captured = {"vision": 0, "llm": 0}
     orig_llm = revision_service._call_llm
     orig_vis = revision_service._call_llm_vision
 
     def fake_vision(sys_p, user_text, image_paths, entry=None, **kw):
-        captured["sys"] = sys_p
-        captured["user"] = user_text
+        captured["vision"] += 1
+        captured["vis_entry"] = entry
         captured["images"] = list(image_paths)
-        captured["entry"] = entry
+        assert "提取" in user_text or sys_p  # OCR 专用提示词
+        return "课程重点：第一讲选课"
+
+    def fake_llm(sys_p, user_p, **kw):
+        captured["llm"] += 1
+        captured["sys"] = sys_p
+        captured["user"] = user_p
         return _FAKE_LLM_JSON
 
     revision_service._call_llm_vision = fake_vision
-    revision_service._call_llm = lambda s, u, **kw: (_ for _ in ()).throw(
-        AssertionError("有图时不应走纯文本调用"))
+    revision_service._call_llm = fake_llm
     try:
         state = sva.run_stage3(
             tmp_path, tid, pid, prompt="VISION-PROMPT", use_image=True, entry=vision_entry,
         )
         assert state["status"] == "done"
+        # OCR 一次 + 主文本调用一次；system 用用户提示词
+        assert captured["vision"] == 1 and captured["llm"] == 1
         assert captured["sys"] == "VISION-PROMPT"
-        assert captured["entry"]["id"] == "qwen-vl-max"
+        assert captured["vis_entry"]["id"] == "qwen-vl-max"
         assert len(captured["images"]) == 1
         assert captured["images"][0].name == "input_image.png"
-        # user payload 含 SRT 与上游格式约束（修订五：上游「大模型智能剪辑」链路）
+        # 主调用 payload：OCR 参考方向 + SRT + 上游前缀
+        assert "【课程重点参考" in captured["user"]
+        assert "课程重点：第一讲选课" in captured["user"]
         assert "第一句" in captured["user"]
         assert "这是待裁剪的视频srt字幕" in captured["user"]
         # 产物元数据记录截图

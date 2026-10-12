@@ -351,37 +351,7 @@ def run_stage4(
     return state
 
 
-# ---------- REQ-20261012-099 修订五：Stage 3 片段截取拼接 ----------
-
-def build_splice_plan(
-    highlights: list[dict],
-    order: list[int] | None,
-) -> tuple[list[dict], list[int]]:
-    """按 ``splice_order`` 排列 highlights，返回 (有序片段, 实际使用的顺序)。
-
-    - order 缺失 / 含已不存在的编号 → 先取有效前缀，再把漏掉的按自然序补尾
-      （拖拽顺序尽量保留，删片段后仍可拼接）
-    - 编号本身（index）不变——顺序只影响拼接先后
-    """
-    by_index: dict[int, dict] = {}
-    for h in highlights or []:
-        try:
-            i = int(h.get("index") or 0)
-        except (TypeError, ValueError):
-            continue
-        if i > 0:
-            by_index[i] = h
-    seq: list[int] = []
-    for i in order or []:
-        try:
-            i = int(i)
-        except (TypeError, ValueError):
-            continue
-        if i in by_index and i not in seq:
-            seq.append(i)
-    seq += [i for i in sorted(by_index) if i not in seq]
-    return [by_index[i] for i in seq], seq
-
+# ---------- REQ-20261012-099 修订六：Stage 3 短视频生成（逐组截取拼接） ----------
 
 def _render_splice_video(
     source_video: Path,
@@ -416,6 +386,27 @@ def _render_splice_video(
         video.close()
 
 
+def _hl_line_window(
+    sl: dict,
+    srt_lookup: dict[int, object],
+) -> tuple[int, int] | None:
+    """字幕行 → 切割窗（毫秒）。优先行自带时间戳，缺失时查 raw.srt 源行。"""
+    try:
+        s = int(sl.get("start_ms") or 0)
+        e = int(sl.get("end_ms") or 0)
+    except (TypeError, ValueError):
+        s = e = 0
+    if e <= s:
+        try:
+            ln = srt_lookup.get(int(sl.get("src_index") or 0))
+        except (TypeError, ValueError):
+            ln = None
+        if ln is None:
+            return None
+        s, e = ln.start_ms, ln.end_ms
+    return (max(0, s), max(0, e))
+
+
 def run_stage3_splice(
     repo_root: Path | str,
     task_id: str,
@@ -424,12 +415,13 @@ def run_stage3_splice(
     start_ost_ms: int = 0,
     end_ost_ms: int = 100,
 ) -> dict:
-    """Stage 3 修订五：按拖拽后的顺序从源视频截取片段并拼接成一条视频。
+    """Stage 3 修订六：每组（一条短视频）按其字幕行时间戳逐行截取并拼接。
 
-    - 顺序 = highlights.json 的 ``splice_order``（无则自然序）
-    - 每个片段按 LLM 给出的 [start_ms, end_ms] 一刀切，按顺序拼接
-    - 产物：``stage3/splice.mp4`` + ``stage3/splice.srt``（时间轴按拼接
-      结果重排）；状态落 ``pipeline.stage3_splice``
+    - 解析产出的 N 组 = N 条独立短视频（不是合成一条）：每组按**当前
+      subtitle_lines 顺序**逐行切割源视频并拼接 → ``stage3/clip_<index>.mp4``
+      + ``clip_<index>.srt``（组内字幕重新编号、时间轴重定位到拼接后）
+    - end_ost 默认 +100ms 防切词尾（与 Stage 4 默认一致）
+    - 状态落 ``pipeline.stage3_splice``：``clips`` 列出每组的产物与时长
     """
     root = Path(repo_root)
     project = svc.load_project(root, task_id, project_id)
@@ -446,44 +438,43 @@ def run_stage3_splice(
 
     hp = svc.stage_highlights_path(root, task_id, project_id)
     if not hp.is_file():
-        raise svc.ShortVideoError("拼接需要先运行 Stage 3 解析生成片段列表")
+        raise svc.ShortVideoError("拼接需要先运行 Stage 3 解析生成短视频列表")
     try:
         doc = json.loads(hp.read_text(encoding="utf-8"))
     except Exception as e:  # noqa: BLE001
         raise svc.ShortVideoError(f"highlights.json 解析失败: {e}") from e
-    ordered, seq = build_splice_plan(doc.get("highlights") or [], doc.get("splice_order"))
-    if not ordered:
-        raise svc.ShortVideoError("highlights.json 没有有效片段")
+    hls = sorted(
+        (h for h in doc.get("highlights") or []
+         if int(h.get("index") or 0) > 0),
+        key=lambda h: int(h.get("index") or 0),
+    )
+    if not hls:
+        raise svc.ShortVideoError("highlights.json 没有有效短视频分组")
 
     state = svc.get_stage_state(project, "stage3_splice")
     state.update({
         "status": "running",
         "started_at": svc.now_iso(),
-        "order": seq,
-        "count": len(ordered),
+        "count": len(hls),
         "logs": list(state.get("logs") or []) + [
-            f"[{svc.now_iso()}] splice start, order={seq}",
+            f"[{svc.now_iso()}] splice start, groups={len(hls)}",
         ],
     })
     state.pop("stale_reason", None)
+    state.pop("error", None)
     svc.set_stage_state(project, "stage3_splice", state)
     svc.save_project(root, project)
 
     stage_dir = svc.stage3_dir(root, task_id, project_id)
-    out_mp4 = stage_dir / "splice.mp4"
-    out_srt = stage_dir / "splice.srt"
     stage_dir.mkdir(parents=True, exist_ok=True)
+    # 清理旧产物（修订五合成一条的 splice.* + 上一轮可能不同组数的 clip_*）
+    for old in list(stage_dir.glob("splice.*")) + list(stage_dir.glob("clip_*")):
+        try:
+            old.unlink()
+        except OSError:
+            pass
 
-    # 每片段的切割窗（毫秒，含偏移；end_ost 默认 +100ms 防切词尾）
-    windows = [
-        (
-            max(0, int(h.get("start_ms") or 0)) + start_ost_ms,
-            max(0, int(h.get("end_ms") or 0)) + end_ost_ms,
-        )
-        for h in ordered
-    ]
-
-    # 拼接 SRT：按新顺序重编 + 时间轴重定位到拼接后的连续时间轴
+    # 源字幕查表（旧数据/JSON 兜底的行没有自带时间戳时用）
     srt_lookup: dict[int, object] = {}
     srt_path = svc.stage_raw_srt_path(root, task_id, project_id)
     if srt_path.is_file():
@@ -495,54 +486,76 @@ def run_stage3_splice(
             }
         except Exception as parse_err:  # noqa: BLE001
             log.warning("[stage3-splice] raw.srt 解析失败: %s", parse_err)
-    blocks: list[str] = []
-    acc_ms = 0
-    for h, (w_start, w_end) in zip(ordered, windows):
-        for sl in h.get("subtitle_lines") or []:
-            try:
-                ln = srt_lookup.get(int(sl.get("src_index") or 0))
-            except (TypeError, ValueError):
-                ln = None
-            if ln is None:
-                continue
-            ls, le = max(w_start, ln.start_ms), min(w_end, ln.end_ms)
-            if le <= ls:
-                continue
-            blocks.append(
-                f"{len(blocks) + 1}\n"
-                f"{_fmt_srt_time(acc_ms + ls - w_start)} --> {_fmt_srt_time(acc_ms + le - w_start)}\n"
-                f"{ln.text}\n"
-            )
-        acc_ms += max(0, w_end - w_start)
-    out_srt.write_text("\n".join(blocks), encoding="utf-8")
 
+    # 视频实际时长用于夹紧切割窗（毫秒级时间戳可能略超片尾）
+    vid_dur = 0.0
+    try:
+        import subprocess
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(source_video)],
+            capture_output=True, text=True, timeout=30, encoding="utf-8",
+        )
+        if probe.returncode == 0:
+            vid_dur = max(0.0, float((probe.stdout or "").strip()))
+    except Exception:  # noqa: BLE001
+        pass
+
+    clips_meta: list[dict] = []
     t0 = time.time()
     try:
-        # 视频实际时长用于夹紧切割窗（毫秒级时间戳可能略超片尾）
-        vid_dur = 0.0
-        try:
-            import subprocess
-            probe = subprocess.run(
-                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-                 "-of", "default=noprint_wrappers=1:nokey=1", str(source_video)],
-                capture_output=True, text=True, timeout=30, encoding="utf-8",
-            )
-            if probe.returncode == 0:
-                vid_dur = max(0.0, float((probe.stdout or "").strip()))
-        except Exception:  # noqa: BLE001
-            pass
-        seg_list: list[tuple[float, float]] = []
-        for w_start, w_end in windows:
-            s_sec = max(0.0, w_start / 1000.0)
-            e_sec = w_end / 1000.0
-            if vid_dur > 0:
-                e_sec = min(vid_dur, e_sec)
-            if e_sec <= s_sec:
+        for h in hls:
+            idx = int(h.get("index") or 0)
+            title = str(h.get("title") or f"短视频 {idx}")
+            # (窗起, 窗止, 该行字幕文本) —— 按当前 subtitle_lines 顺序
+            windows: list[tuple[int, int, str]] = []
+            for sl in h.get("subtitle_lines") or []:
+                win = _hl_line_window(sl, srt_lookup)
+                if win is None:
+                    continue
+                windows.append((win[0] + start_ost_ms, win[1] + end_ost_ms,
+                                str(sl.get("text") or "")))
+            if not windows:
+                log.warning("[stage3-splice] 组 #%s 没有可切割的字幕行，跳过", idx)
                 continue
-            seg_list.append((s_sec, e_sec))
-        if not seg_list:
-            raise ValueError("没有有效的切割时间段")
-        _render_splice_video(source_video, seg_list, out_mp4)
+
+            # 组内拼接 SRT：重新编号 + 时间轴重定位到拼接后的连续时间轴
+            blocks: list[str] = []
+            acc_ms = 0
+            for w_start, w_end, text in windows:
+                span = max(0, w_end - w_start)
+                blocks.append(
+                    f"{len(blocks) + 1}\n"
+                    f"{_fmt_srt_time(acc_ms)} --> {_fmt_srt_time(acc_ms + span)}\n"
+                    f"{text}\n"
+                )
+                acc_ms += span
+
+            seg_list: list[tuple[float, float]] = []
+            for w_start, w_end, _text in windows:
+                s_sec = max(0.0, w_start / 1000.0)
+                e_sec = w_end / 1000.0
+                if vid_dur > 0:
+                    e_sec = min(vid_dur, e_sec)
+                if e_sec <= s_sec:
+                    continue
+                seg_list.append((s_sec, e_sec))
+            if not seg_list:
+                raise ValueError(f"组 #{idx} 没有有效的切割时间段")
+            out_mp4 = stage_dir / f"clip_{idx}.mp4"
+            _render_splice_video(source_video, seg_list, out_mp4)
+            if not out_mp4.is_file() or out_mp4.stat().st_size < 1024:
+                raise ValueError(f"组 #{idx} 未产出有效 mp4")
+            total_sec = sum(max(0.0, e - s) for s, e in seg_list)
+            out_srt = stage_dir / f"clip_{idx}.srt"
+            out_srt.write_text("\n".join(blocks), encoding="utf-8")
+            clips_meta.append({
+                "index": idx,
+                "title": title,
+                "mp4": out_mp4.name,
+                "srt": out_srt.name,
+                "total_sec": round(total_sec, 1),
+            })
     except Exception as e:  # noqa: BLE001
         log.exception("stage3 splice failed")
         project = svc.load_project(root, task_id, project_id)
@@ -560,14 +573,13 @@ def run_stage3_splice(
         return state
 
     elapsed = int(time.time() - t0)
-    total_sec = sum(max(0, e - s) for s, e in windows) / 1000.0
-    if not out_mp4.is_file() or out_mp4.stat().st_size < 1024:
+    if not clips_meta:
         project = svc.load_project(root, task_id, project_id)
         state = svc.get_stage_state(project, "stage3_splice")
         state.update({
             "status": "failed",
             "finished_at": svc.now_iso(),
-            "error": "拼接未产出有效 mp4",
+            "error": "没有任何分组产出有效短视频",
         })
         svc.set_stage_state(project, "stage3_splice", state)
         svc.save_project(root, project)
@@ -579,12 +591,11 @@ def run_stage3_splice(
         "status": "done",
         "finished_at": svc.now_iso(),
         "elapsed_sec": elapsed,
-        "mp4": svc._rel(root, out_mp4),
-        "srt": svc._rel(root, out_srt),
-        "total_sec": round(total_sec, 1),
-        "order": seq,
+        "count": len(clips_meta),
+        "clips": clips_meta,
+        "total_sec": round(sum(c["total_sec"] for c in clips_meta), 1),
         "logs": list(state.get("logs") or []) + [
-            f"[{svc.now_iso()}] splice done, order={seq}, total={total_sec:.1f}s, elapsed={elapsed}s",
+            f"[{svc.now_iso()}] splice done, clips={len(clips_meta)}, elapsed={elapsed}s",
         ],
     })
     state.pop("error", None)
