@@ -21,14 +21,17 @@ def _src(rel: str) -> str:
 
 def test_nav_labels_renamed():
     src = _src("app.py")
-    assert "📋 长视频任务列表" in src, "「任务列表」按钮应改为「长视频任务列表」"
-    assert "🎞 短视频任务列表" in src, "hero「短视频混剪」按钮应改为「短视频任务列表」"
-    assert ">短视频任务列表<" in src, "顶栏「短视频混剪」按钮应改为「短视频任务列表」"
+    assert "📋 长视频列表" in src, "「任务列表」按钮应改为「长视频列表」"
+    assert "🎞 短视频列表" in src, "hero「短视频混剪」按钮应改为「短视频列表」"
+    assert ">短视频列表<" in src, "顶栏「短视频混剪」按钮应改为「短视频列表」"
     # 旧文案不再出现在导航区（default 项目名里的「短视频混剪」不受影响）
     assert ">短视频混剪<" not in src
+    assert ">短视频任务列表<" not in src
     assert "📋 任务列表<" not in src
+    assert "📋 长视频任务列表" not in src
     assert "🎞 短视频混剪" not in src
     assert "短视频混剪加载中" not in src
+    assert "短视频任务列表加载中" not in src
 
 
 # ---------- 刷新保持当前页面 ----------

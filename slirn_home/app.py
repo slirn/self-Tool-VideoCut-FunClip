@@ -313,7 +313,7 @@ def _render_task_list_skeleton() -> str:
     </div>
     <div class="slirn-task-grid"><div class="slirn-empty" style="grid-column:1/-1;">
         <div class="slirn-empty-icon">⏳</div>
-        <div class="slirn-empty-text">任务列表加载中…（登录后按你的权限显示）</div>
+        <div class="slirn-empty-text">长视频列表加载中…（登录后按你的权限显示）</div>
     </div></div>
     </div>'''
 
@@ -5828,7 +5828,7 @@ def build_app(repo_root: Path | None = None) -> gr.Blocks:
             <span>Video Studio</span>
         </div>
         <div class="slirn-topbar-actions">
-            <button class="slirn-btn" data-action="goto-short-video">短视频任务列表</button>
+            <button class="slirn-btn" data-action="goto-short-video">短视频列表</button>
             <button class="slirn-btn-icon" data-action="open-llm-settings" aria-label="大模型设置" title="大模型设置">⚙️</button>
             <button class="slirn-btn-icon" onclick="window.slirnToggleTheme && window.slirnToggleTheme()" aria-label="切换主题" title="切换主题">🌓</button>
             <a class="slirn-btn" href="http://127.0.0.1:7860/" target="_blank">🚀 上游首页</a>
@@ -5847,9 +5847,9 @@ def build_app(repo_root: Path | None = None) -> gr.Blocks:
             <p>登录后按你的权限管理任务 · 仓库 <code>{_esc(repo_root)}</code></p>
         </div>
         <div class="slirn-hero-actions">
-            <button class="slirn-btn" data-action="goto-tasks">📋 长视频任务列表</button>
+            <button class="slirn-btn" data-action="goto-tasks">📋 长视频列表</button>
             <button class="slirn-btn" data-action="goto-hotwords">📚 热词库</button>
-            <button class="slirn-btn" data-action="goto-short-video">🎞 短视频任务列表</button>
+            <button class="slirn-btn" data-action="goto-short-video">🎞 短视频列表</button>
             <button class="slirn-btn slirn-btn-primary" data-action="goto-create">➕ 新建任务</button>
         </div>
     </div>
@@ -5859,7 +5859,7 @@ def build_app(repo_root: Path | None = None) -> gr.Blocks:
     <div id="slirn-tab-create" class="slirn-tab-content" style="display:none;">{_render_create_task(repo_root)}</div>
     <div id="slirn-tab-hotwords" class="slirn-tab-content" style="display:none;">{_render_hotword_lib(repo_root)}</div>
     <div id="slirn-tab-short-video" class="slirn-tab-content" style="display:none;">
-        <div id="slirn-short-video-inner" class="slirn-tab-inner"><div class="slirn-empty">短视频任务列表加载中…</div></div>
+        <div id="slirn-short-video-inner" class="slirn-tab-inner"><div class="slirn-empty">短视频列表加载中…</div></div>
     </div>
     <div id="slirn-tab-detail" class="slirn-tab-content" style="display:none;"></div>
     <div id="slirn-tab-workbench" class="slirn-tab-content" style="display:none;"></div>
