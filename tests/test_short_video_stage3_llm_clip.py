@@ -928,6 +928,8 @@ def test_remove_hl_flow(tmp_path):
     }).json()["html"]
     assert html.count('class="slirn-stage3-hl-row"') == 0
     assert 'data-action="sv-stage3-splice" disabled' in html
+    # 修订九：删光后页签栏也不渲染（回「解析后将列出」空态）
+    assert "slirn-stage3-hl-tabs" not in html
 
 
 def test_stage3_ui_segments_and_remove_button(tmp_path):
@@ -969,3 +971,78 @@ def test_preview_segments_and_remove_wiring():
     assert "window.confirm(msg)" in js
     assert "short_video_stage3_remove_hl" in js
     assert "action === 'sv-stage3-remove-hl'" in js
+
+
+# ---------- 修订九：N 条短视频逐条页签（tab bar + 面板） ----------
+
+def test_stage3_ui_tabs_per_hl(tmp_path):
+    """每条短视频一个页签：tab 数 = 条数、首签（#1）默认激活、
+    面板一一对应且只有一个显示；行本身的 DOM 结构不变（旧断言不受影响）。"""
+    from fastapi.testclient import TestClient
+
+    from slirn_home.app import build_app
+
+    tid, pid = _make_project(tmp_path)
+    _select_first_source(tmp_path, tid, pid)
+    assert _run_stage3_groups(tmp_path, tid, pid)["status"] == "done"
+
+    client = TestClient(build_app(tmp_path).app)
+    html = client.post("/slirn/api/short_video_get", json={
+        "task_id": tid, "project_id": pid,
+    }).json()["html"]
+
+    # tab bar：2 组 → 2 个页签（#1 主题B 重编后是第一组）
+    assert 'class="slirn-stage3-hl-tabs"' in html
+    assert html.count('data-action="sv-stage3-hl-tab"') == 2
+    # 首签默认激活（组 1 = 主题B）；非 active 的 tab 无标记
+    assert 'class="slirn-stage3-hl-tab active" data-action="sv-stage3-hl-tab" data-hl-index="1"' in html
+    assert html.count('slirn-stage3-hl-tab active"') == 1
+    assert "#1 主题B" in html and "#2 主题A" in html
+    # 面板：每条一个 pane，仅激活页显示；行 class 保持原样（既有断言不破）
+    assert html.count('class="slirn-stage3-hl-pane"') == 1
+    assert html.count('class="slirn-stage3-hl-pane active"') == 1
+    assert html.count('class="slirn-stage3-hl-row"') == 2
+
+
+def test_stage3_ui_tab_label_truncation(tmp_path, monkeypatch):
+    """页签标签超长截断（≤10 字 + …）；完整标题仍在 tooltip / 标题输入框里。"""
+    from fastapi.testclient import TestClient
+
+    from slirn_home.app import build_app
+
+    tid, pid = _make_project(tmp_path)
+    assert _run_stage3_groups(tmp_path, tid, pid)["status"] == "done"
+    monkeypatch.setattr(
+        revision_service, "_call_llm",
+        lambda s, u, **kw: (
+            "# 1 | 一个特别特别特别长的短视频标题一定会被截断\n"
+            "1. [00:00:01,000-00:00:02,000] 第一句\n"
+        ),
+    )
+    assert sva.rerun_stage3_one(tmp_path, tid, pid, 1)["status"] == "done"
+
+    client = TestClient(build_app(tmp_path).app)
+    html = client.post("/slirn/api/short_video_get", json={
+        "task_id": tid, "project_id": pid,
+    }).json()["html"]
+    assert "#1 一个特别特别特别长的…" in html            # 10 字截断 + …
+    assert "一个特别特别特别长的短视频标题一定会被截断" in html  # tooltip/输入框仍完整
+
+
+def test_stage3_hl_tabs_wiring():
+    """页签切换 JS（switchHlTab + 分发 + 重渲染后恢复记忆页签）与 CSS 显示规则。"""
+    js = (FUNCLIP_ROOT / "slirn_home" / "static" / "short_video.js").read_text(encoding="utf-8")
+    css = (FUNCLIP_ROOT / "slirn_home" / "static" / "home.css").read_text(encoding="utf-8")
+    # 切换函数 + 点击分发
+    assert "function switchHlTab(" in js
+    assert "action === 'sv-stage3-hl-tab'" in js
+    # 重渲染（restore/rerun/删除/拼接都走 openProject）后恢复用户选中的页签；
+    # 记忆带项目 key（换项目不串页签），已删除的条目回默认第一条
+    assert "function _restoreHlTab(" in js
+    assert "_restoreHlTab(taskId, projectId);" in js
+    assert "window._slirnSvHlTab" in js
+    # CSS：面板默认隐藏、激活显示；tab 单行横排可横滚
+    assert ".slirn-stage3-hl-tab.active {" in css
+    assert ".slirn-stage3-hl-pane {\n  display: none;\n}" in css
+    assert ".slirn-stage3-hl-pane.active {\n  display: block;\n}" in css
+    assert "overflow-x: auto" in css.split(".slirn-stage3-hl-tabs {", 1)[1][:200]

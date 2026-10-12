@@ -450,9 +450,18 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
     # 修订六：一组 = 一条短视频（围绕一个标题，字幕合计约 70s）；组内每行带
     # 唯一编号 no + 时间戳（拖拽重排后编号随行移动不变，「还原顺序」按 no 升序）
     hl_rows = []
+    # 修订九：N 条短视频逐条页签（点页签切换，不再整页长滚动）；首签默认选中
+    hl_tabs = []
     for hl in s3.get("highlights") or []:
         idx = hl.get("index") or len(hl_rows) + 1
         title = hl.get("title") or f"短视频 #{idx}"
+        is_first = len(hl_rows) == 0
+        _tab_label = title if len(title) <= 10 else title[:10] + "…"
+        hl_tabs.append(
+            f'<button class="slirn-stage3-hl-tab{" active" if is_first else ""}" '
+            f'data-action="sv-stage3-hl-tab" data-hl-index="{idx}" '
+            f'title="{esc(title)}">#{idx} {esc(_tab_label)}</button>'
+        )
         start = hl.get("start_ms") or 0
         end = hl.get("end_ms") or 0
         sub_lines = hl.get("subtitle_lines") or []
@@ -540,6 +549,8 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
             f'data-hl-index="{idx}" disabled title="当前已是大模型最初顺序">↩️ 还原顺序</button>'
         )
         hl_rows.append(
+            # 修订九：每条短视频包一层页签面板（tab bar 在列表头部），点页签切换显示
+            f'<div class="slirn-stage3-hl-pane{" active" if is_first else ""}" data-hl-index="{idx}">'
             f'<div class="slirn-stage3-hl-row" data-hl-index="{idx}" data-sub-text="{esc(full_text)}">'
             f'<div class="slirn-stage3-hl-head">'
             f'<span class="slirn-sv-row-no">#{idx}</span>'
@@ -556,8 +567,13 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
             f'<div class="slirn-stage3-hl-preview" data-hl-index="{idx}">{sub_preview}</div>'
             f'<div class="slirn-sv-muted slirn-stage3-hl-hint">⋮⋮ 拖动调整本条短视频内字幕的先后顺序（行首编号保持不变，拼接按当前行序）；↩️ 还原顺序 = 恢复大模型最初给出的顺序</div>'
             f'</div>'
+            f'</div>'
         )
-    hl_list = "".join(hl_rows) or '<div class="slirn-sv-muted">解析后将列出各条短视频</div>'
+    hl_list = (
+        '<div class="slirn-stage3-hl-tabs">' + "".join(hl_tabs) + '</div>' + "".join(hl_rows)
+        if hl_rows else
+        '<div class="slirn-sv-muted">解析后将列出各条短视频</div>'
+    )
 
     # 修订六：短视频生成卡 —— 每条（组）按其字幕行时间戳截取拼接成独立 mp4
     splice = project.get("pipeline", {}).get("stage3_splice") or {}

@@ -5599,6 +5599,46 @@ input[type="checkbox"]:focus-visible {
 }
 
 /* REQ-20261004-UX：Stage 3 highlights 字幕预览 */
+/* 修订九：N 条短视频逐条页签 —— tab bar 单行横排（多了横向滚动），面板只显示激活页 */
+.slirn-stage3-hl-tabs {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 4px;
+  margin-top: 10px;
+  overflow-x: auto;
+  border-bottom: 1px solid #e2e8f0;
+}
+.slirn-stage3-hl-tab {
+  flex: 0 1 auto;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 6px 12px;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  background: transparent;
+  color: #475569;
+  font-size: 12px;
+  cursor: pointer;
+}
+.slirn-stage3-hl-tab:hover {
+  background: #f1f5f9;
+  color: #1e293b;
+}
+.slirn-stage3-hl-tab.active {
+  background: #fafafa;
+  border-color: #e2e8f0;
+  color: #4338ca;
+  font-weight: 600;
+}
+.slirn-stage3-hl-pane {
+  display: none;
+}
+.slirn-stage3-hl-pane.active {
+  display: block;
+}
 .slirn-stage3-hl-row {
   margin-top: 10px;
   padding: 10px 12px;

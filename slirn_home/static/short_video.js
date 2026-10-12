@@ -166,7 +166,47 @@
       }
       startElapsedTicker();
       initSubtitleSortAll();
+      // 修订九：restore/rerun/删除/拼接都走 openProject 重渲染 —— 渲染完
+      // 恢复用户上次选中的短视频页签（该条已删则回默认第一条）
+      _restoreHlTab(taskId, projectId);
     });
+  }
+
+  // ---------- 修订九：Stage 3 多条短视频逐条页签 ----------
+
+  function _svProjKey() {
+    var el = document.getElementById('slirn-short-video-inner');
+    if (!el) return '';
+    return (el.getAttribute('data-task-id') || '') + '/' +
+           (el.getAttribute('data-project-id') || '');
+  }
+
+  function switchHlTab(idx) {
+    var want = String(idx || '');
+    var hit = false;
+    Array.prototype.forEach.call(
+      document.querySelectorAll('.slirn-stage3-hl-tab'),
+      function(t) {
+        var on = String(t.getAttribute('data-hl-index') || '') === want;
+        if (on) hit = true;
+        t.classList.toggle('active', on);
+      });
+    Array.prototype.forEach.call(
+      document.querySelectorAll('.slirn-stage3-hl-pane'),
+      function(p) {
+        p.classList.toggle('active', String(p.getAttribute('data-hl-index') || '') === want);
+      });
+    // 只在确实命中时记忆（连同项目 key，换项目不串页签）
+    if (hit) window._slirnSvHlTab = {k: _svProjKey(), hl: want};
+  }
+
+  function _restoreHlTab(taskId, projectId) {
+    var mem = window._slirnSvHlTab;
+    if (!mem || !mem.hl) return;
+    if (mem.k !== String(taskId) + '/' + String(projectId)) return;
+    var tab = document.querySelector('.slirn-stage3-hl-tab[data-hl-index="' + mem.hl + '"]');
+    if (tab) switchHlTab(mem.hl);
+    else window._slirnSvHlTab = null;   // 该条已删除 → 回默认第一条
   }
 
   function createProject() {
@@ -1047,6 +1087,7 @@
     if (action === 'sv-stage3-verify-run') return stage3VerifyRun();
     if (action === 'sv-stage3-rerun') return stage3RerunOne(btn);
     if (action === 'sv-stage3-remove-hl') return stage3RemoveHl(btn);
+    if (action === 'sv-stage3-hl-tab') return switchHlTab(btn.getAttribute('data-hl-index'));
     if (action === 'sv-stage3-save-default') return stage3SaveDefault();
     if (action === 'sv-stage3-save-history') return stage3SaveHistory();
     if (action === 'sv-stage3-load-prompt') return stage3LoadPrompt(btn);
