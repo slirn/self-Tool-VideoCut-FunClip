@@ -328,3 +328,36 @@ rerun 提示词捕获 / 删除全流程含删光 / segments UI 断言 / JS 接�
 
 验证：全量 pytest **1176 passed** / node --check OK / ruff HEAD-vs-worktree
 零新增 / 7861 重启后 served JS 含逐段引擎与 confirm 接线（11 处匹配）。
+
+## 修订九（2026-10-13 验收反馈）：多条短视频逐条页签显示
+
+用户反馈：解析出的多条短视频片段显示时，**每一条用一个页签（tab）**——
+看其他条点一下页签即可，不需要滚动很长的滚动条。纯 UI 重构，后端/数据结构
+零改动（highlights.json、端点、状态镜像全部不变）。
+
+实现：
+
+1. **渲染层**（`short_video_ui.py`）：行循环里每条 highlight 同时产出
+   tab 按钮 + pane 面板。tab bar（`slirn-stage3-hl-tabs`）置于列表头部，
+   单行横排、超宽横向滚动；每个 tab = `#序号 标题`（≤10 字截断加 …，
+   完整标题在 tooltip 和标题输入框里），`data-action="sv-stage3-hl-tab"`
+   走既有事件代理分发。每条 row 原样包进 `slirn-stage3-hl-pane`
+   （`data-hl-index` 对应），**首签默认激活**；row 本身的 class/DOM 不动
+   ——既有 DOM 计数断言（`class="slirn-stage3-hl-row"`）不受影响。
+   删光后 tab bar 不渲染（回「解析后将列出」空态）。
+2. **前端切换**（`static/short_video.js`）：`switchHlTab(idx)` 切换
+   tab/pane 的 `active`；记忆 `window._slirnSvHlTab = {k: 项目key, hl: 序号}`
+   （带项目 key，换项目不串页签）。restore/rerun/删除/拼接都走
+   `openProject` 重渲染 → 渲染完 `_restoreHlTab` 恢复用户选中的页签；
+   该条已删除则清记忆回默认第一条。
+3. **样式**（`static/home.css`）：`.slirn-stage3-hl-pane` 默认
+   `display:none`、`.active` 显示（与 `.slirn-sv-stage-pane` 同款模式）；
+   tab 显式配色（base/hover/active 三态，防 `.prose *` 颜色陷阱）。
+
+涉及：`short_video_ui.py` / `static/short_video.js` / `static/home.css`；
+测试新增 3 例（页签渲染 + 标签截断 + JS/CSS 接线守卫）+ 删光断言 1 处，
+文件内 37 例。
+
+验证：全量 pytest **1179 passed** / node --check 双 JS OK / ruff
+HEAD-vs-worktree 零新增 / 7861 重启后 served 页面 config 含新 CSS 规则、
+served JS 含 switchHlTab 接线。
