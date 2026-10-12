@@ -739,19 +739,56 @@
     };
     document.addEventListener('keydown', onEsc);
 
-    // video seek + pause 逻辑（与之前一致）
+    // video 逐段播放引擎（修订八）：按 data-segments 的切割窗逐段 seek 播放，
+    // 与拼接产物一致；无 segments 时退回旧的「组起点连播到组终点」。
     var v = fp.querySelector('#slirn-sv-fp-video');
     if (!v) return;
-    var startSec = startMs / 1000;
-    var endSec = Math.max(startSec + 0.05, endMs / 1000);
+    var segs = null;
+    try {
+      var raw = btn.getAttribute('data-segments');
+      if (raw) {
+        var parsed = JSON.parse(raw);
+        if (Object.prototype.toString.call(parsed) === '[object Array]' && parsed.length) {
+          segs = parsed.filter(function(sg) {
+            return sg && isFinite(sg[0]) && isFinite(sg[1]) && sg[1] > sg[0];
+          }).map(function(sg) { return [sg[0] / 1000, sg[1] / 1000]; });
+          if (!segs.length) segs = null;
+        }
+      }
+    } catch (e) { segs = null; }
+    var startSec = (segs ? segs[0][0] : startMs / 1000);
     var cleared = false;
+    var segIdx = 0;
+    var manual = false;   // 用户自己拖进度条 → 停止自动逐段推进
+    function onSeeking() {
+      if (cleared || segIdx >= (segs ? segs.length : 0)) return;
+      var t = v.currentTime;
+      // 当前段的自动 seek 会先触发 seeking —— 只把「跳出现段」的视作手动
+      var cur = segs[segIdx];
+      if (t < cur[0] - 0.05 || t > cur[1] + 0.05) manual = true;
+    }
     function onTime() {
-      if (cleared) return;
-      if (v.currentTime >= endSec) {
+      if (cleared || manual) return;
+      if (segs) {
+        if (v.currentTime >= segs[segIdx][1]) {
+          segIdx++;
+          if (segIdx >= segs.length) {
+            v.pause();
+            cleared = true;
+            v.removeEventListener('timeupdate', onTime);
+            v.removeEventListener('seeking', onSeeking);
+          } else {
+            try { v.currentTime = segs[segIdx][0]; } catch (e) { /* ignore */ }
+          }
+        }
+      } else if (v.currentTime >= endSecFallback()) {
         v.pause();
         cleared = true;
         v.removeEventListener('timeupdate', onTime);
       }
+    }
+    function endSecFallback() {
+      return Math.max(startMs / 1000 + 0.05, endMs / 1000);
     }
     function onLoaded() {
       try {
@@ -759,6 +796,7 @@
         v.play().catch(function(){});
       } catch (e) { /* seek 偶发 NotSupported 忽略 */ }
       v.addEventListener('timeupdate', onTime);
+      if (segs) v.addEventListener('seeking', onSeeking);
     }
     if (v.readyState >= 1) {
       onLoaded();
@@ -899,6 +937,27 @@
     });
   }
 
+  // 修订八：删除一条短视频 —— 必须先弹确认框，用户确认后才真正删除
+  function stage3RemoveHl(btn) {
+    var ctx = innerCtx(); if (!ctx) return;
+    var hlIndex = parseInt(btn.getAttribute('data-hl-index') || '0', 10);
+    if (!hlIndex) { toast('缺少片段编号，未执行删除', 'error'); return; }
+    var row = btn.closest ? btn.closest('.slirn-stage3-hl-row') : null;
+    var titleEl = row ? row.querySelector('.slirn-stage3-hl-title') : null;
+    var title = titleEl ? (titleEl.value || titleEl.textContent || '').trim() : '';
+    var msg = '确定要删除短视频 #' + hlIndex +
+      (title ? '「' + title + '」' : '') + ' 吗？删除后需要重新解析才能恢复。';
+    if (!window.confirm(msg)) return;
+    postJSON(API + '/short_video_stage3_remove_hl', {
+      task_id: ctx.taskId, project_id: ctx.projectId, hl_index: hlIndex
+    }).then(function(r) {
+      if (r && r.ok) {
+        toast(r.toast || ('#' + hlIndex + ' 已删除'));
+        openProject(ctx.taskId, ctx.projectId);
+      } else toast((r && r.error) || '删除失败', 'error');
+    });
+  }
+
   // ---------- 列表过滤 / 搜索（REQ-20261012-099 修订四，对齐长视频列表） ----------
 
   // 「我的任务 / 全部任务」radio 切换 → 按新 scope 重拉列表
@@ -987,6 +1046,7 @@
     if (action === 'sv-stage3-preview') return stage3PreviewHl(btn);
     if (action === 'sv-stage3-verify-run') return stage3VerifyRun();
     if (action === 'sv-stage3-rerun') return stage3RerunOne(btn);
+    if (action === 'sv-stage3-remove-hl') return stage3RemoveHl(btn);
     if (action === 'sv-stage3-save-default') return stage3SaveDefault();
     if (action === 'sv-stage3-save-history') return stage3SaveHistory();
     if (action === 'sv-stage3-load-prompt') return stage3LoadPrompt(btn);

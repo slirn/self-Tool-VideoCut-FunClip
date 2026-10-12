@@ -10179,6 +10179,36 @@ def _register_slirn_api(
             return _err(f"还原失败: {e}")
         return _ok(highlight=updated, toast=f"#{hl_index} 已还原为大模型最初顺序")
 
+    @app.app.post("/slirn/api/short_video_stage3_remove_hl")
+    async def short_video_stage3_remove_hl(body: dict = Body(default_factory=dict)):
+        """REQ-20261012-099 修订八：删除一条短视频。
+
+        body: task_id / project_id / hl_index。前端先弹 confirm，用户确认
+        后才调到这里真删；其余条目 index 不变，下游/拼接作废。
+        """
+        from slirn_home import short_video_analyze as _sv_analyze
+
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        if not tid or not pid:
+            return _err("缺少 task_id 或 project_id")
+        try:
+            hl_index = int(body.get("hl_index") or 0)
+        except (TypeError, ValueError):
+            return _err("hl_index 无效")
+        if hl_index <= 0:
+            return _err("hl_index 必须 > 0")
+        try:
+            res = _sv_analyze.remove_stage3_hl(repo_root, tid, pid, hl_index)
+        except Exception as e:  # noqa: BLE001
+            log.exception("stage3_remove_hl failed")
+            return _err(f"删除失败: {e}")
+        left = int(res.get("count") or 0)
+        return _ok(
+            removed_index=res.get("removed_index"),
+            toast=f"#{hl_index} 已删除" + (f"，剩余 {left} 条" if left else "（已无剩余，可重新解析）"),
+        )
+
     @app.app.post("/slirn/api/short_video_stage3_splice")
     async def short_video_stage3_splice(body: dict = Body(default_factory=dict)):
         """REQ-20261012-099 修订六：逐组截取拼接 —— 每条短视频各自成片。

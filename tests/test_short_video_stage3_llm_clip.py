@@ -818,3 +818,154 @@ def test_llm_groups_js_wiring():
         capture_output=True, text=True, timeout=30,
     )
     assert r.returncode == 0, f"short_video.js 语法错误\nstderr={r.stderr[:1000]}"
+
+
+# ---------- 修订八：预览逐段播放 / 删除确认 / 重解析提示词重组 ----------
+
+def test_filter_ocr_for_title():
+    """OCR 参考按标题相关性过滤：相关行保留、无关行丢弃、无命中给空串。"""
+    f = sva._filter_ocr_for_title
+    ocr = "如何选课的三个步骤\n老师讲了剪辑软件\n选课要注意时间冲突\n下一章：导出视频"
+    out = f(ocr, "选课")
+    assert "如何选课的三个步骤" in out
+    assert "选课要注意时间冲突" in out
+    assert "剪辑软件" not in out and "导出视频" not in out
+    assert f(ocr, "") == ""                    # 无标题 → 不给参考
+    assert f("", "选课") == ""                 # 无 OCR → 空
+    assert f("完全无关的内容", "选课") == ""   # 无命中 → 宁缺毋滥
+    long_ocr = "\n".join(f"选课要点{i}" for i in range(20))
+    assert len(f(long_ocr, "选课").splitlines()) == 12   # 12 行上限
+
+
+def test_rerun_prompt_theme_and_filtered_ocr(tmp_path):
+    """修订八：重解析提示词按标题重组 —— 主题声明 + OCR 只给相关行 +
+    有条理组织要求（system 尾部定向指令同步升级）。"""
+    tid, pid = _make_project(tmp_path)
+    img = tmp_path / "shot.png"
+    img.write_bytes(b"\x89PNG-fake")
+    svc.save_stage3_image(tmp_path, tid, pid, img)
+    # 整跑出 2 组（重编后：组1=主题B，组2=主题A）
+    assert _run_stage3_groups(tmp_path, tid, pid)["status"] == "done"
+
+    captured = {"sys": "", "user": ""}
+    orig_llm = revision_service._call_llm
+    orig_vis = revision_service._call_llm_vision
+
+    def fake_vision(*a, **kw):
+        return "如何做好主题A的第一步\n无关行：明天天气\n主题A 的第二步要点"
+
+    def fake_llm(sys_p, user_p, **kw):
+        captured["sys"] = sys_p
+        captured["user"] = user_p
+        return "# 1 | 主题A\n1. [00:00:05,000-00:00:06,000] 第二句\n"
+
+    revision_service._call_llm = fake_llm
+    revision_service._call_llm_vision = fake_vision
+    try:
+        state = sva.rerun_stage3_one(
+            tmp_path, tid, pid, 2, use_image=True, entry=_VISION_ENTRY,
+        )
+        assert state["status"] == "done"
+        # OCR 只给与「主题A」相关的行（节选模板，非整跑全量模板）
+        assert "主题A的第一步" in captured["user"]
+        assert "主题A 的第二步要点" in captured["user"]
+        assert "无关行" not in captured["user"]
+        assert "与主题「主题A」相关的参考方向" in captured["user"]
+        assert "课程重点参考（来自" not in captured["user"]
+        # 主题声明 + 有条理组织（user 约束 + system 定向指令）
+        assert "只解析主题「主题A」这 1 条短视频" in captured["user"]
+        assert "有条理地组织" in captured["user"]
+        assert "只围绕主题「主题A」" in captured["sys"]
+        assert "有条理地组织" in captured["sys"]
+    finally:
+        revision_service._call_llm = orig_llm
+        revision_service._call_llm_vision = orig_vis
+
+
+def test_remove_hl_flow(tmp_path):
+    """删除一条：doc/state 镜像同步、其余 index 不重编、下游作废、
+    删光后页面回未解析态；不存在 → 报错。"""
+    from fastapi.testclient import TestClient
+
+    from slirn_home.app import build_app
+
+    tid, pid = _make_project(tmp_path)
+    _select_first_source(tmp_path, tid, pid)
+    assert _run_stage3_groups(tmp_path, tid, pid)["status"] == "done"
+    proj = svc.load_project(tmp_path, tid, pid)
+    sp = svc.get_stage_state(proj, "stage3_splice")
+    sp["status"] = "done"
+    svc.set_stage_state(proj, "stage3_splice", sp)
+    svc.save_project(tmp_path, proj)
+
+    client = TestClient(build_app(tmp_path).app)
+    r = client.post("/slirn/api/short_video_stage3_remove_hl", json={
+        "task_id": tid, "project_id": pid, "hl_index": 2,
+    }).json()
+    assert r["ok"] is True, r
+    assert "剩余 1 条" in r["toast"]
+
+    doc = json.loads(
+        svc.stage_highlights_path(tmp_path, tid, pid).read_text(encoding="utf-8")
+    )
+    assert [h["index"] for h in doc["highlights"]] == [1]   # index 不重编
+    proj = svc.load_project(tmp_path, tid, pid)
+    s3 = proj["pipeline"]["stage3_analyze"]
+    assert s3["count"] == 1 and len(s3["highlights"]) == 1  # 镜像整表同步
+    assert svc.get_stage_state(proj, "stage3_splice").get("status") == "pending"
+
+    r = client.post("/slirn/api/short_video_stage3_remove_hl", json={
+        "task_id": tid, "project_id": pid, "hl_index": 9,
+    }).json()
+    assert r["ok"] is False and "不存在" in r["error"]
+
+    r = client.post("/slirn/api/short_video_stage3_remove_hl", json={
+        "task_id": tid, "project_id": pid, "hl_index": 1,
+    }).json()
+    assert r["ok"] is True and "已无剩余" in r["toast"]
+    html = client.post("/slirn/api/short_video_get", json={
+        "task_id": tid, "project_id": pid,
+    }).json()["html"]
+    assert html.count('class="slirn-stage3-hl-row"') == 0
+    assert 'data-action="sv-stage3-splice" disabled' in html
+
+
+def test_stage3_ui_segments_and_remove_button(tmp_path):
+    """预览按钮带逐段切割窗（当前行序 + 100ms 词尾，与拼接一致）；
+    删除按钮文案「删除」而非单字「删」。"""
+    from fastapi.testclient import TestClient
+
+    from slirn_home.app import build_app
+
+    tid, pid = _make_project(tmp_path)
+    _select_first_source(tmp_path, tid, pid)
+    assert _run_stage3_groups(tmp_path, tid, pid)["status"] == "done"
+    _swap_group1_lines(tmp_path, tid, pid)
+
+    client = TestClient(build_app(tmp_path).app)
+    html = client.post("/slirn/api/short_video_get", json={
+        "task_id": tid, "project_id": pid,
+    }).json()["html"]
+    # 组 1 已拖拽倒序：no2(src1, 1-2s) 在前 + no1(src3, 8-9s)，end+100ms
+    assert 'data-segments="[[1000, 2100], [8000, 9100]]"' in html
+    # 组 2 原序：5-6s、10.5-11s
+    assert 'data-segments="[[5000, 6100], [10500, 11100]]"' in html
+    # 删除按钮（修订八：完整文案 + 需确认提示；Stage 1 素材列表的「删」不在此范围）
+    assert ('data-action="sv-stage3-remove-hl" data-hl-index="1" '
+            'title="删除这条短视频（需确认）">删除</button>') in html
+    assert ('data-action="sv-stage3-remove-hl" data-hl-index="1" '
+            'title="删除这条短视频（需确认）">删</button>') not in html
+
+
+def test_preview_segments_and_remove_wiring():
+    js = (FUNCLIP_ROOT / "slirn_home" / "static" / "short_video.js").read_text(encoding="utf-8")
+    # 逐段播放引擎：解析 data-segments、段末跳下一段、手动拖进度条退出自动推进
+    assert "getAttribute('data-segments')" in js
+    assert "JSON.parse(raw)" in js
+    assert "v.currentTime = segs[segIdx][0]" in js
+    assert "addEventListener('seeking', onSeeking)" in js
+    # 删除：confirm 先行 + 端点 + 分发
+    assert "function stage3RemoveHl(btn)" in js
+    assert "window.confirm(msg)" in js
+    assert "short_video_stage3_remove_hl" in js
+    assert "action === 'sv-stage3-remove-hl'" in js

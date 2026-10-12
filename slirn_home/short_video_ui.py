@@ -10,6 +10,7 @@ REQ-20261012-099：Stage 3 由「AI 拆条」改名并改版 —— 用户录入
 from __future__ import annotations
 
 import html
+import json
 from pathlib import Path
 from urllib.parse import quote
 
@@ -479,6 +480,9 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
             for sl in sub_lines
         )
         preview_items = []
+        # 修订八：预览要按各字幕行的时间戳**逐段**截取播放（与拼接产物一致），
+        # 不再从组起点连播到组终点。窗口 = 行时间戳 + 100ms 防切词尾（同拼接）。
+        seg_times: list[tuple[int, int]] = []
         for pos, sl in enumerate(sub_lines, start=1):
             t = esc(str(sl.get("text") or ""))
             src = int(sl.get("src_index") or 0)
@@ -490,6 +494,7 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
             except (TypeError, ValueError):
                 times = srt_index_to_time.get(src)
             if times:
+                seg_times.append((times[0], times[1] + 100))
                 # 修订七：行格式 = 编号. [hh:mm:ss,ms → hh:mm:ss,ms] 字幕文本（带方括号）
                 range_html = f'[{_ts(times[0])} → {_ts(times[1])}]'
                 tip = f"源字幕 #{src} @ {_ts(times[0])}-{_ts(times[1])}"
@@ -506,14 +511,19 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
                 f'</div>'
             )
         sub_preview = "".join(preview_items) or '<div class="slirn-sv-muted">无字幕（拖拽排序需先有字幕）</div>'
+        # 修订八：data-segments 按当前行序给出逐段切割窗（毫秒，已含 +100ms
+        # 词尾余量，与 run_stage3_splice 完全一致）——悬浮预览逐段 seek 播放
+        segs_attr = (
+            f' data-segments="{esc(json.dumps(seg_times))}"' if seg_times else ""
+        )
         # 源视频未选 → 预览按钮禁用（避免点了没反应）
         preview_btn = (
             f'<button class="slirn-btn-mini slirn-btn-mini-primary" '
             f'data-action="sv-stage3-preview" '
             f'data-src-url="{esc(source_url)}" '
-            f'data-start-ms="{int(start)}" data-end-ms="{int(end)}" '
+            f'data-start-ms="{int(start)}" data-end-ms="{int(end)}"{segs_attr} '
             f'data-title="{esc(title)}" '
-            f'title="在源视频中截取该片段预览（浏览器 seek，无需生成 mp4）">'
+            f'title="按各字幕行时间戳逐段截取预览（浏览器 seek，无需生成 mp4）">'
             f'🎬 预览片段</button>'
             if source_url else
             '<button class="slirn-btn-mini" disabled title="请先在 Stage 1 选源视频">🎬 预览片段</button>'
@@ -541,7 +551,7 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
             f'title="针对该条的标题/主题，用当前提示词+截图参考单独重新解析（时间段与字幕内容会替换）">'
             f'🔄 重新解析</button>'
             f'<button class="slirn-btn-mini slirn-btn-mini-danger" data-action="sv-stage3-remove-hl" '
-            f'data-hl-index="{idx}">删</button>'
+            f'data-hl-index="{idx}" title="删除这条短视频（需确认）">删除</button>'
             f'</div>'
             f'<div class="slirn-stage3-hl-preview" data-hl-index="{idx}">{sub_preview}</div>'
             f'<div class="slirn-sv-muted slirn-stage3-hl-hint">⋮⋮ 拖动调整本条短视频内字幕的先后顺序（行首编号保持不变，拼接按当前行序）；↩️ 还原顺序 = 恢复大模型最初给出的顺序</div>'

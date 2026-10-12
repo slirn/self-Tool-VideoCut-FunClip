@@ -1070,14 +1070,43 @@ def _rerun_one_suffix(title: str) -> str:
     """定向指令。title 用户可编辑（可能含 { }），不用 .format 防 KeyError。
 
     修订六：与整跑同一套分组输出格式（1 组 = 1 条短视频，组内多行）。
+    修订八：明确「只围绕该主题选行」+「选中的字幕要有条理地组织」。
     """
     return (
         "\n\n# 本次任务：单片段重新解析\n"
-        f"只针对主题「{title}」重新整理 **1 组**（一条短视频）：\n"
+        f"只围绕主题「{title}」重新整理 **1 组**（一条短视频）：\n"
+        "- 只选与该主题直接相关的字幕行，不引入其他主题的内容\n"
         "- 组内各字幕行的时间戳取自源字幕真实时间\n"
-        "- 行顺序按该主题的叙事需要排列（可以与 srt 原顺序不同）\n"
-        "- 全部字幕时长合计约 70 秒，文本围绕该主题"
+        "- 把选中的字幕行**有条理地组织**成一条连贯的短视频：按叙事/逻辑先后"
+        "排列（可以与 srt 原顺序不同），有起点、有展开、有收束\n"
+        "- 全部字幕时长合计约 70 秒"
     )
+
+
+def _filter_ocr_for_title(ocr_text: str, title: str, max_lines: int = 12) -> str:
+    """修订八：重解析时 OCR 参考只给**与当前标题相关**的行，不给全量截图文字。
+
+    相关 = 行内含标题的任一 2-gram（CJK 友好，标题拆相邻两字滑窗）；
+    标点/空白跨界的 gram 丢弃。无命中 → 空串（宁缺毋滥，不给噪声参考）。
+    """
+    lines = [ln.strip() for ln in str(ocr_text or "").splitlines() if ln.strip()]
+    title = str(title or "").strip()
+    if not lines or len(title) < 2:
+        return ""
+    _junk = re.compile(r"[\s，。：:、；;！!？?，.．·\-—_/\\()\[\]（）【】\"'‘’“”]+")
+    grams = {title[i:i + 2] for i in range(len(title) - 1)}
+    grams = {g for g in grams if not _junk.search(g)}
+    if not grams:
+        return ""
+    kept = [ln for ln in lines if any(g in ln for g in grams)]
+    return "\n".join(kept[:max_lines])
+
+
+# 修订八：重解析专用的 OCR 参考模板（声明「节选」+ 与主题相关）
+_RERUN_OCR_REFERENCE_TMPL = (
+    "【与主题「{title}」相关的参考方向（自「智能纪要课程重点」截图文字中"
+    "节选，仅作方向参考，不要求逐字使用）】\n{ocr_text}\n\n"
+)
 
 
 def rerun_stage3_one(
@@ -1153,17 +1182,24 @@ def rerun_stage3_one(
     svc.set_stage_state(project, "stage3_analyze", state)
     svc.save_project(root, project)
 
-    # 修订六：与整跑同一套流程 —— 截图先 OCR 提文字作参考方向，主调用纯文本
+    # 修订六：与整跑同一套流程 —— 截图先 OCR 提文字作参考方向，主调用纯文本。
+    # 修订八：参考方向**按标题过滤**，只给与当前主题相关的 OCR 行。
     ocr_text = ""
     if image_path is not None:
         ocr_text, _cached = _ocr_stage3_image(
             root, task_id, project_id, image_path, entry=entry,
         )
+    ocr_ref = ""
+    if ocr_text:
+        ocr_lines = _filter_ocr_for_title(ocr_text, title)
+        if ocr_lines:
+            ocr_ref = _RERUN_OCR_REFERENCE_TMPL.format(title=title, ocr_text=ocr_lines)
     user_payload = (
-        (_OCR_REFERENCE_TMPL.format(ocr_text=ocr_text) if ocr_text else "")
+        ocr_ref
+        + f"本次任务：只解析主题「{title}」这 1 条短视频。\n\n"
         + _UPSTREAM_CLIP_USER_PREFIX + "\n\n" + srt_text.strip()
-        + "\n\n请从上述字幕中只整理出 1 组短视频（围绕上述主题，全部字幕"
-          "时长合计约 70 秒）。"
+        + "\n\n请从上述字幕中只整理出 1 组短视频（只围绕上述主题，全部字幕"
+          "时长合计约 70 秒，选中的字幕行要按叙事逻辑有条理地组织）。"
         + _GROUPS_OUTPUT_CONSTRAINT.format(n=1)
     )
 
@@ -1327,6 +1363,56 @@ def restore_hl_order(
     svc.reset_downstream_stages(project, "stage3_analyze")
     svc.save_project(root, project)
     return hls[target_pos]
+
+
+# ---------- REQ-20261012-099 修订八：删除一条短视频（确认在前端，删除在后端原位） ----------
+
+def remove_stage3_hl(
+    repo_root: Path | str,
+    task_id: str,
+    project_id: str,
+    hl_index: int,
+) -> dict:
+    """删除 ``index == hl_index`` 的一条短视频（前端已 confirm，这里真删）。
+
+    - 其余条目 **index 保持不变**（编号是稳定标识，rerun/restore/clip 命名
+      都按它定位；删中间一条后留空洞是刻意行为，重跑解析会整体重编）
+    - doc + state 镜像同步（整表，修订七对称约定）+ 下游作废
+    - 返回 ``{"removed_index": …, "count": 剩余}`` 供端点组 toast
+    """
+    root = Path(repo_root)
+    hp = svc.stage_highlights_path(root, task_id, project_id)
+    if not hp.is_file():
+        raise svc.ShortVideoError("highlights.json 不存在，请先运行整体解析")
+    try:
+        doc = json.loads(hp.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001
+        raise svc.ShortVideoError(f"highlights.json 解析失败: {e}") from e
+    hls = doc.get("highlights") or []
+    if not any(int(h.get("index") or 0) == int(hl_index) for h in hls):
+        raise svc.ShortVideoError(f"短视频 #{hl_index} 不存在")
+    hls = [h for h in hls if int(h.get("index") or 0) != int(hl_index)]
+    doc["highlights"] = hls
+    doc["warnings"] = (list(doc.get("warnings") or []) + [
+        f"[{svc.now_iso()}] 短视频 #{hl_index} 已删除",
+    ])[-20:]
+    svc._write_json_atomic(hp, doc)
+
+    project = svc.load_project(root, task_id, project_id)
+    state = svc.get_stage_state(project, "stage3_analyze")
+    # 镜像整表同步（删光也保持空表，UI 回到「解析后将列出」态）
+    state["highlights"] = hls
+    state["count"] = len(hls)
+    state["warnings"] = (list(state.get("warnings") or []) + [
+        f"[{svc.now_iso()}] 短视频 #{hl_index} 已删除，剩余 {len(hls)} 条",
+    ])[-20:]
+    state["logs"] = list(state.get("logs") or []) + [
+        f"[{svc.now_iso()}] stage3 remove-hl #{hl_index} done, remaining={len(hls)}",
+    ]
+    svc.set_stage_state(project, "stage3_analyze", state)
+    svc.reset_downstream_stages(project, "stage3_analyze")
+    svc.save_project(root, project)
+    return {"removed_index": int(hl_index), "count": len(hls)}
 
 
 def _fmt_ms(ms: int) -> str:
