@@ -1046,3 +1046,60 @@ def test_stage3_hl_tabs_wiring():
     assert ".slirn-stage3-hl-pane {\n  display: none;\n}" in css
     assert ".slirn-stage3-hl-pane.active {\n  display: block;\n}" in css
     assert "overflow-x: auto" in css.split(".slirn-stage3-hl-tabs {", 1)[1][:200]
+
+
+# ---------- 修订十：系统级提示词 + 「🧭 引用系统提示词」按钮 ----------
+
+def test_stage3_system_prompt_constant():
+    """系统级提示词内置在服务层：独立于默认/历史两级存储，内容为用户
+    提供的完整版（选题类型 / 选行规则 / 切片筛选 / 内容质量门槛 / 输出前自检）。"""
+    s = svc.STAGE3_SYSTEM_PROMPT
+    assert s.strip().startswith("你是")
+    for key in (
+        "【干货】三步搭建AI脚本工作流",   # 组头示例（与解析器 # N | 标题 格式一致）
+        "选行规则",
+        "内容质量门槛",
+        "输出前自检",
+        "宁缺毋滥",
+    ):
+        assert key in s, f"系统提示词缺少关键段: {key}"
+    # 只管选题与选行标准；输出格式约束由 run_stage3 拼 user 尾部，这里不复述
+    assert "只输出" not in s
+
+
+def test_stage3_ui_use_system_prompt_button(tmp_path):
+    """「🧭 引用系统提示词」按钮位于「💾 设为默认」之前，data-prompt
+    携带系统提示词全文（HTML 转义）；未跑解析的项目也要渲染（提示词 UI
+    不依赖 highlights）。"""
+    from fastapi.testclient import TestClient
+
+    from slirn_home.app import build_app
+    from slirn_home.short_video_ui import esc
+
+    tid, pid = _make_project(tmp_path)
+    client = TestClient(build_app(tmp_path).app)
+    html = client.post("/slirn/api/short_video_get", json={
+        "task_id": tid, "project_id": pid,
+    }).json()["html"]
+
+    assert "引用系统提示词" in html
+    i_sys = html.index('data-action="sv-stage3-use-system-prompt"')
+    i_def = html.index('data-action="sv-stage3-save-default"')
+    assert i_sys < i_def, "引用系统提示词按钮必须在「设为默认」前面"
+    assert 'data-prompt="' in html[i_sys:i_def], "按钮须携带 data-prompt 全文"
+    assert esc(svc.STAGE3_SYSTEM_PROMPT) in html, "系统提示词全文需嵌入页面"
+
+
+def test_stage3_use_system_prompt_wiring():
+    """前端接线：引用函数（覆盖确认 + 独立 toast）+ 点击分发 + JS 语法。"""
+    js = (FUNCLIP_ROOT / "slirn_home" / "static" / "short_video.js").read_text(encoding="utf-8")
+    assert "function stage3UseSystemPrompt(" in js
+    assert "action === 'sv-stage3-use-system-prompt'" in js
+    assert "已引用系统提示词" in js
+    assert "用系统提示词覆盖它？" in js
+
+    r = subprocess.run(
+        ["node", "--check", str(FUNCLIP_ROOT / "slirn_home" / "static" / "short_video.js")],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert r.returncode == 0, f"short_video.js 语法错误\nstderr={r.stderr[:1000]}"

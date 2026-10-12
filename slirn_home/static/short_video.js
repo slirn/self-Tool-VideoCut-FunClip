@@ -411,6 +411,19 @@
     toast('已载入历史提示词');
   }
 
+  // 修订十：一键引用系统级提示词（内置在系统里，独立于默认/历史两级存储；
+  // 填入文本域后可继续编辑，再按需「设为默认」——覆盖确认逻辑与「载入」一致）
+  function stage3UseSystemPrompt(btn) {
+    var ta = document.getElementById('slirn-stage3-prompt');
+    if (!ta) return;
+    var text = btn.getAttribute('data-prompt') || '';
+    if (!text) return;
+    if (ta.value && ta.value.trim() && !window.confirm(
+        '文本域已有内容，用系统提示词覆盖它？')) return;
+    ta.value = text;
+    toast('已引用系统提示词');
+  }
+
   function stage3ClearPrompt() {
     var ta = document.getElementById('slirn-stage3-prompt');
     if (!ta) return;
@@ -1091,6 +1104,7 @@
     if (action === 'sv-stage3-save-default') return stage3SaveDefault();
     if (action === 'sv-stage3-save-history') return stage3SaveHistory();
     if (action === 'sv-stage3-load-prompt') return stage3LoadPrompt(btn);
+    if (action === 'sv-stage3-use-system-prompt') return stage3UseSystemPrompt(btn);
     if (action === 'sv-stage3-toggle-hist') return stage3ToggleHist(btn);
     if (action === 'sv-stage3-clear-prompt') return stage3ClearPrompt();
     if (action === 'sv-stage3-upload-image') return stage3UploadImage();

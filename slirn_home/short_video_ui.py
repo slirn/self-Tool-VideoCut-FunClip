@@ -14,6 +14,8 @@ import json
 from pathlib import Path
 from urllib.parse import quote
 
+from .short_video_service import STAGE3_SYSTEM_PROMPT
+
 
 def esc(value: object) -> str:
     return html.escape("" if value is None else str(value), quote=True)
@@ -637,10 +639,13 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
   <div class="slirn-stage-body">
     <label class="slirn-sv-wide slirn-stage3-prompt-label2">解析提示词 {default_badge}
       <textarea id="slirn-stage3-prompt" class="slirn-stage3-prompt-input" rows="8"
-        placeholder="录入提取短视频内容所用的提示词；可「设为默认」或「存入列表」复用">{esc(initial_prompt)}</textarea>
+        placeholder="录入提取短视频内容所用的提示词；可「引用系统提示词」「设为默认」或「存入列表」复用">{esc(initial_prompt)}</textarea>
     </label>
     <div class="slirn-stage3-prompt-toolbar">
       <div class="slirn-stage3-prompt-actions2">
+        <button class="slirn-btn-mini" data-action="sv-stage3-use-system-prompt"
+          data-prompt="{esc(STAGE3_SYSTEM_PROMPT)}"
+          title="把系统内置的解析提示词填入文本域（独立于默认/历史；可继续编辑后再解析或设为默认）">🧭 引用系统提示词</button>
         <button class="slirn-btn-mini slirn-btn-mini-primary" data-action="sv-stage3-save-default"
           title="把当前文本域提示词保存为默认提示词（全局生效，新项目初始填充）">💾 设为默认</button>
         <button class="slirn-btn-mini" data-action="sv-stage3-save-history"
