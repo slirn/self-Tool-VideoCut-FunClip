@@ -246,3 +246,47 @@ OCR 提示）/ `static/short_video.js`（stage3RestoreOrder + 删行拖拽块）
 
 验证：全量 pytest 1165 passed / node --check OK / ruff HEAD-vs-worktree
 无新增违规 / 7861 重启后实测（新 JS 已上、旧拖拽 JS 已清、新 CSS 类注入）。
+
+## 修订七（2026-10-13 验收反馈）：行格式/文字颜色 + 只显示一组 bug + 预览窗口拖拽调宽
+
+用户验收三件事：
+
+1. **行格式 + 文字颜色**：每行 `编号. [hh:mm:ss,ms → hh:mm:ss,ms] 字幕文本`
+   （`_ts` 从 mm:ss 改完整 SRT 式毫秒，区间带方括号）；字幕文本此前在深色
+   预览底上"看不到文字"。
+   - 根因（CDP 实测定位）：Gradio 主题样式表含
+     `.gradio-container-6-17-3 .prose * { color: var(--body-text-color) }` ——
+     gr.HTML 输出被包在 `.prose` 里，**所有后代被直接声明 color**（直接声明
+     压过继承，且其在 Tailwind @layer 内、非 layer 的自有规则可赢）。
+     `.slirn-stage3-hl-sub`/chips 自带显式色不受影响；`.slirn-stage3-hl-text`
+     无任何 color 规则 → 被强制成 `#1f2937` 深字落在 `#1e293b` 深底上。
+   - 修复：`.slirn-stage3-hl-preview .slirn-stage3-hl-text { color: #f1f5f9 }`
+     （双类特异度 + 非 layer 稳赢）；`.slirn-srt-pre` 固定浅底配固定深字
+     `#0f172a`（暗色主题原先同样被强制成浅字 → 白底白字）。
+2. **只显示一组（如只剩 3 号）**：显示层 bug，生成没问题（磁盘 doc 5 组完整）。
+   - 根因链：`rerun_stage3_one` 在 state 镜像为空时 append 出**单组镜像**落盘 →
+     之后整跑 `run_stage3` 重写 doc 为全新 N 组但**不清镜像** → GET 层
+     `_inject_stage3_highlights` 用 `if not s3.get("highlights")` 跳过注入 →
+     页面渲染过期单组（37 行旧内容）。
+   - 修复（多入口状态对称）：注入改**按 doc 整表覆盖**（doc=source of truth，
+     GET 不落盘只影响渲染）；`rerun_one`/`restore_hl_order` 镜像同步改
+     `state["highlights"] = hls` 整表；`run_stage3` done 块 pop 过期
+     `highlights`/`srt_lines` 镜像。用户下次打开页面即自愈，无需迁移。
+3. **预览视频窗口可拖动 + 可调整大小**：预览 modal（🎬 播放/📖 字幕）原本
+   固定居中——新助手 `_enableWinDrag`（标题栏 mousedown → 卡片切绝对定位
+   跟手移动，钳制在视口内）+ `_enableWinResize`（右下角 ◢ 把柄拉宽，解除
+   max-width 上限，视频随 max-width:100% 跟随）；Stage 3 悬浮播放器原本已
+   可拖、补 ◢ 调宽 + 尺寸记忆 `slirn.sv.fp.size`（位置本就记忆
+   `slirn.sv.fp.pos`）。
+
+涉及：`short_video_ui.py`（`_ts` 完整毫秒 + `[...]` 区间）/ `home.css`
+（hl-text 显式色 / srt-pre 深字 / ◢ 把柄 + 标题栏 move 光标）/
+`app.py`（注入整表覆盖）/ `short_video_analyze.py`（三处镜像对称）/
+`static/short_video.js`（拖动/调宽助手 + modal/悬浮窗接线）；测试新增
+5 例（陈旧镜像自愈 / 整跑清镜像 / rerun+restore 整表对称 / 颜色守卫 /
+拖拽调宽接线）+ 时间戳断言更新，文件内 29 例。
+
+验证：全量 pytest **1171 passed** / node --check OK / ruff HEAD-vs-worktree
+零新增 / 7861 重启后 CDP 实测：hl-text 计算色 rgb(241,245,249)（修复前
+rgb(31,41,55) 不可见）、时间戳 `[00:34:38,090 → 00:34:39,450]`、srt-pre
+深字浅底、served JS 含拖拽调宽接线。
