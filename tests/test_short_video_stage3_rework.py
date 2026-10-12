@@ -531,6 +531,8 @@ def test_api_prompt_settings_endpoints(tmp_path):
     assert "🔍 解析" in r["html"]
     # 修订：快速模板 radio 已移除
     assert 'name="sv-stage3-template"' not in r["html"]
+    # 修订：截图区块标题（无论是否已传图都渲染）
+    assert "智能纪要课程重点截图：" in r["html"]
     # 修订：历史条目可展开查看完整内容 + 默认标记
     assert 'data-action="sv-stage3-toggle-hist"' in r["html"]
     assert "slirn-stage3-hist-full" in r["html"]

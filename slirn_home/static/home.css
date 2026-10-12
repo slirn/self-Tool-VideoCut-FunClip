@@ -5769,13 +5769,6 @@ input[type="checkbox"]:focus-visible {
   color: #475569;
   user-select: none;
 }
-/* REQ-099 修订：截图复选框前的语义标签（智能纪要课程重点截图） */
-.slirn-stage3-image-send-label {
-  font-size: 12px;
-  font-weight: 600;
-  color: #334155;
-  cursor: pointer;
-}
 .slirn-stage3-hl-more {
   margin-top: 4px;
   color: #94a3b8;

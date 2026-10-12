@@ -4,7 +4,7 @@ REQ-20261003-098：6 阶段管线（选源 → 抽字幕 → 解析短视频内�
 REQ-20261012-099：Stage 3 由「AI 拆条」改名并改版 —— 用户录入解析提示词（默认 +
 最新 10 条历史两级复用）、可选上传截图一起发给多模态 AI；每个片段可单独重新解析。
 修订（验收反馈）：移除快速模板 UI；历史条目可展开查看完整内容、⭐ 标默认；
-截图复选框前加「智能纪要课程重点截图」label；保存提示词后历史下拉原地自动刷新。
+截图区块标题改为「智能纪要课程重点截图」；保存提示词后历史下拉原地自动刷新。
 """
 
 from __future__ import annotations
@@ -357,8 +357,6 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
             f'<div class="slirn-stage3-image-row">'
             f'<a href="{esc(img_url)}" target="_blank" rel="noopener" title="查看大图">'
             f'<img class="slirn-stage3-image-thumb" src="{esc(img_url)}" alt="解析截图"></a>'
-            f'<label class="slirn-stage3-image-send-label" for="slirn-stage3-use-image">'
-            f'智能纪要课程重点截图</label>'
             f'<label class="slirn-stage3-image-send">'
             f'<input type="checkbox" id="slirn-stage3-use-image" checked> 发送截图给 AI</label>'
             f'<button class="slirn-btn-mini slirn-btn-mini-danger" '
@@ -500,7 +498,7 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
       <div class="slirn-stage3-hist-list">{hist_html}</div>
     </details>
     <div class="slirn-stage3-image-block">
-      <span class="slirn-sv-muted">截图（可选）：</span>
+      <span class="slirn-sv-muted">智能纪要课程重点截图：</span>
       <input type="file" id="slirn-stage3-image-file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp">
       <button class="slirn-btn-mini" data-action="sv-stage3-upload-image">📤 上传</button>
       {image_area}
