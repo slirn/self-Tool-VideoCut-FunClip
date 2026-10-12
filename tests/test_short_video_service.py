@@ -123,12 +123,13 @@ def test_short_video_ui_contains_editor_and_materials(tmp_path):
     project = svc.update_project(tmp_path, task.task_id, project["id"],
                                  {"base_material_id": project["materials"][0]["id"]})
     html = ui.render_project(project)
-    # REQ-20261003-098：6 阶段管线 UI（旧 mixcut 编辑器已被替换）
-    for stage in (1, 2, 3, 4, 5, 6):
+    # REQ-20261013-100：7 阶段管线 UI（重编号 + 内容优化替换 3.5 核验）
+    for stage in (1, 2, 3, 4, 5, 6, 7):
         assert f'data-stage="{stage}"' in html, f"Stage {stage} 卡片缺失"
     assert "选源视频" in html
     assert "提取字幕" in html
     assert "AI 拆条" in html
+    assert "内容优化" in html
     assert "粗剪合成" in html
     assert "优化字幕" in html
     assert "精剪混编" in html
@@ -730,166 +731,271 @@ def test_clean_highlight_subtitles_removes_out_of_range():
     assert any("不存在" in w for w in warns), f"应有「不存在」警告: {warns}"
 
 
-# ---------- REQ-20261004-verify: Stage 3.5 字幕一致性核验 ----------
+# ---------- REQ-20261013-100: Stage 4 内容优化（替换原 3.5 字幕一致性核验） ----------
 
-def test_verify_char_similarity_identical():
-    """完全相同文本相似度 = 1.0。"""
-    from slirn_home.short_video_verify import _char_similarity
-    assert _char_similarity("你好世界", "你好世界") == 1.0
+def test_pipeline_key_migration_old_project(tmp_path):
+    """旧 key 项目载入即迁移：旧 4/5/6 状态搬到新 5/6/7，stage3_verify 丢弃。"""
+    import json as _json
+    from slirn_home.short_video_service import (
+        project_dir, save_project, load_project,
+    )
+    from tasklib import TaskManager
 
-
-def test_verify_char_similarity_whitespace_normalized():
-    """空格/换行差异不影响相似度。"""
-    from slirn_home.short_video_verify import _char_similarity
-    # 字幕可能是 "你好 世界"（funasr 输出可能是 "你好世界"）
-    assert _char_similarity("你好 世界", "你好世界") == 1.0
-
-
-def test_verify_char_similarity_empty_strings():
-    """空串 vs 空串 = 1.0；空串 vs 非空 = 0.0。"""
-    from slirn_home.short_video_verify import _char_similarity
-    assert _char_similarity("", "") == 1.0
-    assert _char_similarity("", "x") == 0.0
-    assert _char_similarity("x", "") == 0.0
-
-
-def test_verify_align_subtitle_to_asr_exact_match():
-    """字幕与 ASR 文本完全相同 → ok。"""
-    from slirn_home.short_video_verify import _align_subtitle_to_asr
-    asr_lines = [
-        {"idx": 1, "start_ms": 1100, "end_ms": 1900, "text": "你好世界"},
-    ]
-    ml = _align_subtitle_to_asr("你好世界", 5, asr_lines, 1000, 2000)
-    assert ml.status == "ok"
-    assert ml.similarity == 1.0
-    assert ml.suggestion == "无操作"
-
-
-def test_verify_align_subtitle_to_asr_partial_match():
-    """部分相似 (0.4-0.7) → partial。"""
-    from slirn_home.short_video_verify import _align_subtitle_to_asr
-    asr_lines = [
-        {"idx": 1, "start_ms": 1100, "end_ms": 1900, "text": "你好世界"},
-    ]
-    # "你好" 与 "你好世界" 相似度 ~0.5
-    ml = _align_subtitle_to_asr("你好", 5, asr_lines, 1000, 2000)
-    assert ml.status == "partial"
-    assert 0.4 <= ml.similarity < 0.7
-
-
-def test_verify_align_subtitle_to_asr_mismatch():
-    """相似度 < 0.4 → mismatch，建议替换为 ASR 文本。"""
-    from slirn_home.short_video_verify import _align_subtitle_to_asr
-    asr_lines = [
-        {"idx": 1, "start_ms": 1100, "end_ms": 1900, "text": "完全不同的音频"},
-    ]
-    ml = _align_subtitle_to_asr("你好世界", 5, asr_lines, 1000, 2000)
-    assert ml.status == "mismatch"
-    assert ml.similarity < 0.4
-    assert "ASR 文本" in ml.suggestion
-
-
-def test_verify_align_subtitle_to_asr_time_miss():
-    """ASR 行不在 highlight 时间窗口 ±容差内 → missing。"""
-    from slirn_home.short_video_verify import _align_subtitle_to_asr
-    asr_lines = [
-        # 这个 ASR 行在 [5000, 6000]，离 highlight [1000, 2000] 太远
-        {"idx": 1, "start_ms": 5000, "end_ms": 6000, "text": "你好世界"},
-    ]
-    ml = _align_subtitle_to_asr("你好世界", 5, asr_lines, 1000, 2000)
-    assert ml.status == "missing"
-    assert "找不到对应音频" in ml.suggestion
-
-
-def test_verify_parse_re_asr_srt_with_offset():
-    """_parse_re_asr_srt 把 ASR 内部时间 + offset 转回源视频时间轴。"""
-    from slirn_home.short_video_verify import _parse_re_asr_srt
-
-    srt = """1
-00:00:01,000 --> 00:00:02,000
-你好世界
-"""
-    out = _parse_re_asr_srt(srt, offset_ms=30000)
-    assert len(out) == 1
-    assert out[0]["start_ms"] == 31000
-    assert out[0]["end_ms"] == 32000
-    assert out[0]["text"] == "你好世界"
-
-
-def test_verify_stage_runs_end_to_end(tmp_path):
-    """完整跑 Stage 3.5：模拟一个完整 pipeline（Stage 1-3 + verify）。
-
-    用静默 funasr/ffmpeg 替代：直接准备 highlights.json + SRT + 假 source 视频。
-    跳过 ffmpeg/funasr 路径，只验证状态机写入 + summary 报告。
-    """
-    from slirn_home import short_video_verify
-    from slirn_home import short_video_service as svc
-    import json
-
-    root = tmp_path
-    tid = "20261004-001"
-    pid = "sv_test"
-
-    # 直接手工搭项目结构（绕过 create_project 的 task 检查）
-    proj_dir = svc.project_dir(root, tid, pid)
+    video = tmp_path / "src.mp4"
+    video.write_bytes(b"fake")
+    mgr = TaskManager(tmp_path)
+    task = mgr.create(name="t", original_video=video)
+    tid = task.task_id
+    proj_dir = project_dir(tmp_path, tid, "sv_old")
     proj_dir.mkdir(parents=True, exist_ok=True)
-    fake_video = proj_dir / "fake.mp4"
-    fake_video.write_bytes(b"\x00" * 1024)  # 假视频（仅用于通过路径检查）
-    assets_dir = proj_dir / "assets"
-    assets_dir.mkdir(exist_ok=True)
-
     proj = {
-        "task_id": tid,
-        "id": pid,
-        "name": "测试",
-        "kind": "split",
-        "materials": [{
-            "id": "mat_fake",
-            "kind": "video",
-            "name": "fake.mp4",
-            "path": str(fake_video),
-            "source": "auto",
-        }],
-        "base_material_id": "mat_fake",
+        "task_id": tid, "id": "sv_old", "name": "旧项目", "kind": "split",
         "pipeline": {
-            "stage1_source": {"status": "done", "source_material_id": "mat_fake"},
-            "stage2_extract": {"status": "pending"},
-            "stage3_analyze": {"status": "pending"},
-            "stage3_verify": {"status": "pending"},
-            "stage4_coarse": {"status": "pending"},
-            "stage5_refine": {"status": "pending"},
-            "stage6_finalize": {"status": "pending"},
+            "stage1_source": {"status": "done"},
+            "stage2_extract": {"status": "done"},
+            "stage3_analyze": {"status": "done"},
+            "stage3_verify": {"status": "done", "summary": {"ok": 3}},
+            "stage4_coarse": {"status": "done", "count": 2},
+            "stage5_refine": {"status": "done", "count": 2},
+            "stage6_finalize": {"status": "done", "count": 2},
         },
     }
-    svc.save_project(root, proj)
+    save_project(tmp_path, proj)
+    loaded = load_project(tmp_path, tid, "sv_old")
+    pl = loaded["pipeline"]
+    # 旧 key 的状态原样搬到新 key
+    assert pl["stage5_coarse"] == {"status": "done", "count": 2}
+    assert pl["stage6_refine"] == {"status": "done", "count": 2}
+    assert pl["stage7_finalize"] == {"status": "done", "count": 2}
+    # 旧 key 全部清除；verify 丢弃；新 optimize 补 pending
+    for gone in ("stage3_verify", "stage4_coarse", "stage5_refine", "stage6_finalize"):
+        assert gone not in pl, f"{gone} 应被迁移清除"
+    assert pl["stage4_optimize"]["status"] == "pending"
+    # 幂等：再次载入不回退
+    again = load_project(tmp_path, tid, "sv_old")
+    assert again["pipeline"]["stage5_coarse"]["status"] == "done"
 
-    # 写一个 highlights.json
-    hl = {
-        "highlights": [
-            {
-                "index": 1,
-                "id": "h1",
-                "title": "测试片段",
-                "start_ms": 0,
-                "end_ms": 5000,
-                "subtitle_lines": [{"src_index": 1, "text": "假字幕"}],
-            },
-        ],
+
+def test_optimize_parse_result_ops_and_downgrade():
+    """keep/fix/split 解析 + 缺席=删除 + 校验降级（宁可不改不可改错）。"""
+    import json as _json
+    from slirn_home.short_video_optimize import _parse_optimize_result
+
+    src_lines = [
+        {"no": 1, "src_index": 1, "text": "第一行"},
+        {"no": 2, "src_index": 2, "text": "第二行长句子需要切分"},
+        {"no": 3, "src_index": 3, "text": "第三行"},
+        {"no": 4, "src_index": 4, "text": "第四行"},
+    ]
+    raw = _json.dumps({"lines": [
+        {"no": 1, "op": "keep"},
+        {"no": 2, "op": "split", "splits": ["第二行长句子", "需要切分"]},
+        {"no": 3, "op": "fix", "text": "第三行（改写）"},
+        {"no": 9, "op": "keep"},
+        # no=4 缺席 = 删除
+    ]}, ensure_ascii=False)
+    ops, warns = _parse_optimize_result(raw, src_lines)
+    assert ops[1] == {"op": "keep"}
+    assert ops[2] == {"op": "split", "splits": ["第二行长句子", "需要切分"]}
+    assert ops[3] == {"op": "fix", "text": "第三行（改写）"}
+    assert 4 not in ops, "缺席编号 = 删除（无 op）"
+    assert any("未知行号 9" in w for w in warns)
+
+    # split 子句拼接与原文不一致 → 降级 keep（宁可不切不可错切）
+    bad = _json.dumps({"lines": [
+        {"no": 2, "op": "split", "splits": ["改写过的", "两段子句"]},
+    ]}, ensure_ascii=False)
+    ops2, warns2 = _parse_optimize_result(bad, src_lines)
+    assert ops2[2] == {"op": "keep"}
+    assert any("不一致" in w for w in warns2)
+
+    # fix 空文本 → keep
+    empty_fix = _json.dumps({"lines": [{"no": 3, "op": "fix", "text": "  "}]},
+                            ensure_ascii=False)
+    ops3, _ = _parse_optimize_result(empty_fix, src_lines)
+    assert ops3[3] == {"op": "keep"}
+
+
+def test_optimize_interpolate_split_timestamps():
+    """切分子行时间戳按字符占比内插：覆盖父窗口、首尾对齐、src_index 继承。"""
+    from slirn_home.short_video_optimize import _interpolate_split
+
+    line = {"src_index": 7, "text": "一二三四五六", "start_ms": 1000, "end_ms": 4000}
+    out = _interpolate_split(line, ["一二三", "四五六"])
+    assert [x["text"] for x in out] == ["一二三", "四五六"]
+    assert out[0]["start_ms"] == 1000 and out[0]["end_ms"] == 2500
+    assert out[1]["start_ms"] == 2500 and out[1]["end_ms"] == 4000
+    assert all(x["src_index"] == 7 for x in out)
+
+
+def _seed_optimize_project(tmp_path):
+    """split 项目 + highlights.json（1 条 4 行，行带时间戳）。返回 (tid, pid)。"""
+    import json as _json
+    from slirn_home.short_video_service import create_project, stage_highlights_path
+    from tasklib import TaskManager
+
+    video = tmp_path / "src.mp4"
+    video.write_bytes(b"fake")
+    mgr = TaskManager(tmp_path)
+    task = mgr.create(name="t", original_video=video)
+    tid = task.task_id
+    proj = create_project(tmp_path, tid, name="p", brief="")
+    pid = proj["id"]
+    doc = {
+        "highlights": [{
+            "index": 1, "id": "h1", "title": "测试标题",
+            "start_ms": 1000, "end_ms": 8000, "total_ms": 7000,
+            "subtitle_lines": [
+                {"no": 1, "src_index": 1, "text": "大家好呀今天",
+                 "start_ms": 1000, "end_ms": 4000},
+                {"no": 2, "src_index": 2, "text": "我们来讲一个非常长的主题句子",
+                 "start_ms": 4000, "end_ms": 8000},
+                {"no": 3, "src_index": 3, "text": "嗯对",
+                 "start_ms": 5000, "end_ms": 5400},
+                {"no": 4, "src_index": 4, "text": "谢谢观看",
+                 "start_ms": 5400, "end_ms": 6000},
+            ],
+        }],
     }
-    sp = svc.stage_highlights_path(root, tid, pid)
-    sp.parent.mkdir(parents=True, exist_ok=True)
-    sp.write_text(json.dumps(hl, ensure_ascii=False), encoding="utf-8")
+    hp = stage_highlights_path(tmp_path, tid, pid)
+    hp.parent.mkdir(parents=True, exist_ok=True)
+    hp.write_text(_json.dumps(doc, ensure_ascii=False), encoding="utf-8")
+    return tid, pid
 
-    # 跑 verify（会因 ffmpeg 在 fake.mp4 上失败）
+
+def test_optimize_run_end_to_end(tmp_path):
+    """run_stage4_optimize：fix/split/删除落地 + no 重编 + 首次备份 + 下游重置
+    （含 stage3_splice）+ Stage 3 state 镜像同步。"""
+    import json as _json
+    from slirn_home import revision_service
+    from slirn_home import short_video_service as svcs
+    from slirn_home import short_video_optimize as opt
+    from slirn_home.short_video_service import (
+        load_project, save_project, stage_highlights_path,
+    )
+
+    tid, pid = _seed_optimize_project(tmp_path)
+    # 下游先标 done，验证优化后全部重置
+    proj = load_project(tmp_path, tid, pid)
+    for key in ("stage3_splice", "stage5_coarse", "stage6_refine", "stage7_finalize"):
+        proj["pipeline"][key] = {"status": "done"}
+    save_project(tmp_path, proj)
+
+    llm_out = _json.dumps({"lines": [
+        {"no": 1, "op": "fix", "text": "大家好，今天"},
+        {"no": 2, "op": "split", "splits": ["我们来讲一个", "非常长的主题句子"]},
+        # no=3 缺席 = 删除（口水话）
+        {"no": 4, "op": "keep"},
+    ]}, ensure_ascii=False)
+    captured = {}
+    orig = revision_service._call_llm
+
+    def fake(sys_p, user_p, **kw):
+        captured["sys"] = sys_p
+        captured["user"] = user_p
+        return llm_out
+
+    revision_service._call_llm = fake
     try:
-        short_video_verify.run_stage3_verify(root, tid, pid)
-    except svc.ShortVideoError:
-        # 预期失败 —— fake.mp4 不是真视频
-        pass
+        state = opt.run_stage4_optimize(tmp_path, tid, pid)
+    finally:
+        revision_service._call_llm = orig
 
-    # 至少 verify_dir 应被创建（核验初始化成功）
-    verify_dir = svc.stage3_verify_dir(root, tid, pid)
-    assert verify_dir.is_dir(), f"verify 目录应被创建: {verify_dir}"
+    assert state["status"] == "done"
+    hl_state = state["highlights"][0]
+    assert hl_state["status"] == "ok"
+    assert hl_state["fixed"] == 1 and hl_state["split"] == 1 and hl_state["deleted"] == 1
+    assert hl_state["lines_before"] == 4
+    assert hl_state["lines_after"] == 4  # 4 行：删 1、切分 +1
+
+    # user payload 捕获了标题 + 编号字幕行
+    assert "测试标题" in captured["user"]
+    assert "1. 大家好呀今天" in captured["user"]
+
+    # 写回 highlights.json：fix/split/删除落地 + no 按行序重编 1..4
+    doc = _json.loads(stage_highlights_path(tmp_path, tid, pid).read_text(encoding="utf-8"))
+    lines = doc["highlights"][0]["subtitle_lines"]
+    assert [l["text"] for l in lines] == [
+        "大家好，今天", "我们来讲一个", "非常长的主题句子", "谢谢观看"]
+    assert [l["no"] for l in lines] == [1, 2, 3, 4]
+    # 切分子行：src_index 继承父行、时间戳按占比内插（首=父 start，末=父 end）
+    assert lines[1]["src_index"] == 2 and lines[2]["src_index"] == 2
+    assert lines[1]["start_ms"] == 4000 and lines[2]["end_ms"] == 8000
+    # 组窗口重算
+    assert doc["highlights"][0]["start_ms"] == 1000
+    assert doc["highlights"][0]["end_ms"] == 8000
+
+    # 首次备份存在（备份原表）
+    backup = svcs.stage4_optimize_dir(tmp_path, tid, pid) / "backup_highlights.json"
+    assert backup.is_file()
+    backup_doc = _json.loads(backup.read_text(encoding="utf-8"))
+    assert backup_doc["highlights"][0]["subtitle_lines"][0]["text"] == "大家好呀今天"
+
+    # 下游全部重置（含 Stage 3 拼接）
+    proj2 = load_project(tmp_path, tid, pid)
+    for key in ("stage3_splice", "stage5_coarse", "stage6_refine", "stage7_finalize"):
+        assert proj2["pipeline"][key]["status"] == "pending", key
+    # Stage 3 state 镜像同步（页签渲染读这份）
+    s3 = svcs.get_stage_state(proj2, "stage3_analyze")
+    assert [l["text"] for l in s3["highlights"][0]["subtitle_lines"]] == [
+        "大家好，今天", "我们来讲一个", "非常长的主题句子", "谢谢观看"]
+
+
+def test_optimize_run_backup_once(tmp_path):
+    """重复优化不覆盖首次备份（保住最初解析结果）。"""
+    import json as _json
+    from slirn_home import revision_service
+    from slirn_home import short_video_optimize as opt
+    from slirn_home.short_video_service import (
+        stage4_optimize_dir, stage_highlights_path,
+    )
+
+    tid, pid = _seed_optimize_project(tmp_path)
+    orig = revision_service._call_llm
+
+    def reply(text):
+        return lambda s, u, **kw: _json.dumps(
+            {"lines": [{"no": 1, "op": "fix", "text": text}]}, ensure_ascii=False)
+
+    revision_service._call_llm = reply("第一次改写")
+    try:
+        opt.run_stage4_optimize(tmp_path, tid, pid)
+        bp = stage4_optimize_dir(tmp_path, tid, pid) / "backup_highlights.json"
+        first = bp.read_text(encoding="utf-8")
+        revision_service._call_llm = reply("第二次改写")
+        opt.run_stage4_optimize(tmp_path, tid, pid)
+        assert bp.read_text(encoding="utf-8") == first
+        doc = _json.loads(
+            stage_highlights_path(tmp_path, tid, pid).read_text(encoding="utf-8"))
+        assert doc["highlights"][0]["subtitle_lines"][0]["text"] == "第二次改写"
+    finally:
+        revision_service._call_llm = orig
+
+
+def test_optimize_run_all_deleted_keeps_original(tmp_path):
+    """LLM 把全部行删光 → 保留原行（kept_original），highlights 不被写坏；
+    唯一一条也是这一步 → 阶段标 failed（本次没有优化成任何一条）。"""
+    import json as _json
+    from slirn_home import revision_service
+    from slirn_home import short_video_optimize as opt
+    from slirn_home.short_video_service import stage_highlights_path
+
+    tid, pid = _seed_optimize_project(tmp_path)
+    orig = revision_service._call_llm
+    revision_service._call_llm = lambda s, u, **kw: _json.dumps({"lines": []})
+    try:
+        state = opt.run_stage4_optimize(tmp_path, tid, pid)
+    finally:
+        revision_service._call_llm = orig
+
+    hl = state["highlights"][0]
+    assert hl["status"] == "kept_original"
+    assert hl["deleted"] == 4 and hl["lines_after"] == 4
+    assert state["status"] == "failed"
+    doc = _json.loads(
+        stage_highlights_path(tmp_path, tid, pid).read_text(encoding="utf-8"))
+    texts = [l["text"] for l in doc["highlights"][0]["subtitle_lines"]]
+    assert texts == ["大家好呀今天", "我们来讲一个非常长的主题句子", "嗯对", "谢谢观看"]
 
 
 # ---------- REQ-20261004-stage3-restructure 新增测试 ----------
@@ -995,7 +1101,8 @@ def test_reorder_subtitle_line_end_to_end(tmp_path):
     # 验证下游 stage 被重置
     proj2 = load_project(tmp_path, tid, pid)
     pl = proj2.get("pipeline", {})
-    for stage_key in ["stage3_verify", "stage4_coarse", "stage5_refine", "stage6_finalize"]:
+    for stage_key in ["stage3_splice", "stage4_optimize", "stage5_coarse",
+                      "stage6_refine", "stage7_finalize"]:
         s = pl.get(stage_key, {})
         assert s.get("status") == "pending", f"{stage_key} 应被重置为 pending，实际 {s}"
 

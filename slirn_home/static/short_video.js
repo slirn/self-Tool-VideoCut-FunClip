@@ -331,7 +331,7 @@
     var titleEl = row ? row.querySelector('.slirn-stage3-hl-title') : null;
     if (titleEl) title = titleEl.value || '';
     if (!window.confirm('针对「' + (title || '#' + hlIndex) + '」单独重新解析？\n'
-        + '该片段的时间段与字幕内容将被替换，下游 Stage 4/5/6 重置。')) return;
+        + '该片段的时间段与字幕内容将被替换，下游 Stage 4/5/6/7 重置。')) return;
     toast('片段 #' + hlIndex + ' 重新解析中…');
     postJSON(API + '/short_video_stage3_rerun_one', {
       task_id: ctx.taskId, project_id: ctx.projectId,
@@ -458,23 +458,27 @@
     });
   }
 
-  function stage3VerifyRun() {
-    // REQ-20261004-verify：跑 Stage 3.5 一致性核验（ffmpeg 抽音频 + funasr
-    // 重 ASR + 与 Stage 3 字幕逐行对齐）。每个 highlight 几秒，全跑 ~10-30s；
-    // toast 提示开始，done 后刷新页面看报告。
+  function stage4OptimizeRun() {
+    // REQ-20261013-100：Stage 4 内容优化 — LLM 按标题逐条优化 Stage 3 字幕
+    // （切分长行 / 修改文字 / 删除冗余行），结果写回 highlights.json；
+    // 完成后刷新页面（Stage 3 页签看优化后字幕，本卡显示统计）。
     var ctx = innerCtx(); if (!ctx) return;
-    toast('字幕一致性核验中（每条片段几秒）…');
-    postJSON(API + '/short_video_stage3_verify', {
+    toast('内容优化中（每条短视频调一次大模型）…');
+    postJSON(API + '/short_video_stage4_optimize', {
       task_id: ctx.taskId, project_id: ctx.projectId
     }).then(function(r) {
       if (r && r.ok) {
-        var sum = ((r.stage3_verify || {}).summary) || {};
-        toast('核验完成：' + (sum.ok || 0) + ' 一致 / '
-              + (sum.warning || 0) + ' 部分 / '
-              + (sum.failed || 0) + ' 不符');
+        var st = r.stage4_optimize || {};
+        var hls = st.highlights || [];
+        var fixedTot = 0, splitTot = 0, delTot = 0;
+        hls.forEach(function(h) {
+          fixedTot += h.fixed || 0; splitTot += h.split || 0; delTot += h.deleted || 0;
+        });
+        toast('内容优化完成：修改 ' + fixedTot + ' 行 · 切分 ' + splitTot
+              + ' 行 · 删除 ' + delTot + ' 行');
         openProject(ctx.taskId, ctx.projectId);
       }
-      else toast((r && r.error) || 'Stage 3.5 失败', 'error');
+      else toast((r && r.error) || 'Stage 4 内容优化失败', 'error');
     });
   }
 
@@ -484,8 +488,8 @@
     postJSON(API + '/short_video_stage4_run', {
       task_id: ctx.taskId, project_id: ctx.projectId
     }).then(function(r) {
-      if (r && r.ok) { toast('Stage 4 完成'); openProject(ctx.taskId, ctx.projectId); }
-      else toast((r && r.error) || 'Stage 4 失败', 'error');
+      if (r && r.ok) { toast('Stage 5 完成'); openProject(ctx.taskId, ctx.projectId); }
+      else toast((r && r.error) || 'Stage 5 失败', 'error');
     });
   }
 
@@ -498,7 +502,7 @@
       task_id: ctx.taskId, project_id: ctx.projectId, index: index
     }).then(function(r) {
       if (r && r.ok) { toast('ASR 完成'); openProject(ctx.taskId, ctx.projectId); }
-      else toast((r && r.error) || 'Stage 5 ASR 失败', 'error');
+      else toast((r && r.error) || 'Stage 6 ASR 失败', 'error');
     });
   }
 
@@ -513,36 +517,36 @@
     postJSON(API + '/short_video_stage5_save', {
       task_id: ctx.taskId, project_id: ctx.projectId, index: index, srt_text: srt
     }).then(function(r) {
-      if (r && r.ok) { toast('Stage 5 #'+index+' 已保存'); openProject(ctx.taskId, ctx.projectId); }
+      if (r && r.ok) { toast('Stage 6 #'+index+' 已保存'); openProject(ctx.taskId, ctx.projectId); }
       else toast((r && r.error) || '保存失败', 'error');
     });
   }
 
   function stage6Run() {
     var ctx = innerCtx(); if (!ctx) return;
-    // 自动从 stage5.highlights + stage4.highlights 拼 items
+    // 自动从 stage5_coarse.highlights + stage6_refine.highlights 拼 items
     postJSON(API + '/short_video_get', {task_id: ctx.taskId, project_id: ctx.projectId}).then(function(r) {
       if (!r || !r.ok) return toast('读取项目失败', 'error');
       var p = r.project || {};
-      var s4 = (p.pipeline || {}).stage4_coarse || {};
-      var s5 = (p.pipeline || {}).stage5_refine || {};
-      var s4hls = s4.highlights || [];
-      var s5hls = s5.highlights || [];
-      var items = s4hls.map(function(h4) {
-        var h5 = s5hls.find(function(x) { return x.index === h4.index; }) || {};
+      var coarse = (p.pipeline || {}).stage5_coarse || {};
+      var refine = (p.pipeline || {}).stage6_refine || {};
+      var cHls = coarse.highlights || [];
+      var rHls = refine.highlights || [];
+      var items = cHls.map(function(hc) {
+        var hr = rHls.find(function(x) { return x.index === hc.index; }) || {};
         return {
-          index: h4.index,
-          coarse_mp4: h4.coarse_mp4 || '',
-          refined_srt: h5.refined_srt || ''
+          index: hc.index,
+          coarse_mp4: hc.coarse_mp4 || '',
+          refined_srt: hr.refined_srt || ''
         };
       }).filter(function(it) { return it.coarse_mp4 && it.refined_srt; });
-      if (!items.length) return toast('Stage 4 / 5 未就绪', 'error');
+      if (!items.length) return toast('Stage 5 / 6 未就绪', 'error');
       toast('精剪 ' + items.length + ' 条中…');
       postJSON(API + '/short_video_stage6_run', {
         task_id: ctx.taskId, project_id: ctx.projectId, items: items
       }).then(function(x) {
-        if (x && x.ok) { toast('Stage 6 完成'); openProject(ctx.taskId, ctx.projectId); }
-        else toast((x && x.error) || 'Stage 6 失败', 'error');
+        if (x && x.ok) { toast('Stage 7 完成'); openProject(ctx.taskId, ctx.projectId); }
+        else toast((x && x.error) || 'Stage 7 失败', 'error');
       });
     });
   }
@@ -944,7 +948,7 @@
               parent.insertBefore(movedEl, el.nextSibling);
               showToast('字幕重排失败：' + (data.body && data.body.error || '未知错误'), 'error');
             } else {
-              showToast('字幕顺序已更新（下游 Stage 4/5/6 已重置）', 'ok');
+              showToast('字幕顺序已更新（下游 Stage 4-7 已重置）', 'ok');
             }
           })
           .catch(function(err) {
@@ -1097,7 +1101,7 @@
     if (action === 'sv-stage3-splice') return stage3Splice();
     if (action === 'sv-stage3-restore-order') return stage3RestoreOrder(btn);
     if (action === 'sv-stage3-preview') return stage3PreviewHl(btn);
-    if (action === 'sv-stage3-verify-run') return stage3VerifyRun();
+    if (action === 'sv-stage4-optimize-run') return stage4OptimizeRun();
     if (action === 'sv-stage3-rerun') return stage3RerunOne(btn);
     if (action === 'sv-stage3-remove-hl') return stage3RemoveHl(btn);
     if (action === 'sv-stage3-hl-tab') return switchHlTab(btn.getAttribute('data-hl-index'));

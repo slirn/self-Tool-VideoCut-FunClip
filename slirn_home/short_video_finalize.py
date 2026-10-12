@@ -328,7 +328,7 @@ def run_stage6_batch(
     *,
     progress_cb=None,
 ) -> dict:
-    """批量执行 Stage 6；每条独立 try，整体结果汇总写回 project.pipeline.stage6_finalize。
+    """批量执行 Stage 6；每条独立 try，整体结果汇总写回 project.pipeline.stage7_finalize。
 
     每条 item 形如：
         {"index": 1, "coarse_mp4": "stage4/coarse_01.mp4", "refined_srt": "stage5/refined_01.srt"}

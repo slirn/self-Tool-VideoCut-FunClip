@@ -681,118 +681,97 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
 </div>'''
 
 
-def _stage35_verify(project: dict) -> str:
-    """REQ-20261004-verify：Stage 3.5 字幕一致性核验。
+def _stage4_optimize(project: dict) -> str:
+    """REQ-20261013-100：Stage 4「内容优化」（替换原 3.5 字幕一致性核验）。
 
-    仅生成报告，不修改任何数据。报告按 highlight 列出每条字幕行的状态：
-    - ✅ ok（相似度 ≥ 0.7）— 与音频相符
-    - ⚠️ partial（0.4-0.7）— 文本部分相符，建议核对
-    - ❌ mismatch（< 0.4）— 文本错误，建议改用 ASR 文本
-    - ❌ missing — 字幕找不到对应音频（可能切片错位或 funasr 漏识别）
-    - 🆕 extra — ASR 中有但字幕没收录（建议补字幕）
+    把 Stage 3 全部短视频的标题+字幕行交给大模型：长行切分（子文本拼接须
+    逐字等于原文，时间戳按占比内插）、文字修改、整行删除；结果写回
+    highlights.json（首次备份原表）。本卡显示每条优化统计；优化后的字幕
+    在 Stage 3 页签里查看/微调（与 rerun/restore 同一编辑面）。
     """
-    s3v = project.get("pipeline", {}).get("stage3_verify", {}) or {}
+    s4o = project.get("pipeline", {}).get("stage4_optimize", {}) or {}
     s3 = project.get("pipeline", {}).get("stage3_analyze", {}) or {}
-    status = s3v.get("status") or "pending"
-    hl_count = s3v.get("count") or 0
-    hl_rows = s3v.get("highlights") or []
-    summary = s3v.get("summary") or {}
+    status = s4o.get("status") or "pending"
+    hl_rows = s4o.get("highlights") or []
+    warnings = s4o.get("warnings") or []
     error_html = ""
     if status == "failed" and not hl_rows:
-        err = s3v.get("error") or "核验失败"
+        err = s4o.get("error") or "内容优化失败"
         error_html = f'<div class="slirn-stage-error">{esc(err)}</div>'
 
-    # 是否允许运行核验：Stage 3 必须 done 且至少有 1 条 highlight
+    # 是否允许运行：Stage 3 必须 done 且至少有 1 条 highlight
     s3_done = s3.get("status") == "done"
     hl_list = s3.get("highlights") or []
     can_run = s3_done and bool(hl_list)
-    btn_label = "🔍 重新核验" if status == "done" else "🔍 跑一致性核验"
+    btn_label = "✨ 重新优化" if status == "done" else "✨ 优化字幕"
     btn_class = "slirn-btn" if status == "done" else "slirn-btn slirn-btn-primary"
     disabled_attr = "" if can_run else " disabled title=\"请先完成 Stage 3 解析短视频内容\""
     run_btn = (
-        f'<button class="{btn_class}" data-action="sv-stage3-verify-run"{disabled_attr}>'
+        f'<button class="{btn_class}" data-action="sv-stage4-optimize-run"{disabled_attr}>'
         f'{btn_label}</button>'
     )
 
-    # 报告摘要
-    summary_html = ""
-    if summary:
-        summary_html = (
-            f'<div class="slirn-stage35-summary">'
-            f'<span class="slirn-sv-badge slirn-sv-badge-ok">✅ {summary.get("ok", 0)} 一致</span>'
-            f'<span class="slirn-sv-badge slirn-sv-badge-warning">⚠️ {summary.get("warning", 0)} 部分</span>'
-            f'<span class="slirn-sv-badge slirn-sv-badge-failed">❌ {summary.get("failed", 0)} 不符</span>'
-            f'<span class="slirn-sv-badge slirn-sv-badge-muted">— {summary.get("skipped", 0)} 跳过</span>'
-            f'</div>'
-        )
-
-    # 详细行：每条 highlight 一行
+    # 每条短视频的优化统计行
     detail_rows = []
     for hl in hl_rows:
         idx = hl.get("index") or len(detail_rows) + 1
         st = hl.get("status") or "pending"
-        sub = hl.get("subtitle_count") or 0
-        asr = hl.get("asr_count") or 0
-        matched = hl.get("matched_count") or 0
-        mismatched = hl.get("mismatched_count") or 0
-        missing = hl.get("missing_in_audio") or 0
-        extra = hl.get("extra_in_audio") or 0
-        err = hl.get("error") or ""
         badge_cls = {
             "ok": "slirn-sv-badge-ok",
-            "warning": "slirn-sv-badge-warning",
+            "kept_original": "slirn-sv-badge-warning",
             "failed": "slirn-sv-badge-failed",
-            "skipped": "slirn-sv-badge-muted",
         }.get(st, "slirn-sv-badge-muted")
         badge_text = {
-            "ok": "✅ 一致",
-            "warning": "⚠️ 部分",
-            "failed": "❌ 不符",
-            "skipped": "— 跳过",
+            "ok": "✅ 已优化",
+            "kept_original": "⚠️ 保留原行",
+            "failed": "❌ 失败",
         }.get(st, st)
-        err_html = f'<div class="slirn-stage-error">{esc(err)}</div>' if err else ""
         detail_rows.append(
-            f'<div class="slirn-stage35-row" data-clip-index="{idx}">'
-            f'<div class="slirn-stage35-row-head">'
+            f'<div class="slirn-stage4-opt-row">'
             f'<span class="slirn-sv-row-no">#{idx}</span>'
             f'<span class="slirn-sv-badge {badge_cls}">{badge_text}</span>'
             f'<span class="slirn-sv-muted">'
-            f'字幕 {sub} 行 · ASR {asr} 行 · '
-            f'一致 {matched} · 不符 {mismatched} · 缺失 {missing} · 多余 {extra}'
+            f'{int(hl.get("lines_before") or 0)} 行 → {int(hl.get("lines_after") or 0)} 行 · '
+            f'保留 {int(hl.get("kept") or 0)} · 修改 {int(hl.get("fixed") or 0)} · '
+            f'切分 {int(hl.get("split") or 0)} · 删除 {int(hl.get("deleted") or 0)}'
             f'</span>'
-            f'</div>'
-            f'{err_html}'
             f'</div>'
         )
     detail_html = "".join(detail_rows)
+    warn_html = ""
+    if warnings:
+        items = "".join(f'<li>{esc(w)}</li>' for w in warnings[:8])
+        more = f'<li>… 其余 {len(warnings) - 8} 条见日志</li>' if len(warnings) > 8 else ""
+        warn_html = f'<ul class="slirn-stage4-opt-warns">{items}{more}</ul>'
 
-    return f'''<div class="slirn-stage" data-stage="3.5">
+    return f'''<div class="slirn-stage" data-stage="4">
   <div class="slirn-stage-head">
-    <span class="slirn-stage-num">3.5</span>
-    <strong>字幕一致性核验</strong>
+    <span class="slirn-stage-num">4</span>
+    <strong>内容优化</strong>
     {_stage_badge(status)}
-    {_stage_elapsed(s3v)}
+    {_stage_elapsed(s4o)}
   </div>
   <div class="slirn-stage-body">
-    <div class="slirn-sv-muted slirn-stage35-help">
-      对 Stage 3 的每个 highlight 跑 ffmpeg 抽音频 + funasr 重 ASR，与现有字幕做相似度对比。
-      <strong>仅生成报告</strong>，不修改任何数据；根据报告决定是否调整字幕文本或重新裁剪。
+    <div class="slirn-sv-muted slirn-stage4-opt-help">
+      按标题让大模型优化每条短视频的字幕：<strong>切分长行</strong>（子句拼接须逐字等于原文，时间戳按占比估算）、
+      <strong>修改文字</strong>（去口水/错字）、<strong>删除冗余行</strong>。
+      结果写回 Stage 3 字幕（首次优化前自动备份），可回 Stage 3 页签微调；拼接与后续阶段将作废重跑。
     </div>
     <div class="slirn-sv-card-actions">
       {run_btn}
-      {summary_html}
     </div>
-    <div class="slirn-stage35-detail">{detail_html}</div>
+    <div class="slirn-stage4-opt-detail">{detail_html}</div>
+    {warn_html}
     {error_html}
-    {_stage_logs(s3v)}
+    {_stage_logs(s4o)}
   </div>
 </div>'''
 
 
-def _stage4_coarse(project: dict) -> str:
+def _stage5_coarse(project: dict) -> str:
     task_id = str(project.get("task_id") or "")
     project_id = str(project.get("id") or "")
-    s4 = project.get("pipeline", {}).get("stage4_coarse", {}) or {}
+    s4 = project.get("pipeline", {}).get("stage5_coarse", {}) or {}
     rows = []
     for hl in (s4.get("highlights") or []):
         idx = hl.get("index") or len(rows) + 1
@@ -815,9 +794,9 @@ def _stage4_coarse(project: dict) -> str:
             f'{err_html}'
             f'</div>'
         )
-    return f'''<div class="slirn-stage" data-stage="4">
+    return f'''<div class="slirn-stage" data-stage="5">
   <div class="slirn-stage-head">
-    <span class="slirn-stage-num">4</span>
+    <span class="slirn-stage-num">5</span>
     <strong>粗剪合成</strong>
     {_stage_badge(s4.get("status"))}
     {_stage_elapsed(s4)}
@@ -834,10 +813,10 @@ def _stage4_coarse(project: dict) -> str:
 </div>'''
 
 
-def _stage5_refine(project: dict) -> str:
+def _stage6_refine(project: dict) -> str:
     task_id = str(project.get("task_id") or "")
     project_id = str(project.get("id") or "")
-    s5 = project.get("pipeline", {}).get("stage5_refine", {}) or {}
+    s5 = project.get("pipeline", {}).get("stage6_refine", {}) or {}
     rows = []
     for hl in (s5.get("highlights") or []):
         idx = hl.get("index") or len(rows) + 1
@@ -878,24 +857,24 @@ def _stage5_refine(project: dict) -> str:
             f'{err_html}'
             f'</div>'
         )
-    return f'''<div class="slirn-stage" data-stage="5">
+    return f'''<div class="slirn-stage" data-stage="6">
   <div class="slirn-stage-head">
-    <span class="slirn-stage-num">5</span>
+    <span class="slirn-stage-num">6</span>
     <strong>优化字幕</strong>
     {_stage_badge(s5.get("status"))}
   </div>
   <div class="slirn-stage-body">
     <div class="slirn-sv-muted">每条独立处理：先重新 ASR → 编辑文本 → 保存</div>
-    <div class="slirn-stage5-list">{"".join(rows) or '<div class="slirn-sv-muted">先完成 Stage 4 粗剪</div>'}</div>
+    <div class="slirn-stage5-list">{"".join(rows) or '<div class="slirn-sv-muted">先完成 Stage 5 粗剪</div>'}</div>
     {_stage_logs(s5)}
   </div>
 </div>'''
 
 
-def _stage6_finalize(project: dict) -> str:
+def _stage7_finalize(project: dict) -> str:
     task_id = str(project.get("task_id") or "")
     project_id = str(project.get("id") or "")
-    s6 = project.get("pipeline", {}).get("stage6_finalize", {}) or {}
+    s6 = project.get("pipeline", {}).get("stage7_finalize", {}) or {}
     rows = []
     for hl in (s6.get("highlights") or []):
         idx = hl.get("index") or len(rows) + 1
@@ -921,9 +900,9 @@ def _stage6_finalize(project: dict) -> str:
             f'{err_html}'
             f'</div>'
         )
-    return f'''<div class="slirn-stage" data-stage="6">
+    return f'''<div class="slirn-stage" data-stage="7">
   <div class="slirn-stage-head">
-    <span class="slirn-stage-num">6</span>
+    <span class="slirn-stage-num">7</span>
     <strong>精剪混编</strong>
     {_stage_badge(s6.get("status"))}
     {_stage_elapsed(s6)}
@@ -933,7 +912,7 @@ def _stage6_finalize(project: dict) -> str:
       <button class="slirn-btn slirn-btn-primary" data-action="sv-stage6-run">精剪全部</button>
       <span class="slirn-sv-muted">每条 highlight 独立 mp4，与长视频产物完全隔离</span>
     </div>
-    <div class="slirn-stage6-list">{"".join(rows) or '<div class="slirn-sv-muted">先完成 Stage 5</div>'}</div>
+    <div class="slirn-stage6-list">{"".join(rows) or '<div class="slirn-sv-muted">先完成 Stage 6</div>'}</div>
     {_stage_logs(s6)}
   </div>
 </div>'''
@@ -943,10 +922,10 @@ _SV_STAGE_NAV = (
     ("stage1", "1", "选择源视频", "从任务视频中选择本项目的唯一源视频。", "stage1_source"),
     ("stage2", "2", "提取字幕", "运行 ASR 并生成后续解析所需字幕。", "stage2_extract"),
     ("stage3", "3", "解析短视频内容", "使用提示词和可选截图解析片段内容。", "stage3_analyze"),
-    ("stage35", "3.5", "字幕一致性核验", "核对 AI 拆条字幕与视频音频是否一致。", "stage3_verify"),
-    ("stage4", "4", "粗剪", "按解析结果生成候选短视频片段。", "stage4_coarse"),
-    ("stage5", "5", "字幕优化", "优化字幕文本、断句和时间范围。", "stage5_refine"),
-    ("stage6", "6", "精剪混编", "生成最终短视频文件并检查导出结果。", "stage6_finalize"),
+    ("stage4", "4", "内容优化", "按标题让大模型切分长行、修改文字、删除冗余字幕行。", "stage4_optimize"),
+    ("stage5", "5", "粗剪", "按解析结果生成候选短视频片段。", "stage5_coarse"),
+    ("stage6", "6", "字幕优化", "优化字幕文本、断句和时间范围。", "stage6_refine"),
+    ("stage7", "7", "精剪混编", "生成最终短视频文件并检查导出结果。", "stage7_finalize"),
 )
 
 
@@ -995,10 +974,10 @@ def render_project(project: dict, all_tasks: list[dict] | None = None) -> str:
             source_url=_source_video_url(project),
             srt_lines=(pipeline.get("stage3_analyze", {}) or {}).get("srt_lines") or [],
         )),
-        ("stage35", _stage35_verify(project)),
-        ("stage4", _stage4_coarse(project)),
-        ("stage5", _stage5_refine(project)),
-        ("stage6", _stage6_finalize(project)),
+        ("stage4", _stage4_optimize(project)),
+        ("stage5", _stage5_coarse(project)),
+        ("stage6", _stage6_refine(project)),
+        ("stage7", _stage7_finalize(project)),
     )
     pane_html = "".join(
         f'<section class="slirn-sv-stage-pane{" active" if key == focus_key else ""}" '

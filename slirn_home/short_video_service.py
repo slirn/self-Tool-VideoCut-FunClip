@@ -46,7 +46,7 @@ STAGE6_DIR = "stage6"
 STAGE5_DIR = "stage5"
 STAGE4_DIR = "stage4"
 STAGE3_DIR = "stage3"
-STAGE3_VERIFY_DIR = "stage3_verify"
+STAGE4_OPTIMIZE_DIR = "stage4_optimize"
 STAGE2_DIR = "stage2"
 STAGE1_DIR = "stage1"
 FINAL_MP4_PREFIX = "final"
@@ -220,16 +220,29 @@ def _normalize_project(data: dict, task_id: str, project_id: str) -> dict:
     if not isinstance(pipeline, dict):
         pipeline = {}
     if data["kind"] == PROJECT_KIND_SPLIT:
+        # REQ-20261013-100：阶段重编号 key 迁移（3.5→4 内容优化、4→5、5→6、6→7）。
+        # 必须在下方 setdefault 初始化**之前**执行，否则新 key 已被填上 pending
+        # 默认值、迁移条件永远不成立。幂等：新 key 已有状态则保留新 key（旧 key
+        # 仍清除）。旧 stage3_verify（字幕一致性核验）结构与新阶段不兼容 → 丢弃。
+        for _old, _new in (
+            ("stage6_finalize", "stage7_finalize"),
+            ("stage5_refine", "stage6_refine"),
+            ("stage4_coarse", "stage5_coarse"),
+        ):
+            if _old in pipeline:
+                pipeline.setdefault(_new, pipeline.pop(_old))
+        if "stage3_verify" in pipeline:
+            pipeline.pop("stage3_verify")
         for stage_key, defaults in (
             ("stage1_source", {"status": "pending"}),
             ("stage2_extract", {"status": "pending"}),
             ("stage3_analyze", {"status": "pending"}),
             # REQ-20261012-099 修订五：Stage 3 截取拼接产物状态（拼接顺序 / splice.mp4）
             ("stage3_splice", {"status": "pending"}),
-            ("stage3_verify", {"status": "pending"}),
-            ("stage4_coarse", {"status": "pending"}),
-            ("stage5_refine", {"status": "pending"}),
-            ("stage6_finalize", {"status": "pending"}),
+            ("stage4_optimize", {"status": "pending"}),
+            ("stage5_coarse", {"status": "pending"}),
+            ("stage6_refine", {"status": "pending"}),
+            ("stage7_finalize", {"status": "pending"}),
         ):
             pipeline.setdefault(stage_key, dict(defaults))
         data["pipeline"] = pipeline
@@ -938,8 +951,8 @@ def stage3_dir(repo_root: Path | str, task_id: str, project_id: str) -> Path:
     return project_dir(repo_root, task_id, project_id) / STAGE3_DIR
 
 
-def stage3_verify_dir(repo_root: Path | str, task_id: str, project_id: str) -> Path:
-    return project_dir(repo_root, task_id, project_id) / STAGE3_VERIFY_DIR
+def stage4_optimize_dir(repo_root: Path | str, task_id: str, project_id: str) -> Path:
+    return project_dir(repo_root, task_id, project_id) / STAGE4_OPTIMIZE_DIR
 
 
 def stage2_dir(repo_root: Path | str, task_id: str, project_id: str) -> Path:
@@ -1299,9 +1312,10 @@ def stage6_paths(
 
 
 def get_stage6_state(project: dict) -> dict:
-    """读 stage6 状态字段（缺则视为空）。"""
+    """读精剪混编状态字段（缺则视为空）。REQ-20261013-100：显示编号 7，
+    key 已迁移为 stage7_finalize（函数/目录名保留稳定 API）。"""
     pipeline = project.get("pipeline") or {}
-    state = pipeline.get("stage6_finalize") or {}
+    state = pipeline.get("stage7_finalize") or {}
     if not isinstance(state, dict):
         state = {}
     state.setdefault("status", "pending")
@@ -1312,7 +1326,7 @@ def get_stage6_state(project: dict) -> dict:
 
 def set_stage6_state(project: dict, state: dict) -> None:
     pipeline = project.setdefault("pipeline", {})
-    pipeline["stage6_finalize"] = state
+    pipeline["stage7_finalize"] = state
 
 
 # ---------- 通用阶段状态读写 ----------
@@ -1322,10 +1336,10 @@ _STAGE_STATE_KEYS = {
     "stage2_extract": "stage2_extract",
     "stage3_analyze": "stage3_analyze",
     "stage3_splice": "stage3_splice",
-    "stage3_verify": "stage3_verify",
-    "stage4_coarse": "stage4_coarse",
-    "stage5_refine": "stage5_refine",
-    "stage6_finalize": "stage6_finalize",
+    "stage4_optimize": "stage4_optimize",
+    "stage5_coarse": "stage5_coarse",
+    "stage6_refine": "stage6_refine",
+    "stage7_finalize": "stage7_finalize",
 }
 
 
@@ -1353,18 +1367,18 @@ def set_stage_state(project: dict, stage: str, state: dict) -> None:
 def reset_downstream_stages(project: dict, after_stage: str) -> None:
     """把指定阶段之后的所有阶段重置为 pending（用于上游阶段重跑时清空下游）。
 
-    ``after_stage`` 应是 "stage1_source" / "stage2_extract" / ... / "stage5_refine"。
-    "stage6_finalize" 之后没有下游，无需重置。
+    ``after_stage`` 应是 "stage1_source" / "stage2_extract" / ... / "stage6_refine"。
+    "stage7_finalize" 之后没有下游，无需重置。
     """
     order = [
         "stage1_source",
         "stage2_extract",
         "stage3_analyze",
         "stage3_splice",
-        "stage3_verify",
-        "stage4_coarse",
-        "stage5_refine",
-        "stage6_finalize",
+        "stage4_optimize",
+        "stage5_coarse",
+        "stage6_refine",
+        "stage7_finalize",
     ]
     if after_stage not in order:
         return

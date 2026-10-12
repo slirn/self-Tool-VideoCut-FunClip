@@ -9861,7 +9861,7 @@ def _register_slirn_api(
 
         每条 highlight 独立调上游 cut_by_srt.py 子进程，产物落到
         ``tasks/<tid>/short_video/<pid>/stage6/``。运行结束返回最新
-        pipeline.stage6_finalize 状态。
+        pipeline.stage7_finalize 状态。
         """
         from slirn_home import short_video_finalize as _sv_finalize
 
@@ -10083,28 +10083,31 @@ def _register_slirn_api(
             toast="已存入提示词列表",
         )
 
-    @app.app.post("/slirn/api/short_video_stage3_verify")
-    async def short_video_stage3_verify(body: dict = Body(default_factory=dict)):
-        """REQ-20261004-verify：Stage 3.5 字幕一致性核验 — 插入在 Stage 3 和
-        Stage 4 之间。每个 highlight 跑 ffmpeg 抽音频 + funasr 重 ASR，与 Stage 3
-        的 subtitle_lines 做对齐 + 相似度对比，输出每条字幕行的 ok/partial/mismatch/
-        missing 分类 + 建议。仅生成报告，不做任何自动修改。
+    @app.app.post("/slirn/api/short_video_stage4_optimize")
+    async def short_video_stage4_optimize(body: dict = Body(default_factory=dict)):
+        """REQ-20261013-100：Stage 4「内容优化」（替换原 Stage 3.5 字幕一致性
+        核验）：把 Stage 3 全部短视频的标题+字幕行交给大模型 — 长行切分（子
+        文本拼接须逐字等于原文，时间戳按占比内插）、文字修改、整行删除；结果
+        写回 highlights.json（首次优化前备份原表到 stage4_optimize/），拼接与
+        粗剪及之后作废。
         """
-        from slirn_home import short_video_verify as _sv_verify
+        from slirn_home import short_video_optimize as _sv_opt
 
         tid = (body.get("task_id") or "").strip()
         pid = (body.get("project_id") or "").strip()
         if not tid or not pid:
             return _err("缺少 task_id 或 project_id")
         try:
-            state = _sv_verify.run_stage3_verify(
-                repo_root, tid, pid,
-                model=str(body.get("model") or "paraformer"),
+            state = _sv_opt.run_stage4_optimize(
+                repo_root, tid, pid, prompt=str(body.get("prompt") or ""),
             )
         except Exception as e:  # noqa: BLE001
-            log.exception("stage3_verify run failed")
-            return _err(f"Stage 3.5 执行失败: {e}")
-        return _ok(stage3_verify=state, toast=f"Stage 3.5 {state.get('status', '')}")
+            log.exception("stage4_optimize run failed")
+            return _err(f"Stage 4 内容优化执行失败: {e}")
+        return _ok(
+            stage4_optimize=state,
+            toast="内容优化完成，可回 Stage 3 查看/微调字幕",
+        )
 
     @app.app.post("/slirn/api/short_video_stage3_reorder_subtitles")
     async def short_video_stage3_reorder_subtitles(body: dict = Body(default_factory=dict)):
@@ -10116,7 +10119,7 @@ def _register_slirn_api(
           - src_index: 被拖动行的 src_index
           - before_src_index: 插入到此行之前；None/0 表示移到末尾
 
-        落地：更新 highlights.json + 同步 project state + 重置下游 Stage 4/5/6。
+        落地：更新 highlights.json + 同步 project state + 重置下游阶段（Stage 4-7）。
         """
         tid = (body.get("task_id") or "").strip()
         pid = (body.get("project_id") or "").strip()
@@ -10348,7 +10351,7 @@ def _register_slirn_api(
         if srt_text is None and not srt_file:
             return _err("需要 srt_text 或 srt_file")
         try:
-            hl = _sv_extract.save_stage5_refined(
+            hl = _sv_extract.save_stage6_refined(
                 repo_root, tid, pid, index,
                 srt_text=srt_text, srt_file=srt_file,
             )

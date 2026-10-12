@@ -310,7 +310,7 @@ def _seed_highlights(tmp_path, tid, pid):
         revision_service._call_llm = orig
     # 把下游标记成 done，验证 rerun 后会被重置
     proj = svc.load_project(tmp_path, tid, pid)
-    for key in ("stage4_coarse", "stage5_refine", "stage6_finalize"):
+    for key in ("stage5_coarse", "stage6_refine", "stage7_finalize"):
         svc.get_stage_state(proj, key)["status"] = "done"
     svc.save_project(tmp_path, proj)
 
@@ -475,7 +475,7 @@ def test_rerun_stage3_one(tmp_path):
     assert (svc.stage3_dir(tmp_path, tid, pid) / "llm_raw_hl1.txt").is_file()
     # 下游重置
     proj = svc.load_project(tmp_path, tid, pid)
-    for key in ("stage4_coarse", "stage5_refine", "stage6_finalize"):
+    for key in ("stage5_coarse", "stage6_refine", "stage7_finalize"):
         assert svc.get_stage_state(proj, key).get("status") == "pending", key
 
 
@@ -636,3 +636,85 @@ def test_api_rerun_one_endpoint(tmp_path):
         assert resp["ok"] is False
     finally:
         revision_service._call_llm = orig
+
+
+# ---------- REQ-20261013-100：Stage 4 内容优化端点 + 阶段重编号 UI ----------
+
+def test_api_stage4_optimize_endpoint(tmp_path, monkeypatch):
+    """端点 plumbing：调 run_stage4_optimize（prompt 透传），返回 state + toast。"""
+    from fastapi.testclient import TestClient
+    from slirn_home.app import build_app
+    from slirn_home import short_video_optimize as opt
+
+    tid, pid = _make_project(tmp_path)
+    called = {}
+
+    def fake_run(root, t, p, **kw):
+        called["args"] = (t, p, kw)
+        return {"status": "done", "highlights": [{"index": 1, "status": "ok"}]}
+
+    monkeypatch.setattr(opt, "run_stage4_optimize", fake_run)
+    client = TestClient(build_app(tmp_path).app)
+    r = client.post("/slirn/api/short_video_stage4_optimize", json={
+        "task_id": tid, "project_id": pid, "prompt": "更口语化",
+    }).json()
+    assert r["ok"] is True, r
+    assert r["stage4_optimize"]["status"] == "done"
+    assert "内容优化" in r["toast"]
+    assert called["args"][:2] == (tid, pid)
+    assert called["args"][2].get("prompt") == "更口语化"
+
+    # 缺参数 → 报错
+    r = client.post("/slirn/api/short_video_stage4_optimize", json={}).json()
+    assert r["ok"] is False and "task_id" in r["error"]
+
+
+def test_render_project_seven_stages_and_optimize_card(tmp_path):
+    """阶段重编号 UI：nav 7 条（4=内容优化、5=粗剪、6=字幕优化、7=精剪混编）
+    + Stage 4 卡（运行按钮 / 统计行 / 告警）；旧 3.5 核验 UI 不再出现。"""
+    from slirn_home import short_video_ui as ui
+
+    tid, pid = _make_project(tmp_path)
+    proj = svc.load_project(tmp_path, tid, pid)
+    proj["pipeline"]["stage3_analyze"] = {
+        "status": "done",
+        "highlights": [{"index": 1, "title": "T", "start_ms": 0, "end_ms": 1000,
+                        "subtitle_lines": [{"no": 1, "src_index": 1, "text": "x",
+                                            "start_ms": 0, "end_ms": 1000}]}],
+    }
+    proj["pipeline"]["stage4_optimize"] = {
+        "status": "done",
+        "highlights": [{"index": 1, "status": "ok", "lines_before": 3,
+                        "lines_after": 4, "kept": 1, "fixed": 1, "split": 1,
+                        "deleted": 1}],
+        "warnings": ["#1 split 子句拼接与原文不一致，保留原行（宁可不切不可错切）"],
+    }
+    html = ui.render_project(proj)
+    # nav：新 key 顺序（stage4 内容优化 → stage7 精剪混编）
+    for frag in ('data-stage-key="stage1"', 'data-stage-key="stage4"',
+                 'data-stage-key="stage5"', 'data-stage-key="stage6"',
+                 'data-stage-key="stage7"'):
+        assert frag in html, frag
+    assert "内容优化" in html and "精剪混编" in html
+    # Stage 4 卡：done 后按钮变「重新优化」+ 统计行 + 告警列表
+    assert 'data-action="sv-stage4-optimize-run"' in html
+    assert "✨ 重新优化" in html
+    assert "slirn-stage4-opt-row" in html
+    assert "slirn-stage4-opt-warns" in html
+    # 旧 3.5 核验 UI 彻底移除
+    assert "sv-stage3-verify" not in html
+    assert "字幕一致性" not in html
+
+
+def test_short_video_js_stage4_optimize_wiring():
+    """前端接线：dispatch 指向 stage4OptimizeRun；新端点 URL / 旧 verify 调用清除。"""
+    js_path = Path(__file__).resolve().parent.parent / "slirn_home" / "static" / "short_video.js"
+    js = js_path.read_text(encoding="utf-8")
+    assert "sv-stage4-optimize-run') return stage4OptimizeRun()" in js
+    assert "'/short_video_stage4_optimize'" in js
+    assert "stage4OptimizeRun" in js
+    assert "stage3VerifyRun" not in js
+    assert "'/short_video_stage3_verify'" not in js
+    # stage6Run 读新 pipeline key（stage5_coarse / stage6_refine）
+    assert ".stage5_coarse" in js and ".stage6_refine" in js
+    assert ".stage4_coarse" not in js and ".stage5_refine" not in js

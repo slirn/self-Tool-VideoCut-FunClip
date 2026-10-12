@@ -299,7 +299,7 @@ def run_stage5_one(
 ) -> dict:
     """Stage 5: 对 Stage 4 粗剪 mp4 重新 ASR → ``stage5/refined_NN_asr.srt``。
 
-    默认用 paraformer-zh（与 Stage 2 一致）。返回 stage5_refine.highlights[N] 状态。
+    默认用 paraformer-zh（与 Stage 2 一致）。返回 stage6_refine.highlights[N] 状态。
     """
     root = Path(repo_root)
     project = svc.load_project(root, task_id, project_id)
@@ -307,7 +307,7 @@ def run_stage5_one(
     if not coarse_mp4.is_file():
         raise svc.ShortVideoError(f"粗剪 mp4 不存在: {coarse_mp4}")
 
-    s5_state = svc.get_stage_state(project, "stage5_refine")
+    s5_state = svc.get_stage_state(project, "stage6_refine")
     highlights = list(s5_state.get("highlights") or [])
     while len(highlights) < index:
         highlights.append({"index": len(highlights) + 1, "status": "pending"})
@@ -320,17 +320,17 @@ def run_stage5_one(
     s5_state["logs"] = list(s5_state.get("logs") or []) + [
         f"[{svc.now_iso()}] clip #{index} ASR start, model={model}",
     ]
-    svc.set_stage_state(project, "stage5_refine", s5_state)
+    svc.set_stage_state(project, "stage6_refine", s5_state)
     svc.save_project(root, project)
 
     asr_srt = svc.stage5_default_srt_path(root, task_id, project_id, index)
-    refined_srt = svc.stage5_refined_srt_path(root, task_id, project_id, index)
+    refined_srt = svc.stage6_refined_srt_path(root, task_id, project_id, index)
     result = _run_funasr_extract(
         input_video=coarse_mp4, output_srt=asr_srt,
         repo_root=root, model=model, lang=lang, timeout_sec=timeout_sec,
     )
 
-    s5_state = svc.get_stage_state(project, "stage5_refine")
+    s5_state = svc.get_stage_state(project, "stage6_refine")
     highlights = list(s5_state.get("highlights") or [])
     hl = highlights[index - 1]
     _logs = list(s5_state.get("logs") or [])
@@ -357,12 +357,12 @@ def run_stage5_one(
     highlights[index - 1] = hl
     s5_state["highlights"] = highlights
     s5_state["logs"] = _logs
-    svc.set_stage_state(project, "stage5_refine", s5_state)
+    svc.set_stage_state(project, "stage6_refine", s5_state)
     svc.save_project(root, project)
     return hl
 
 
-def save_stage5_refined(
+def save_stage6_refined(
     repo_root: Path | str,
     task_id: str,
     project_id: str,
@@ -379,7 +379,7 @@ def save_stage5_refined(
     """
     root = Path(repo_root)
     project = svc.load_project(root, task_id, project_id)
-    refined_srt = svc.stage5_refined_srt_path(root, task_id, project_id, index)
+    refined_srt = svc.stage6_refined_srt_path(root, task_id, project_id, index)
 
     if srt_text is not None:
         text = srt_text
@@ -393,7 +393,7 @@ def save_stage5_refined(
     refined_srt.parent.mkdir(parents=True, exist_ok=True)
     refined_srt.write_text(text, encoding="utf-8")
 
-    s5_state = svc.get_stage_state(project, "stage5_refine")
+    s5_state = svc.get_stage_state(project, "stage6_refine")
     highlights = list(s5_state.get("highlights") or [])
     while len(highlights) < index:
         highlights.append({"index": len(highlights) + 1, "status": "pending"})
@@ -407,7 +407,7 @@ def save_stage5_refined(
     s5_state["logs"] = list(s5_state.get("logs") or []) + [
         f"[{svc.now_iso()}] clip #{index} refined saved, chars={len(text)}",
     ]
-    svc.set_stage_state(project, "stage5_refine", s5_state)
+    svc.set_stage_state(project, "stage6_refine", s5_state)
     svc.save_project(root, project)
     return hl
 

@@ -5263,20 +5263,14 @@ input[type="checkbox"]:focus-visible {
   margin-right: 4px;
 }
 
-/* REQ-20261004-verify：Stage 3.5 字幕一致性核验 */
-.slirn-stage35-help {
+/* REQ-20261013-100：Stage 4 内容优化（替换原 3.5 字幕一致性核验） */
+.slirn-stage4-opt-help {
   font-size: 12px;
   margin-bottom: 8px;
   padding: 6px 10px;
   background: #f1f5f9;
   border-radius: 6px;
   line-height: 1.55;
-}
-.slirn-stage35-summary {
-  display: inline-flex;
-  gap: 6px;
-  flex-wrap: wrap;
-  margin-left: 12px;
 }
 .slirn-sv-badge {
   display: inline-block;
@@ -5306,22 +5300,29 @@ input[type="checkbox"]:focus-visible {
   color: #475569;
   border-color: #cbd5e1;
 }
-.slirn-stage35-detail {
+.slirn-stage4-opt-detail {
   margin-top: 10px;
 }
-.slirn-stage35-row {
+.slirn-stage4-opt-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
   margin-top: 8px;
   padding: 8px 12px;
   background: #fafafa;
   border: 1px solid #e2e8f0;
   border-radius: 6px;
-}
-.slirn-stage35-row-head {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
   font-size: 12px;
+}
+.slirn-stage4-opt-warns {
+  margin: 8px 0 0;
+  padding: 6px 10px 6px 26px;
+  font-size: 12px;
+  color: #92400e;
+  background: #fef3c7;
+  border: 1px solid #fcd34d;
+  border-radius: 6px;
 }
 
 .slirn-sv-preview-body audio {

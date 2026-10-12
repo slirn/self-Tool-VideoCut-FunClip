@@ -202,7 +202,7 @@ def run_stage4(
 ) -> dict:
     """Stage 4: 读 highlights.json + 源视频 → ``stage4/coarse_NN.{mp4,srt}``。
 
-    返回最新 pipeline.stage4_coarse 状态。
+    返回最新 pipeline.stage5_coarse 状态。
     """
     root = Path(repo_root)
     project = svc.load_project(root, task_id, project_id)
@@ -260,14 +260,14 @@ def run_stage4(
             out.append((int(ln.start_ms), int(ln.end_ms)))
         return out
 
-    state = svc.get_stage_state(project, "stage4_coarse")
+    state = svc.get_stage_state(project, "stage5_coarse")
     state["status"] = "running"
     state["started_at"] = svc.now_iso()
     state["count"] = len(raw_highlights)
     state["logs"] = list(state.get("logs") or []) + [
         f"[{svc.now_iso()}] stage4 start, {len(raw_highlights)} clips",
     ]
-    svc.set_stage_state(project, "stage4_coarse", state)
+    svc.set_stage_state(project, "stage5_coarse", state)
     svc.save_project(root, project)
 
     if progress_cb:
@@ -305,7 +305,7 @@ def run_stage4(
 
     any_failed = any(r.status != "done" for r in results)
 
-    state = svc.get_stage_state(project, "stage4_coarse")
+    state = svc.get_stage_state(project, "stage5_coarse")
     state["status"] = "done" if not any_failed else "failed"
     state["finished_at"] = svc.now_iso()
     state["highlights"] = [
@@ -331,12 +331,12 @@ def run_stage4(
         f"{sum(1 for r in results if r.status == 'done')}/{len(results)} clips ok"
     )
     state["logs"] = _log_lines
-    svc.set_stage_state(project, "stage4_coarse", state)
+    svc.set_stage_state(project, "stage5_coarse", state)
     svc.save_project(root, project)
 
     # Stage 4 改 → 下游 stage 5/6 全部作废
     if not any_failed:
-        svc.reset_downstream_stages(project, "stage4_coarse")
+        svc.reset_downstream_stages(project, "stage5_coarse")
         svc.save_project(root, project)
 
     if progress_cb:
