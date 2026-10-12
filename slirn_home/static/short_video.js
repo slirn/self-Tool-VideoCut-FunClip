@@ -858,6 +858,275 @@
     else if (act === 'sv-stage6-row-reject') { ev.preventDefault(); _stage6RowSave(a, false); }
   });
 
+  // REQ-20261013-105：Stage 7 精剪 v1 完整版
+  // 收集当前面板的 params（6 组子字段从 DOM 读）
+  function _collectStage7Params() {
+    var params = {
+      materials: {}, font: {}, output: {}, audio: {}, preview: {}, layout: {},
+    };
+    // materials
+    document.querySelectorAll('.slirn-sv-mat-input').forEach(function(inp) {
+      var slot = inp.getAttribute('data-mat-slot');
+      if (slot) params.materials[slot] = inp.value || '';
+    });
+    // font
+    document.querySelectorAll('.slirn-sv-font-input').forEach(function(inp) {
+      var key = inp.getAttribute('data-font-key');
+      if (!key) return;
+      var v = inp.value;
+      // 布尔字段
+      if (key === 'bold' || key === 'bg_enabled') {
+        params.font[key] = (v === 'true' || v === true);
+      } else if (['size', 'stroke_width', 'bg_opacity', 'bg_radius', 'offset_ms'].includes(key)) {
+        params.font[key] = parseFloat(v) || 0;
+      } else {
+        params.font[key] = v;
+      }
+    });
+    // output
+    var res = document.querySelector('.slirn-sv-output-resolution');
+    if (res) params.output.resolution = res.value || '720p';
+    // audio
+    var ae = document.querySelector('.slirn-sv-audio-enabled');
+    if (ae) params.audio.enabled = !!ae.checked;
+    var av = document.querySelector('.slirn-sv-audio-volume');
+    if (av) params.audio.volume_db = parseFloat(av.value) || -6;
+    var afi = document.querySelector('.slirn-sv-audio-fadein');
+    if (afi) params.audio.fade_in_ms = parseFloat(afi.value) || 500;
+    // preview
+    var pd = document.querySelector('.slirn-sv-preview-duration');
+    if (pd) params.preview.duration_sec = parseInt(pd.value, 10) || 5;
+    return params;
+  }
+  // 保存 6 组子字段
+  function stage7SaveParams(btn) {
+    var ctx = innerCtx(); if (!ctx) return;
+    var params = _collectStage7Params();
+    postJSON(API + '/short_video_stage7_save_params', {
+      task_id: ctx.taskId, project_id: ctx.projectId, params: params
+    }).then(function(r) {
+      if (r && r.ok) toast(r.toast || '💾 已保存');
+      else toast('❌ ' + (r && r.error ? r.error : '保存失败'), 'error');
+    });
+  }
+  // 异步导出（仿 Stage 5 setInterval 轮询）
+  function stage7Export(btn) {
+    var ctx = innerCtx(); if (!ctx) return;
+    // 先保存 params
+    stage7SaveParams(btn);
+    var setBtn = function(t, d) { btn.textContent = t; btn.disabled = !!d; };
+    var status = document.getElementById('slirn-sv-stage7-status');
+    var msg = status ? status.querySelector('.slirn-sv-stage7-msg') : null;
+    var bar = status ? status.querySelector('.slirn-progress-bar') : null;
+    var show = function(t) { if (msg) { msg.style.display = ''; msg.textContent = t; } };
+    setBtn('🎬 导出中…', true);
+    show('⏳ 正在启动…');
+    postJSON(API + '/short_video_stage7_export', {
+      task_id: ctx.taskId, project_id: ctx.projectId
+    }).then(function(r) {
+      if (!r || !r.ok) {
+        setBtn('💾 导出最终视频', false);
+        show('');
+        if (msg) msg.style.display = 'none';
+        return toast('❌ ' + (r && r.error ? r.error : '启动失败'), 'error');
+      }
+      toast(r.toast || '🎬 精剪已启动');
+      var timer = setInterval(function() {
+        postJSON(API + '/short_video_stage7_export_status', {
+          task_id: ctx.taskId, project_id: ctx.projectId
+        }).then(function(s) {
+          if (!s || !s.ok || !s.job) return;
+          var j = s.job;
+          if (j.state === 'running') {
+            var pct = Math.max(1, Math.min(99, Math.round(j.progress || 0)));
+            setBtn('🎬 导出中… ' + pct + '%', true);
+            if (bar) bar.style.width = pct + '%';
+            show('⏳ ' + (j.stage || '导出中') + ' ' + pct + '%');
+            return;
+          }
+          clearInterval(timer);
+          if (j.state === 'done') {
+            setBtn('💾 重新导出', false);
+            if (bar) bar.style.width = '100%';
+            show('✅ 精剪完成');
+            toast('✅ 精剪完成');
+            openProject(ctx.taskId, ctx.projectId);
+          } else {
+            setBtn('💾 重新导出', false);
+            show('❌ ' + (j.error || '失败'));
+            toast('❌ ' + (j.error || '失败'), 'error');
+          }
+        });
+      }, 2000);
+    });
+  }
+  // 预览（按 index 调 ffmpeg 切段）
+  function stage7Preview(btn) {
+    var ctx = innerCtx(); if (!ctx) return;
+    var idx = parseInt(btn.getAttribute('data-clip-index') || '0', 10);
+    if (!idx) return;
+    var dur = parseInt((document.querySelector('.slirn-sv-preview-duration') || {}).value || '5', 10);
+    btn.disabled = true;
+    postJSON(API + '/short_video_stage7_preview', {
+      task_id: ctx.taskId, project_id: ctx.projectId, index: idx, duration_sec: dur
+    }).then(function(r) {
+      btn.disabled = false;
+      if (!r || !r.ok) return toast('❌ ' + (r && r.error ? r.error : '预览失败'), 'error');
+      toast(r.toast || '🎬 预览已生成');
+      // 弹视频预览
+      var url = r.preview_path;
+      if (url) {
+        var fname = url.split(/[\\/]/).pop();
+        var fileUrl = '/gradio_api/file=tasks/' + ctx.taskId + '/short_video/' + ctx.projectId + '/stage6/' + fname;
+        previewVideo({getAttribute: function() { return fileUrl; }});
+      }
+    });
+  }
+  // bg 检测
+  function stage7DetectBg(btn) {
+    var ctx = innerCtx(); if (!ctx) return;
+    btn.disabled = true;
+    postJSON(API + '/short_video_stage7_detect_bg', {
+      task_id: ctx.taskId, project_id: ctx.projectId
+    }).then(function(r) {
+      btn.disabled = false;
+      if (!r || !r.ok) return toast('❌ ' + (r && r.error ? r.error : '检测失败'), 'error');
+      toast(r.toast || '🔍 检测完成');
+      openProject(ctx.taskId, ctx.projectId);
+    });
+  }
+  // 应用 detected 到 layout.video
+  function stage7ApplyDetected(btn) {
+    var ctx = innerCtx(); if (!ctx) return;
+    btn.disabled = true;
+    postJSON(API + '/short_video_stage7_apply_detected', {
+      task_id: ctx.taskId, project_id: ctx.projectId
+    }).then(function(r) {
+      btn.disabled = false;
+      if (!r || !r.ok) return toast('❌ ' + (r && r.error ? r.error : '填充失败'), 'error');
+      toast(r.toast || '✅ 已填充');
+      openProject(ctx.taskId, ctx.projectId);
+    });
+  }
+  // AI 智能布局
+  function stage7ParseLayout(btn) {
+    var ctx = innerCtx(); if (!ctx) return;
+    var ref = (document.querySelector('.slirn-sv-mat-input[data-mat-slot="reference"]') || {}).value || '';
+    btn.disabled = true;
+    postJSON(API + '/short_video_stage7_parse_layout', {
+      task_id: ctx.taskId, project_id: ctx.projectId, reference_path: ref
+    }).then(function(r) {
+      btn.disabled = false;
+      if (!r || !r.ok) return toast('❌ ' + (r && r.error ? r.error : 'AI 布局失败'), 'error');
+      toast(r.toast || '🤖 AI 布局已应用');
+      openProject(ctx.taskId, ctx.projectId);
+    });
+  }
+  // BGM 列表（弹窗选）
+  function stage7ListBgm(btn) {
+    var ctx = innerCtx(); if (!ctx) return;
+    postJSON(API + '/short_video_stage7_list_bgm', {}).then(function(r) {
+      if (!r || !r.ok) return toast('❌ 获取 BGM 失败', 'error');
+      var bgms = r.bgms || [];
+      if (!bgms.length) return toast('❌ 暂无系统 BGM', 'error');
+      var opts = bgms.map(function(b, i) {
+        return (i + 1) + '. ' + (b.label || b.filename) + (b.available ? '' : ' (缺失)');
+      }).join('\n');
+      var pick = window.prompt('选 BGM（输入序号）：\n' + opts, '1');
+      var n = parseInt(pick, 10);
+      if (!n || n < 1 || n > bgms.length) return;
+      var b = bgms[n - 1];
+      if (!b.available) return toast('❌ BGM 文件缺失', 'error');
+      postJSON(API + '/short_video_stage7_select_bgm', {
+        task_id: ctx.taskId, project_id: ctx.projectId, bgm_id: b.id
+      }).then(function(r2) {
+        if (r2 && r2.ok) { toast(r2.toast || '🎵 已选'); openProject(ctx.taskId, ctx.projectId); }
+        else toast('❌ ' + (r2 && r2.error ? r.error : '选 BGM 失败'), 'error');
+      });
+    });
+  }
+  // ---- 模板 6 端点 ----
+  function stage7ProfilesList(btn) {
+    postJSON(API + '/short_video_stage7_profiles_list', {}).then(function(r) {
+      if (!r || !r.ok) return toast('❌ 列表失败', 'error');
+      var sel = document.querySelector('.slirn-sv-profile-select');
+      if (!sel) return;
+      sel.innerHTML = '<option value="">-- 选模板 --</option>' +
+        (r.profiles || []).map(function(p) {
+          return '<option value="' + p.id + '">' + p.name + '</option>';
+        }).join('');
+      toast('📋 共 ' + (r.profiles || []).length + ' 个模板');
+    });
+  }
+  function stage7ProfilesSave(btn) {
+    var name = (document.querySelector('.slirn-sv-profile-name') || {}).value || '';
+    if (!name.trim()) return toast('请输入模板名', 'error');
+    var params = _collectStage7Params();
+    postJSON(API + '/short_video_stage7_profiles_save', {
+      name: name, params: params
+    }).then(function(r) {
+      if (r && r.ok) { toast(r.toast || '💾 已保存'); stage7ProfilesList(btn); }
+      else toast('❌ ' + (r && r.error ? r.error : '保存失败'), 'error');
+    });
+  }
+  function stage7ProfilesApply(btn) {
+    var ctx = innerCtx(); if (!ctx) return;
+    var sel = document.querySelector('.slirn-sv-profile-select');
+    var pid = sel ? sel.value : '';
+    if (!pid) return toast('先选模板', 'error');
+    postJSON(API + '/short_video_stage7_profiles_apply', {
+      task_id: ctx.taskId, project_id: ctx.projectId, profile_id: pid
+    }).then(function(r) {
+      if (r && r.ok) { toast(r.toast || '📋 已应用'); openProject(ctx.taskId, ctx.projectId); }
+      else toast('❌ ' + (r && r.error ? r.error : '应用失败'), 'error');
+    });
+  }
+  function stage7ProfilesRename(btn) {
+    var sel = document.querySelector('.slirn-sv-profile-select');
+    var pid = sel ? sel.value : '';
+    if (!pid) return toast('先选模板', 'error');
+    var opt = sel.querySelector('option[value="' + pid + '"]');
+    var newName = window.prompt('新名字', opt ? opt.textContent : '');
+    if (!newName) return;
+    postJSON(API + '/short_video_stage7_profiles_rename', {
+      profile_id: pid, new_name: newName
+    }).then(function(r) {
+      if (r && r.ok) { toast(r.toast || '✏️ 已重命名'); stage7ProfilesList(btn); }
+      else toast('❌ ' + (r && r.error ? r.error : '重命名失败'), 'error');
+    });
+  }
+  function stage7ProfilesExport(btn) {
+    var sel = document.querySelector('.slirn-sv-profile-select');
+    var pid = sel ? sel.value : '';
+    if (!pid) return toast('先选模板', 'error');
+    postJSON(API + '/short_video_stage7_profiles_export', {
+      profile_id: pid
+    }).then(function(r) {
+      if (!r || !r.ok) return toast('❌ 导出失败', 'error');
+      var blob = new Blob([JSON.stringify(r.profile, null, 2)],
+                          {type: 'application/json'});
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url; a.download = (r.profile.name || 'template') + '.json';
+      document.body.appendChild(a); a.click();
+      setTimeout(function() { URL.revokeObjectURL(url); document.body.removeChild(a); }, 100);
+      toast('📤 已导出');
+    });
+  }
+  function stage7ProfilesDelete(btn) {
+    var sel = document.querySelector('.slirn-sv-profile-select');
+    var pid = sel ? sel.value : '';
+    if (!pid) return toast('先选模板', 'error');
+    if (!window.confirm('确定删除该模板？')) return;
+    postJSON(API + '/short_video_stage7_profiles_delete', {
+      profile_id: pid
+    }).then(function(r) {
+      if (r && r.ok) { toast(r.toast || '🗑️ 已删除'); stage7ProfilesList(btn); }
+      else toast('❌ 删除失败', 'error');
+    });
+  }
+
+
   function stage5Asr(btn) {
     var ctx = innerCtx(); if (!ctx) return;
     var index = parseInt(btn.getAttribute('data-clip-index') || '0', 10);
@@ -1496,6 +1765,20 @@
     if (action === 'sv-stage6-unsplit') return stage6Unsplit(btn);
     if (action === 'sv-stage6-batch-search') return stage6BatchSearch(btn);
     if (action === 'sv-stage6-batch-replace') return stage6BatchReplace(btn);
+    // REQ-20261013-105：Stage 7 精剪 v1 完整版（6 素材 + 字体 + BGM + 预览 + 异步 + 模板 + 检测 + AI 布局）
+    if (action === 'sv-stage7-export') return stage7Export(btn);
+    if (action === 'sv-stage7-save-params') return stage7SaveParams(btn);
+    if (action === 'sv-stage7-preview') return stage7Preview(btn);
+    if (action === 'sv-stage7-detect-bg') return stage7DetectBg(btn);
+    if (action === 'sv-stage7-apply-detected') return stage7ApplyDetected(btn);
+    if (action === 'sv-stage7-parse-layout') return stage7ParseLayout(btn);
+    if (action === 'sv-stage7-list-bgm') return stage7ListBgm(btn);
+    if (action === 'sv-stage7-profiles-list') return stage7ProfilesList(btn);
+    if (action === 'sv-stage7-profiles-save') return stage7ProfilesSave(btn);
+    if (action === 'sv-stage7-profiles-apply') return stage7ProfilesApply(btn);
+    if (action === 'sv-stage7-profiles-rename') return stage7ProfilesRename(btn);
+    if (action === 'sv-stage7-profiles-export') return stage7ProfilesExport(btn);
+    if (action === 'sv-stage7-profiles-delete') return stage7ProfilesDelete(btn);
 
     // 预览 / 素材
     if (action === 'sv-preview') return previewVideo(btn);

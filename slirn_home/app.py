@@ -10534,6 +10534,244 @@ def _register_slirn_api(
             return _err(f"Stage 6 替换失败: {e}")
         return _ok("", replaced=res["replaced"], lines=res["lines"], toast="✅ 替换完成")
 
+    # REQ-20261013-105：Stage 7 精剪 v1 完整版（仿长视频 fine 整套搬）
+    @app.app.post("/slirn/api/short_video_stage7_export")
+    async def short_video_stage7_export(body: dict = Body(default_factory=dict)):
+        """异步启动精剪（仿 compose_service.start_compose）。"""
+        from slirn_home import short_video_fine as _sv_fine
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        if not tid or not pid:
+            return _err("缺少 task_id 或 project_id")
+        try:
+            started = _sv_fine.start_fine_async(repo_root, tid, pid)
+        except Exception as e:  # noqa: BLE001
+            log.exception("stage7 export failed")
+            return _err(f"Stage 7 启动失败: {e}")
+        job = _sv_fine.job_status(tid, pid) or {}
+        return _ok(running=bool(started), job=job,
+                   toast="🎬 精剪已启动" if started else "⏳ 精剪已在进行中")
+
+    @app.app.post("/slirn/api/short_video_stage7_export_status")
+    async def short_video_stage7_export_status(body: dict = Body(default_factory=dict)):
+        """Stage 7 进度轮询。"""
+        from slirn_home import short_video_fine as _sv_fine
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        if not tid or not pid:
+            return _err("缺少 task_id 或 project_id")
+        job = _sv_fine.job_status(tid, pid)
+        if job is None:
+            return _ok("", job={"state": "idle", "progress": 0.0})
+        import time as _t
+        job["elapsed_s"] = int(
+            (job.get("finished_at") or _t.time()) - job.get("started_at", _t.time())
+        )
+        return _ok("", job=job)
+
+    @app.app.post("/slirn/api/short_video_stage7_save_params")
+    async def short_video_stage7_save_params(body: dict = Body(default_factory=dict)):
+        """保存 6 组子字段（materials / layout / font / output / audio / preview）。"""
+        from slirn_home import short_video_fine as _sv_fine
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        params = body.get("params") or {}
+        if not tid or not pid:
+            return _err("缺少 task_id 或 project_id")
+        try:
+            res = _sv_fine.save_params(repo_root, tid, pid, params)
+        except Exception as e:  # noqa: BLE001
+            log.exception("stage7 save params failed")
+            return _err(f"Stage 7 保存参数失败: {e}")
+        return _ok("", params=res["params"], toast="💾 参数已保存")
+
+    @app.app.post("/slirn/api/short_video_stage7_load_default")
+    async def short_video_stage7_load_default(body: dict = Body(default_factory=dict)):
+        """返回默认 params（前端首次加载用）。"""
+        from slirn_home import short_video_fine as _sv_fine
+        return _ok("", params=_sv_fine.load_default_params())
+
+    @app.app.post("/slirn/api/short_video_stage7_preview")
+    async def short_video_stage7_preview(body: dict = Body(default_factory=dict)):
+        """2-30s 快速预览（ffmpeg -ss -t）。"""
+        from slirn_home import short_video_fine as _sv_fine
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        idx = int(body.get("index") or 0)
+        start_ms = int(body.get("start_ms") or 0)
+        dur = int(body.get("duration_sec") or 5)
+        if not tid or not pid or not idx:
+            return _err("缺少 task_id / project_id / index")
+        try:
+            res = _sv_fine.preview_clip(repo_root, tid, pid, idx,
+                                         start_ms=start_ms, duration_sec=dur)
+        except Exception as e:  # noqa: BLE001
+            log.exception("stage7 preview failed")
+            return _err(f"Stage 7 预览失败: {e}")
+        return _ok("", preview_path=res["preview_path"], size=res["size"],
+                   index=res["index"], toast="🎬 预览已生成")
+
+    @app.app.post("/slirn/api/short_video_stage7_detect_bg")
+    async def short_video_stage7_detect_bg(body: dict = Body(default_factory=dict)):
+        """bg 白底检测。"""
+        from slirn_home import short_video_bg_detect as _bg
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        src = str(body.get("source_video") or "")
+        if not tid or not pid:
+            return _err("缺少 task_id 或 project_id")
+        try:
+            region = _bg.detect_bg_white_area(repo_root, tid, pid, source_video=src)
+        except Exception as e:  # noqa: BLE001
+            log.exception("stage7 detect bg failed")
+            return _err(f"Stage 7 bg 检测失败: {e}")
+        return _ok("", region=region, toast="🔍 检测完成")
+
+    @app.app.post("/slirn/api/short_video_stage7_apply_detected")
+    async def short_video_stage7_apply_detected(body: dict = Body(default_factory=dict)):
+        """把 detected_region 填充到 layout.video。"""
+        from slirn_home import short_video_bg_detect as _bg
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        if not tid or not pid:
+            return _err("缺少 task_id 或 project_id")
+        try:
+            res = _bg.apply_detected_to_layout(repo_root, tid, pid)
+        except Exception as e:  # noqa: BLE001
+            log.exception("stage7 apply detected failed")
+            return _err(f"Stage 7 填充失败: {e}")
+        return _ok("", layout=res["layout"], toast="✅ 已填充到视频位置和裁剪")
+
+    @app.app.post("/slirn/api/short_video_stage7_parse_layout")
+    async def short_video_stage7_parse_layout(body: dict = Body(default_factory=dict)):
+        """AI 智能布局（参考图 → 4 区域）。"""
+        from slirn_home import short_video_ai_layout as _ai
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        ref = str(body.get("reference_path") or "")
+        style = str(body.get("style_hint") or "现代简洁")
+        if not tid or not pid:
+            return _err("缺少 task_id 或 project_id")
+        try:
+            layout = _ai.parse_reference_layout(repo_root, tid, pid,
+                                                 style_hint=style, reference_path=ref)
+            res = _ai.apply_ai_layout(repo_root, tid, pid, layout)
+        except Exception as e:  # noqa: BLE001
+            log.exception("stage7 parse layout failed")
+            return _err(f"Stage 7 AI 布局失败: {e}")
+        return _ok("", layout=res["layout"], toast="🤖 AI 布局已应用")
+
+    # ---- BGM 选择（复用长视频 _get_default_bgms 助手） ----
+    @app.app.post("/slirn/api/short_video_stage7_list_bgm")
+    async def short_video_stage7_list_bgm(body: dict = Body(default_factory=dict)):
+        """列出系统默认 BGM（短剧项目级）。"""
+        try:
+            bgms = _get_default_bgms()  # noqa: F821 — app.py 模块级
+        except NameError:
+            bgms = []
+        return _ok(bgms=bgms)
+
+    @app.app.post("/slirn/api/short_video_stage7_select_bgm")
+    async def short_video_stage7_select_bgm(body: dict = Body(default_factory=dict)):
+        """选系统默认 BGM → 写入 stage7_finalize.params.audio.bgm_path。"""
+        from slirn_home import short_video_fine as _sv_fine
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        bgm_id = (body.get("bgm_id") or "").strip()
+        if not tid or not pid or not bgm_id:
+            return _err("缺少 task_id / project_id / bgm_id")
+        # 复用长视频 _DEFAULT_BGMS 列表
+        bgm = next((b for b in _DEFAULT_BGMS  # noqa: F821
+                    if b.get("id") == bgm_id), None)
+        if not bgm:
+            return _err(f"未知的 bgm_id: {bgm_id}")
+        src = _DEFAULT_BGMS_DIR / bgm["filename"]  # noqa: F821
+        if not src.exists():
+            return _err(f"系统默认 BGM 文件不存在: {src}")
+        # 写入 params.audio
+        try:
+            root = repo_root
+            project = _sv_fine.svc.load_project(root, tid, pid)
+            params = _sv_fine._get_params(project)
+            params["audio"]["enabled"] = True
+            params["audio"]["bgm_path"] = str(src)
+            s = _sv_fine.svc.get_stage_state(project, "stage7_finalize")
+            s["params"] = params
+            _sv_fine.svc.set_stage_state(project, "stage7_finalize", s)
+            _sv_fine.svc.save_project(root, project)
+        except Exception as e:  # noqa: BLE001
+            log.exception("select_bgm save params failed")
+            return _err(f"选 BGM 失败: {e}")
+        return _ok("", bgm_path=str(src), toast=f"🎵 已选 BGM: {bgm.get('name', bgm_id)}")
+
+    # ---- 模板管理 6 端点 ----
+    @app.app.post("/slirn/api/short_video_stage7_profiles_list")
+    async def short_video_stage7_profiles_list(body: dict = Body(default_factory=dict)):
+        from slirn_home import short_video_fine as _sv_fine
+        return _ok(profiles=_sv_fine.list_profiles(repo_root))
+
+    @app.app.post("/slirn/api/short_video_stage7_profiles_save")
+    async def short_video_stage7_profiles_save(body: dict = Body(default_factory=dict)):
+        from slirn_home import short_video_fine as _sv_fine
+        name = str(body.get("name") or "").strip()
+        params = body.get("params") or {}
+        pid = str(body.get("profile_id") or "").strip() or None
+        if not name:
+            return _err("缺少 name")
+        try:
+            res = _sv_fine.save_profile(repo_root, name=name, params=params, profile_id=pid)
+        except Exception as e:  # noqa: BLE001
+            log.exception("profiles save failed")
+            return _err(f"保存模板失败: {e}")
+        return _ok("", profile=res, toast="💾 模板已保存")
+
+    @app.app.post("/slirn/api/short_video_stage7_profiles_apply")
+    async def short_video_stage7_profiles_apply(body: dict = Body(default_factory=dict)):
+        from slirn_home import short_video_fine as _sv_fine
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        prof_id = str(body.get("profile_id") or "").strip()
+        if not tid or not pid or not prof_id:
+            return _err("缺少 task_id / project_id / profile_id")
+        try:
+            res = _sv_fine.apply_profile(repo_root, tid, pid, prof_id)
+        except Exception as e:  # noqa: BLE001
+            log.exception("profiles apply failed")
+            return _err(f"应用模板失败: {e}")
+        return _ok("", params=res["params"], toast="📋 模板已应用")
+
+    @app.app.post("/slirn/api/short_video_stage7_profiles_delete")
+    async def short_video_stage7_profiles_delete(body: dict = Body(default_factory=dict)):
+        from slirn_home import short_video_fine as _sv_fine
+        prof_id = str(body.get("profile_id") or "").strip()
+        if not prof_id:
+            return _err("缺少 profile_id")
+        ok = _sv_fine.delete_profile(repo_root, prof_id)
+        return _ok("", deleted=ok, toast="🗑️ 已删除" if ok else "❌ 不存在")
+
+    @app.app.post("/slirn/api/short_video_stage7_profiles_rename")
+    async def short_video_stage7_profiles_rename(body: dict = Body(default_factory=dict)):
+        from slirn_home import short_video_fine as _sv_fine
+        prof_id = str(body.get("profile_id") or "").strip()
+        new_name = str(body.get("new_name") or "").strip()
+        if not prof_id or not new_name:
+            return _err("缺少 profile_id / new_name")
+        res = _sv_fine.rename_profile(repo_root, prof_id, new_name)
+        if not res:
+            return _err("模板不存在")
+        return _ok("", profile=res, toast="✏️ 已重命名")
+
+    @app.app.post("/slirn/api/short_video_stage7_profiles_export")
+    async def short_video_stage7_profiles_export(body: dict = Body(default_factory=dict)):
+        from slirn_home import short_video_fine as _sv_fine
+        prof_id = str(body.get("profile_id") or "").strip()
+        if not prof_id:
+            return _err("缺少 profile_id")
+        res = _sv_fine.export_profile(repo_root, prof_id)
+        if not res:
+            return _err("模板不存在")
+        return _ok("", profile=res, toast="📤 已导出")
+
     @app.app.post("/slirn/api/short_video_stage5_run")
     async def short_video_stage5_run(body: dict = Body(default_factory=dict)):
         """REQ-20261003-098：Stage 5 优化字幕 — 重新 ASR 一条粗剪 mp4。"""

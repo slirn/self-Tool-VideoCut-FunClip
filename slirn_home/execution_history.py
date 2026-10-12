@@ -47,6 +47,8 @@ KIND_SHORT_VIDEO_RENDER = "short_video_render"
 # REQ-20261013-103：短视频 Stage 5 粗剪（按长视频 compose_rough 整套搬）
 KIND_SHORT_VIDEO_COARSE = "short_video_coarse"
 KIND_SHORT_VIDEO_COARSE_DELETE = "short_video_coarse_delete"
+# REQ-20261013-105：短视频 Stage 7 精剪（按长视频 fine 整套搬）
+KIND_SHORT_VIDEO_FINE = "short_video_fine"
 
 # 阶段中文标签（前端展示用）
 KIND_LABELS: dict[str, str] = {
@@ -66,6 +68,7 @@ KIND_LABELS: dict[str, str] = {
     KIND_SHORT_VIDEO_RENDER: "短视频渲染",
     KIND_SHORT_VIDEO_COARSE: "粗剪合成（短）",
     KIND_SHORT_VIDEO_COARSE_DELETE: "删除粗剪成品（短）",
+    KIND_SHORT_VIDEO_FINE: "精剪混编（短）",
 }
 
 # kind → 所属工作台阶段 key（前端分组 / 颜色）
@@ -88,6 +91,7 @@ KIND_TO_STAGE: dict[str, str] = {
     KIND_SHORT_VIDEO_RENDER: "fine_cut",
     KIND_SHORT_VIDEO_COARSE: "stage5_coarse",
     KIND_SHORT_VIDEO_COARSE_DELETE: "stage5_coarse",
+    KIND_SHORT_VIDEO_FINE: "stage7_finalize",
 }
 
 # 默认 description 模板（调用方未传 description 时使用）
@@ -108,6 +112,7 @@ DEFAULT_DESCRIPTIONS: dict[str, str] = {
     KIND_SHORT_VIDEO_RENDER: "渲染短视频 9:16 成片",
     KIND_SHORT_VIDEO_COARSE: "短视频粗剪合成（每条 highlight 独立 mp4）",
     KIND_SHORT_VIDEO_COARSE_DELETE: "删除短视频粗剪成品（N 条 mp4 + 占位 srt）",
+    KIND_SHORT_VIDEO_FINE: "短视频精剪混编（ffmpeg 切 + 烧字幕 + BGM）",
 }
 
 # 全部合法 kind（路由层校验非法请求）
@@ -117,7 +122,8 @@ ALL_KINDS = {KIND_SUBTITLE_GENERATION, KIND_SUBTITLE_REVIEW,
              KIND_OPTIMIZE, KIND_OPTIMIZE_CUT, KIND_FINE_AI_LAYOUT,
              KIND_FINE_BG_DETECT, KIND_FINE_PREVIEW, KIND_FINE_EXPORT,
              KIND_SHORT_VIDEO_AI, KIND_SHORT_VIDEO_RENDER,
-             KIND_SHORT_VIDEO_COARSE, KIND_SHORT_VIDEO_COARSE_DELETE}
+             KIND_SHORT_VIDEO_COARSE, KIND_SHORT_VIDEO_COARSE_DELETE,
+             KIND_SHORT_VIDEO_FINE}
 
 
 def _now_iso(ts: float) -> str:
