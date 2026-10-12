@@ -5118,6 +5118,7 @@ input[type="checkbox"]:focus-visible {
 
 /* ============ REQ-20261001-096：素材预览小窗口（页内模态，不开新页签）============ */
 .slirn-sv-preview-card {
+  position: relative;   /* 修订七：右下角调宽把柄的定位锚 */
   min-width: 300px;
   max-width: min(720px, 88vw);
   padding: 14px 16px 16px;
@@ -5130,6 +5131,7 @@ input[type="checkbox"]:focus-visible {
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 10px;
+  cursor: move;   /* 修订七：标题栏拖动整窗 */
 }
 
 .slirn-sv-preview-title {
@@ -5148,6 +5150,25 @@ input[type="checkbox"]:focus-visible {
   background: #000;
   margin: 0 auto;
 }
+
+/* 修订七：预览窗口右下角调宽把柄（预览 modal + Stage 3 悬浮播放器共用样式） */
+.slirn-sv-preview-resize,
+.slirn-sv-fp-resize {
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  width: 20px;
+  height: 20px;
+  line-height: 20px;
+  text-align: center;
+  font-size: 13px;
+  color: var(--text-muted, #94a3b8);
+  cursor: nwse-resize;
+  user-select: none;
+  z-index: 5;
+}
+.slirn-sv-preview-resize:hover,
+.slirn-sv-fp-resize:hover { color: var(--text-primary, #1e293b); }
 
 /* REQ-20261004-UX：Stage 3 片段预览 modal 字幕行 */
 .slirn-sv-clip-meta {
@@ -5727,15 +5748,13 @@ input[type="checkbox"]:focus-visible {
 }
 .slirn-stage3-hl-ts {
   display: inline-block;
-  min-width: 42px;
-  padding: 1px 4px;
+  padding: 1px 5px;
   background: #0f172a;
   color: #fbbf24;
   border-radius: 3px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 11px;
   flex-shrink: 0;
-  text-align: right;
 }
 /* 修订六：行唯一编号 chip（no. — 拖拽重排后随行移动，「还原顺序」按它升序） */
 .slirn-stage3-hl-no {
@@ -5750,8 +5769,13 @@ input[type="checkbox"]:focus-visible {
   text-align: right;
   flex-shrink: 0;
 }
-.slirn-stage3-hl-text {
+/* 修订七：字幕文本必须显式给色 —— Gradio 会用 `.prose *` 给 gr.HTML 内
+   所有后代强制 color: var(--body-text-color)（直接声明压过继承），无色规则
+   的 span 在深色预览底上变成深字（用户反馈「看不到文字」）。非 layer 规则
+   + 双类选择器稳赢。 */
+.slirn-stage3-hl-preview .slirn-stage3-hl-text {
   flex: 1 1 auto;
+  color: #f1f5f9;
 }
 .slirn-stage3-hl-hint {
   margin-top: 4px;
@@ -6042,6 +6066,9 @@ input[type="checkbox"]:focus-visible {
   margin: 0;
   padding: 12px;
   background: #f8fafc;
+  /* 修订七：底色固定浅色 → 文字也必须固定深色（防暗色主题下被 `.prose *`
+     强制成浅色文字 → 白底白字） */
+  color: #0f172a;
   border-radius: 6px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;

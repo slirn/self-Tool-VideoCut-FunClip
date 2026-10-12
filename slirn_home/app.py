@@ -9659,10 +9659,13 @@ def _register_slirn_api(
 
             pl = project.setdefault("pipeline", {})
             s3 = pl.setdefault("stage3_analyze", {})
-            if not s3.get("highlights"):
-                s3["highlights"] = hls
-                if not s3.get("count"):
-                    s3["count"] = len(hls)
+            # 修订七 bugfix：state 镜像是 highlights.json 的**派生数据**，doc 才是
+            # source of truth——必须按 doc 覆盖，不能 `if not s3.get("highlights")`
+            # 跳过。旧写法会被 rerun_one 留在磁盘上的过期单组镜像卡死：整跑后
+            # doc 换成新 5 组，state 里还是旧的那 1 组 → 页面只显示一组（用户
+            # 报「只看到 3 号短视频」）。GET 不落盘，覆盖只影响本次渲染。
+            s3["highlights"] = hls
+            s3["count"] = len(hls)
             # 注入 srt_lines（只在第一次注入，避免重复覆盖）
             if srt_lines_dicts and not s3.get("srt_lines"):
                 s3["srt_lines"] = srt_lines_dicts

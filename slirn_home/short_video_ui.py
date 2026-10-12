@@ -437,13 +437,13 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
             srt_index_to_time[idx] = (sm, em)
 
     def _ts(ms: int) -> str:
-        # UI 简洁版：mm:ss（行内字幕行只用 mm:ss 就够，省空间）
-        if ms <= 0:
-            return "00:00"
-        sec = ms / 1000.0
-        m = int(sec // 60)
-        s = int(sec % 60)
-        return f"{m:02d}:{s:02d}"
+        # 修订七（用户验收）：行内时间戳要完整 hh:mm:ss,ms（与 LLM 输出/SRT
+        # 时间格式一致，长视频 mm:ss 会看不出在哪个小时）
+        ms = max(0, int(ms))
+        h, rem = divmod(ms, 3_600_000)
+        m, rem = divmod(rem, 60_000)
+        s, milli = divmod(rem, 1000)
+        return f"{h:02d}:{m:02d}:{s:02d},{milli:03d}"
 
     # 高亮条目可编辑标题 + 删除 + 完整字幕预览（REQ-20261004-UX：用户要直接看到全部文字）
     # 修订六：一组 = 一条短视频（围绕一个标题，字幕合计约 70s）；组内每行带
@@ -490,10 +490,11 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
             except (TypeError, ValueError):
                 times = srt_index_to_time.get(src)
             if times:
-                range_html = f'{_ts(times[0])} → {_ts(times[1])}'
+                # 修订七：行格式 = 编号. [hh:mm:ss,ms → hh:mm:ss,ms] 字幕文本（带方括号）
+                range_html = f'[{_ts(times[0])} → {_ts(times[1])}]'
                 tip = f"源字幕 #{src} @ {_ts(times[0])}-{_ts(times[1])}"
             else:
-                range_html = "??:??"
+                range_html = "[??:??:??,???]"
                 tip = f"源字幕 #{src}"
             preview_items.append(
                 f'<div class="slirn-stage3-hl-sub" draggable="true" '

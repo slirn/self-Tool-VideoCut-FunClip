@@ -506,6 +506,74 @@
     ov.remove();
     document.removeEventListener('keydown', onPreviewKey);
   }
+  // 修订七：预览窗口可拖动位置 + 可调整大小（用户验收）。
+  // 拖动 = 标题栏 mousedown 把卡片从 flex 居中切到绝对定位后跟手移动；
+  // 调整大小 = 右下角把柄改 width（视频 max-width:100% 自动跟随），有持久化 key 则记忆。
+  function _enableWinDrag(win, head) {
+    head.addEventListener('mousedown', function(ev) {
+      if (ev.button !== 0) return;
+      if (ev.target.closest && ev.target.closest('button')) return;
+      ev.preventDefault();
+      var rect = win.getBoundingClientRect();
+      var parent = win.offsetParent || document.body;
+      var prect = parent.getBoundingClientRect();
+      var baseL = rect.left - prect.left, baseT = rect.top - prect.top;
+      win.style.position = 'absolute';
+      win.style.margin = '0';
+      win.style.left = baseL + 'px';
+      win.style.top = baseT + 'px';
+      var x0 = ev.clientX, y0 = ev.clientY;
+      function move(e2) {
+        var l = Math.max(0, Math.min(prect.width - 80, baseL + e2.clientX - x0));
+        var t = Math.max(0, Math.min(prect.height - 40, baseT + e2.clientY - y0));
+        win.style.left = l + 'px';
+        win.style.top = t + 'px';
+      }
+      function up() {
+        document.removeEventListener('mousemove', move);
+        document.removeEventListener('mouseup', up);
+      }
+      document.addEventListener('mousemove', move);
+      document.addEventListener('mouseup', up);
+    });
+  }
+  function _enableWinResize(win, handle, opts) {
+    opts = opts || {};
+    var minW = opts.minW || 300;
+    if (opts.persistKey) {
+      try {
+        var saved = JSON.parse(localStorage.getItem(opts.persistKey) || 'null');
+        if (saved && saved.width > minW) {
+          win.style.width = saved.width + 'px';
+          win.style.maxWidth = 'none';
+        }
+      } catch (e) { /* ignore */ }
+    }
+    handle.addEventListener('mousedown', function(ev) {
+      if (ev.button !== 0) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      var startW = win.getBoundingClientRect().width;
+      var x0 = ev.clientX;
+      win.style.maxWidth = 'none';  // 解除 max-width 上限，允许拉大
+      function move(e2) {
+        var w = Math.max(minW, Math.min(window.innerWidth - 24, startW + e2.clientX - x0));
+        win.style.width = w + 'px';
+      }
+      function up() {
+        document.removeEventListener('mousemove', move);
+        document.removeEventListener('mouseup', up);
+        if (opts.persistKey) {
+          try {
+            localStorage.setItem(opts.persistKey, JSON.stringify({ width: win.getBoundingClientRect().width }));
+          } catch (e) { /* ignore */ }
+        }
+      }
+      document.addEventListener('mousemove', move);
+      document.addEventListener('mouseup', up);
+    });
+  }
+
   function previewByUrl(url, name, body) {
     closePreview();
     if (!url) return;
@@ -519,12 +587,16 @@
           '<button class="slirn-btn-mini" data-action="sv-preview-close" title="关闭 (Esc)">✕</button>' +
         '</div>' +
         '<div class="slirn-sv-preview-body">' + body + '</div>' +
+        '<div class="slirn-sv-preview-resize" title="拖动调整窗口大小">◢</div>' +
       '</div>';
     ov.addEventListener('click', function(ev2) {
       if (ev2.target === ov) closePreview();
     });
     document.body.appendChild(ov);
     document.addEventListener('keydown', onPreviewKey);
+    var card = ov.querySelector('.slirn-sv-preview-card');
+    _enableWinDrag(card, ov.querySelector('.slirn-sv-preview-head'));
+    _enableWinResize(card, ov.querySelector('.slirn-sv-preview-resize'), { minW: 300 });
   }
 
   function previewSrtByUrl(url) {
@@ -575,7 +647,8 @@
         '<video id="slirn-sv-fp-video" class="slirn-sv-fp-video" ' +
           'controls autoplay playsinline preload="auto" src="' + esc(url) + '"></video>' +
         '<div class="slirn-sv-fp-subs" id="slirn-sv-fp-subs"></div>' +
-      '</div>';
+      '</div>' +
+      '<div class="slirn-sv-fp-resize" title="拖动调整窗口大小">◢</div>';
     document.body.appendChild(fp);
 
     // 字幕块：从 data-sub-text 还原成行
@@ -646,6 +719,11 @@
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);
     }
+
+    // 修订七：右下角把柄调窗口大小（宽度驱动，视频跟随），记忆到 localStorage
+    _enableWinResize(fp, fp.querySelector('.slirn-sv-fp-resize'), {
+      minW: 280, persistKey: 'slirn.sv.fp.size',
+    });
 
     // 关闭按钮（事件冒泡到全局 click 分发，但这里直接绑，省一次查找）
     fp.querySelector('[data-action="sv-fp-close"]').addEventListener('click', function() {

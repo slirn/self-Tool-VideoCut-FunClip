@@ -590,10 +590,10 @@ def test_stage3_ui_line_no_timestamps_and_restore(tmp_path):
         "task_id": tid, "project_id": pid,
     }).json()["html"]
 
-    # 行显示：唯一编号 + 时间戳（内容和时间都要显示）
+    # 行显示：唯一编号 + 完整时间戳（修订七：hh:mm:ss,ms 带方括号）
     assert html.count("slirn-stage3-hl-no") >= 4          # 2 组 × 2 行
-    assert "00:08 → 00:09" in html                        # src3 的时间区间
-    assert "00:01 → 00:02" in html
+    assert "[00:00:08,000 → 00:00:09,000]" in html        # src3 的时间区间
+    assert "[00:00:01,000 → 00:00:02,000]" in html
     # 组元信息：字幕合计 + 行数
     assert "字幕合计" in html and "行" in html
     # 还原顺序按钮：组 1（已打乱）可点；组 2（原序）禁用
@@ -671,6 +671,130 @@ def test_stage3_ui_splice_card_before_parse(tmp_path):
     }).json()["html"]
     assert "短视频截取拼接" in html
     assert 'data-action="sv-stage3-splice" disabled' in html
+
+
+# ---------- 修订七：只显示一组 bug（state 镜像 ≠ doc） ----------
+
+def test_stale_state_mirror_heals_on_get(tmp_path):
+    """真实 bug（2026-10-12 用户报「只看到 3 号短视频」）：
+
+    rerun_one 在镜像为空时留下单组镜像 → 之后整跑重写 doc 为全新 N 组，
+    run_stage3 不清镜像 + GET 注入 `if not highlights` 跳过 → 页面只显示
+    那一组过期数据。GET 注入必须按 doc（source of truth）整表覆盖。
+    """
+    from fastapi.testclient import TestClient
+
+    from slirn_home.app import build_app
+
+    tid, pid = _make_project(tmp_path)
+    assert _run_stage3_groups(tmp_path, tid, pid)["status"] == "done"
+
+    # 人为复刻磁盘上的过期单组镜像（等价于 rerun 留下 + 整跑后的现场）
+    proj = svc.load_project(tmp_path, tid, pid)
+    doc = json.loads(
+        svc.stage_highlights_path(tmp_path, tid, pid).read_text(encoding="utf-8")
+    )
+    stale = [dict(doc["highlights"][1])]  # 只留组 2（对应真实现场「只剩 #3」）
+    proj["pipeline"]["stage3_analyze"]["highlights"] = stale
+    svc.save_project(tmp_path, proj)
+
+    client = TestClient(build_app(tmp_path).app)
+    html = client.post("/slirn/api/short_video_get", json={
+        "task_id": tid, "project_id": pid,
+    }).json()["html"]
+    # doc 有 2 组 → 页面必须显示 2 组（旧代码这里只剩 1 行）
+    assert html.count('class="slirn-stage3-hl-row"') == 2
+    assert "主题A" in html and "主题B" in html
+
+
+def test_run_stage3_clears_stale_mirror(tmp_path):
+    """整跑产出全新 doc → 旧镜像（highlights / srt_lines）必须清掉。"""
+    tid, pid = _make_project(tmp_path)
+    proj = svc.load_project(tmp_path, tid, pid)
+    s3 = proj["pipeline"]["stage3_analyze"]
+    s3["highlights"] = [{"index": 99, "title": "过期单组"}]
+    s3["srt_lines"] = [{"index": 1, "start_ms": 0, "end_ms": 1, "text": "过期行"}]
+    svc.save_project(tmp_path, proj)
+
+    assert _run_stage3_groups(tmp_path, tid, pid)["status"] == "done"
+    proj = svc.load_project(tmp_path, tid, pid)
+    s3 = proj["pipeline"]["stage3_analyze"]
+    assert "highlights" not in s3, "整跑应清掉过期 highlights 镜像（由 GET 重注）"
+    assert "srt_lines" not in s3, "整跑应清掉过期 srt_lines 镜像"
+
+
+def test_rerun_and_restore_mirror_full_doc(tmp_path, monkeypatch):
+    """rerun_one / restore 后，磁盘 state 镜像必须整表等于 doc（多入口对称）。"""
+    from fastapi.testclient import TestClient
+
+    from slirn_home.app import build_app
+
+    tid, pid = _make_project(tmp_path)
+    assert _run_stage3_groups(tmp_path, tid, pid)["status"] == "done"
+    _swap_group1_lines(tmp_path, tid, pid)
+
+    monkeypatch.setattr(
+        revision_service, "_call_llm",
+        lambda s, u, **kw: "# 1 | 重解析主题\n1. [00:00:05,000-00:00:06,000] 第二句\n",
+    )
+    client = TestClient(build_app(tmp_path).app)
+
+    # rerun 组 1 → 镜像 = doc 全表（2 组），不是只有重解析的那组
+    r = client.post("/slirn/api/short_video_stage3_rerun_one", json={
+        "task_id": tid, "project_id": pid, "hl_index": 1,
+    }).json()
+    assert r["ok"] is True, r
+    doc = json.loads(
+        svc.stage_highlights_path(tmp_path, tid, pid).read_text(encoding="utf-8")
+    )
+    proj = svc.load_project(tmp_path, tid, pid)
+    mirror = proj["pipeline"]["stage3_analyze"]["highlights"]
+    assert len(mirror) == len(doc["highlights"]) == 2, "镜像必须整表同步 doc"
+
+    # restore 组 1 → 同样整表同步（组 1 被 rerun 成单行，取组 2 验证内容随行）
+    r = client.post("/slirn/api/short_video_stage3_restore_order", json={
+        "task_id": tid, "project_id": pid, "hl_index": 1,
+    }).json()
+    assert r["ok"] is True, r
+    proj = svc.load_project(tmp_path, tid, pid)
+    mirror = proj["pipeline"]["stage3_analyze"]["highlights"]
+    assert len(mirror) == 2
+    m1 = next(h for h in mirror if h["index"] == 1)
+    assert [sl["no"] for sl in m1["subtitle_lines"]] == [1]  # rerun 后只剩 1 行
+    m2 = next(h for h in mirror if h["index"] == 2)
+    assert [sl["no"] for sl in m2["subtitle_lines"]] == [1, 2]
+
+
+# ---------- 修订七：字幕文字颜色 + 预览窗口拖动/调宽 ----------
+
+def test_stage3_hl_text_explicit_color():
+    """Gradio 用 `.prose *` 给 gr.HTML 所有后代强制 color（直接声明压继承）——
+    无显式颜色的 .slirn-stage3-hl-text 在深色预览底上被强制成深字（看不到
+    文字）；.slirn-srt-pre 固定浅底也同理（暗色主题变白底白字）。必须有显式色。"""
+    css = (FUNCLIP_ROOT / "slirn_home" / "static" / "home.css").read_text(encoding="utf-8")
+    seg = css.split(".slirn-stage3-hl-preview .slirn-stage3-hl-text {", 1)[1]
+    seg = seg[: seg.index("}")]
+    assert "color:" in seg, "hl-text 需显式 color（双类特异度压 .prose *）"
+    srt_seg = css.split(".slirn-srt-pre {", 1)[1][:400]
+    assert "color: #0f172a" in srt_seg, "srt-pre 固定浅底 → 固定深字"
+
+
+def test_preview_windows_drag_and_resize_wiring():
+    """预览 modal 与悬浮播放器都要能拖动 + 调整大小（修订七验收）。"""
+    js = (FUNCLIP_ROOT / "slirn_home" / "static" / "short_video.js").read_text(encoding="utf-8")
+    css = (FUNCLIP_ROOT / "slirn_home" / "static" / "home.css").read_text(encoding="utf-8")
+    # 共享拖动/调宽助手 + modal 接线（modal 原本居中固定，不能拖也不能调）
+    assert "function _enableWinDrag(" in js
+    assert "function _enableWinResize(" in js
+    assert "_enableWinDrag(card, ov.querySelector('.slirn-sv-preview-head'))" in js
+    assert "slirn-sv-preview-resize" in js
+    # 悬浮播放器：原本只可拖，补调宽 + 尺寸记忆
+    assert "slirn-sv-fp-resize" in js
+    assert "slirn.sv.fp.size" in js
+    # CSS：把柄样式 + 标题栏拖动光标
+    assert ".slirn-sv-preview-resize,\n.slirn-sv-fp-resize {" in css
+    assert "cursor: nwse-resize" in css
+    assert "cursor: move" in css.split(".slirn-sv-preview-head {", 1)[1][:200]
 
 
 # ---------- 前端接线守卫 ----------

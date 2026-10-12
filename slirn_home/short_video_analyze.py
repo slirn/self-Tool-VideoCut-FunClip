@@ -1045,6 +1045,10 @@ def run_stage3(
     state["count"] = len(validated)
     state["flow"] = "llm_groups"
     state.pop("splice_order", None)
+    # 修订七：整跑产出全新 doc → 清掉旧镜像（rerun/上一轮留下的 highlights、
+    # 可能过期的 srt_lines），由 GET 层 _inject_stage3_highlights 按 doc 重注。
+    state.pop("highlights", None)
+    state.pop("srt_lines", None)
     # REQ-20261004-bugfix：清掉上一次失败的 error，避免 UI 显示陈旧报错。
     state.pop("error", None)
     state["logs"] = list(state.get("logs") or []) + [
@@ -1257,14 +1261,10 @@ def rerun_stage3_one(
         f"[{svc.now_iso()}] stage3 rerun-one #{hl_index} done, "
         f"lines={len(new_hl.get('subtitle_lines') or [])}, elapsed={elapsed}s",
     ]
-    state_hls = state.get("highlights") or []
-    for i, sh in enumerate(state_hls):
-        if int(sh.get("index") or 0) == int(hl_index):
-            state_hls[i] = new_hl
-            break
-    else:
-        state_hls.append(new_hl)
-    state["highlights"] = state_hls
+    # 修订七：state 镜像整表同步自 doc（多入口写同一份状态必须对称）。
+    # 旧「按 index 原位替换 / 空则 append 单组」会在镜像为空时留下单组镜像，
+    # 之后整跑重写 doc 却不清镜像 → 页面只显示这一组。
+    state["highlights"] = hls
     svc.set_stage_state(project, "stage3_analyze", state)
     svc.reset_downstream_stages(project, "stage3_analyze")
     svc.save_project(root, project)
@@ -1318,14 +1318,8 @@ def restore_hl_order(
 
     project = svc.load_project(root, task_id, project_id)
     state = svc.get_stage_state(project, "stage3_analyze")
-    state_hls = state.get("highlights") or []
-    for sh in state_hls:
-        if int(sh.get("index") or 0) == int(hl_index):
-            sh["subtitle_lines"] = list(lines)
-            break
-    else:
-        state_hls.append(hls[target_pos])
-        state["highlights"] = state_hls
+    # 修订七：state 镜像整表同步自 doc（与 rerun_stage3_one 对称）
+    state["highlights"] = hls
     state["warnings"] = list(state.get("warnings") or []) + [
         f"[{svc.now_iso()}] 短视频 #{hl_index} 字幕顺序已还原为大模型最初顺序",
     ]
