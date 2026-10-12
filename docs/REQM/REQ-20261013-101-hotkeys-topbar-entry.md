@@ -33,11 +33,30 @@
 
 ## 验收标准
 
-1. 顶栏顺序：⌨ 快捷键 → 📚 热词库 → 大模型设置 → 🌓 主题 → 🚀 上游首页。
+1. 顶栏顺序：⌨ 快捷键 → 📚 热词库 → 大模型设置 → 🌓 主题 → 🚀 上游首页。 ✅
 2. 点「⌨ 快捷键」弹出与面板内「⚙ 自定义」**同一**弹窗（同一 DOM id
    `slirn-revkeys-modal`、同一渲染函数 `revKeysOpenModal`），键位列表 +
-   视频键冲突表 + 录制态完整一致。
+   视频键冲突表 + 录制态完整一致。 ✅ 证据：复用 router.js:7106 派发、
+   0 新增逻辑；测试 `test_topbar_hotkeys_button_uses_reuse_dispatch` 校验
+   router.js 内 `if (action === 'revkeys-open')` + `revKeysOpenModal();`
+   同时存在。
 3. 改键后：提示条（`.slirn-rev-kbhint` / `.slirn-opt-kbhint`）跟随刷新；
-   关闭弹窗状态不丢；localStorage `slirnRevKeys` 已写。
-4. 面板内的「⚙ 自定义」按钮**仍然存在**（双入口）。
-5. ruff 零新增 / node --check 通过 / 全量 pytest 通过 / 7861 顶栏已渲染新按钮。
+   关闭弹窗状态不丢；localStorage `slirnRevKeys` 已写。 ✅
+   证据：`applyRevKeysState` + `applyOptKeysState` 已由 router.js 在
+   保存键位后调用（既有方案，不在本任务范围）。
+4. 面板内的「⚙ 自定义」按钮**仍然存在**（双入口）。 ✅ 证据：
+   `test_panel_revkeys_open_still_present` 校验 app.py 内
+   `data-action="revkeys-open"` 出现 ≥ 2 次（顶栏 + 至少一处面板）。
+5. ruff 零新增 / node --check 通过 / 全量 pytest 通过 / 7861 顶栏已渲染新按钮。 ✅
+   证据：ruff `app.py` 工作树 99 == HEAD 99 错误（零新增）；`node --check
+   router.js` 通过；全量 pytest 1186 passed（基础 1182 + 新增 4）；7861
+   已重启 PID 24004，`_build_topbar` 输出含 `revkeys-open` 在 `goto-hotwords`
+   之前（顺序测试 `test_topbar_hotkeys_button_before_hotwords` 通过）。
+
+## 闭环记录
+
+- 提交：2a2d148，pushed to main（ref-update `73f6e24..2a2d148`）。
+- 7861 后台任务：b3dh9r95p（live PID 24004）。
+- 后续任务：Task C+D（短视频精剪/粗剪/字幕优化按长视频搬运，方向相同
+  合并侦察；后台能复用的尽量复用、短/长互不影响），按用户串行指令
+  排在 B 之后。
