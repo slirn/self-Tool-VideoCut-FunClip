@@ -4721,6 +4721,14 @@ input[type="checkbox"]:focus-visible {
   margin-bottom: 18px;
 }
 
+/* REQ-20261012-099 修订四：列表头部按钮组（新建短视频任务 + 刷新） */
+.slirn-sv-header-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-shrink: 0;
+}
+
 .slirn-sv-header h2 {
   margin: 0 0 6px;
   font-size: 24px;

@@ -118,9 +118,16 @@
     catch (e) { return null; }
   }
 
-  function loadList() {
+  function loadList(optScope) {
+    // REQ-20261012-099 修订四：scope（我的任务/全部任务，仅 admin 有 radio）。
+    // 不传时读当前选中 radio；都没有 → 交给后端按登录态决定。
+    var scope = optScope || '';
+    if (!scope) {
+      var sR = document.querySelector('input[name="slirn-sv-scope"]:checked');
+      if (sR) scope = sR.value;
+    }
     _saveSvView('', '');
-    postJSON(API + '/short_video_list', {}).then(function(r) {
+    postJSON(API + '/short_video_list', {scope: scope || 'all'}).then(function(r) {
       if (r && r.ok) setHTML(r.html);
       else setHTML('<div class="slirn-empty">' + esc((r && r.error) || '加载失败') + '</div>');
       stopElapsedTickerIfIdle();
@@ -770,6 +777,50 @@
     document.querySelectorAll('.slirn-stage3-hl-preview').forEach(bindSubtitleSort);
   }
 
+  // ---------- 列表过滤 / 搜索（REQ-20261012-099 修订四，对齐长视频列表） ----------
+
+  // 「我的任务 / 全部任务」radio 切换 → 按新 scope 重拉列表
+  document.addEventListener('change', function(e) {
+    if (e.target && e.target.name === 'slirn-sv-scope') {
+      loadList(e.target.value);
+    }
+  });
+
+  // 搜索框 client-side 过滤：按短视频任务名（项目名）/ 任务 ID / 项目 ID 匹配卡片
+  function _filterSvCards(query) {
+    var q = (query || '').trim().toLowerCase();
+    var grid = document.querySelector('.slirn-sv-grid');
+    if (!grid) return;
+    var matchedCount = 0;
+    grid.querySelectorAll('.slirn-sv-card').forEach(function(card) {
+      var tid = (card.getAttribute('data-task-id') || '').toLowerCase();
+      var pid = (card.getAttribute('data-project-id') || '').toLowerCase();
+      var headEl = card.querySelector('.slirn-sv-card-head strong');
+      var mutedEl = card.querySelector('.slirn-sv-muted');
+      var name = headEl ? (headEl.textContent || '').toLowerCase() : '';
+      var meta = mutedEl ? (mutedEl.textContent || '').toLowerCase() : '';
+      var match = !q || (tid + ' ' + pid + ' ' + name + ' ' + meta).indexOf(q) >= 0;
+      card.style.display = match ? '' : 'none';
+      if (match) matchedCount++;
+    });
+    var existing = grid.querySelector('.slirn-search-empty');
+    if (existing) existing.remove();
+    if (q && matchedCount === 0) {
+      var empty = document.createElement('div');
+      empty.className = 'slirn-empty slirn-search-empty';
+      empty.style.gridColumn = '1/-1';
+      empty.innerHTML = '<div class="slirn-empty-icon">🔍</div>' +
+        '<div class="slirn-empty-text">没有匹配「' + esc(q) + '」的短视频任务</div>';
+      grid.appendChild(empty);
+    }
+  }
+  // 事件代理挂监听（列表重渲染会换掉 input 元素，不能直接绑）
+  document.addEventListener('input', function(e) {
+    if (e.target && e.target.id === 'slirn-sv-search') {
+      _filterSvCards(e.target.value);
+    }
+  });
+
   // ---------- 点击分发 ----------
 
   document.addEventListener('click', function(ev) {
@@ -780,6 +831,16 @@
     ev.preventDefault();
 
     // 列表 / 创建 / 打开
+    if (action === 'sv-new') {
+      // 「➕ 新建短视频任务」（从 hero 挪来）：滚动到创建表单并聚焦项目名
+      var createSec = document.getElementById('slirn-sv-create');
+      if (createSec && createSec.scrollIntoView) {
+        createSec.scrollIntoView({behavior: 'smooth', block: 'center'});
+      }
+      var nameInput = document.getElementById('slirn-sv-create-name');
+      if (nameInput && nameInput.focus) nameInput.focus();
+      return;
+    }
     if (action === 'sv-refresh') return loadList();
     if (action === 'sv-create') return createProject();
     if (action === 'sv-open') {

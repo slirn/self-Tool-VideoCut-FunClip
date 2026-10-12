@@ -55,8 +55,10 @@ def test_topbar_and_hero_layout():
     hero = src.split("slirn-hero-actions")[1]
     hero = hero[: hero.index("</div>")]
     assert "热词库" not in hero, "热词库已移到顶栏，hero 不再保留"
-    assert hero.index("新建任务") < hero.index("短视频列表") < hero.index("长视频列表"), \
-        "hero 按钮顺序：新建任务 → 短视频列表 → 长视频列表"
+    # 修订四：「新建任务」挪进短视频列表（新建短视频任务），hero 只留两个列表入口
+    assert "新建任务" not in hero, "「新建任务」按钮应挪到短视频列表，hero 不再保留"
+    assert hero.index("短视频列表") < hero.index("长视频列表"), \
+        "hero 按钮顺序：短视频列表 → 长视频列表"
 
 
 def test_llm_hint_texts_follow_button_rename():

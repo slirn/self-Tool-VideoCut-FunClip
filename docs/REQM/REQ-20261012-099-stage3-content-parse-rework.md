@@ -123,3 +123,23 @@
 `test_llm_settings_modal_width_doubled` /
 `test_llm_hint_texts_follow_button_rename`
 （`tests/test_short_video_nav_and_refresh.py`）。
+
+## 修订四（2026-10-12 验收反馈四：短视频列表对齐长视频列表）
+
+1. **「➕ 新建任务」从 hero 挪入短视频列表**：列表头部新增 primary 按钮
+   「➕ 新建短视频任务」（sv-new：滚动到创建表单 + 聚焦项目名）；原「创建项目」
+   区块标题同步改为「新建短视频任务」。hero 只留 短视频列表 / 长视频列表
+   两个入口（新建长视频任务的入口仍在长视频列表工具栏）。
+2. **scope 过滤（我的任务 / 全部任务）**：radio 仅 admin 渲染（默认 all 保持
+   老行为）；普通用户固定 mine — 传 scope=all 也在端点 + `_visible_short_video_tasks`
+   双重钳回（与长视频列表语义一致）。radio name 用 `slirn-sv-scope`，
+   与长视频的 `slirn-task-scope` 区分，避免 router.js 的 change 分发串台。
+3. **搜索**：`#slirn-sv-search` client-side 过滤 `.slirn-sv-card`
+   （匹配 项目名 / 任务 ID / 项目 ID），事件代理挂监听（列表重渲染安全），
+   无匹配时显示空态 — 完整对齐 `#slirn-task-search` 模式。卡片补 data-task-id。
+
+涉及：`app.py`（hero / `_visible_short_video_tasks(scope)` / 列表端点）/
+`short_video_ui.py`（`render_project_list` 加 scope/is_admin 参数）/
+`static/short_video.js`（loadList(scope) + change/input 监听 + sv-new）/
+`static/home.css`（`.slirn-sv-header-actions`）；
+新测试 `tests/test_short_video_list_filters.py`（8 例，含非 admin 钳制端点测试）。

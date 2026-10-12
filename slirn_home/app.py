@@ -5847,7 +5847,6 @@ def build_app(repo_root: Path | None = None) -> gr.Blocks:
             <p>登录后按你的权限管理任务 · 仓库 <code>{_esc(repo_root)}</code></p>
         </div>
         <div class="slirn-hero-actions">
-            <button class="slirn-btn slirn-btn-primary" data-action="goto-create">➕ 新建任务</button>
             <button class="slirn-btn" data-action="goto-short-video">🎞 短视频列表</button>
             <button class="slirn-btn" data-action="goto-tasks">📋 长视频列表</button>
         </div>
@@ -9554,9 +9553,15 @@ def _register_slirn_api(
     from slirn_home import short_video_service as _sv_service
     from slirn_home import short_video_ui as _sv_ui
 
-    def _visible_short_video_tasks() -> list[dict]:
+    def _visible_short_video_tasks(scope: str = "all") -> list[dict]:
+        """短视频列表可见的来源任务。
+
+        REQ-20261012-099 修订四：admin 可选 mine/all（默认 all 保持老行为）；
+        普通 / 未登录用户一律钳回 mine（列表里的「全部任务」radio 对他们不渲染，
+        传了 scope=all 也在此处被钳掉，与长视频列表语义一致）。
+        """
         user = _get_cur_user()
-        if user and user.get("is_admin"):
+        if user and user.get("is_admin") and scope != "mine":
             summaries = mgr.list()
         else:
             username = (user or {}).get("username", "")
@@ -9666,10 +9671,19 @@ def _register_slirn_api(
 
     @app.app.post("/slirn/api/short_video_list")
     async def short_video_list(body: dict = Body(default_factory=dict)):
-        tasks = _visible_short_video_tasks()
+        # REQ-20261012-099 修订四：scope 过滤（我的任务/全部任务）。
+        # admin 默认 all（老行为）；普通用户无论传什么都钳回 mine。
+        user = _get_cur_user()
+        is_admin = bool(user and user.get("is_admin"))
+        scope = str(body.get("scope") or "all").strip() or "all"
+        if not is_admin:
+            scope = "mine"
+        tasks = _visible_short_video_tasks(scope)
         task_ids = [t["task_id"] for t in tasks]
         projects = _sv_service.list_projects_for_tasks(repo_root, task_ids)
-        return _ok(html=_sv_ui.render_project_list(tasks, projects))
+        return _ok(html=_sv_ui.render_project_list(
+            tasks, projects, scope=scope, is_admin=is_admin,
+        ))
 
     @app.app.post("/slirn/api/short_video_create")
     async def short_video_create(body: dict = Body(default_factory=dict)):

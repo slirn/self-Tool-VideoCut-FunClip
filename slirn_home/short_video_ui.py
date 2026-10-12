@@ -92,7 +92,19 @@ def render_prompt_history_list(prompt_settings: dict) -> str:
 
 # ---------- 项目列表（保持兼容） ----------
 
-def render_project_list(tasks: list[dict], projects: list[dict]) -> str:
+def render_project_list(
+    tasks: list[dict],
+    projects: list[dict],
+    scope: str = "all",
+    is_admin: bool = False,
+) -> str:
+    """短视频项目列表 HTML。
+
+    REQ-20261012-099 修订四：对齐长视频列表 —
+    - scope radio（我的任务/全部任务，仅 admin；普通用户固定「我的」由后端钳制）
+    - 按短视频任务名（项目名）搜索（前端 client-side 过滤）
+    - 「➕ 新建短视频任务」按钮从 hero 挪入列表头部
+    """
     task_options = "".join(
         f'<option value="{esc(t.get("task_id"))}">{esc(t.get("task_id"))} · {esc(t.get("name"))}</option>'
         for t in tasks
@@ -102,7 +114,8 @@ def render_project_list(tasks: list[dict], projects: list[dict]) -> str:
         kind = str(p.get("kind") or "mixcut")
         kind_label = "AI 拆条" if kind == "split" else "多素材混剪（旧）"
         cards.append(
-            f'<div class="slirn-sv-card" data-project-id="{esc(p.get("id"))}">'
+            f'<div class="slirn-sv-card" data-task-id="{esc(p.get("task_id"))}" '
+            f'data-project-id="{esc(p.get("id"))}">'
             f'<div class="slirn-sv-card-head"><strong>{esc(p.get("name"))}</strong>'
             f'<span class="slirn-sv-badge">{esc(kind_label)}</span></div>'
             f'<div class="slirn-sv-muted">任务 {esc(p.get("task_id"))} · 素材 {len(p.get("materials") or [])}</div>'
@@ -115,17 +128,35 @@ def render_project_list(tasks: list[dict], projects: list[dict]) -> str:
         )
     if not cards:
         cards.append('<div class="slirn-empty"><div class="slirn-empty-text">还没有短视频项目</div></div>')
+    # scope radio（admin 才显示「我的任务/全部任务」切换；普通用户固定「我的」）
+    scope_html = (
+        '<div class="slirn-scope-toggle">'
+        '<label><input type="radio" name="slirn-sv-scope" value="mine"'
+        + (' checked' if scope == "mine" else '') + '> 我的任务</label>'
+        '<label><input type="radio" name="slirn-sv-scope" value="all"'
+        + (' checked' if scope != "mine" else '') + '> 全部任务</label>'
+        '</div>'
+    ) if is_admin else ''
     return f'''<div id="slirn-short-video-inner" class="slirn-tab-inner">
   <div class="slirn-sv-header">
     <div><h2>单源 AI 短视频内容拆条</h2><p>从一段完整视频出发，AI 通过字幕重组+重排序产生 3-5 个独立短视频。</p></div>
-    <button class="slirn-btn" data-action="sv-refresh">刷新</button>
+    <div class="slirn-sv-header-actions">
+      <button class="slirn-btn slirn-btn-primary" data-action="sv-new">➕ 新建短视频任务</button>
+      <button class="slirn-btn" data-action="sv-refresh">刷新</button>
+    </div>
   </div>
-  <div class="slirn-sv-create">
-    <div class="slirn-sv-section-title">创建项目</div>
+  <div class="slirn-sv-create" id="slirn-sv-create">
+    <div class="slirn-sv-section-title">新建短视频任务</div>
     <div class="slirn-sv-form-grid">
       <label>来源任务<select id="slirn-sv-create-task">{task_options}</select></label>
       <label>项目名<input id="slirn-sv-create-name" placeholder="例如：公开课拆条"></label>
       <button class="slirn-btn slirn-btn-primary slirn-sv-create-btn" data-action="sv-create">创建项目</button>
+    </div>
+  </div>
+  <div class="slirn-toolbar">
+    {scope_html}
+    <div class="slirn-search-wrap">
+      <input class="slirn-search-box" id="slirn-sv-search" placeholder="搜索短视频任务名 / 任务 ID..." />
     </div>
   </div>
   <div class="slirn-sv-section-title">项目列表</div>
