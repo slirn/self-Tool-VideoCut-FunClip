@@ -505,7 +505,7 @@
   };
   var ALL_TABS = ['slirn-tab-dashboard','slirn-tab-tasks','slirn-tab-create','slirn-tab-hotwords','slirn-tab-workbench','slirn-tab-short-video'];
 
-  function showTab(targetCell) {
+  function showTab(targetCell, options) {
     ALL_TABS.forEach(function(id) {
       var el = document.getElementById(id);
       if (el) el.style.display = (id === targetCell) ? '' : 'none';
@@ -530,7 +530,10 @@
       }
     }
     if (targetCell === 'slirn-tab-short-video') {
-      try { window.slirnShortVideoLoad && window.slirnShortVideoLoad(); } catch (e) {}
+      var forceShortVideoList = !!(options && options.forceShortVideoList);
+      try {
+        window.slirnShortVideoLoad && window.slirnShortVideoLoad(forceShortVideoList);
+      } catch (e) {}
     }
     window.scrollTo({top: 0, behavior: 'smooth'});
   }
@@ -7129,7 +7132,9 @@
       if (TAB_BUTTONS[action] !== 'slirn-tab-workbench') {
         try { _clearTaskPageHash(); } catch (e) {}
       }
-      showTab(TAB_BUTTONS[action]);
+      showTab(TAB_BUTTONS[action], {
+        forceShortVideoList: action === 'goto-short-video',
+      });
       return;
     }
 

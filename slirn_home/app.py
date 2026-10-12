@@ -10150,6 +10150,62 @@ def _register_slirn_api(
             return _err(f"重排失败: {e}")
         return _ok(highlight=updated, toast="字幕顺序已更新")
 
+    @app.app.post("/slirn/api/short_video_stage3_reorder_highlights")
+    async def short_video_stage3_reorder_highlights(body: dict = Body(default_factory=dict)):
+        """REQ-20261012-099 修订五：拖拽调整片段顺序（编号不变，只改拼接顺序）。
+
+        body: task_id / project_id / order（片段编号数组 = 新拼接顺序，
+        必须为当前全部片段编号的一个排列）。
+        """
+        from slirn_home import short_video_analyze as _sv_analyze
+
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        if not tid or not pid:
+            return _err("缺少 task_id 或 project_id")
+        order_raw = body.get("order") or []
+        if not isinstance(order_raw, list) or not order_raw:
+            return _err("order 需为片段编号数组")
+        try:
+            order = [int(x) for x in order_raw]
+        except (TypeError, ValueError):
+            return _err("order 需为片段编号数组")
+        try:
+            state = _sv_analyze.reorder_splice_order(repo_root, tid, pid, order)
+        except Exception as e:  # noqa: BLE001
+            log.exception("stage3_reorder_highlights failed")
+            return _err(f"顺序保存失败: {e}")
+        return _ok(
+            splice_order=state.get("splice_order") or order,
+            toast="拼接顺序已更新（片段编号不变）",
+        )
+
+    @app.app.post("/slirn/api/short_video_stage3_splice")
+    async def short_video_stage3_splice(body: dict = Body(default_factory=dict)):
+        """REQ-20261012-099 修订五：按调整后的顺序截取片段并拼接成一条视频。
+
+        body: task_id / project_id。读 highlights.json 的 splice_order（无则
+        自然序），从源视频逐段截取后拼接 → stage3/splice.mp4 + splice.srt。
+        """
+        from slirn_home import short_video_coarse as _sv_coarse
+
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        if not tid or not pid:
+            return _err("缺少 task_id 或 project_id")
+        try:
+            state = _sv_coarse.run_stage3_splice(repo_root, tid, pid)
+        except Exception as e:  # noqa: BLE001
+            log.exception("stage3 splice failed")
+            return _err(f"拼接失败: {e}")
+        if state.get("status") != "done":
+            return _err(f"拼接失败: {state.get('error') or state.get('status')}")
+        return _ok(
+            stage3_splice=state,
+            toast=f"拼接完成（{state.get('count', '?')} 段 · "
+                  f"{state.get('total_sec', 0)}s）",
+        )
+
     @app.app.post("/slirn/api/short_video_save_custom_prompt")
     async def short_video_save_custom_prompt(body: dict = Body(default_factory=dict)):
         """REQ-20261004-stage3-prompt-edit：保存用户对某个模板的修改提示词。

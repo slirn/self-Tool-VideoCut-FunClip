@@ -118,6 +118,19 @@
     catch (e) { return null; }
   }
 
+  function switchSvStage(stageKey) {
+    var root = document.getElementById('slirn-short-video-inner');
+    if (!root || !stageKey) return;
+    root.querySelectorAll('.slirn-sv-stage-nav').forEach(function(el) {
+      var active = el.getAttribute('data-stage-key') === stageKey;
+      el.classList.toggle('active', active);
+      el.setAttribute('aria-current', active ? 'step' : 'false');
+    });
+    root.querySelectorAll('.slirn-sv-stage-pane').forEach(function(el) {
+      el.classList.toggle('active', el.getAttribute('data-stage-key') === stageKey);
+    });
+  }
+
   function loadList(optScope) {
     // REQ-20261012-099 修订四：scope（我的任务/全部任务，仅 admin 有 radio）。
     // 不传时读当前选中 radio；都没有 → 交给后端按登录态决定。
@@ -133,7 +146,8 @@
       stopElapsedTickerIfIdle();
     });
   }
-  window.slirnShortVideoLoad = function() {
+  window.slirnShortVideoLoad = function(forceList) {
+    if (forceList) return loadList();
     var v = _readSvView();
     if (v && v.t && v.p) openProject(v.t, v.p);
     else loadList();
@@ -777,6 +791,104 @@
     document.querySelectorAll('.slirn-stage3-hl-preview').forEach(bindSubtitleSort);
   }
 
+  // ---------- REQ-20261012-099 修订五：片段行拖拽调整拼接顺序（编号不变） ----------
+  // 行默认不可拖（避免与标题输入 / 行内字幕拖拽冲突）；按住行首 ⇕ 把柄时才
+  // 开启行级 draggable。drop 后把 DOM 顺序 POST 给后端持久化为 splice_order；
+  // 行内 #编号 随行移动 → 原始顺序号天然保持不变。事件全走 document 代理，
+  // 列表整块 innerHTML 重渲染后无需重绑。
+  document.addEventListener('mousedown', function(e) {
+    var handle = e.target.closest ? e.target.closest('.slirn-stage3-hl-dragseg') : null;
+    if (!handle) return;
+    var row = handle.closest ? handle.closest('.slirn-stage3-hl-row') : null;
+    if (row) row.setAttribute('draggable', 'true');
+  });
+  document.addEventListener('mouseup', function() {
+    document.querySelectorAll('.slirn-stage3-hl-row[draggable="true"]').forEach(function(r) {
+      // 拖拽进行中（dragging 类）的行留给 dragend 收尾
+      if (!r.classList.contains('slirn-seg-dragging')) r.removeAttribute('draggable');
+    });
+  });
+  document.addEventListener('dragstart', function(e) {
+    var row = e.target.closest ? e.target.closest('.slirn-stage3-hl-row') : null;
+    if (!row || row.getAttribute('draggable') !== 'true') return;
+    window._slirnSegDragRow = row;
+    row.classList.add('slirn-seg-dragging');
+    try { e.dataTransfer.setData('text/plain', row.getAttribute('data-hl-index') || ''); } catch (err) {}
+    e.dataTransfer.effectAllowed = 'move';
+  });
+  document.addEventListener('dragend', function(e) {
+    var row = e.target.closest ? e.target.closest('.slirn-stage3-hl-row') : null;
+    if (row) {
+      row.classList.remove('slirn-seg-dragging');
+      row.removeAttribute('draggable');
+    }
+    document.querySelectorAll('.slirn-stage3-hl-row.seg-drop-target').forEach(function(r) {
+      r.classList.remove('seg-drop-target');
+    });
+    window._slirnSegDragRow = null;
+  });
+  document.addEventListener('dragover', function(e) {
+    var row = e.target.closest ? e.target.closest('.slirn-stage3-hl-row') : null;
+    if (!row || !window._slirnSegDragRow || row === window._slirnSegDragRow) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    row.classList.add('seg-drop-target');
+  });
+  document.addEventListener('dragleave', function(e) {
+    var row = e.target.closest ? e.target.closest('.slirn-stage3-hl-row') : null;
+    if (row) row.classList.remove('seg-drop-target');
+  });
+  document.addEventListener('drop', function(e) {
+    var row = e.target.closest ? e.target.closest('.slirn-stage3-hl-row') : null;
+    var src = window._slirnSegDragRow;
+    if (!row || !src || row === src) return;
+    e.preventDefault();
+    row.classList.remove('seg-drop-target');
+    // 按目标行上下半区决定插前 / 插后（更符合直觉）
+    var rect = row.getBoundingClientRect();
+    var after = e.clientY > rect.top + rect.height / 2;
+    row.parentNode.insertBefore(src, after ? row.nextSibling : row);
+    // DOM 顺序 → 片段编号数组 → 持久化 splice_order
+    var list = document.querySelector('.slirn-stage3-hl-list');
+    if (!list) return;
+    var order = [];
+    list.querySelectorAll('.slirn-stage3-hl-row').forEach(function(r) {
+      var v = parseInt(r.getAttribute('data-hl-index') || '0', 10);
+      if (v) order.push(v);
+    });
+    var ctx = innerCtx();
+    if (!ctx) { toast('缺少 task_id / project_id，拖拽未持久化', 'error'); return; }
+    postJSON(API + '/short_video_stage3_reorder_highlights', {
+      task_id: ctx.taskId, project_id: ctx.projectId, order: order
+    }).then(function(r) {
+      if (r && r.ok) {
+        toast('拼接顺序已更新（片段编号不变）');
+        // 同步下方拼接顺序展示（不整页刷新，避免丢文本域编辑中内容）
+        var orderEl = document.querySelector('.slirn-stage3-splice-order');
+        if (orderEl) {
+          orderEl.innerHTML = '拼接顺序：' + order.map(function(i) { return '#' + i; }).join(' → ')
+            + '（拖动上方片段行调整，编号保持原始序号）';
+        }
+      } else {
+        toast((r && r.error) || '顺序保存失败，已还原', 'error');
+        openProject(ctx.taskId, ctx.projectId);
+      }
+    });
+  });
+
+  function stage3Splice() {
+    var ctx = innerCtx(); if (!ctx) return;
+    toast('截取拼接中…（按当前顺序从源视频切片并拼接）');
+    postJSON(API + '/short_video_stage3_splice', {
+      task_id: ctx.taskId, project_id: ctx.projectId
+    }).then(function(r) {
+      if (r && r.ok) {
+        toast(r.toast || '拼接完成');
+        openProject(ctx.taskId, ctx.projectId);
+      } else toast((r && r.error) || '拼接失败', 'error');
+    });
+  }
+
   // ---------- 列表过滤 / 搜索（REQ-20261012-099 修订四，对齐长视频列表） ----------
 
   // 「我的任务 / 全部任务」radio 切换 → 按新 scope 重拉列表
@@ -841,6 +953,9 @@
       if (nameInput && nameInput.focus) nameInput.focus();
       return;
     }
+    if (action === 'sv-stage-nav') {
+      return switchSvStage(btn.getAttribute('data-stage-key') || '');
+    }
     if (action === 'sv-refresh') return loadList();
     if (action === 'sv-create') return createProject();
     if (action === 'sv-open') {
@@ -857,6 +972,7 @@
     if (action === 'sv-stage2-run') return stage2Run();
     if (action === 'sv-stage2-preview-srt') return previewStage2Srt(btn);
     if (action === 'sv-stage3-run') return stage3Run();
+    if (action === 'sv-stage3-splice') return stage3Splice();
     if (action === 'sv-stage3-preview') return stage3PreviewHl(btn);
     if (action === 'sv-stage3-verify-run') return stage3VerifyRun();
     if (action === 'sv-stage3-rerun') return stage3RerunOne(btn);

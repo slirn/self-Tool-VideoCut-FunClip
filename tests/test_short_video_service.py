@@ -1276,5 +1276,6 @@ def test_run_stage3_uses_custom_prompt(tmp_path):
     state2 = sva.run_stage3(tmp_path, tid, pid, template="story_arc", n_clips=4)
     assert state2["status"] == "done"
     assert state2.get("custom_prompt_used") is False  # story_arc 没自定义
-    assert any("Story-Arc" in c or "起承转合" in c for c in captured2["calls"]), \
-        f"应使用系统默认提示词"
+    # REQ-20261012-099 修订五：未自定义的模板 → 上游「大模型智能剪辑」默认提示词
+    assert any("srt字幕分析剪辑器" in c for c in captured2["calls"]), \
+        f"应使用上游大模型智能剪辑默认提示词"

@@ -5310,6 +5310,109 @@ input[type="checkbox"]:focus-visible {
 }
 
 /* REQ-20261003-098：6 阶段管线 */
+/* REQ-20261012-099: short-video stage navigation follows the long-video workbench. */
+.slirn-sv-pipeline {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+  margin-top: 16px;
+}
+.slirn-sv-stages-card {
+  position: sticky;
+  top: 12px;
+  padding: 12px;
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 12px;
+  background: var(--bg-card, #ffffff);
+}
+.slirn-sv-stages-title {
+  padding: 2px 4px 8px 6px;
+  color: var(--text-muted, #64748b);
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+.slirn-sv-stage-nav-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.slirn-sv-stage-nav {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  width: 100%;
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.slirn-sv-stage-nav:hover {
+  background: var(--bg-hover, rgba(127, 127, 127, 0.08));
+}
+.slirn-sv-stage-nav:focus-visible {
+  outline: 2px solid var(--accent-solid, #4f7cff);
+  outline-offset: 2px;
+}
+.slirn-sv-stage-nav.active {
+  border-color: var(--accent-solid, #4f7cff);
+  background: var(--bg-hover, rgba(127, 127, 127, 0.08));
+}
+.slirn-sv-stage-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #e2e8f0;
+  color: #475569;
+  font-size: 11px;
+  font-weight: 700;
+}
+.slirn-sv-stage-nav.done .slirn-sv-stage-mark {
+  background: var(--ok-solid, #2e9e5b);
+  color: #ffffff;
+}
+.slirn-sv-stage-nav.current .slirn-sv-stage-mark {
+  background: var(--accent-solid, #4f7cff);
+  color: #ffffff;
+}
+.slirn-sv-stage-nav.failed .slirn-sv-stage-mark {
+  background: #dc2626;
+  color: #ffffff;
+}
+.slirn-sv-stage-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.slirn-sv-stage-copy strong {
+  color: var(--text-primary, #1e293b);
+  font-size: 13px;
+  line-height: 1.35;
+}
+.slirn-sv-stage-copy small {
+  color: var(--text-muted, #64748b);
+  font-size: 11.5px;
+  line-height: 1.4;
+}
+.slirn-sv-stage-pane {
+  display: none;
+  min-width: 0;
+}
+.slirn-sv-stage-pane.active {
+  display: block;
+}
+
 .slirn-stage {
   background: var(--bg-card, #ffffff);
   border: 1px solid var(--border, #e2e8f0);
@@ -5350,6 +5453,25 @@ input[type="checkbox"]:focus-visible {
   max-width: 100%;
   overflow: hidden;
 }
+@media (max-width: 900px) {
+  .slirn-sv-pipeline {
+    grid-template-columns: 1fr;
+  }
+  .slirn-sv-stages-card {
+    position: static;
+  }
+  .slirn-sv-stage-nav-list {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .slirn-sv-stage-nav-list {
+    grid-template-columns: 1fr;
+  }
+}
+
 .slirn-stage-error {
   margin-top: 8px;
   padding: 8px 10px;
@@ -5534,6 +5656,55 @@ input[type="checkbox"]:focus-visible {
 }
 .slirn-stage3-hl-sub.slirn-stage3-hl-sub-drop-target {
   border-top: 2px solid #38bdf8;
+}
+
+/* REQ-20261012-099 修订五：片段行拖拽调整拼接顺序（编号不变）+ 截取拼接卡 */
+.slirn-stage3-hl-dragseg {
+  cursor: grab;
+  user-select: none;
+  color: #64748b;
+  font-size: 14px;
+  padding: 2px 6px;
+  flex-shrink: 0;
+  border-radius: 4px;
+}
+.slirn-stage3-hl-dragseg:hover {
+  background: rgba(56, 189, 248, 0.15);
+  color: #38bdf8;
+}
+.slirn-stage3-hl-dragseg:active {
+  cursor: grabbing;
+}
+.slirn-stage3-hl-row.slirn-seg-dragging {
+  opacity: 0.45;
+}
+.slirn-stage3-hl-row.seg-drop-target {
+  outline: 2px dashed #38bdf8;
+  outline-offset: 2px;
+}
+.slirn-stage3-splice-card {
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  border-radius: 10px;
+  background: rgba(148, 163, 184, 0.06);
+}
+.slirn-stage3-splice-head {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 6px;
+}
+.slirn-stage3-splice-order {
+  font-variant-numeric: tabular-nums;
+  word-break: break-all;
+}
+.slirn-stage3-splice-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 8px;
 }
 .slirn-stage3-hl-sub + .slirn-stage3-hl-sub {
   border-top: 1px dashed rgba(148, 163, 184, 0.25);

@@ -264,9 +264,9 @@ def test_run_stage3_vision_call(tmp_path):
         assert captured["entry"]["id"] == "qwen-vl-max"
         assert len(captured["images"]) == 1
         assert captured["images"][0].name == "input_image.png"
-        # user payload 含 SRT 与格式约束
+        # user payload 含 SRT 与上游格式约束（修订五：上游「大模型智能剪辑」链路）
         assert "第一句" in captured["user"]
-        assert "highlights" in captured["user"]
+        assert "这是待裁剪的视频srt字幕" in captured["user"]
         # 产物元数据记录截图
         doc = json.loads(
             svc.stage_highlights_path(tmp_path, tid, pid).read_text(encoding="utf-8")
@@ -306,8 +306,8 @@ def _seed_highlights(tmp_path, tid, pid):
 
 
 def test_run_stage3_format_constraint_and_unchanged_prompt(tmp_path):
-    """评审修复回归：user payload 的 JSON schema 用单花括号；prompt 与模板
-    生效文本相同时不算 "user"（badge/doc 溯源不失真）。"""
+    """修订五回归：默认走上游「大模型智能剪辑」链路 —— user payload = 上游
+    前缀 + raw.srt + 编号列表格式约束；prompt 与生效默认相同不算 "user"。"""
     tid, pid = _make_project(tmp_path)
     captured = {"sys": [], "user": []}
     orig = revision_service._call_llm
@@ -319,21 +319,25 @@ def test_run_stage3_format_constraint_and_unchanged_prompt(tmp_path):
 
     revision_service._call_llm = fake
     try:
-        # prompt 留空 → 模板路径；user 侧 schema 必须是单花括号
+        # prompt 留空 → 上游默认提示词（模板路径）
         state = sva.run_stage3(tmp_path, tid, pid, template="hook_first")
         assert state["status"] == "done"
         assert state["prompt_source"] == "template"
-        assert '"highlights"' in captured["user"][-1]
-        assert "{{" not in captured["user"][-1].split("输出严格 JSON")[1], \
-            "格式约束里不应有 .format 转义的双花括号"
+        assert "srt字幕分析剪辑器" in captured["sys"][-1]
+        assert "这是待裁剪的视频srt字幕" in captured["user"][-1]
+        assert "00:00:01,000 --> 00:00:02,000" in captured["user"][-1], \
+            "上游链路应发送原始 SRT 文本（非逐行重组格式）"
+        assert "[开始时间-结束时间]" in captured["user"][-1]
         doc = json.loads(
             svc.stage_highlights_path(tmp_path, tid, pid).read_text(encoding="utf-8")
         )
         assert doc["prompt"] == ""
 
-        # prompt 恰好等于模板生效文本 → 归类为模板路径
-        tpl_text = sva._PROMPT_TEMPLATES["hook_first"]
-        state = sva.run_stage3(tmp_path, tid, pid, template="hook_first", prompt=tpl_text)
+        # prompt 恰好等于生效默认（上游提示词）→ 归类为模板路径
+        default_system = sva._UPSTREAM_CLIP_SYSTEM_PROMPT.format(n=4)
+        state = sva.run_stage3(
+            tmp_path, tid, pid, template="hook_first", prompt=default_system,
+        )
         assert state["prompt_source"] == "template"
     finally:
         revision_service._call_llm = orig

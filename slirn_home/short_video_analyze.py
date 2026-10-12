@@ -515,46 +515,172 @@ _OUTPUT_FORMAT_CONSTRAINT = (
 )
 
 
+# ---------- REQ-20261012-099 修订五：上游「大模型智能剪辑」同款后台流程 ----------
+#
+# 用户验收：Stage 3「解析」按钮改为调用上游 FunClip 首页「🧠 LLM智能裁剪」
+# 对应的后台功能（funclip/launch.py llm_inference + utils/trans_utils.
+# extract_timestamps）：system = 上游 prompt_head（按片段数模板化），user =
+# 「这是待裁剪的视频srt字幕：」+ raw.srt，LLM 输出编号字幕列表
+# `1. [开始时间-结束时间] 文本`，再按时间戳从源视频截取拼接。
+#
+# 偏离点：不拼上游 llm_inference 里的「视频实际时长 / 不低于 50% 时长」
+# 注记 —— 那是上游「全片摘要」取向，与拆条（n 条以内）目标冲突。
+_UPSTREAM_CLIP_SYSTEM_PROMPT = (
+    "你是一个视频srt字幕分析剪辑器，输入视频的srt字幕，"
+    "分析其中的精彩且尽可能连续的片段并裁剪出来，输出{n}条以内的片段，"
+    "将片段中在时间上连续的多个句子及它们的时间戳合并为一条，"
+    "注意确保文字与时间戳的正确匹配。"
+    "输出需严格按照如下格式：1. [开始时间-结束时间] 文本，"
+    '注意其中的连接符是"-"。开始/结束时间使用 HH:MM:SS,mmm 格式'
+    "（与 srt 字幕时间戳一致）。"
+)
+
+# 上游 user 侧固定前缀（funclip/launch.py prompt_head2 原文）
+_UPSTREAM_CLIP_USER_PREFIX = "这是待裁剪的视频srt字幕："
+
+# 输出格式约束固定拼在 user payload 尾部（与旧 JSON schema 同理：system 被
+# 用户自定义提示词替换时，输出仍可被 _parse_llm_clip_segments 解析）。
+_UPSTREAM_CLIP_OUTPUT_CONSTRAINT = (
+    "\n\n【输出格式（必须遵守）】忽略上文的其他输出格式要求（包括 JSON）：\n"
+    "只输出片段列表，每条一行，格式为：序号. [开始时间-结束时间] 该片段的完整字幕文本。\n"
+    "序号从 1 连续编号；时间戳取自上方 srt 中真实存在的时间（HH:MM:SS,mmm），"
+    '连接符为"-"；最多输出 {n} 条，除此之外不要输出任何内容。'
+)
+
+# `1. [00:00:01,000-00:00:05,500] 文本`（上游 extract_timestamps 的逐行版，
+# 序号宽松匹配：LLM 常写全角句点 / 列表符号；时间容忍 MM:SS,mmm 短格式）
+_CLIP_LINE_RE = re.compile(
+    r"^\s*(?:\d+[\.\、)]|[-*•])?\s*\["
+    r"(\d{1,2}:\d{2}(?::\d{2})?[,.]\d{1,3})\s*-\s*"
+    r"(\d{1,2}:\d{2}(?::\d{2})?[,.]\d{1,3})\s*\]\s*(.*)$"
+)
+
+
+def _parse_llm_time(token: str) -> int:
+    """`HH:MM:SS,mmm` / `MM:SS,mmm` → 毫秒（上游 convert_time_to_millis 同款）。"""
+    parts = re.split(r"[,:]", token.strip())
+    try:
+        nums = [int(x) for x in parts]
+    except ValueError:
+        return -1
+    if len(nums) == 4:
+        h, m, s, ms = nums
+    elif len(nums) == 3:
+        h, (m, s, ms) = 0, nums
+    else:
+        return -1
+    return (h * 3600 + m * 60 + s) * 1000 + ms
+
+
+def _parse_llm_clip_segments(
+    raw: str,
+    srt_lines: list[SrtLine],
+    *,
+    n_clips: int = 4,
+    title_fallback: str = "",
+) -> tuple[list[dict], list[str]]:
+    """解析上游「大模型智能剪辑」编号字幕列表 → highlights 同构列表。
+
+    - **自动编号**：按出现顺序重编 1..N（不信任 LLM 写的序号），编号即原始
+      顺序号，后续拖拽重排时保持不变
+    - 时间重叠映射：每个片段 [start, end] 与 raw.srt 行取交集 →
+      subtitle_lines（src_index 引用真实行），下游 Stage 3.5/4/5/6 零改动
+    - 超出 n_clips 截断并告警；时间戳非法 / 区间内无字幕行的条目跳过并告警
+
+    Raises: ShortVideoError —— 整个返回里没有可识别的片段行。
+    """
+    warnings: list[str] = []
+    max_ms = max((ln.end_ms for ln in srt_lines), default=0)
+    srt_sorted = sorted(srt_lines, key=lambda ln: ln.index)
+    cap = max(1, int(n_clips or 4))
+
+    segments: list[dict] = []
+    matched = 0
+    for lineno, line in enumerate(raw.splitlines(), start=1):
+        m = _CLIP_LINE_RE.match(line)
+        if not m:
+            continue
+        matched += 1
+        start_ms = _parse_llm_time(m.group(1))
+        end_ms = _parse_llm_time(m.group(2))
+        if start_ms < 0 or end_ms < 0:
+            warnings.append(f"第 {lineno} 行时间戳无法解析，已跳过")
+            continue
+        start_ms = max(0, min(start_ms, max_ms))
+        end_ms = max(0, min(end_ms, max_ms))
+        if end_ms <= start_ms:
+            warnings.append(f"第 {lineno} 行结束时间不晚于开始时间，已跳过")
+            continue
+        text = m.group(3).strip()
+        sub_lines = [
+            {"src_index": ln.index, "text": ln.text}
+            for ln in srt_sorted
+            if ln.start_ms < end_ms and ln.end_ms > start_ms
+        ]
+        if not sub_lines:
+            warnings.append(f"第 {lineno} 行时间段内没有源字幕行（时间戳可能错误）")
+        title = (text or title_fallback).strip()[:80] or f"片段 {len(segments) + 1}"
+        segments.append({
+            "id": f"h{len(segments) + 1}",
+            "index": len(segments) + 1,
+            "title": title,
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "subtitle_lines": sub_lines,
+        })
+        if len(segments) >= cap:
+            break
+
+    if not segments:
+        preview = raw.strip().replace("\n", " ")[:120]
+        raise svc.ShortVideoError(
+            "LLM 返回值里没有可识别的片段行（期望 `1. [开始-结束] 文本`）。返回开头："
+            + (preview or "<空>")
+        )
+    if matched > len(segments):
+        warnings.append(f"LLM 输出了 {matched} 条片段，超出 {cap} 条上限，已截取前 {len(segments)} 条")
+    return segments, warnings
+
+
 def _resolve_stage3_system_prompt(
     repo_root: Path,
     task_id: str,
     project_id: str,
     *,
     template: str,
-    custom_prompt: str,
-    prompt: str,
+    custom_prompt: str = "",
+    prompt: str = "",
+    n_clips: int = 4,
 ) -> tuple[str, str]:
     """决定 Stage 3 的 system 提示词。
 
-    REQ-20261012-099 优先级（高 → 低）：
+    REQ-20261012-099 修订五（Batch F）：默认 system 换成上游「大模型智能
+    剪辑」提示词（_UPSTREAM_CLIP_SYSTEM_PROMPT，n 按片段数模板化）；旧的
+    hook_first / topic_cluster / story_arc 模板文本退出默认链，仅保留其
+    用户自定义覆盖入口（custom_prompts.json）。优先级（高 → 低）：
 
-    1. ``prompt``（用户在「解析提示词」文本域录入的完整提示词）——但若与
-       template 生效文本完全相同（UI 初始值未改直接点解析），按模板路径归类，
-       不算 "user"（badge/doc 溯源不失真）
-    2. template 对应的用户自定义覆盖（custom_prompts.json）
-    3. template 系统默认 / custom_prompt（template="custom" 时）
+    1. ``prompt``（「解析提示词」文本域；与生效默认相同则归模板路径，
+       badge/doc 溯源不失真）
+    2. template 的用户自定义覆盖（custom_prompts.json）
+    3. 上游「大模型智能剪辑」默认提示词
 
     返回 (system_prompt, source)——source 取 "user" / "custom_override" /
     "template" / "custom"，写入 state 溯源。
     """
+    default_system = _UPSTREAM_CLIP_SYSTEM_PROMPT.format(n=max(1, int(n_clips or 4)))
     custom_overrides = svc.load_custom_prompts(repo_root, task_id, project_id)
-    template_effective = ""
+    override = ""
     if template in _PROMPT_TEMPLATES:
-        override = custom_overrides.get(template) or {}
-        template_effective = str(override.get("prompt") or "").strip() \
-            or _PROMPT_TEMPLATES[template]
+        override = str((custom_overrides.get(template) or {}).get("prompt") or "").strip()
 
     user_prompt = str(prompt or "").strip()
-    if user_prompt and user_prompt != template_effective:
+    if user_prompt and user_prompt != default_system:
         return user_prompt, "user"
     if template == "custom":
-        sys_p = custom_prompt.strip() or _PROMPT_TEMPLATES[svc.HIGHLIGHT_TEMPLATE_HOOK_FIRST]
-        return sys_p, "custom"
-    if template in _PROMPT_TEMPLATES:
-        if template_effective != _PROMPT_TEMPLATES[template]:
-            return template_effective, "custom_override"
-        return _PROMPT_TEMPLATES[template], "template"
-    raise svc.ShortVideoError(f"未知模板: {template}")
+        return (custom_prompt.strip() or default_system), "custom"
+    if override:
+        return override, "custom_override"
+    return default_system, "template"
 
 
 def _resolve_stage3_image(
@@ -621,14 +747,15 @@ def run_stage3(
     if not srt_lines:
         raise svc.ShortVideoError("raw.srt 解析后无有效字幕行")
 
+    n_clips = max(3, min(5, int(n_clips or 4)))
     sys_p, prompt_source = _resolve_stage3_system_prompt(
         root, task_id, project_id,
         template=template, custom_prompt=custom_prompt, prompt=prompt,
+        n_clips=n_clips,
     )
     image_path = _resolve_stage3_image(
         root, task_id, project_id, use_image=use_image, entry=entry,
     )
-    n_clips = max(3, min(5, int(n_clips or 4)))
 
     # 写状态
     state = svc.get_stage_state(project, "stage3_analyze")
@@ -650,20 +777,16 @@ def run_stage3(
     svc.set_stage_state(project, "stage3_analyze", state)
     svc.save_project(root, project)
 
-    # 把 SRT 拆成 (src_index, start_ms, end_ms, text) 列表给 LLM
-    srt_for_llm = "\n".join(
-        f"[{ln.index}] {_fmt_ms(ln.start_ms)}-{_fmt_ms(ln.end_ms)} {ln.text}"
-        for ln in srt_lines
-    )
+    # 修订五：上游「大模型智能剪辑」——user 侧 = 上游固定前缀 + 原始 SRT
+    # 整文（上游 llm_inference 发的就是整段 srt 文本，不是逐行重组格式）
     user_payload = (
-        f"以下是源视频的 SRT（每行 ``[序号] HH:MM:SS,mmm-HH:MM:SS,mmm 文本``）：\n\n"
-        f"{srt_for_llm}\n\n"
-        f"请生成 {n_clips} 条 highlights（解析出 {n_clips} 个内容片段）。\n\n"
-        + _OUTPUT_FORMAT_CONSTRAINT
+        _UPSTREAM_CLIP_USER_PREFIX + "\n\n" + srt_text.strip()
+        + f"\n\n请从上述字幕中裁剪出不超过 {n_clips} 条片段。"
+        + _UPSTREAM_CLIP_OUTPUT_CONSTRAINT.format(n=n_clips)
     )
     if image_path is not None:
         user_payload = (
-            "随字幕附带一张源视频截图，请结合画面信息一起解析短视频内容。\n\n"
+            "随字幕附带一张源视频截图，请结合画面信息一起挑选片段。\n\n"
             + user_payload
         )
 
@@ -696,10 +819,17 @@ def run_stage3(
     llm_raw_path.parent.mkdir(parents=True, exist_ok=True)
     llm_raw_path.write_text(raw, encoding="utf-8")
 
-    # 解析 + 校验
+    # 解析 + 校验：优先上游编号字幕列表格式；模型仍按旧 JSON 输出时兜底旧解析
     try:
-        payload = _strip_json_block(raw)
-        validated, warnings = _validate_highlights(payload, srt_lines)
+        try:
+            validated, warnings = _parse_llm_clip_segments(
+                raw, srt_lines, n_clips=n_clips,
+            )
+        except svc.ShortVideoError:
+            if "highlights" not in raw:
+                raise
+            payload = _strip_json_block(raw)
+            validated, warnings = _validate_highlights(payload, srt_lines)
     except Exception as e:  # noqa: BLE001
         state = svc.get_stage_state(project, "stage3_analyze")
         state["status"] = "failed"
@@ -713,17 +843,20 @@ def run_stage3(
         svc.save_project(root, project)
         return state
 
-    # 写 highlights.json
+    # 写 highlights.json（修订五：+ flow 溯源 + splice_order 拼接顺序基线）
     highlights_path = svc.stage_highlights_path(root, task_id, project_id)
     model_id = (entry or {}).get("id") or "default"
+    splice_order = [int(h.get("index") or i + 1) for i, h in enumerate(validated)]
     out_doc = {
         "project_id": project_id,
         "source_srt": svc._rel(root, raw_srt),
         "model": model_id,
         "template": template,
+        "flow": "llm_clip",
         "prompt": sys_p if prompt_source == "user" else "",
         "image": image_path.name if image_path is not None else "",
         "n_clips": len(validated),
+        "splice_order": splice_order,
         "highlights": validated,
         "warnings": warnings,
         "created_at": svc.now_iso(),
@@ -740,6 +873,9 @@ def run_stage3(
     state["highlights_path"] = svc._rel(root, highlights_path)
     state["warnings"] = warnings
     state["count"] = len(validated)
+    # 修订五：编号字幕列表 + 拼接顺序基线（自然序）镜像进 state 供 UI 渲染
+    state["flow"] = "llm_clip"
+    state["splice_order"] = splice_order
     # REQ-20261004-bugfix：清掉上一次失败的 error，避免 UI 显示陈旧报错。
     state.pop("error", None)
     state["logs"] = list(state.get("logs") or []) + [
@@ -758,13 +894,16 @@ def run_stage3(
 # ---------- REQ-20261012-099：单片段重新解析 ----------
 
 def _rerun_one_suffix(title: str) -> str:
-    """定向指令。title 用户可编辑（可能含 { }），不用 .format 防 KeyError。"""
+    """定向指令。title 用户可编辑（可能含 { }），不用 .format 防 KeyError。
+
+    修订五：与整跑同一套上游「大模型智能剪辑」输出格式（编号字幕行）。
+    """
     return (
         "\n\n# 本次任务：单片段重新解析\n"
-        f"只针对主题「{title}」重新解析 **1 条** highlight（JSON 数组里只有 1 个元素）：\n"
-        "- 重新划定该主题的时间段（start_ms / end_ms，源字幕真实毫秒）\n"
-        "- 重新挑选该时间段内的字幕行（subtitle_lines，src_index 必须落在时间段内）\n"
-        f"- title 给出更准确的表达（保留原意）；无更优表达时沿用「{title}」"
+        f"只针对主题「{title}」重新裁剪 **1 条**片段（列表里只有 1 行）：\n"
+        "- 重新划定该主题的时间段（时间戳取自源字幕真实时间）\n"
+        "- 输出该片段的完整字幕文本\n"
+        f"- 无更优表达时文本围绕「{title}」"
     )
 
 
@@ -804,7 +943,8 @@ def rerun_stage3_one(
     raw_srt = svc.stage_raw_srt_path(root, task_id, project_id)
     if not raw_srt.is_file() or raw_srt.stat().st_size < 4:
         raise svc.ShortVideoError("重新解析需要 Stage 2 的 raw.srt")
-    srt_lines = _parse_srt_lines(raw_srt.read_text(encoding="utf-8", errors="replace"))
+    srt_text = raw_srt.read_text(encoding="utf-8", errors="replace")
+    srt_lines = _parse_srt_lines(srt_text)
     if not srt_lines:
         raise svc.ShortVideoError("raw.srt 解析后无有效字幕行")
 
@@ -840,19 +980,15 @@ def rerun_stage3_one(
     svc.set_stage_state(project, "stage3_analyze", state)
     svc.save_project(root, project)
 
-    srt_for_llm = "\n".join(
-        f"[{ln.index}] {_fmt_ms(ln.start_ms)}-{_fmt_ms(ln.end_ms)} {ln.text}"
-        for ln in srt_lines
-    )
+    # 修订五：与整跑同一套上游「大模型智能剪辑」user payload（只裁 1 条）
     user_payload = (
-        f"以下是源视频的 SRT（每行 ``[序号] HH:MM:SS,mmm-HH:MM:SS,mmm 文本``）：\n\n"
-        f"{srt_for_llm}\n\n"
-        "请只输出 1 条 highlight（highlights 数组仅 1 个元素）。\n\n"
-        + _OUTPUT_FORMAT_CONSTRAINT
+        _UPSTREAM_CLIP_USER_PREFIX + "\n\n" + srt_text.strip()
+        + "\n\n请从上述字幕中只裁剪出 1 条片段（围绕上述主题）。"
+        + _UPSTREAM_CLIP_OUTPUT_CONSTRAINT.format(n=1)
     )
     if image_path is not None:
         user_payload = (
-            "随字幕附带一张源视频截图，请结合画面信息一起解析。\n\n" + user_payload
+            "随字幕附带一张源视频截图，请结合画面信息一起挑选片段。\n\n" + user_payload
         )
 
     t0 = time.time()
@@ -885,10 +1021,18 @@ def rerun_stage3_one(
     raw_path.write_text(raw, encoding="utf-8")
 
     try:
-        payload = _strip_json_block(raw)
-        validated, warnings = _validate_highlights(
-            payload, srt_lines, title_fallback=title,
-        )
+        try:
+            # 修订五：优先上游编号字幕行格式（单片段 = 取第 1 行）
+            validated, warnings = _parse_llm_clip_segments(
+                raw, srt_lines, n_clips=1, title_fallback=title,
+            )
+        except svc.ShortVideoError:
+            if "highlights" not in raw:
+                raise
+            payload = _strip_json_block(raw)
+            validated, warnings = _validate_highlights(
+                payload, srt_lines, title_fallback=title,
+            )
     except Exception as e:  # noqa: BLE001
         project = svc.load_project(root, task_id, project_id)
         state = svc.get_stage_state(project, "stage3_analyze")
@@ -956,6 +1100,60 @@ def rerun_stage3_one(
     state["highlights"] = state_hls
     svc.set_stage_state(project, "stage3_analyze", state)
     svc.reset_downstream_stages(project, "stage3_analyze")
+    svc.save_project(root, project)
+    return state
+
+
+# ---------- REQ-20261012-099 修订五：拖拽调整拼接顺序（编号不变） ----------
+
+def reorder_splice_order(
+    repo_root: Path | str,
+    task_id: str,
+    project_id: str,
+    order: list[int],
+) -> dict:
+    """写入 ``highlights.json`` 顶层 ``splice_order``（拼接顺序）。
+
+    - 片段编号（index）是**原始顺序号**，重排永远不重编——只改拼接顺序
+    - ``order`` 必须恰好包含当前全部片段编号各一次（排列校验）
+    - 顺序变更后，上次拼接产物作废（stage3_splice → pending，带 stale_reason）
+    """
+    root = Path(repo_root)
+    hp = svc.stage_highlights_path(root, task_id, project_id)
+    if not hp.is_file():
+        raise svc.ShortVideoError("请先运行 Stage 3 解析生成片段列表")
+    try:
+        doc = json.loads(hp.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001
+        raise svc.ShortVideoError(f"highlights.json 解析失败: {e}") from e
+
+    cur: list[int] = []
+    for h in doc.get("highlights") or []:
+        try:
+            i = int(h.get("index") or 0)
+        except (TypeError, ValueError):
+            continue
+        if i > 0:
+            cur.append(i)
+    cur.sort()
+    if sorted(int(x) for x in order) != cur:
+        raise svc.ShortVideoError(
+            "order 必须恰好包含全部片段编号各一次（当前片段："
+            + "、".join(f"#{i}" for i in cur) + "）"
+        )
+
+    doc["splice_order"] = [int(x) for x in order]
+    svc._write_json_atomic(hp, doc)
+
+    project = svc.load_project(root, task_id, project_id)
+    state = svc.get_stage_state(project, "stage3_analyze")
+    state["splice_order"] = [int(x) for x in order]
+    svc.set_stage_state(project, "stage3_analyze", state)
+    # 顺序变了 → 上一次拼接结果不再对应新顺序，标记待重拼
+    splice = svc.get_stage_state(project, "stage3_splice")
+    if splice.get("status") == "done":
+        splice.update({"status": "pending", "stale_reason": "拼接顺序已调整，请重新拼接"})
+        svc.set_stage_state(project, "stage3_splice", splice)
     svc.save_project(root, project)
     return state
 

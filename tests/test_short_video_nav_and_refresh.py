@@ -108,6 +108,54 @@ def test_short_video_view_persistence_wiring():
     assert "openProject(v.t, v.p)" in src
 
 
+def test_explicit_short_video_list_entry_ignores_saved_editor_view():
+    router_src = _src("static/router.js")
+    sv_src = _src("static/short_video.js")
+    assert "forceShortVideoList: action === 'goto-short-video'" in router_src
+    assert "window.slirnShortVideoLoad(forceShortVideoList)" in router_src
+    assert "window.slirnShortVideoLoad = function(forceList)" in sv_src
+    assert "if (forceList) return loadList();" in sv_src
+
+
+def test_short_video_stage_navigation_shows_one_pane():
+    from slirn_home import short_video_ui as ui
+
+    project = {
+        "id": "p1",
+        "task_id": "t1",
+        "name": "demo",
+        "materials": [],
+        "pipeline": {
+            "stage1_source": {"status": "done"},
+            "stage2_extract": {"status": "running"},
+        },
+    }
+    html = ui.render_project(project)
+    assert 'class="slirn-sv-pipeline"' in html
+    assert html.count('data-action="sv-stage-nav"') == 7
+    assert html.count("slirn-sv-stage-pane active") == 1
+    assert (
+        'class="slirn-sv-stage-nav done" data-action="sv-stage-nav" '
+        'data-stage-key="stage1" aria-current="false"'
+    ) in html
+    assert (
+        'class="slirn-sv-stage-nav current active" data-action="sv-stage-nav" '
+        'data-stage-key="stage2" aria-current="step"'
+    ) in html
+    assert (
+        'class="slirn-sv-stage-pane active" id="slirn-sv-stage-pane-stage2"'
+    ) in html
+
+    sv_src = _src("static/short_video.js")
+    css = _src("static/home.css")
+    assert "function switchSvStage(stageKey)" in sv_src
+    assert "action === 'sv-stage-nav'" in sv_src
+    pane_rule = css.split(".slirn-sv-stage-pane {", 1)[1].split("}", 1)[0]
+    active_pane_rule = css.split(".slirn-sv-stage-pane.active {", 1)[1].split("}", 1)[0]
+    assert "display: none;" in pane_rule
+    assert "display: block;" in active_pane_rule
+
+
 # ---------- 截图区块标题 ----------
 
 def test_stage3_image_block_label():

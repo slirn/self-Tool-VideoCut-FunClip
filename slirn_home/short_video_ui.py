@@ -430,8 +430,19 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
         return f"{m:02d}:{s:02d}"
 
     # 高亮条目可编辑标题 + 删除 + 完整字幕预览（REQ-20261004-UX：用户要直接看到全部文字）
+    # 修订五：渲染顺序按 splice_order（拖拽拼接顺序）；编号 #idx = 原始顺序号不变
+    try:
+        _splice_order = [int(x) for x in (s3.get("splice_order") or [])]
+    except (TypeError, ValueError):
+        _splice_order = []
+    _hl_all = list(s3.get("highlights") or [])
+    if _splice_order:
+        from slirn_home.short_video_coarse import build_splice_plan
+        _ordered_hls, _splice_order = build_splice_plan(_hl_all, _splice_order)
+    else:
+        _ordered_hls = _hl_all
     hl_rows = []
-    for hl in (s3.get("highlights") or []):
+    for hl in _ordered_hls:
         idx = hl.get("index") or len(hl_rows) + 1
         title = hl.get("title") or f"片段 #{idx}"
         start = hl.get("start_ms") or 0
@@ -478,6 +489,8 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
         hl_rows.append(
             f'<div class="slirn-stage3-hl-row" data-hl-index="{idx}" data-sub-text="{esc(full_text)}">'
             f'<div class="slirn-stage3-hl-head">'
+            f'<span class="slirn-stage3-hl-dragseg" data-hl-index="{idx}" '
+            f'title="按住拖动整行调整拼接顺序（编号保持原始序号不变）">⇕</span>'
             f'<span class="slirn-sv-row-no">#{idx}</span>'
             f'<input type="text" class="slirn-stage3-hl-title" data-hl-field="title" value="{esc(title)}" placeholder="标题">'
             f'<span class="slirn-sv-muted slirn-stage3-hl-meta">{_format_ms(start)} - {_format_ms(end)} · {dur:.1f}s · {sub_count} 字幕行</span>'
@@ -489,10 +502,47 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
             f'data-hl-index="{idx}">删</button>'
             f'</div>'
             f'<div class="slirn-stage3-hl-preview" data-hl-index="{idx}">{sub_preview}</div>'
-            f'<div class="slirn-sv-muted slirn-stage3-hl-hint">⋮⋮ 拖动行可调整顺序；最终顺序将决定 Stage 4 切片拼接的时序</div>'
+            f'<div class="slirn-sv-muted slirn-stage3-hl-hint">⇕ 按住行首拖动调整片段拼接顺序（编号保持原始序号）；⋮⋮ 拖动行内句子调整片段内部顺序（决定 Stage 4 切片时序）</div>'
             f'</div>'
         )
     hl_list = "".join(hl_rows) or '<div class="slirn-sv-muted">解析后将列出各内容片段</div>'
+
+    # 修订五：片段截取拼接卡 —— 按拖拽后的顺序从源视频截取片段并拼接成一条视频
+    splice = project.get("pipeline", {}).get("stage3_splice") or {}
+    order_display = " → ".join(f"#{i}" for i in _splice_order) if _splice_order else ""
+    can_splice = bool(_ordered_hls) and bool(source_url)
+    splice_btn = (
+        '<button class="slirn-btn slirn-btn-primary" data-action="sv-stage3-splice">✂️ 截取拼接</button>'
+        if can_splice else
+        '<button class="slirn-btn slirn-btn-primary" data-action="sv-stage3-splice" disabled '
+        'title="需先在 Stage 1 选源视频并完成 Stage 3 解析">✂️ 截取拼接</button>'
+    )
+    splice_result = ""
+    if splice.get("status") == "done":
+        splice_result = (
+            f'<button class="slirn-btn-mini slirn-btn-mini-primary" data-action="sv-preview" '
+            f'data-url="{_file_url(task_id, project_id, "stage3", "splice.mp4")}" '
+            f'data-name="Stage 3 拼接结果">🎬 播放拼接结果</button>'
+            f'<button class="slirn-btn-mini" data-action="sv-preview-srt" '
+            f'data-url="{_file_url(task_id, project_id, "stage3", "splice.srt")}">📖 拼接字幕</button>'
+            f'<span class="slirn-sv-muted">{splice.get("count", 0)} 段 · '
+            f'{_duration_str(float(splice.get("total_sec") or 0))}</span>'
+        )
+    splice_note = ""
+    if splice.get("status") == "pending" and splice.get("stale_reason"):
+        splice_note = f'<div class="slirn-sv-muted">⚠️ {esc(splice["stale_reason"])}</div>'
+    elif splice.get("status") == "failed" and splice.get("error"):
+        splice_note = f'<div class="slirn-stage-error">{esc(splice["error"])}</div>'
+    splice_card = (
+        '<div class="slirn-stage3-splice-card">'
+        f'<div class="slirn-stage3-splice-head"><strong>🎞 片段截取拼接</strong>'
+        f'{_stage_badge(splice.get("status"))}</div>'
+        f'<div class="slirn-sv-muted slirn-stage3-splice-order">拼接顺序：'
+        f'{order_display or "解析后按编号顺序"}（拖动上方片段行调整，编号保持原始序号）</div>'
+        f'<div class="slirn-stage3-splice-actions">{splice_btn}{splice_result}</div>'
+        f'{splice_note}'
+        '</div>'
+    )
 
     prompt_badge = ""
     if s3.get("prompt_source") == "user" or s3.get("custom_prompt_used"):
@@ -543,6 +593,7 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
       {prompt_badge}{img_used_badge}
     </div>
     <div class="slirn-stage3-hl-list">{hl_list}</div>
+    {splice_card}
     {error_html}
     {_stage_logs(s3)}
   </div>
@@ -807,9 +858,72 @@ def _stage6_finalize(project: dict) -> str:
 </div>'''
 
 
+_SV_STAGE_NAV = (
+    ("stage1", "1", "选择源视频", "从任务视频中选择本项目的唯一源视频。", "stage1_source"),
+    ("stage2", "2", "提取字幕", "运行 ASR 并生成后续解析所需字幕。", "stage2_extract"),
+    ("stage3", "3", "解析短视频内容", "使用提示词和可选截图解析片段内容。", "stage3_analyze"),
+    ("stage35", "3.5", "字幕一致性核验", "核对 AI 拆条字幕与视频音频是否一致。", "stage3_verify"),
+    ("stage4", "4", "粗剪", "按解析结果生成候选短视频片段。", "stage4_coarse"),
+    ("stage5", "5", "字幕优化", "优化字幕文本、断句和时间范围。", "stage5_refine"),
+    ("stage6", "6", "精剪混编", "生成最终短视频文件并检查导出结果。", "stage6_finalize"),
+)
+
+
+def _stage_nav_state(status: object) -> str:
+    value = str(status or "pending").lower()
+    if value in ("done", "confirmed"):
+        return "done"
+    if value in ("running", "running_asr", "user_editing"):
+        return "current"
+    if value == "failed":
+        return "failed"
+    return "pending"
+
+
 def render_project(project: dict, all_tasks: list[dict] | None = None) -> str:
     task_id = str(project.get("task_id") or "")
     project_id = str(project.get("id") or "")
+    pipeline = project.get("pipeline") or {}
+    stage_states = {
+        key: _stage_nav_state((pipeline.get(stage_key) or {}).get("status"))
+        for key, _num, _title, _desc, stage_key in _SV_STAGE_NAV
+    }
+    focus_key = next(
+        (key for key, _num, _title, _desc, _stage_key in _SV_STAGE_NAV
+         if stage_states[key] != "done"),
+        _SV_STAGE_NAV[-1][0],
+    )
+    nav_items = []
+    for key, number, title, desc, _stage_key in _SV_STAGE_NAV:
+        state = stage_states[key]
+        mark = "✓" if state == "done" else ("!" if state == "failed" else number)
+        active = key == focus_key
+        nav_items.append(
+            f'<button type="button" class="slirn-sv-stage-nav {state}'
+            f'{" active" if active else ""}" data-action="sv-stage-nav" '
+            f'data-stage-key="{esc(key)}" aria-current="{"step" if active else "false"}">'
+            f'<span class="slirn-sv-stage-mark">{esc(mark)}</span>'
+            f'<span class="slirn-sv-stage-copy"><strong>{esc(number)} · {esc(title)}</strong>'
+            f'<small>{esc(desc)}</small></span></button>'
+        )
+    panes = (
+        ("stage1", _stage1_select_source(project)),
+        ("stage2", _stage2_extract(project)),
+        ("stage3", _stage3_analyze(
+            project,
+            source_url=_source_video_url(project),
+            srt_lines=(pipeline.get("stage3_analyze", {}) or {}).get("srt_lines") or [],
+        )),
+        ("stage35", _stage35_verify(project)),
+        ("stage4", _stage4_coarse(project)),
+        ("stage5", _stage5_refine(project)),
+        ("stage6", _stage6_finalize(project)),
+    )
+    pane_html = "".join(
+        f'<section class="slirn-sv-stage-pane{" active" if key == focus_key else ""}" '
+        f'id="slirn-sv-stage-pane-{esc(key)}" data-stage-key="{esc(key)}">{content}</section>'
+        for key, content in panes
+    )
     return f'''<div id="slirn-short-video-inner" class="slirn-tab-inner"
   data-task-id="{esc(task_id)}" data-project-id="{esc(project_id)}">
   <div class="slirn-sv-header">
@@ -822,11 +936,11 @@ def render_project(project: dict, all_tasks: list[dict] | None = None) -> str:
       <button class="slirn-btn" data-action="sv-refresh">刷新状态</button>
     </div>
   </div>
-  {_stage1_select_source(project)}
-  {_stage2_extract(project)}
-  {_stage3_analyze(project, source_url=_source_video_url(project), srt_lines=(project.get("pipeline", {}).get("stage3_analyze", {}) or {}).get("srt_lines") or [])}
-  {_stage35_verify(project)}
-  {_stage4_coarse(project)}
-  {_stage5_refine(project)}
-  {_stage6_finalize(project)}
+  <div class="slirn-sv-pipeline">
+    <aside class="slirn-sv-stages-card" aria-label="短视频阶段">
+      <div class="slirn-sv-stages-title">阶段</div>
+      <div class="slirn-sv-stage-nav-list">{"".join(nav_items)}</div>
+    </aside>
+    <div class="slirn-sv-stage-panes">{pane_html}</div>
+  </div>
 </div>'''
