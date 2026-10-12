@@ -531,11 +531,30 @@
     }
     if (targetCell === 'slirn-tab-short-video') {
       var forceShortVideoList = !!(options && options.forceShortVideoList);
-      try {
-        window.slirnShortVideoLoad && window.slirnShortVideoLoad(forceShortVideoList);
-      } catch (e) {}
+      _callShortVideoLoadWhenReady(forceShortVideoList);
     }
     window.scrollTo({top: 0, behavior: 'smooth'});
+  }
+
+  // ===== 短视频脚本就绪等待（bug 修复：更新重启后自动弹出的页面列表永远「加载中」）=====
+  // 三个 JS 是 Gradio 前端运行时用 createElement 动态插入 <head> 的 —— 动态脚本
+  // 的 defer 属性不生效，执行顺序 = 网络加载完成顺序（竞态）。router.js 先于
+  // short_video.js 执行时，showTab 里 window.slirnShortVideoLoad 还是 undefined，
+  // 守卫调用被静默跳过 → 恢复 lastTab=短视频页时列表停在骨架「加载中…」永不刷新。
+  // 这里改为就绪前轮询等待（100ms × 最多 100 次 ≈ 10s），就绪后立即调用。
+  var _svLoadSeq = 0;
+  function _callShortVideoLoadWhenReady(forceList) {
+    var seq = ++_svLoadSeq;   // 后来的调用接管，旧的轮询作废（防重复加载）
+    var tries = 0;
+    (function tick() {
+      if (seq !== _svLoadSeq) return;
+      if (typeof window.slirnShortVideoLoad === 'function') {
+        try { window.slirnShortVideoLoad(forceList); } catch (e) {}
+        return;
+      }
+      if (++tries > 100) return;   // ~10s 未就绪 → 放弃（页面异常时不死循环）
+      setTimeout(tick, 100);
+    })();
   }
 
   // ===== 刷新保持当前页面（2026-10-12 修订）=====
@@ -549,9 +568,9 @@
     var navTabs = Object.keys(TAB_BUTTONS).map(function(k) { return TAB_BUTTONS[k]; });
     if (navTabs.indexOf(last) >= 0) showTab(last);
   }
-  // router.js 是 defer 脚本，执行时 short_video.js（同为 defer，排在后面）
-  // 还没跑 —— 必须等 DOMContentLoaded（所有 defer 脚本跑完）再恢复，
-  // 否则 showTab 调 slirnShortVideoLoad 时它还不存在。
+  // 注意：router.js / short_video.js 都是 Gradio 运行时动态插入的脚本，defer
+  // 不生效、相互执行顺序不保证 —— 恢复时 short_video.js 可能还没跑。
+  // showTab 内部用 _callShortVideoLoadWhenReady 等它就绪后再调，这里无需再等。
   if (document.readyState === 'complete') _restoreLastTab();
   else document.addEventListener('DOMContentLoaded', _restoreLastTab);
 

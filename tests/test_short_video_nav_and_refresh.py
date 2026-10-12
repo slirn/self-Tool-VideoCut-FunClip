@@ -88,10 +88,10 @@ def test_router_tab_restore_wiring():
     # showTab 记住最后所在 tab
     assert "localStorage.setItem('slirn.lastTab'" in src, \
         "showTab 应把当前 tab 写入 localStorage（slirn.lastTab）"
-    # 刷新后恢复：_restoreLastTab + DOMContentLoaded 时机（等 defer 的 short_video.js）
+    # 刷新后恢复：_restoreLastTab + DOMContentLoaded 时机
     assert "function _restoreLastTab" in src, "router.js 应定义 _restoreLastTab"
     assert "DOMContentLoaded', _restoreLastTab" in src, \
-        "router.js 应在 DOMContentLoaded 后恢复 tab（defer 脚本全部执行完）"
+        "router.js 应在 DOMContentLoaded 后恢复 tab"
     # 恢复范围只限主导航 tab（TAB_BUTTONS 的值），不含 detail/workbench
     assert "TAB_BUTTONS).map" in src
 
@@ -108,11 +108,33 @@ def test_short_video_view_persistence_wiring():
     assert "openProject(v.t, v.p)" in src
 
 
+def test_short_video_load_waits_for_script_readiness():
+    """回归（2026-10-12 bug）：更新重启后自动弹出的页面短视频列表永远「加载中」。
+
+    三个 JS 由 Gradio 前端运行时动态插入 <head>，defer 不生效、相互执行顺序
+    不保证 —— router.js 先执行时 window.slirnShortVideoLoad 尚未定义，旧的
+    `window.slirnShortVideoLoad && ...` 守卫被静默跳过且永不重试。
+    showTab 必须经 _callShortVideoLoadWhenReady：就绪前轮询等待（有上限）、
+    就绪后调用；就绪判定用 typeof，等待期间有 seq 接管防重复加载。
+    """
+    src = _src("static/router.js")
+    assert "function _callShortVideoLoadWhenReady(forceList)" in src, \
+        "showTab 应通过就绪等待函数调 short_video.js 的加载入口"
+    assert "_callShortVideoLoadWhenReady(forceShortVideoList)" in src
+    # 就绪判定 + 有界轮询 + 新调用接管
+    assert "typeof window.slirnShortVideoLoad === 'function'" in src
+    assert "setTimeout(tick, 100)" in src
+    assert "tries > 100" in src, "轮询必须有上限（防死循环）"
+    assert "_svLoadSeq" in src, "后续调用应接管旧轮询（防重复加载）"
+    # 旧的静默跳过写法不应残留
+    assert "window.slirnShortVideoLoad && window.slirnShortVideoLoad(" not in src
+
+
 def test_explicit_short_video_list_entry_ignores_saved_editor_view():
     router_src = _src("static/router.js")
     sv_src = _src("static/short_video.js")
     assert "forceShortVideoList: action === 'goto-short-video'" in router_src
-    assert "window.slirnShortVideoLoad(forceShortVideoList)" in router_src
+    assert "window.slirnShortVideoLoad(forceList)" in router_src
     assert "window.slirnShortVideoLoad = function(forceList)" in sv_src
     assert "if (forceList) return loadList();" in sv_src
 
