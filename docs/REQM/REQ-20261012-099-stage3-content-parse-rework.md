@@ -361,3 +361,40 @@ rerun 提示词捕获 / 删除全流程含删光 / segments UI 断言 / JS 接�
 验证：全量 pytest **1179 passed** / node --check 双 JS OK / ruff
 HEAD-vs-worktree 零新增 / 7861 重启后 served 页面 config 含新 CSS 规则、
 served JS 含 switchHlTab 接线。
+
+## 修订十（2026-10-13 验收反馈）：系统级提示词 + 「引用系统提示词」按钮
+
+两件事：
+
+1. **⭐ 默认星号「没打上」排查（无缺陷，页面状态早于保存成功）**：
+   磁盘证据——`config/short_video_prompts.json`（repo_root =
+   slirn-standalone）里 `default_prompt` 与 `history[0]` 完全相等
+   （均 @2026-10-13 01:17:32，同一 save_default_prompt 调用写入）；
+   组件实测 `render_prompt_history_list(load_prompt_settings(...))`
+   输出含 ⭐、6 条；端点（save 后重载 settings 再渲染）、整页渲染
+   （`_inject_stage3_highlights` 每次注入 fresh settings）、JS 原地刷新
+   （`.slirn-stage3-hist-list` 容器类匹配）三条路径全部正确。结论：截图
+   对应「📜 存入列表已生效、💾 设为默认成功前」的页面状态，刷新即见 ⭐。
+2. **系统级提示词**：用户提供的完整版提示词（选题类型四选一带标题前缀
+   示例 / 选行规则（逐字取自 srt 原文、一行对一行、优先时间相邻）/ 切片
+   筛选标准（含 60-90s 时长、首行钩子、主题纯净）/ 过滤 / 内容质量门槛
+   （主题传达完整 + 文字忠实原文 + 逻辑连贯）/ 输出前自检（宁缺毋滥））
+   **内置为 `short_video_service.STAGE3_SYSTEM_PROMPT` 常量**——独立于
+   用户「默认 / 历史」两级存储：不占 10 条历史名额、不被用户保存覆盖、
+   随代码部署。输出格式约束仍由 run_stage3 拼 user payload 尾部
+   （「忽略上文的其他输出格式要求」），系统提示词只管选题与选行标准，
+   不复述输出格式（与任何自定义 system 共存安全，同优先级链）。
+   「🧭 引用系统提示词」按钮置于「💾 设为默认」**前面**，data-prompt
+   属性携带全文（与历史「载入」同模式）；点击填入文本域——文本域非空
+   先 confirm 覆盖，toast「已引用系统提示词」；之后照常编辑 / 解析 /
+   设为默认。placeholder 同步提及三个复用入口。
+
+涉及：`short_video_service.py`（STAGE3_SYSTEM_PROMPT 常量）/
+`short_video_ui.py`（import + 按钮渲染 + placeholder）/
+`static/short_video.js`（stage3UseSystemPrompt + 分发）；
+测试新增 3 例（常量关键段 / 按钮位于设为默认前 + 全文 HTML 转义嵌入
+未解析项目也渲染 / JS 接线 + node --check），文件内 40 例。
+
+验证：全量 pytest **1182 passed** / node --check 双 JS OK / ruff
+HEAD-vs-worktree 零新增（F541/F841 为存量，两侧一致）/ 7861 重启后
+served JS 含 stage3UseSystemPrompt 接线（3 处标记）。
