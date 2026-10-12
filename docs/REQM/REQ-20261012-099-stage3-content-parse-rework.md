@@ -105,3 +105,21 @@
    （顶栏 + hero）→「短视频任务列表」；tab 骨架加载文案同步。
 3. **截图区块标题**改为「智能纪要课程重点截图：」（上一版加在复选框前的
    重复 label 移除，避免同行出现两遍相同文案）。
+
+## 修订三（2026-10-12 验收反馈三）
+
+1. **顶栏「短视频列表」按钮删除**（红框；入口保留在 hero）。
+2. **热词库移入顶栏**：位于「大模型设置」按钮左边；hero 不再保留。
+3. **设置图标按钮（⚙️）改为文字按钮「大模型设置」**；app.py /
+   short_video_analyze.py 中所有用户可见的「顶栏 ⚙️」指引文案同步改为
+   「顶栏「大模型设置」」（装饰性 toast 里的 ⚙️ 不动）。
+4. **hero 按钮重排**：➕ 新建任务（primary）→ 🎞 短视频列表 → 📋 长视频列表。
+5. **大模型设置弹窗宽度加倍**（有效 420→840px）：`.slirn-modal-card.slirn-llm-card`
+   双类选择器提高特异度——否则排在后面的通用 `.slirn-modal-card{width:380px}`
+   （home.css 后半段）会把它压回去；`max-width: calc(100vw - 48px)` 小屏兜底。
+
+涉及：`app.py` / `short_video_analyze.py` / `static/home.css`；
+守卫测试新增 `test_topbar_and_hero_layout` /
+`test_llm_settings_modal_width_doubled` /
+`test_llm_hint_texts_follow_button_rename`
+（`tests/test_short_video_nav_and_refresh.py`）。

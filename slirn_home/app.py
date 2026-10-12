@@ -567,7 +567,7 @@ def _render_revision_zone(task_id: str, t, mgr: TaskManager) -> str:
         cur_model = _esc(llm_config.get_current(mgr.tasks_dir.parent))
         return f'''<div class="slirn-card" style="margin-top:16px;">
         <div class="slirn-panel-header"><div class="slirn-panel-title">🎬 处理剪辑 · 第 2 步：字幕修订</div></div>
-        <div class="slirn-form-hint">把上一阶段生成的 {len(sub_meta['segments'])} 段字幕交给大模型（<b>{cur_model}</b>，可在顶栏 ⚙️ 修改）逐段分析，识别：</div>
+        <div class="slirn-form-hint">把上一阶段生成的 {len(sub_meta['segments'])} 段字幕交给大模型（<b>{cur_model}</b>，可在顶栏「大模型设置」 修改）逐段分析，识别：</div>
         <div class="slirn-rev-intro">
             <div>🟥 <strong>整行删除</strong> — 口癖、口头禅、语气词、无意义内容</div>
             <div>🟩 <strong>完整保留</strong> — 正常有效内容</div>
@@ -1318,7 +1318,7 @@ def _render_optimize_zone(task_id: str, t, mgr: TaskManager) -> str:
     if not data:
         from slirn_home import llm_config
         if llm_config.get_current_entry(mgr.tasks_dir.parent) is None:
-            return _guide("未注册任何大模型 — 请先点顶栏 ⚙️ 添加模型", "")
+            return _guide("未注册任何大模型 — 请先点顶栏「大模型设置」 添加模型", "")
         try:
             size_mb = round(artifact.stat().st_size / 1024 / 1024, 1)
             art_disp = f"（{size_mb} MB）"
@@ -5828,8 +5828,8 @@ def build_app(repo_root: Path | None = None) -> gr.Blocks:
             <span>Video Studio</span>
         </div>
         <div class="slirn-topbar-actions">
-            <button class="slirn-btn" data-action="goto-short-video">短视频列表</button>
-            <button class="slirn-btn-icon" data-action="open-llm-settings" aria-label="大模型设置" title="大模型设置">⚙️</button>
+            <button class="slirn-btn" data-action="goto-hotwords">📚 热词库</button>
+            <button class="slirn-btn" data-action="open-llm-settings" aria-label="大模型设置" title="大模型设置">大模型设置</button>
             <button class="slirn-btn-icon" onclick="window.slirnToggleTheme && window.slirnToggleTheme()" aria-label="切换主题" title="切换主题">🌓</button>
             <a class="slirn-btn" href="http://127.0.0.1:7860/" target="_blank">🚀 上游首页</a>
             <span class="slirn-current-user" id="slirn-current-user" style="display:none;">
@@ -5847,10 +5847,9 @@ def build_app(repo_root: Path | None = None) -> gr.Blocks:
             <p>登录后按你的权限管理任务 · 仓库 <code>{_esc(repo_root)}</code></p>
         </div>
         <div class="slirn-hero-actions">
-            <button class="slirn-btn" data-action="goto-tasks">📋 长视频列表</button>
-            <button class="slirn-btn" data-action="goto-hotwords">📚 热词库</button>
-            <button class="slirn-btn" data-action="goto-short-video">🎞 短视频列表</button>
             <button class="slirn-btn slirn-btn-primary" data-action="goto-create">➕ 新建任务</button>
+            <button class="slirn-btn" data-action="goto-short-video">🎞 短视频列表</button>
+            <button class="slirn-btn" data-action="goto-tasks">📋 长视频列表</button>
         </div>
     </div>
 
@@ -6400,7 +6399,7 @@ def _register_slirn_api(
 
         entry = llm_config.get_current_entry(repo_root)
         if entry is None:
-            return _err("未注册任何大模型 — 请先点顶栏 ⚙️ 添加模型")
+            return _err("未注册任何大模型 — 请先点顶栏「大模型设置」 添加模型")
         try:
             candidates = hotword_service.extract_hotwords(
                 source, entry=entry, page_hint=page_hint,
@@ -6962,9 +6961,9 @@ def _register_slirn_api(
         if cur_entry is None or not revision_service._is_vision_entry(cur_entry):
             vision_alts = [m["id"] for m in models if revision_service._is_vision_entry(m)]
             hint = (
-                f" — 已注册可用多模态模型：{', '.join(vision_alts)}，请在顶栏 ⚙️ 切换"
+                f" — 已注册可用多模态模型：{', '.join(vision_alts)}，请在顶栏「大模型设置」 切换"
             ) if vision_alts else (
-                " — 请在顶栏 ⚙️ 注册多模态模型（推荐 qwen-vl-plus）"
+                " — 请在顶栏「大模型设置」 注册多模态模型（推荐 qwen-vl-plus）"
             )
             return _bg_finish_err(
                 f"AI 颜色识别需多模态模型，当前模型不支持图片输入{hint}"
@@ -7055,9 +7054,9 @@ def _register_slirn_api(
         if cur_entry is None or not revision_service._is_vision_entry(cur_entry):
             vision_alts = [m["id"] for m in models if revision_service._is_vision_entry(m)]
             hint = (
-                f" — 已注册可用多模态模型：{', '.join(vision_alts)}，请在顶栏 ⚙️ 切换"
+                f" — 已注册可用多模态模型：{', '.join(vision_alts)}，请在顶栏「大模型设置」 切换"
             ) if vision_alts else (
-                " — 请在顶栏 ⚙️ 注册多模态模型（推荐 qwen-vl-plus）"
+                " — 请在顶栏「大模型设置」 注册多模态模型（推荐 qwen-vl-plus）"
             )
             return _err(
                 f"AI 检测需多模态模型，当前模型不支持图片输入{hint}"
@@ -7120,7 +7119,7 @@ def _register_slirn_api(
         """REQ-20260919-061 Phase C：调多模态模型解析参考位置关系图 → 4 素材布局。
 
         模型选择：自动扫描已注册 entry，挑第一个 _is_vision_entry() 为真的模型；
-        若没有则提示用户在顶栏 ⚙️ 注册一个多模态模型（qwen-vl-plus 等）。
+        若没有则提示用户在顶栏「大模型设置」 注册一个多模态模型（qwen-vl-plus 等）。
         响应：写回 fine_compose.json: layout.{video,subtitle,cover,bg}.{x,y,scale,enabled}。
 
         REQ-20260919-075：AI 智能布局写执行历史。
@@ -7163,16 +7162,16 @@ def _register_slirn_api(
         cur_entry = next((m for m in models if m.get("id") == cur_id), None)
         if cur_entry is None:
             return _err(
-                "未选择当前模型 — 请在顶栏 ⚙️ 选定一个大模型后再试"
+                "未选择当前模型 — 请在顶栏「大模型设置」 选定一个大模型后再试"
             )
         if not revision_service._is_vision_entry(cur_entry):
             # 列出已注册的多模态备选（如有），帮用户快速切换
             vision_alts = [m["id"] for m in models if revision_service._is_vision_entry(m)]
             hint = (
                 f" — 已在配置中找到可用的多模态模型：{', '.join(vision_alts)}，"
-                "请在顶栏 ⚙️ 切换当前模型"
+                "请在顶栏「大模型设置」 切换当前模型"
             ) if vision_alts else (
-                " — 请在顶栏 ⚙️ 添加多模态模型（推荐 qwen-vl-plus），"
+                " — 请在顶栏「大模型设置」 添加多模态模型（推荐 qwen-vl-plus），"
                 "需要环境变量 DASHSCOPE_API_KEY"
             )
             return _err(
@@ -8792,7 +8791,7 @@ def _register_slirn_api(
 
         entry = llm_config.get_current_entry(repo_root)
         if entry is None:
-            return _err("未注册任何大模型 — 请先点顶栏 ⚙️ 添加模型")
+            return _err("未注册任何大模型 — 请先点顶栏「大模型设置」 添加模型")
         started = revision_service.start_job(
             tid, sub_meta["segments"], t.name, hotwords, outputs_dir,
             entry=entry, rigor=rigor, custom_prompt=custom_prompt,
@@ -10563,7 +10562,7 @@ def _register_slirn_api(
             pass
         entry = llm_config.get_current_entry(repo_root)
         if entry is None:
-            return _err("未注册任何大模型 — 请先点顶栏 ⚙️ 添加模型")
+            return _err("未注册任何大模型 — 请先点顶栏「大模型设置」 添加模型")
         started = optimize_service.start_job(
             tid, artifact, hotwords, t.name, outputs_dir, entry=entry,
             auto=_auto,

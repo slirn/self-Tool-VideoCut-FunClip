@@ -1011,7 +1011,14 @@ input[type="checkbox"]:focus-visible {
 }
 
 /* ============ 大模型设置弹窗（REQ-20260915-008：多厂商模型动态注册）============ */
-.slirn-llm-card { text-align: left; min-width: 420px; max-width: 560px; }
+/* REQ-20261012-099 修订三：宽度加倍（420→840）。双类选择器提高特异度，
+   否则排在后面的通用 .slirn-modal-card{width:380px} 会把它压回去。 */
+.slirn-modal-card.slirn-llm-card {
+  text-align: left;
+  width: 840px;
+  min-width: 840px;
+  max-width: calc(100vw - 48px);
+}
 .slirn-llm-subtitle {
   font-size: 13px;
   color: var(--text-secondary, #64748b);

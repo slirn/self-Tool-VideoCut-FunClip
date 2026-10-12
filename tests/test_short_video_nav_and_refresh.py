@@ -5,6 +5,12 @@
   short_video.js 按记忆恢复项目），不应跳回首页/列表
 - Stage 3 截图区块标题 →「智能纪要课程重点截图」
 
+修订三（顶栏/hero 布局调整）：
+- 顶栏删「短视频列表」按钮（入口留在 hero）；热词库移入顶栏、
+  位于「大模型设置」左边；设置图标按钮（⚙️）改为文字「大模型设置」
+- hero 按钮顺序：新建任务 → 短视频列表 → 长视频列表
+- 大模型设置弹窗宽度加倍（420→840px）
+
 接线类断言走本仓库既有 source-grep 模式（见 test_auth.py 接线守卫）。
 """
 
@@ -23,7 +29,8 @@ def test_nav_labels_renamed():
     src = _src("app.py")
     assert "📋 长视频列表" in src, "「任务列表」按钮应改为「长视频列表」"
     assert "🎞 短视频列表" in src, "hero「短视频混剪」按钮应改为「短视频列表」"
-    assert ">短视频列表<" in src, "顶栏「短视频混剪」按钮应改为「短视频列表」"
+    # 修订三：顶栏「短视频列表」按钮已删（红框），入口留在 hero
+    assert ">短视频列表<" not in src, "顶栏不再放「短视频列表」按钮（入口在 hero）"
     # 旧文案不再出现在导航区（default 项目名里的「短视频混剪」不受影响）
     assert ">短视频混剪<" not in src
     assert ">短视频任务列表<" not in src
@@ -32,6 +39,44 @@ def test_nav_labels_renamed():
     assert "🎞 短视频混剪" not in src
     assert "短视频混剪加载中" not in src
     assert "短视频任务列表加载中" not in src
+
+
+def test_topbar_and_hero_layout():
+    """修订三：热词库移入顶栏（大模型设置左边）+ 设置改文字 + hero 重排。"""
+    src = _src("app.py")
+    topbar = src.split("slirn-topbar-actions")[1]
+    topbar = topbar[: topbar.index("</div>")]
+    assert 'data-action="goto-hotwords"' in topbar, "热词库按钮应在顶栏"
+    assert topbar.index("热词库") < topbar.index("大模型设置"), \
+        "热词库应在「大模型设置」按钮左边"
+    assert 'data-action="open-llm-settings"' in topbar
+    assert "⚙️" not in topbar, "设置图标按钮应改为文字「大模型设置」"
+
+    hero = src.split("slirn-hero-actions")[1]
+    hero = hero[: hero.index("</div>")]
+    assert "热词库" not in hero, "热词库已移到顶栏，hero 不再保留"
+    assert hero.index("新建任务") < hero.index("短视频列表") < hero.index("长视频列表"), \
+        "hero 按钮顺序：新建任务 → 短视频列表 → 长视频列表"
+
+
+def test_llm_hint_texts_follow_button_rename():
+    """修订三：用户可见提示从「顶栏 ⚙️」改指「顶栏「大模型设置」」（按钮已无图标）。"""
+    src = _src("app.py")
+    assert "顶栏「大模型设置」" in src
+    assert "顶栏 ⚙️" not in src
+    assert "顶栏「大模型设置」" in _src("short_video_analyze.py")
+
+
+def test_llm_settings_modal_width_doubled():
+    """修订三：大模型设置弹窗宽度加倍（420→840）。"""
+    css = _src("static/home.css")
+    rule = ".slirn-modal-card.slirn-llm-card"
+    assert rule in css, \
+        "宽度规则需双类特异度，否则被后面的通用 .slirn-modal-card{width:380px} 压回去"
+    seg = css.split(rule, 1)[1][:300]
+    assert "width: 840px" in seg
+    assert "min-width: 840px" in seg
+    assert "max-width: calc(100vw - 48px)" in seg, "小屏兜底，不溢出视口"
 
 
 # ---------- 刷新保持当前页面 ----------

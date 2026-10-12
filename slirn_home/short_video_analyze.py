@@ -580,7 +580,7 @@ def _resolve_stage3_image(
     if entry is not None and not revision_service._is_vision_entry(entry):
         raise svc.ShortVideoError(
             f"当前模型 [{entry.get('id', '?')}] 不支持图片输入，无法把截图发给 AI。"
-            "请到 ⚙️ 大模型设置切换多模态模型（或在模型条目里声明 vision=true），"
+            "请到顶栏「大模型设置」切换多模态模型（或在模型条目里声明 vision=true），"
             "或取消勾选「发送截图」。"
         )
     return svc.stage3_dir(repo_root, task_id, project_id) / cur["name"]
