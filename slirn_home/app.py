@@ -5759,6 +5759,34 @@ def _read_css() -> str:
     return css_path.read_text(encoding="utf-8")
 
 
+def _build_topbar(repo_root: str) -> str:
+    """REQ-20261013-101：顶栏按钮组。⌨ 快捷键在热词库前面（统一设置入口）。
+
+    全部按钮都是 data-action 驱动的客户端事件，pure HTML，测试可直接拼装。
+    """
+    return (
+        '<div class="slirn-topbar">'
+        '<div class="slirn-logo">'
+        '<div class="slirn-logo-icon">🎬</div>'
+        '<span>Video Studio</span>'
+        '</div>'
+        '<div class="slirn-topbar-actions">'
+        '<button class="slirn-btn" data-action="revkeys-open" title="全局快捷键自定义（长/短视频各阶段均生效）">⌨ 快捷键</button>'
+        '<button class="slirn-btn" data-action="goto-hotwords">📚 热词库</button>'
+        '<button class="slirn-btn" data-action="open-llm-settings" aria-label="大模型设置" title="大模型设置">大模型设置</button>'
+        '<button class="slirn-btn-icon" onclick="window.slirnToggleTheme && window.slirnToggleTheme()" aria-label="切换主题" title="切换主题">🌓</button>'
+        '<a class="slirn-btn" href="http://127.0.0.1:7860/" target="_blank">🚀 上游首页</a>'
+        '<span class="slirn-current-user" id="slirn-current-user" style="display:none;">'
+        '👤 <span id="slirn-current-user-name"></span>'
+        '<button class="slirn-btn-mini" data-action="users-open" id="slirn-users-open-btn" style="display:none;" title="用户管理">用户管理</button>'
+        '<button class="slirn-btn-mini" data-action="logout">登出</button>'
+        '</span>'
+        '<button class="slirn-btn-icon" data-action="show-login" id="slirn-login-btn" title="登录">🔑</button>'
+        '</div>'
+        '</div>'
+    )
+
+
 def _build_head() -> str:
     """构造 head 注入：主题切换 JS（内联，无反斜杠，安全）+ 事件路由 JS（静态文件引用）。
 
@@ -5822,24 +5850,7 @@ def build_app(repo_root: Path | None = None) -> gr.Blocks:
     # 否则全部任务会随页面源码泄漏给未登录访客和普通用户。
     # 单个 gr.HTML 包裹全部 UI — JS 通过 ID 控制各 tab 的可见性
     full_html = f'''
-    <div class="slirn-topbar">
-        <div class="slirn-logo">
-            <div class="slirn-logo-icon">🎬</div>
-            <span>Video Studio</span>
-        </div>
-        <div class="slirn-topbar-actions">
-            <button class="slirn-btn" data-action="goto-hotwords">📚 热词库</button>
-            <button class="slirn-btn" data-action="open-llm-settings" aria-label="大模型设置" title="大模型设置">大模型设置</button>
-            <button class="slirn-btn-icon" onclick="window.slirnToggleTheme && window.slirnToggleTheme()" aria-label="切换主题" title="切换主题">🌓</button>
-            <a class="slirn-btn" href="http://127.0.0.1:7860/" target="_blank">🚀 上游首页</a>
-            <span class="slirn-current-user" id="slirn-current-user" style="display:none;">
-                👤 <span id="slirn-current-user-name"></span>
-                <button class="slirn-btn-mini" data-action="users-open" id="slirn-users-open-btn" style="display:none;" title="用户管理">用户管理</button>
-                <button class="slirn-btn-mini" data-action="logout">登出</button>
-            </span>
-            <button class="slirn-btn-icon" data-action="show-login" id="slirn-login-btn" title="登录">🔑</button>
-        </div>
-    </div>
+    {_build_topbar(str(repo_root))}
 
     <div class="slirn-hero">
         <div class="slirn-hero-text">
