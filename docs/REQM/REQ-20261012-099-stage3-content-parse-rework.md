@@ -75,3 +75,21 @@
 - Python 3.10、现有依赖（httpx/fastapi/gradio）；多模态走 `revision_service._call_llm_vision`
   （openai/anthropic 双协议已支持）。
 - vision 判定用 `revision_service._is_vision_entry`（用户显式声明优先，启发式兜底）。
+
+## 修订（2026-10-12 验收反馈）
+
+1. **移除快速模板 UI**（radio 组 + 「↺ 重置模板」按钮）；模板仅留作提示词
+   初始填充兜底，后端 template 参数与优先级链不变。
+2. **历史条目可查看完整内容**：条目改卡片结构（头部行 + `<pre hidden>`），
+   点击头部展开/收起；「载入」独立按钮负责填入文本域。
+3. **默认提示词在历史中可见**：`save_default_prompt` 尽力同步进历史
+   （已存在→置顶；满且不存在→跳过不强占）；渲染时按文本相等标「⭐ 默认」。
+4. **截图复选框前加 label**「智能纪要课程重点截图」。
+5. **存入列表/设为默认后历史下拉自动刷新**：两端点返回 `history_html`
+   片段，前端原地替换 `.slirn-stage3-hist-list` 并自动展开 details
+   （不重渲染整页，文本域编辑内容不丢）。
+
+涉及：`short_video_service.py` / `short_video_ui.py`（新增
+`render_prompt_history_list`）/ `app.py` / `static/short_video.js` /
+`static/home.css`；测试同步更新（`test_short_video_service.py` 的模板 radio
+断言反转为「不存在」）。

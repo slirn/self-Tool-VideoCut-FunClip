@@ -118,7 +118,6 @@
       else toast((r && r.error) || '打开失败', 'error');
       startElapsedTicker();
       initSubtitleSortAll();
-      bindStage3TemplateRadios();
     });
   }
 
@@ -219,9 +218,8 @@
 
   function stage3Run() {
     var ctx = innerCtx(); if (!ctx) return;
-    var radios = document.querySelectorAll('input[name="sv-stage3-template"]');
+    // REQ-099 修订：快速模板 UI 已移除，template 固定默认值（仅作后端兜底链）
     var template = 'hook_first';
-    radios.forEach(function(r) { if (r.checked) template = r.value; });
     var n = parseInt((document.getElementById('slirn-stage3-n') || {}).value || '4', 10);
     var prompt = _stage3PromptText();
     var useImage = _stage3UseImage();
@@ -258,23 +256,15 @@
     });
   }
 
-  // 快速模板 radio：change 时把该模板生效文本填进提示词文本域
-  function bindStage3TemplateRadios() {
-    var radios = document.querySelectorAll('input[name="sv-stage3-template"]');
-    radios.forEach(function(r) {
-      if (r.getAttribute('data-tpl-bound') === '1') return;
-      r.setAttribute('data-tpl-bound', '1');
-      r.addEventListener('change', function() {
-        if (!r.checked) return;
-        var ta = document.getElementById('slirn-stage3-prompt');
-        var text = r.getAttribute('data-prompt') || '';
-        if (!ta || !text) return;
-        if (ta.value && ta.value.trim() && !window.confirm(
-            '文本域已有内容，用「快速模板」文本覆盖它？')) return;
-        ta.value = text;
-        toast('已填充快速模板提示词（可继续修改）');
-      });
-    });
+  // REQ-099 修订：保存默认 / 存入列表后，用服务端返回的 history_html 原地
+  // 刷新历史下拉（不重渲染整页 —— 文本域里用户正在编辑的内容不能丢），
+  // 并自动展开让其立即看到新条目与 ⭐ 默认标记。
+  function _refreshStage3History(historyHtml) {
+    if (!historyHtml) return;
+    var list = document.querySelector('.slirn-stage3-hist-list');
+    if (list) list.innerHTML = historyHtml;
+    var box = document.querySelector('.slirn-stage3-prompts-section');
+    if (box) box.open = true;
   }
 
   function stage3SaveDefault() {
@@ -282,8 +272,10 @@
     if (!prompt) return toast('提示词为空，无法设为默认', 'error');
     postJSON(API + '/short_video_save_default_prompt', { prompt: prompt })
       .then(function(r) {
-        if (r && r.ok) toast('已设为默认提示词（新项目初始填充）');
-        else toast((r && r.error) || '保存失败', 'error');
+        if (r && r.ok) {
+          _refreshStage3History(r.history_html);
+          toast('已设为默认提示词（列表中 ⭐ 标出）');
+        } else toast((r && r.error) || '保存失败', 'error');
       });
   }
 
@@ -308,8 +300,16 @@
         }
         return;
       }
-      toast('已存入提示词列表（刷新页面可见）');
+      _refreshStage3History(r.history_html);
+      toast('已存入提示词列表');
     });
+  }
+
+  // 历史条目：点击展开 / 收起完整内容（与「载入」分开，先看再决定）
+  function stage3ToggleHist(btn) {
+    var item = btn.closest ? btn.closest('.slirn-stage3-hist-item') : null;
+    var full = item ? item.querySelector('.slirn-stage3-hist-full') : null;
+    if (full) full.hidden = !full.hidden;
   }
 
   function stage3LoadPrompt(btn) {
@@ -328,26 +328,6 @@
     if (!ta) return;
     if (ta.value && !window.confirm('清空当前提示词文本域？')) return;
     ta.value = '';
-  }
-
-  // 历史遗留的每模板自定义覆盖（REQ-20261004-stage3-prompt-edit）在新 UI 里
-  // 只会静默影响快速模板预填；这里给一个恢复系统默认的出口。
-  function stage3ResetTemplates() {
-    var ctx = innerCtx(); if (!ctx) return;
-    if (!window.confirm('清除 3 个快速模板的自定义覆盖，恢复系统默认？')) return;
-    var templates = ['hook_first', 'topic_cluster', 'story_arc'];
-    var done = 0, fail = 0;
-    templates.forEach(function(tpl) {
-      postJSON(API + '/short_video_reset_custom_prompt', {
-        task_id: ctx.taskId, project_id: ctx.projectId, template: tpl,
-      }).then(function(r) {
-        if (r && r.ok) done++; else fail++;
-        if (done + fail === templates.length) {
-          if (fail) toast(fail + ' 个模板重置失败', 'error');
-          else { toast('已恢复系统默认模板'); openProject(ctx.taskId, ctx.projectId); }
-        }
-      });
-    });
   }
 
   function stage3UploadImage() {
@@ -795,8 +775,8 @@
     if (action === 'sv-stage3-save-default') return stage3SaveDefault();
     if (action === 'sv-stage3-save-history') return stage3SaveHistory();
     if (action === 'sv-stage3-load-prompt') return stage3LoadPrompt(btn);
+    if (action === 'sv-stage3-toggle-hist') return stage3ToggleHist(btn);
     if (action === 'sv-stage3-clear-prompt') return stage3ClearPrompt();
-    if (action === 'sv-stage3-reset-templates') return stage3ResetTemplates();
     if (action === 'sv-stage3-upload-image') return stage3UploadImage();
     if (action === 'sv-stage3-remove-image') return stage3RemoveImage();
     if (action === 'sv-stage4-run') return stage4Run();

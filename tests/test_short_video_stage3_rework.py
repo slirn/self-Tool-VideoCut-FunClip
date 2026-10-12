@@ -55,12 +55,17 @@ def test_prompt_settings_default_and_history(tmp_path):
         "default_prompt": None, "history": [],
     }
 
-    # 默认提示词：保存 + 覆盖
+    # 默认提示词：保存 + 覆盖。修订后保存默认会尽力同步进历史
+    # （这样历史列表里能看到哪一条是默认，前端按文本相等标 ⭐）。
     entry = svc.save_default_prompt(tmp_path, "你是解析助手 A")
     assert entry["prompt"] == "你是解析助手 A"
-    assert svc.load_prompt_settings(tmp_path)["default_prompt"]["prompt"] == "你是解析助手 A"
+    st = svc.load_prompt_settings(tmp_path)
+    assert st["default_prompt"]["prompt"] == "你是解析助手 A"
+    assert [h["prompt"] for h in st["history"]] == ["你是解析助手 A"]
     svc.save_default_prompt(tmp_path, "你是解析助手 B")
-    assert svc.load_prompt_settings(tmp_path)["default_prompt"]["prompt"] == "你是解析助手 B"
+    st = svc.load_prompt_settings(tmp_path)
+    assert st["default_prompt"]["prompt"] == "你是解析助手 B"
+    assert [h["prompt"] for h in st["history"]] == ["你是解析助手 B", "你是解析助手 A"]
 
     # 空提示词拒绝
     try:
@@ -69,13 +74,13 @@ def test_prompt_settings_default_and_history(tmp_path):
     except svc.ShortVideoError:
         pass
 
-    # 历史：填满 10 条
-    for i in range(10):
+    # 历史：再补 8 条填满 10（默认同步已占 2 条）
+    for i in range(8):
         r = svc.save_prompt_history(tmp_path, f"提示词 {i}")
         assert r["status"] == "saved"
     hist = svc.load_prompt_settings(tmp_path)["history"]
     assert len(hist) == 10
-    assert hist[0]["prompt"] == "提示词 9"  # 最新在前
+    assert hist[0]["prompt"] == "提示词 7"  # 最新在前
 
     # 第 11 条 → need_confirm；confirm=True → 覆盖最旧
     r = svc.save_prompt_history(tmp_path, "提示词 10")
@@ -86,7 +91,7 @@ def test_prompt_settings_default_and_history(tmp_path):
     hist = svc.load_prompt_settings(tmp_path)["history"]
     assert len(hist) == 10
     assert hist[0]["prompt"] == "提示词 10"
-    assert all(h["prompt"] != "提示词 0" for h in hist), "最旧一条应被丢弃"
+    assert all(h["prompt"] != "你是解析助手 A" for h in hist), "最旧一条应被丢弃"
 
     # 已存在 → 置顶 + 不需确认
     r = svc.save_prompt_history(tmp_path, "提示词 3")
@@ -96,8 +101,19 @@ def test_prompt_settings_default_and_history(tmp_path):
     assert hist[0]["prompt"] == "提示词 3"
     assert sum(1 for h in hist if h["prompt"] == "提示词 3") == 1
 
-    # 默认与历史互不影响
-    assert svc.load_prompt_settings(tmp_path)["default_prompt"]["prompt"] == "你是解析助手 B"
+    # 列表已满时设默认为「不在列表」的新提示词 → 同步跳过（不强占），默认本体仍生效
+    svc.save_default_prompt(tmp_path, "全新默认 Z")
+    st = svc.load_prompt_settings(tmp_path)
+    assert st["default_prompt"]["prompt"] == "全新默认 Z"
+    assert all(h["prompt"] != "全新默认 Z" for h in st["history"])
+    assert len(st["history"]) == 10
+
+    # 设默认为「已在列表」的提示词 → 置顶（历史第一眼就能看到哪条是默认）
+    svc.save_default_prompt(tmp_path, "提示词 5")
+    st = svc.load_prompt_settings(tmp_path)
+    assert st["default_prompt"]["prompt"] == "提示词 5"
+    assert st["history"][0]["prompt"] == "提示词 5"
+    assert len(st["history"]) == 10
 
 
 # ---------- Stage 3 截图存取 ----------
@@ -468,40 +484,57 @@ def test_api_prompt_settings_endpoints(tmp_path):
     tid, pid = _make_project(tmp_path)
     client = TestClient(build_app(tmp_path).app)
 
+    # 设默认 → 返回 history_html 片段（前端原地刷新历史下拉），默认条目带 ⭐
     r = client.post("/slirn/api/short_video_save_default_prompt",
                     json={"prompt": "API 默认提示词"}).json()
     assert r["ok"] is True, r
+    assert "API 默认提示词" in r["history_html"]
+    assert "⭐ 默认" in r["history_html"]
 
-    # 历史填满
-    for i in range(10):
+    # 历史填满（默认同步已占 1 条，再补 9 条）
+    for i in range(9):
         r = client.post("/slirn/api/short_video_prompt_history_save",
                         json={"prompt": f"p{i}"}).json()
         assert r["status"] == "saved"
     # 第 11 条 → need_confirm + toast 提示覆盖
     r = client.post("/slirn/api/short_video_prompt_history_save",
-                    json={"prompt": "p10"}).json()
+                    json={"prompt": "p9"}).json()
     assert r["ok"] is True and r["status"] == "need_confirm"
     assert "覆盖" in r["toast"]
-    # confirm 重发 → saved
+    # confirm 重发 → saved + history_html
     r = client.post("/slirn/api/short_video_prompt_history_save",
-                    json={"prompt": "p10", "confirm": True}).json()
+                    json={"prompt": "p9", "confirm": True}).json()
     assert r["status"] == "saved" and len(r["history"]) == 10
+    assert "p9" in r["history_html"]
+
+    # 设默认为已在列表的条目 → 历史置顶 + ⭐
+    r = client.post("/slirn/api/short_video_save_default_prompt",
+                    json={"prompt": "p9"}).json()
+    assert r["ok"] is True
+    assert "⭐ 默认" in r["history_html"]
+    assert r["history"][0]["prompt"] == "p9"
 
     # 空 prompt 拒绝
     r = client.post("/slirn/api/short_video_save_default_prompt",
                     json={"prompt": " "}).json()
     assert r["ok"] is False
 
-    # UI 注入：项目页应含默认提示词 + 历史条目
+    # UI 注入：项目页含默认提示词（文本域初始填充）+ 历史条目
     r = client.post("/slirn/api/short_video_get",
                     json={"task_id": tid, "project_id": pid}).json()
     assert r["ok"] is True
-    assert "API 默认提示词" in r["html"]
-    assert "p10" in r["html"]
+    assert "API 默认提示词" in r["html"] or "p9" in r["html"]
+    assert "p9" in r["html"]
     # 改版 UI 元素
     assert "解析短视频内容" in r["html"]
     assert 'id="slirn-stage3-prompt"' in r["html"]
     assert "🔍 解析" in r["html"]
+    # 修订：快速模板 radio 已移除
+    assert 'name="sv-stage3-template"' not in r["html"]
+    # 修订：历史条目可展开查看完整内容 + 默认标记
+    assert 'data-action="sv-stage3-toggle-hist"' in r["html"]
+    assert "slirn-stage3-hist-full" in r["html"]
+    assert "⭐ 默认" in r["html"]
 
 
 def test_api_stage3_image_endpoints(tmp_path):
@@ -520,11 +553,12 @@ def test_api_stage3_image_endpoints(tmp_path):
     assert r["ok"] is True, r
     assert r["image"]["name"] == "input_image.png"
 
-    # 页面回显缩略 + 发送开关
+    # 页面回显缩略 + 发送开关（修订：复选框前有语义 label）
     r = client.post("/slirn/api/short_video_get",
                     json={"task_id": tid, "project_id": pid}).json()
     assert "slirn-stage3-image-thumb" in r["html"]
     assert 'id="slirn-stage3-use-image"' in r["html"]
+    assert "智能纪要课程重点截图" in r["html"]
 
     # kind=stage3 文件访问
     resp = client.get("/slirn/api/short_video_file", params={

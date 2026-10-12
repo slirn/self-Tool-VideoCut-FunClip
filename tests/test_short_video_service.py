@@ -132,9 +132,10 @@ def test_short_video_ui_contains_editor_and_materials(tmp_path):
     assert "粗剪合成" in html
     assert "优化字幕" in html
     assert "精剪混编" in html
-    # Stage 1 源下拉 + Stage 3 模板单选
+    # Stage 1 源下拉 + Stage 3 提示词文本域（REQ-099 修订：快速模板单选已移除）
     assert "slirn-stage1-source" in html
-    assert 'name="sv-stage3-template"' in html
+    assert 'id="slirn-stage3-prompt"' in html
+    assert 'name="sv-stage3-template"' not in html
     # 已选基础视频应回显在 Stage 1 下拉
     assert project["base_material_id"] in html, "已选基础视频应回显在 Stage 1 下拉"
     assert 'data-action="sv-remove-material"' in html

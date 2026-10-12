@@ -1081,7 +1081,13 @@ def load_prompt_settings(repo_root: Path | str) -> dict:
 
 
 def save_default_prompt(repo_root: Path | str, prompt: str) -> dict:
-    """把当前提示词保存为全局默认（覆盖旧值）。"""
+    """把当前提示词保存为全局默认（覆盖旧值）。
+
+    同时尽力把该提示词同步进历史列表（已存在 → 置顶去重；未满 → 插入），
+    这样历史列表里能看到哪一条是默认（前端按文本相等标 ⭐）。列表已满且
+    该提示词不在其中 → 跳过（不强制覆盖最旧，覆盖决定权仍归 save_prompt_history
+    的 confirm 流程）。
+    """
     text = str(prompt or "").strip()
     if not text:
         raise ShortVideoError("提示词不能为空")
@@ -1090,6 +1096,7 @@ def save_default_prompt(repo_root: Path | str, prompt: str) -> dict:
     entry = {"prompt": text, "updated_at": now_iso()}
     data["default_prompt"] = entry
     _write_json_atomic(prompt_settings_path(root), data)
+    save_prompt_history(root, text)  # need_confirm（满且不存在）时静默跳过
     return entry
 
 

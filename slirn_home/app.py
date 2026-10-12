@@ -10018,7 +10018,11 @@ def _register_slirn_api(
 
     @app.app.post("/slirn/api/short_video_save_default_prompt")
     async def short_video_save_default_prompt(body: dict = Body(default_factory=dict)):
-        """REQ-20261012-099：把当前提示词保存为全局默认提示词。"""
+        """REQ-20261012-099：把当前提示词保存为全局默认提示词。
+
+        服务层会尽力同步进历史列表；``history_html`` 供前端原地刷新
+        （默认条目在列表中标 ⭐）。
+        """
         prompt = str(body.get("prompt") or "")
         if not prompt.strip():
             return _err("提示词不能为空")
@@ -10026,14 +10030,21 @@ def _register_slirn_api(
             entry = _sv_service.save_default_prompt(repo_root, prompt)
         except Exception as e:  # noqa: BLE001
             return _err(f"保存默认提示词失败: {e}")
-        return _ok(default_prompt=entry, toast="已设为默认提示词")
+        settings = _sv_service.load_prompt_settings(repo_root)
+        return _ok(
+            default_prompt=entry,
+            history=settings["history"],
+            history_html=_sv_ui.render_prompt_history_list(settings),
+            toast="已设为默认提示词",
+        )
 
     @app.app.post("/slirn/api/short_video_prompt_history_save")
     async def short_video_prompt_history_save(body: dict = Body(default_factory=dict)):
         """REQ-20261012-099：提示词存入历史列表（≤ 10 条最新）。
 
         已满且新提示词 → ``status=need_confirm``；前端确认后带
-        ``confirm=true`` 重发（覆盖最旧）。
+        ``confirm=true`` 重发（覆盖最旧）。成功时附 ``history_html`` 片段，
+        前端原地替换历史下拉（自动刷新，无需重开页面）。
         """
         prompt = str(body.get("prompt") or "")
         if not prompt.strip():
@@ -10049,7 +10060,12 @@ def _register_slirn_api(
                 max=result.get("max"),
                 toast=f"列表已满 {result.get('max')} 条，是否覆盖最旧一条？",
             )
-        return _ok(status="saved", history=result.get("history"), toast="已存入提示词列表")
+        settings = _sv_service.load_prompt_settings(repo_root)
+        return _ok(
+            status="saved", history=result.get("history"),
+            history_html=_sv_ui.render_prompt_history_list(settings),
+            toast="已存入提示词列表",
+        )
 
     @app.app.post("/slirn/api/short_video_stage3_verify")
     async def short_video_stage3_verify(body: dict = Body(default_factory=dict)):

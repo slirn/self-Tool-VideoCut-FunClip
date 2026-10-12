@@ -3,6 +3,8 @@
 REQ-20261003-098：6 阶段管线（选源 → 抽字幕 → 解析短视频内容 → 粗剪 → 字幕优化 → 精剪混编）。
 REQ-20261012-099：Stage 3 由「AI 拆条」改名并改版 —— 用户录入解析提示词（默认 +
 最新 10 条历史两级复用）、可选上传截图一起发给多模态 AI；每个片段可单独重新解析。
+修订（验收反馈）：移除快速模板 UI；历史条目可展开查看完整内容、⭐ 标默认；
+截图复选框前加「智能纪要课程重点截图」label；保存提示词后历史下拉原地自动刷新。
 """
 
 from __future__ import annotations
@@ -51,6 +53,41 @@ def _format_ms(ms: int) -> str:
         return "00:00"
     s = ms / 1000.0
     return _duration_str(s)
+
+
+def render_prompt_history_list(prompt_settings: dict) -> str:
+    """渲染全局提示词历史列表（REQ-099 修订：可展开查看完整内容 + 标出默认）。
+
+    既用于 Stage 3 面板初始渲染，也作为 ``short_video_save_default_prompt`` /
+    ``short_video_prompt_history_save`` 端点的 ``history_html`` 片段返回 —— 前端
+    保存后原地替换 ``.slirn-stage3-hist-list``，实现「存入列表后下拉自动刷新」。
+    """
+    default_prompt = str(((prompt_settings.get("default_prompt") or {}).get("prompt")) or "")
+    items = []
+    for item in prompt_settings.get("history") or []:
+        p = str(item.get("prompt") or "")
+        if not p.strip():
+            continue
+        head = p.strip().replace("\n", " ")
+        head = head[:80] + ("…" if len(head) > 80 else "")
+        when = str(item.get("updated_at") or "")[:16].replace("T", " ")
+        star = (
+            '<span class="slirn-sv-badge slirn-sv-badge-ok slirn-stage3-hist-default">⭐ 默认</span>'
+            if default_prompt and p.strip() == default_prompt.strip() else ""
+        )
+        items.append(
+            f'<div class="slirn-stage3-hist-item">'
+            f'<div class="slirn-stage3-hist-head">'
+            f'<button type="button" class="slirn-stage3-hist-toggle" '
+            f'data-action="sv-stage3-toggle-hist" title="展开 / 收起完整内容">{esc(head)}{star}'
+            f'<span class="slirn-sv-muted slirn-stage3-hist-time">{esc(when)}</span></button>'
+            f'<button type="button" class="slirn-btn-mini" data-action="sv-stage3-load-prompt" '
+            f'data-prompt="{esc(p)}" title="载入到提示词文本域">载入</button>'
+            f'</div>'
+            f'<pre class="slirn-stage3-hist-full" hidden>{esc(p)}</pre>'
+            f'</div>'
+        )
+    return "".join(items) or '<div class="slirn-sv-muted">尚无保存的提示词</div>'
 
 
 # ---------- 项目列表（保持兼容） ----------
@@ -287,28 +324,15 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
     s3 = project.get("pipeline", {}).get("stage3_analyze", {}) or {}
     n = int(s3.get("n_clips") or 4)
     template = str(s3.get("template") or "hook_first")
-    templates = [
-        ("hook_first", "钩子优先"),
-        ("topic_cluster", "主题聚类"),
-        ("story_arc", "起承转合"),
-    ]
     prompt_state = s3.get("prompt_state") or {}
     custom_prompts = prompt_state.get("custom") or {}
     default_prompts = prompt_state.get("defaults") or {}
 
-    # REQ-20261012-099：每个模板的「生效文本」—— 用户自定义覆盖优先，放 radio 的
-    # data-prompt 上，前端点击快速模板时直接填充提示词文本域。
+    # REQ-20261012-099 修订：快速模板 UI 已移除；模板仅作为提示词文本域的
+    # 初始填充兜底（全局默认优先，历史自定义覆盖仍优先于系统默认文本）。
     def _tpl_effective_text(key: str) -> str:
         custom_entry = custom_prompts.get(key) or {}
         return str(custom_entry.get("prompt") or default_prompts.get(key) or "")
-
-    template_radios = "".join(
-        f'<label class="slirn-stage3-radio">'
-        f'<input type="radio" name="sv-stage3-template" value="{v}"'
-        f'{" checked" if template == v else ""} data-prompt="{esc(_tpl_effective_text(v))}">'
-        f'<span>{label}</span></label>'
-        for v, label in templates
-    )
 
     # REQ-20261012-099：提示词文本域初始值 — 全局默认提示词 → 当前模板生效文本
     prompt_settings = s3.get("prompt_settings") or {}
@@ -319,31 +343,8 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
         if global_default.get("prompt") else ""
     )
 
-    # 历史提示词列表（≤ 10 条，最新在前；点击载入文本域）
-    has_custom_override = any(
-        (custom_prompts.get(k) or {}).get("prompt") for k, _ in templates
-    )
-    reset_tpl_btn = (
-        '<button class="slirn-btn-mini" data-action="sv-stage3-reset-templates" '
-        'title="清除历史遗留的模板提示词自定义覆盖，恢复系统默认">'
-        '↺ 重置模板</button>'
-        if has_custom_override else ""
-    )
-    hist_items = []
-    for i, item in enumerate(prompt_settings.get("history") or []):
-        p = str(item.get("prompt") or "")
-        if not p.strip():
-            continue
-        head = p.strip().replace("\n", " ")
-        head = head[:80] + ("…" if len(head) > 80 else "")
-        when = str(item.get("updated_at") or "")[:16].replace("T", " ")
-        hist_items.append(
-            f'<button type="button" class="slirn-stage3-hist-item" '
-            f'data-action="sv-stage3-load-prompt" data-prompt="{esc(p)}" '
-            f'title="{esc(p[:200])}">{esc(head)}'
-            f'<span class="slirn-sv-muted slirn-stage3-hist-time">{esc(when)}</span></button>'
-        )
-    hist_html = "".join(hist_items) or '<div class="slirn-sv-muted">尚无保存的提示词</div>'
+    # 历史提示词列表（≤ 10 条，最新在前；⭐ 标默认；条目可展开查看完整内容）
+    hist_html = render_prompt_history_list(prompt_settings)
 
     # REQ-20261012-099：截图（上传 / 缩略图 / 移除 / 发送开关）
     cur_image = s3.get("image") or {}
@@ -356,6 +357,8 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
             f'<div class="slirn-stage3-image-row">'
             f'<a href="{esc(img_url)}" target="_blank" rel="noopener" title="查看大图">'
             f'<img class="slirn-stage3-image-thumb" src="{esc(img_url)}" alt="解析截图"></a>'
+            f'<label class="slirn-stage3-image-send-label" for="slirn-stage3-use-image">'
+            f'智能纪要课程重点截图</label>'
             f'<label class="slirn-stage3-image-send">'
             f'<input type="checkbox" id="slirn-stage3-use-image" checked> 发送截图给 AI</label>'
             f'<button class="slirn-btn-mini slirn-btn-mini-danger" '
@@ -480,12 +483,9 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
   <div class="slirn-stage-body">
     <label class="slirn-sv-wide slirn-stage3-prompt-label2">解析提示词 {default_badge}
       <textarea id="slirn-stage3-prompt" class="slirn-stage3-prompt-input" rows="8"
-        placeholder="录入提取短视频内容所用的提示词（可点快速模板填充起点，再按需修改）">{esc(initial_prompt)}</textarea>
+        placeholder="录入提取短视频内容所用的提示词；可「设为默认」或「存入列表」复用">{esc(initial_prompt)}</textarea>
     </label>
     <div class="slirn-stage3-prompt-toolbar">
-      <div class="slirn-stage3-radios">
-        <span class="slirn-sv-muted">快速模板：</span>{template_radios}
-      </div>
       <div class="slirn-stage3-prompt-actions2">
         <button class="slirn-btn-mini slirn-btn-mini-primary" data-action="sv-stage3-save-default"
           title="把当前文本域提示词保存为默认提示词（全局生效，新项目初始填充）">💾 设为默认</button>
@@ -493,11 +493,10 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
           title="存入提示词列表（最多保留最新 10 条）">📜 存入列表</button>
         <button class="slirn-btn-mini" data-action="sv-stage3-clear-prompt"
           title="清空文本域">🧹 清空</button>
-        {reset_tpl_btn}
       </div>
     </div>
     <details class="slirn-stage3-prompts-section">
-      <summary>📜 历史提示词（最新 10 条，点击载入）</summary>
+      <summary>📜 历史提示词（最新 10 条 · ⭐ 为默认 · 点击条目查看完整内容）</summary>
       <div class="slirn-stage3-hist-list">{hist_html}</div>
     </details>
     <div class="slirn-stage3-image-block">
