@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -35,6 +36,120 @@ class CoarseClipResult:
     duration_sec: float
     elapsed_sec: int
     error: str = ""
+
+
+# ---------- REQ-20261013-103：异步粗剪（仿 compose_service.start_compose） ----------
+
+# 内存 job 表：key = (task_id, project_id) 元组，区分不同项目
+_JOBS: dict[tuple[str, str], dict] = {}
+_JOBS_LOCK = threading.Lock()
+
+
+def _job_key(task_id: str, project_id: str) -> tuple[str, str]:
+    return (str(task_id or ""), str(project_id or ""))
+
+
+def coarse_job_status(task_id: str, project_id: str) -> dict | None:
+    """读内存 job 状态；服务重启后内存清空 → 返回 None（前端按 idle 处理）。"""
+    with _JOBS_LOCK:
+        j = _JOBS.get(_job_key(task_id, project_id))
+        return dict(j) if j else None
+
+
+def _set_job(task_id: str, project_id: str, **fields) -> None:
+    """原子更新 _JOBS[(tid, pid)]；保留未传字段。"""
+    with _JOBS_LOCK:
+        key = _job_key(task_id, project_id)
+        cur = _JOBS.get(key) or {"state": "idle", "progress": 0.0,
+                                  "stage": "", "error": None,
+                                  "started_at": 0.0, "finished_at": None,
+                                  "count": 0, "total_count": 0}
+        cur.update(fields)
+        _JOBS[key] = cur
+
+
+def start_coarse_async(
+    repo_root: Path | str,
+    task_id: str,
+    project_id: str,
+    *,
+    start_ost_ms: int = 0,
+    end_ost_ms: int = 100,
+) -> bool:
+    """启动异步粗剪线程。已在跑 → False。
+
+    仿 ``compose_service.start_compose`` 模式：daemon 线程跑 run_stage4，
+    通过 progress_cb 回调更新 _JOBS[(tid, pid)] 进度。
+    """
+    key = _job_key(task_id, project_id)
+    with _JOBS_LOCK:
+        existing = _JOBS.get(key)
+        if existing and existing.get("state") == "running":
+            return False
+        _JOBS[key] = {
+            "state": "running", "progress": 0.0, "stage": "准备",
+            "error": None, "started_at": time.time(), "finished_at": None,
+            "count": 0, "total_count": 0,
+        }
+
+    def _run():
+        # 进度回调：每个 clip done 时更新 progress / count
+        def _cb(event: str, payload: dict) -> None:
+            if event == "stage4_start":
+                _set_job(task_id, project_id,
+                         total_count=int(payload.get("count") or 0),
+                         stage="合成中", progress=5.0)
+            elif event == "stage4_clip_done":
+                done = _JOBS.get(key, {}).get("count", 0) + 1
+                total = max(1, _JOBS.get(key, {}).get("total_count", 1))
+                _set_job(task_id, project_id,
+                         count=done,
+                         progress=round(5.0 + 90.0 * done / total, 1),
+                         stage=f"合成 {done}/{total}")
+            elif event == "stage4_clip_failed":
+                done = _JOBS.get(key, {}).get("count", 0) + 1
+                _set_job(task_id, project_id, count=done)
+            elif event in ("stage4_done", "stage4_failed"):
+                _set_job(task_id, project_id,
+                         state="done" if event == "stage4_done" else "failed",
+                         progress=100.0 if event == "stage4_done" else _JOBS.get(key, {}).get("progress", 0.0),
+                         stage="完成" if event == "stage4_done" else "失败",
+                         finished_at=time.time())
+
+        # 写执行历史（短视频自己的 stage5_dir；不写长视频 outputs）
+        from slirn_home import execution_history
+        stage5_dir = svc.stage5_dir(repo_root, task_id, project_id)
+        exec_id = execution_history.record_start(
+            stage5_dir,
+            execution_history.KIND_SHORT_VIDEO_COARSE,
+            extra={"start_ost_ms": start_ost_ms, "end_ost_ms": end_ost_ms},
+        )
+        try:
+            run_stage4(repo_root, task_id, project_id,
+                       start_ost_ms=start_ost_ms, end_ost_ms=end_ost_ms,
+                       progress_cb=_cb)
+            # run_stage4 内部已通过 _cb 把 state 推到 done/failed；这里取最终
+            final = _JOBS.get(key, {})
+            ok = final.get("state") == "done"
+            execution_history.record_finish(
+                stage5_dir, exec_id, success=ok,
+                error="" if ok else str(final.get("error") or "粗剪合成未全部成功"),
+            )
+        except Exception as e:  # noqa: BLE001 — 后台线程兜底
+            log.exception("[stage5_async][%s/%s] 失败: %s", task_id, project_id, e)
+            _set_job(task_id, project_id,
+                     state="failed", error=str(e),
+                     finished_at=time.time())
+            try:
+                execution_history.record_finish(
+                    stage5_dir, exec_id, success=False, error=str(e)[:500],
+                )
+            except Exception:  # noqa: BLE001
+                pass
+
+    threading.Thread(target=_run, name=f"sv-stage5-{task_id}-{project_id}",
+                     daemon=True).start()
+    return True
 
 
 def _write_coarse_srt(
@@ -200,6 +315,17 @@ def run_stage4(
     end_ost_ms: int = 100,
     progress_cb=None,
 ) -> dict:
+    """Stage 5: 读 highlights.json + 源视频 → ``stage4/coarse_NN.{mp4,srt}``。
+
+    REQ-20261013-103：增加 ``progress_cb(event, payload)`` 注入；默认 None
+    保持向后兼容（不传回调走原行为）。回调事件：
+    - ``stage4_start``: {"count": N}
+    - ``stage4_clip_done``: {"index": idx, "count": N, "duration_sec": ...}
+    - ``stage4_clip_failed``: {"index": idx, "error": ...}
+    - ``stage4_done`` / ``stage4_failed``: {"count": N}
+
+    返回最新 pipeline.stage5_coarse 状态。
+    """
     """Stage 4: 读 highlights.json + 源视频 → ``stage4/coarse_NN.{mp4,srt}``。
 
     返回最新 pipeline.stage5_coarse 状态。
@@ -308,6 +434,9 @@ def run_stage4(
     state = svc.get_stage_state(project, "stage5_coarse")
     state["status"] = "done" if not any_failed else "failed"
     state["finished_at"] = svc.now_iso()
+    # REQ-20261013-103：增量字段 — 所有 done 片段时长累加；前端状态卡显示用
+    state["total_duration_sec"] = round(
+        sum(r.duration_sec for r in results if r.status == "done"), 3)
     state["highlights"] = [
         {
             "index": r.index,
@@ -349,6 +478,160 @@ def run_stage4(
             log.warning("progress_cb raised: %s", cb_err)
 
     return state
+
+
+# ---------- REQ-20261013-103：粗剪成片删除 / 连续 SRT 预览 ----------
+
+def delete_coarse(
+    repo_root: Path | str,
+    task_id: str,
+    project_id: str,
+    *,
+    auto: bool = False,
+    auto_session_id: str = "",
+) -> dict:
+    """删除 Stage 5 粗剪成片（N 条 mp4 + N 条占位 srt）。仿 compose_rough_delete。
+
+    同步、毫秒级；写执行历史 KIND_SHORT_VIDEO_COARSE_DELETE；
+    作废下游 stage 6/7（reset_downstream_stages）。
+    """
+    from slirn_home import execution_history
+
+    root = Path(repo_root)
+    project = svc.load_project(root, task_id, project_id)
+    stage4 = svc.stage4_dir(root, task_id, project_id)
+    stage5 = svc.stage5_dir(root, task_id, project_id)
+
+    removed: list[str] = []
+    # 删 stage4 目录下所有 coarse_NN.{mp4,srt}（不删 stage4 目录本身）
+    if stage4.is_dir():
+        for p in sorted(stage4.iterdir()):
+            if p.is_file() and (p.suffix.lower() in (".mp4", ".srt")) and p.name.startswith("coarse_"):
+                try:
+                    p.unlink()
+                    removed.append(svc._rel(root, p))
+                except OSError as e:
+                    log.warning("[stage5][delete] %s 失败: %s", p, e)
+    # 删 stage5/preview_subs.srt 缓存
+    preview = stage5 / "preview_subs.srt"
+    if preview.is_file():
+        try:
+            preview.unlink()
+            removed.append(svc._rel(root, preview))
+        except OSError:
+            pass
+
+    # 写执行历史（短视频自己的 stage5_dir）
+    try:
+        eid = execution_history.record_start(
+            stage5,
+            execution_history.KIND_SHORT_VIDEO_COARSE_DELETE,
+            extra={"removed": removed},
+            auto=auto,
+            auto_session_id=auto_session_id,
+        )
+        if removed:
+            execution_history.patch_fields(stage5, eid, {
+                "description": f"删除粗剪成品：{' + '.join(removed)}",
+            })
+        else:
+            execution_history.patch_fields(stage5, eid, {
+                "description": "粗剪成片不存在，无需删除（无操作）",
+            })
+        execution_history.record_finish(stage5, eid, success=True, error="")
+    except Exception as e:  # noqa: BLE001
+        log.warning("[stage5][history] delete 记录失败: %s", e)
+
+    # 重置 stage5_coarse 状态（status=pending）+ 作废下游
+    state = svc.get_stage_state(project, "stage5_coarse")
+    state["status"] = "pending"
+    state["highlights"] = []
+    state["count"] = 0
+    state["total_duration_sec"] = 0.0
+    state.pop("finished_at", None)
+    state["logs"] = list(state.get("logs") or []) + [
+        f"[{svc.now_iso()}] stage5 coarse deleted, {len(removed)} files removed",
+    ]
+    svc.set_stage_state(project, "stage5_coarse", state)
+    svc.reset_downstream_stages(project, "stage5_coarse")
+    svc.save_project(root, project)
+
+    if removed:
+        return {"deleted": True, "removed": removed,
+                "remaining": [], "message": f"已删除 {' + '.join(removed)}"}
+    return {"deleted": False, "removed": [], "remaining": [],
+            "message": "粗剪成片不存在，无需删除"}
+
+
+# 连续 SRT 缓存文件名（落 stage5/preview_subs.srt，避免每次都现拼）
+_PREVIEW_SUBS_FILENAME = "preview_subs.srt"
+
+
+def preview_continuous_subs(
+    repo_root: Path | str,
+    task_id: str,
+    project_id: str,
+) -> dict:
+    """跨 N 条 coarse_NN.srt 拼成连续时间轴 SRT（仿 compose_rough_preview_subs）。
+
+    返回 ``{"srt": "....", "clips": N, "cached": bool}``。
+    缓存到 ``stage5/preview_subs.srt``，第二次取直接读（除非 highlights 变化）。
+    """
+    from slirn_home.compose_service import format_srt
+
+    root = Path(repo_root)
+    project = svc.load_project(root, task_id, project_id)
+    stage4 = svc.stage4_dir(root, task_id, project_id)
+    stage5 = svc.stage5_dir(root, task_id, project_id)
+    state = svc.get_stage_state(project, "stage5_coarse")
+    highlights = state.get("highlights") or []
+    if not highlights:
+        return {"srt": "", "clips": 0, "cached": False}
+
+    # 取缓存（与 state.highlights 数量一致即直接返回）
+    preview = stage5 / _PREVIEW_SUBS_FILENAME
+    expected_count = len(highlights)
+    if preview.is_file():
+        try:
+            cached = preview.read_text(encoding="utf-8", errors="replace")
+            # 简单启发：缓存内容含 expected_count 个 "coarse_"
+            if cached.count("-->") == expected_count:
+                return {"srt": cached, "clips": expected_count, "cached": True}
+        except Exception:  # noqa: BLE001
+            pass
+
+    # 现拼：把每条 coarse_NN.srt 当作一个 unit（start_ms = 累加偏移；end_ms = 累加+该条时长）
+    from slirn_home.short_video_finalize import _ffprobe_duration
+    units: list[dict] = []
+    offset_ms = 0
+    for hl in highlights:
+        rel_mp4 = hl.get("coarse_mp4") or ""
+        if not rel_mp4:
+            continue
+        mp4 = (root / rel_mp4).resolve()
+        if not mp4.is_file():
+            continue
+        dur = _ffprobe_duration(mp4)
+        units.append({
+            "id": str(hl.get("index")),
+            "start_ms": offset_ms,
+            "end_ms": offset_ms + int(round(dur * 1000)),
+            "text": f"clip_{hl.get('index')}",
+        })
+        offset_ms += int(round(dur * 1000))
+
+    if not units:
+        return {"srt": "", "clips": 0, "cached": False}
+
+    srt_text = format_srt(units, text_overrides=None)
+    # 落缓存
+    try:
+        stage5.mkdir(parents=True, exist_ok=True)
+        preview.write_text(srt_text, encoding="utf-8")
+    except OSError as e:
+        log.warning("[stage5][preview] 缓存失败: %s", e)
+
+    return {"srt": srt_text, "clips": len(units), "cached": False}
 
 
 # ---------- REQ-20261012-099 修订六：Stage 3 短视频生成（逐组截取拼接） ----------

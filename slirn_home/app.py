@@ -10302,9 +10302,127 @@ def _register_slirn_api(
 
     @app.app.post("/slirn/api/short_video_stage4_run")
     async def short_video_stage4_run(body: dict = Body(default_factory=dict)):
-        """REQ-20261003-098：Stage 4 粗剪合成。"""
+        """REQ-20261003-098：Stage 4 粗剪合成（同步保留 — 异步入口见 stage5_export）。"""
         from slirn_home import short_video_coarse as _sv_coarse
 
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        if not tid or not pid:
+            return _err("缺少 task_id 或 project_id")
+        try:
+            state = _sv_coarse.run_stage4(
+                repo_root, tid, pid,
+                start_ost_ms=int(body.get("start_ost") or 0),
+                end_ost_ms=int(body.get("end_ost") or 100),
+            )
+        except Exception as e:  # noqa: BLE001
+            log.exception("stage4 run failed")
+            return _err(f"Stage 4 执行失败: {e}")
+        return _ok(stage4=state, toast=f"Stage 4 {state.get('status', '')}")
+
+    # REQ-20261013-103：Stage 5 粗剪按长视频 compose_rough 整套搬（异步 + 状态轮询 + 删除 + 连续 SRT）
+    @app.app.post("/slirn/api/short_video_stage5_export")
+    async def short_video_stage5_export(request: Request, body: dict = Body(default_factory=dict)):
+        """异步启动 Stage 5 粗剪合成（仿 compose_rough / start_compose）。"""
+        from slirn_home import short_video_coarse as _sv_coarse
+
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        if not tid or not pid:
+            return _err("缺少 task_id 或 project_id")
+        try:
+            started = _sv_coarse.start_coarse_async(
+                repo_root, tid, pid,
+                start_ost_ms=int(body.get("start_ost") or 0),
+                end_ost_ms=int(body.get("end_ost") or 100),
+            )
+        except Exception as e:  # noqa: BLE001
+            log.exception("stage5 export failed")
+            return _err(f"Stage 5 启动失败: {e}")
+        job = _sv_coarse.coarse_job_status(tid, pid) or {}
+        return _ok(
+            running=bool(started),
+            job=job,
+            toast="🎬 粗剪已启动" if started else "⏳ 粗剪已在进行中",
+        )
+
+    @app.app.post("/slirn/api/short_video_stage5_export_status")
+    async def short_video_stage5_export_status(body: dict = Body(default_factory=dict)):
+        """Stage 5 粗剪进度轮询（仿 compose_rough_status）。"""
+        from slirn_home import short_video_coarse as _sv_coarse
+
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        if not tid or not pid:
+            return _err("缺少 task_id 或 project_id")
+        job = _sv_coarse.coarse_job_status(tid, pid)
+        if job is None:
+            # 服务重启后内存清空 — 兜底：磁盘 stage5_coarse.status=done 即视为完成
+            try:
+                from slirn_home import short_video_service as _svc
+                proj = _svc.load_project(repo_root, tid, pid)
+                st = proj.get("pipeline", {}).get("stage5_coarse", {}) or {}
+                if st.get("status") == "done" and (st.get("highlights") or []):
+                    return _ok("", job={"state": "done", "progress": 100.0,
+                                        "count": len(st.get("highlights") or [])})
+            except Exception:  # noqa: BLE001
+                pass
+            return _ok("", job={"state": "idle", "progress": 0.0})
+        # 算 elapsed_s
+        import time as _time
+        job["elapsed_s"] = int(
+            (job.get("finished_at") or _time.time()) - job.get("started_at", _time.time())
+        )
+        return _ok("", job=job)
+
+    @app.app.post("/slirn/api/short_video_stage5_delete")
+    async def short_video_stage5_delete(request: Request, body: dict = Body(default_factory=dict)):
+        """删除 Stage 5 粗剪成片（仿 compose_rough_delete）。"""
+        from slirn_home import short_video_coarse as _sv_coarse
+
+        _auto = request.headers.get("X-Slirn-Auto") == "1"
+        _auto_session_id = request.headers.get("X-Slirn-Auto-Session") or ""
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        if not tid or not pid:
+            return _err("缺少 task_id 或 project_id")
+        try:
+            res = _sv_coarse.delete_coarse(
+                repo_root, tid, pid,
+                auto=_auto, auto_session_id=_auto_session_id,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.exception("stage5 delete failed")
+            return _err(f"Stage 5 删除失败: {e}")
+        return _ok(
+            "", deleted=res["deleted"],
+            toast="🗑️ " + res["message"] if res["deleted"] else None,
+            removed=res["removed"], remaining=res["remaining"],
+            message=res["message"],
+        )
+
+    @app.app.post("/slirn/api/short_video_stage5_preview_subs")
+    async def short_video_stage5_preview_subs(body: dict = Body(default_factory=dict)):
+        """跨 N 条 coarse_NN.srt 拼成连续时间轴 SRT（仿 compose_rough_preview_subs）。"""
+        from slirn_home import short_video_coarse as _sv_coarse
+
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        if not tid or not pid:
+            return _err("缺少 task_id 或 project_id")
+        try:
+            res = _sv_coarse.preview_continuous_subs(repo_root, tid, pid)
+        except Exception as e:  # noqa: BLE001
+            log.exception("stage5 preview subs failed")
+            return _err(f"Stage 5 连续 SRT 失败: {e}")
+        return _ok(
+            "", srt=res["srt"], clips=res["clips"], cached=res["cached"],
+        )
+
+    @app.app.post("/slirn/api/short_video_stage5_run")
+    async def short_video_stage5_run(body: dict = Body(default_factory=dict)):
+        """REQ-20261003-098：Stage 5 优化字幕 — 重新 ASR 一条粗剪 mp4。"""
+        from slirn_home import short_video_extract as _sv_extract
         tid = (body.get("task_id") or "").strip()
         pid = (body.get("project_id") or "").strip()
         if not tid or not pid:

@@ -769,44 +769,107 @@ def _stage4_optimize(project: dict) -> str:
 
 
 def _stage5_coarse(project: dict) -> str:
+    """Stage 5 粗剪 UI（REQ-20261013-103）：仿长视频 compose_rough 顶部状态卡 +
+    异步重新合成 + 删除 + 连续 SRT 复制/下载；每条 clip 卡片内加单条 SRT 操作。
+    """
     task_id = str(project.get("task_id") or "")
     project_id = str(project.get("id") or "")
     s4 = project.get("pipeline", {}).get("stage5_coarse", {}) or {}
+    has_artifact = bool(s4.get("highlights"))
+    total_sec = float(s4.get("total_duration_sec") or 0)
+    count_n = int(s4.get("count") or 0)
+
+    # ---- 顶部状态卡（仿长视频 _render_rough_compose_zone L1200-1216）----
+    stats_line = (
+        f'{count_n} 条 · 总时长 {total_sec:.1f}s'
+        if has_artifact
+        else '尚未合成'
+    )
+    # progress 条：状态 done/failed → 100/0；其他 → 占位 0（异步轮询会持续更新）
+    s4_status = str(s4.get("status") or "pending")
+    progress_pct = 100 if s4_status == "done" else (0 if s4_status != "running" else 30)
+    progress_color = (
+        "slirn-progress-bar--done" if s4_status == "done"
+        else ("slirn-progress-bar--failed" if s4_status == "failed" else "")
+    )
+    compose_btn_text = "🎬 重新合成" if has_artifact else "🎬 合成粗剪"
+    delete_btn = (
+        f'<button class="slirn-btn slirn-btn-danger" data-action="sv-stage5-delete" '
+        f'data-task-id="{esc(task_id)}" data-project-id="{esc(project_id)}" '
+        f'style="margin-left:8px;">🗑️ 删除粗剪成品</button>'
+        if has_artifact else ""
+    )
+    # ---- 连续 SRT 复制/下载（仅在有产物时显示）----
+    subs_actions = ""
+    if has_artifact:
+        subs_actions = f'''<div class="slirn-sv-card-actions" style="margin-top:8px;">
+      <button class="slirn-btn slirn-btn-sm" data-action="sv-stage5-subs-copy"
+              data-task-id="{esc(task_id)}" data-project-id="{esc(project_id)}">📋 复制连续 SRT</button>
+      <button class="slirn-btn slirn-btn-sm" data-action="sv-stage5-subs-download"
+              data-task-id="{esc(task_id)}" data-project-id="{esc(project_id)}">⬇️ 下载连续 SRT</button>
+    </div>'''
+    status_card = f'''<div class="slirn-rc-status-card" id="slirn-sv-stage5-status"
+        data-task-id="{esc(task_id)}" data-project-id="{esc(project_id)}">
+      <div class="slirn-sub-meta">🎞️ 粗剪成片 · {esc(stats_line)}</div>
+      <div class="slirn-progress" style="margin-top:6px;">
+        <div class="slirn-progress-bar {progress_color}"
+             style="width:{progress_pct}%;"></div>
+      </div>
+      <div class="slirn-status-msg slirn-sv-stage5-msg" style="display:none;"></div>
+    </div>'''
+
+    # ---- clip 列表（每条加「📋 复制 SRT」+「⬇ 下载 SRT」）----
     rows = []
     for hl in (s4.get("highlights") or []):
         idx = hl.get("index") or len(rows) + 1
         mp4_name = Path(str(hl.get("coarse_mp4") or "")).name
+        srt_name = Path(str(hl.get("coarse_srt") or "")).name
         url = _file_url(task_id, project_id, "stage4", mp4_name) if mp4_name else ""
+        srt_url = _file_url(task_id, project_id, "stage4", srt_name) if srt_name else ""
         dur = float(hl.get("duration_sec") or 0)
         err = hl.get("error") or ""
         status = hl.get("status") or "pending"
         video = f'<video controls preload="metadata" src="{esc(url)}"></video>' if url else '<span class="slirn-sv-muted">未生成</span>'
         err_html = f'<div class="slirn-stage-error">{esc(err)}</div>' if err else ""
+        clip_subs_actions = (
+            f'<button class="slirn-btn-mini" data-action="sv-stage5-clip-subs-copy" '
+            f'data-clip-index="{idx}" data-task-id="{esc(task_id)}" '
+            f'data-project-id="{esc(project_id)}">📋 复制 SRT</button>'
+            f'<button class="slirn-btn-mini" data-action="sv-stage5-clip-subs-download" '
+            f'data-clip-index="{idx}" data-task-id="{esc(task_id)}" '
+            f'data-project-id="{esc(project_id)}">⬇ 下载 SRT</button>'
+            if srt_url else ''
+        )
         rows.append(
             f'<div class="slirn-stage4-clip" data-clip-index="{idx}">'
             f'<div class="slirn-stage4-clip-head">'
             f'<span class="slirn-sv-row-no">#{idx}</span>'
             f'{_stage_badge(status)}'
             f'<span class="slirn-sv-muted">{dur:.1f}s</span>'
-            f'<a class="slirn-btn-mini" href="{esc(url)}" download>下载</a>'
+            f'<a class="slirn-btn-mini" href="{esc(url)}" download>下载视频</a>'
+            f'{clip_subs_actions}'
             f'</div>'
             f'{video}'
             f'{err_html}'
             f'</div>'
         )
+
     return f'''<div class="slirn-stage" data-stage="5">
   <div class="slirn-stage-head">
     <span class="slirn-stage-num">5</span>
     <strong>粗剪合成</strong>
     {_stage_badge(s4.get("status"))}
     {_stage_elapsed(s4)}
-    <span class="slirn-sv-muted">{int(s4.get("count") or 0)} 条</span>
+    <span class="slirn-sv-muted">{count_n} 条</span>
   </div>
   <div class="slirn-stage-body">
-    <div class="slirn-sv-card-actions">
-      <button class="slirn-btn slirn-btn-primary" data-action="sv-stage4-run">粗剪全部</button>
-      <span class="slirn-sv-muted">每条 highlight 独立 mp4（不拼接）</span>
+    {status_card}
+    <div class="slirn-sv-card-actions" style="margin-top:10px;">
+      <button class="slirn-btn slirn-btn-primary" data-action="sv-stage5-export"
+              data-task-id="{esc(task_id)}" data-project-id="{esc(project_id)}">{compose_btn_text}</button>
+      {delete_btn}
     </div>
+    {subs_actions}
     <div class="slirn-stage4-list">{"".join(rows) or '<div class="slirn-sv-muted">先完成 Stage 3 再粗剪</div>'}</div>
     {_stage_logs(s4)}
   </div>

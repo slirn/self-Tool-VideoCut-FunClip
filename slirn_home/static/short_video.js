@@ -493,6 +493,180 @@
     });
   }
 
+  // REQ-20261013-103：Stage 5 粗剪异步导出（仿长视频 compose_rough + setInterval 轮询）
+  function stage5Export(btn) {
+    var ctx = innerCtx(); if (!ctx) return;
+    var tid = btn.getAttribute('data-task-id') || ctx.taskId;
+    var pid = btn.getAttribute('data-project-id') || ctx.projectId;
+    var setBtn = function(txt, dis) { btn.textContent = txt; btn.disabled = !!dis; };
+    var status = document.getElementById('slirn-sv-stage5-status');
+    var msg = status ? status.querySelector('.slirn-sv-stage5-msg') : null;
+    var bar = status ? status.querySelector('.slirn-progress-bar') : null;
+    var show = function(t) { if (msg) { msg.style.display = ''; msg.textContent = t; } };
+    setBtn('🎬 合成中…', true);
+    show('⏳ 正在启动合成…');
+    postJSON(API + '/short_video_stage5_export', {
+      task_id: tid, project_id: pid
+    }).then(function(r) {
+      if (!r || !r.ok) {
+        setBtn('🎬 合成粗剪', false);
+        show('');
+        if (msg) msg.style.display = 'none';
+        toast('❌ ' + (r && r.error ? r.error : '启动失败'), 'error');
+        return;
+      }
+      toast(r.toast || '🎬 粗剪已启动');
+      var timer = setInterval(function() {
+        postJSON(API + '/short_video_stage5_export_status', {
+          task_id: tid, project_id: pid
+        }).then(function(s) {
+          if (!s || !s.ok || !s.job) return;
+          var j = s.job;
+          if (j.state === 'running') {
+            var pct = Math.max(1, Math.min(99, Math.round(j.progress || 0)));
+            setBtn('🎬 合成中… ' + pct + '%', true);
+            if (bar) bar.style.width = pct + '%';
+            show('⏳ ' + (j.stage || '合成中') + ' ' + pct + '% — 可继续其它操作，完成后自动显示预览');
+            return;
+          }
+          clearInterval(timer);
+          if (j.state === 'done') {
+            setBtn('🎬 重新合成', false);
+            if (bar) bar.style.width = '100%';
+            show('✅ 粗剪成片已生成 — 下方预览每条 clip');
+            toast('✅ 粗剪完成');
+            openProject(tid, pid);
+          } else {
+            setBtn('🎬 重新合成', false);
+            show('❌ ' + (j.error || '合成失败'));
+            toast('❌ ' + (j.error || '合成失败'), 'error');
+          }
+        });
+      }, 1500);
+    });
+  }
+  // REQ-20261013-103：Stage 5 删除（仿 compose_rough_delete）
+  function stage5Delete(btn) {
+    var ctx = innerCtx(); if (!ctx) return;
+    var tid = btn.getAttribute('data-task-id') || ctx.taskId;
+    var pid = btn.getAttribute('data-project-id') || ctx.projectId;
+    if (!window.confirm('删除「粗剪成品」（' + (btn.getAttribute('data-count') || 'N') + ' 条 mp4 + srt）？\n'
+        + '删除后 Stage 6/7 也会重置，需重新合成。')) return;
+    btn.disabled = true;
+    postJSON(API + '/short_video_stage5_delete', {
+      task_id: tid, project_id: pid
+    }).then(function(r) {
+      btn.disabled = false;
+      if (!r || !r.ok) {
+        toast('❌ ' + (r && r.error ? r.error : '删除失败'), 'error');
+        return;
+      }
+      toast(r.toast || '🗑️ 已删除');
+      openProject(tid, pid);
+    });
+  }
+  // 连续 SRT 复制（从预览面板 <pre> 读，或服务端拼）
+  function stage5SubsCopy(btn) {
+    var ctx = innerCtx(); if (!ctx) return;
+    var tid = btn.getAttribute('data-task-id') || ctx.taskId;
+    var pid = btn.getAttribute('data-project-id') || ctx.projectId;
+    postJSON(API + '/short_video_stage5_preview_subs', {
+      task_id: tid, project_id: pid
+    }).then(function(r) {
+      if (!r || !r.ok || !r.srt) {
+        toast('❌ ' + (r && r.error ? r.error : '获取 SRT 失败'), 'error');
+        return;
+      }
+      var srt = r.srt;
+      var done = function() { toast('📋 已复制 ' + r.clips + ' 段连续 SRT'); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(srt).then(done, function() { _svFallbackCopy(srt, done); });
+      } else {
+        _svFallbackCopy(srt, done);
+      }
+    });
+  }
+  function _svFallbackCopy(text, cb) {
+    var ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); cb && cb(); } catch (e) { toast('❌ 复制失败', 'error'); }
+    document.body.removeChild(ta);
+  }
+  // 连续 SRT 下载
+  function stage5SubsDownload(btn) {
+    var ctx = innerCtx(); if (!ctx) return;
+    var tid = btn.getAttribute('data-task-id') || ctx.taskId;
+    var pid = btn.getAttribute('data-project-id') || ctx.projectId;
+    btn.disabled = true;
+    postJSON(API + '/short_video_stage5_preview_subs', {
+      task_id: tid, project_id: pid
+    }).then(function(r) {
+      btn.disabled = false;
+      if (!r || !r.ok || !r.srt) {
+        toast('❌ ' + (r && r.error ? r.error : '获取 SRT 失败'), 'error');
+        return;
+      }
+      var blob = new Blob([r.srt], {type: 'text/plain;charset=utf-8'});
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url; a.download = 'short_video_coarse_' + tid + '_' + pid + '.srt';
+      document.body.appendChild(a); a.click();
+      setTimeout(function() { URL.revokeObjectURL(url); document.body.removeChild(a); }, 100);
+      toast('⬇️ 已下载 ' + r.clips + ' 段连续 SRT');
+    });
+  }
+  // 单条 clip 的 SRT 复制（按 coarse_srt 文件路径）
+  function stage5ClipSubsCopy(btn) {
+    var ctx = innerCtx(); if (!ctx) return;
+    var tid = btn.getAttribute('data-task-id') || ctx.taskId;
+    var pid = btn.getAttribute('data-project-id') || ctx.projectId;
+    var idx = parseInt(btn.getAttribute('data-clip-index') || '0', 10);
+    if (!idx) return;
+    // 文件路径在 hl.coarse_srt（project 内的相对路径），先拿项目查路径
+    postJSON(API + '/short_video_get', {task_id: tid, project_id: pid}).then(function(r) {
+      if (!r || !r.ok) return toast('读取项目失败', 'error');
+      var coarse = ((r.project || {}).pipeline || {}).stage5_coarse || {};
+      var hl = (coarse.highlights || []).find(function(h) { return h.index === idx; }) || {};
+      if (!hl.coarse_srt) return toast('该 clip 没有 SRT', 'error');
+      // 通过 file_url 直接拉内容
+      var srtName = (hl.coarse_srt.split('/').pop() || '').split('\\').pop();
+      fetch('/gradio_api/file=tasks/' + tid + '/short_video/' + pid + '/stage4/' + srtName, {credentials: 'same-origin'})
+        .then(function(rr) { return rr.ok ? rr.text() : Promise.reject(new Error('HTTP ' + rr.status)); })
+        .then(function(srt) {
+          if (!srt || !srt.trim()) return toast('SRT 为空', 'error');
+          var done = function() { toast('📋 已复制 #' + idx + ' SRT'); };
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(srt).then(done, function() { _svFallbackCopy(srt, done); });
+          } else {
+            _svFallbackCopy(srt, done);
+          }
+        })
+        .catch(function(e) { toast('❌ 读取 SRT 失败: ' + e, 'error'); });
+    });
+  }
+  // 单条 clip 的 SRT 下载（直接 <a download>）
+  function stage5ClipSubsDownload(btn) {
+    var ctx = innerCtx(); if (!ctx) return;
+    var tid = btn.getAttribute('data-task-id') || ctx.taskId;
+    var pid = btn.getAttribute('data-project-id') || ctx.projectId;
+    var idx = parseInt(btn.getAttribute('data-clip-index') || '0', 10);
+    if (!idx) return;
+    postJSON(API + '/short_video_get', {task_id: tid, project_id: pid}).then(function(r) {
+      if (!r || !r.ok) return toast('读取项目失败', 'error');
+      var coarse = ((r.project || {}).pipeline || {}).stage5_coarse || {};
+      var hl = (coarse.highlights || []).find(function(h) { return h.index === idx; }) || {};
+      if (!hl.coarse_srt) return toast('该 clip 没有 SRT', 'error');
+      var srtName = (hl.coarse_srt.split('/').pop() || '').split('\\').pop();
+      var url = '/gradio_api/file=tasks/' + tid + '/short_video/' + pid + '/stage4/' + srtName;
+      var a = document.createElement('a');
+      a.href = url; a.download = srtName;
+      document.body.appendChild(a); a.click();
+      setTimeout(function() { document.body.removeChild(a); }, 100);
+      toast('⬇️ 已下载 #' + idx + ' SRT');
+    });
+  }
+
   function stage5Asr(btn) {
     var ctx = innerCtx(); if (!ctx) return;
     var index = parseInt(btn.getAttribute('data-clip-index') || '0', 10);
@@ -1117,6 +1291,13 @@
     if (action === 'sv-stage5-asr') return stage5Asr(btn);
     if (action === 'sv-stage5-save') return stage5Save(btn);
     if (action === 'sv-stage6-run') return stage6Run();
+    // REQ-20261013-103：Stage 5 粗剪 异步导出/删除/连续 SRT/单条 SRT
+    if (action === 'sv-stage5-export') return stage5Export(btn);
+    if (action === 'sv-stage5-delete') return stage5Delete(btn);
+    if (action === 'sv-stage5-subs-copy') return stage5SubsCopy(btn);
+    if (action === 'sv-stage5-subs-download') return stage5SubsDownload(btn);
+    if (action === 'sv-stage5-clip-subs-copy') return stage5ClipSubsCopy(btn);
+    if (action === 'sv-stage5-clip-subs-download') return stage5ClipSubsDownload(btn);
 
     // 预览 / 素材
     if (action === 'sv-preview') return previewVideo(btn);
