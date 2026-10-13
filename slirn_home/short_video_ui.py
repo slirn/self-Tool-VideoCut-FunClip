@@ -14,7 +14,8 @@ import json
 from pathlib import Path
 from urllib.parse import quote
 
-from .short_video_service import STAGE3_SYSTEM_PROMPT
+from .short_video_service import STAGE3_SYSTEM_PROMPT, STAGE4_SYSTEM_PROMPT
+from . import short_video_optimize as _sv_opt
 
 
 def esc(value: object) -> str:
@@ -681,13 +682,79 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
 </div>'''
 
 
-def _stage4_optimize(project: dict) -> str:
-    """REQ-20261013-100：Stage 4「内容优化」（替换原 3.5 字幕一致性核验）。
+def _render_stage4_sub_row(hl_index: int, sl: dict, per_hl: dict) -> str:
+    """渲染一条 Stage 4 编辑行（每条字幕行 1 行）。"""
+    sid = sl.get("src_index") or sl.get("no")
+    text = sl.get("text") or ""
+    splits = (per_hl.get("split_marks") or {}).get(str(sid)) or []
+    marks = [int(x) for x in (per_hl.get("line_marks") or [])]
+    is_marked = int(sid) in marks
+    is_split = bool(splits)
+    cls = "slirn-stage4-sub-row"
+    if is_marked:
+        cls += " slirn-stage4-sub-row-deleted"
+    if is_split:
+        cls += " slirn-stage4-sub-row-split"
+    badge = ""
+    if is_marked:
+        badge = '<span class="slirn-sv-badge slirn-sv-badge-failed">🗑 已删</span>'
+    elif is_split:
+        badge = f'<span class="slirn-sv-badge slirn-sv-badge-warning">✂ 已切 {len(splits)} 段</span>'
+    return (
+        f'<div class="{cls}" data-seg-id="{esc(sid)}" data-hl-index="{hl_index}" '
+        f'data-start-ms="{int(sl.get("start_ms") or 0)}" '
+        f'data-end-ms="{int(sl.get("end_ms") or 0)}" '
+        f'data-orig-text="{esc(text)}" data-eff-text="{esc(text)}" '
+        f'data-deleted="{1 if is_marked else 0}">'
+        f'<span class="slirn-sv-muted">#{int(sl.get("no") or 0)}</span>'
+        f'<span class="slirn-stage4-sub-text">{esc(text)}</span>'
+        f'<span class="slirn-stage4-sub-actions">'
+        f'{badge}'
+        f'<button type="button" class="slirn-btn-mini" data-action="sv-stage4-line-edit" '
+        f'data-seg-id="{esc(sid)}" data-hl-index="{hl_index}" title="整行替换文字">✏️</button>'
+        f'<button type="button" class="slirn-btn-mini" data-action="sv-stage4-line-resplit" '
+        f'data-seg-id="{esc(sid)}" data-hl-index="{hl_index}" title="重新切分本行为多段">✂️</button>'
+        f'<button type="button" class="slirn-btn-mini" data-action="sv-stage4-line-toggle" '
+        f'data-seg-id="{esc(sid)}" data-hl-index="{hl_index}" '
+        f'title="{"恢复" if is_marked else "删除"}本行">'
+        f'{"✚" if is_marked else "🗑️"}</button>'
+        f'</span>'
+        f'</div>'
+    )
 
-    把 Stage 3 全部短视频的标题+字幕行交给大模型：长行切分（子文本拼接须
-    逐字等于原文，时间戳按占比内插）、文字修改、整行删除；结果写回
-    highlights.json（首次备份原表）。本卡显示每条优化统计；优化后的字幕
-    在 Stage 3 页签里查看/微调（与 rerun/restore 同一编辑面）。
+
+def _render_stage4_clip_card(hl_index: int, hl: dict, per_hl: dict,
+                              effective: list[dict]) -> str:
+    """渲染一条 highlight 的编辑卡（标题 + sub 列表 + 预览/初剪按钮）。"""
+    title = esc(hl.get("title") or f"片段 {hl_index}")
+    head = esc(hl.get("title") or f"片段 {hl_index}")
+    sub_rows = "".join(_render_stage4_sub_row(hl_index, s, per_hl) for s in effective)
+    if not sub_rows:
+        sub_rows = '<div class="slirn-sv-muted">（无有效字幕行）</div>'
+    return f'''<div class="slirn-stage4-clip" data-hl-index="{hl_index}">
+  <div class="slirn-stage4-clip-head">
+    <span class="slirn-stage4-clip-no">#{hl_index}</span>
+    <span class="slirn-stage4-clip-title">{head}</span>
+  </div>
+  <div class="slirn-stage4-clip-subs">{sub_rows}</div>
+  <div class="slirn-stage4-clip-actions">
+    <button type="button" class="slirn-btn-mini" data-action="sv-stage4-preview"
+      data-hl-index="{hl_index}" title="按当前编辑结果拼一段预览 mp4">▶ 预览该高亮</button>
+    <button type="button" class="slirn-btn-mini" data-action="sv-stage4-go-coarse"
+      data-hl-index="{hl_index}" title="切换到 Stage 5 并只跑该条粗剪">🎬 跳到 Stage 5（仅该条）</button>
+    <span class="slirn-sv-muted slirn-stage4-clip-preview-status"></span>
+  </div>
+</div>'''
+
+
+def _stage4_optimize(project: dict, *, task_id: str = "", project_id: str = "",
+                      repo_root: str | Path | None = None) -> str:
+    """REQ-20261013-100 + REQ-20261013-108：Stage 4「内容优化」。
+
+    - 顶部：优化提示词输入区（textarea + 4 按钮 + 历史列表，镜像 Stage 3）。
+    - 中部：现有「✨ 优化字幕」按钮 + 每条 highlight 统计 + warnings。
+    - 下部：每条 highlight 一张编辑卡（含 sub 行 + ✏️/✂️/🗑️ 按钮 + 预览/初剪按钮）。
+    - 用户手动编辑只写 per-hl JSON，不污染 stage3/highlights.json。
     """
     s4o = project.get("pipeline", {}).get("stage4_optimize", {}) or {}
     s3 = project.get("pipeline", {}).get("stage3_analyze", {}) or {}
@@ -710,6 +777,16 @@ def _stage4_optimize(project: dict) -> str:
         f'<button class="{btn_class}" data-action="sv-stage4-optimize-run"{disabled_attr}>'
         f'{btn_label}</button>'
     )
+
+    # 提示词区（REQ-20261013-108）
+    # initial_prompt 优先项目级 prompt_user；其次全局 stage4 default；都没有 → 系统级 STAGE4_SYSTEM_PROMPT
+    project_prompt = str(s4o.get("prompt_user") or s4o.get("prompt") or "")
+    initial_prompt = project_prompt  # 前端 loadPanel 会再用 load_prompts 覆盖
+    default_badge = ""
+    if project_prompt:
+        default_badge = '<span class="slirn-sv-badge slirn-sv-badge-ok">当前项目已填</span>'
+    # 历史列表 HTML 由前端 loadPanel 拉 load_prompts 后再注入；这里留空壳
+    hist_html = '<div class="slirn-sv-muted">（加载中…）</div>'
 
     # 每条短视频的优化统计行
     detail_rows = []
@@ -744,6 +821,50 @@ def _stage4_optimize(project: dict) -> str:
         more = f'<li>… 其余 {len(warnings) - 8} 条见日志</li>' if len(warnings) > 8 else ""
         warn_html = f'<ul class="slirn-stage4-opt-warns">{items}{more}</ul>'
 
+    # 每条 highlight 的编辑卡（REQ-20261013-108 + REQ-20261013-109 tab 化）
+    # tab 化后：tab bar 顶部 + 每个 highlight 套一层 .slirn-stage4-hl-pane，
+    # 第 1 个 tab / pane 加 active；切换由前端 sv-stage4-hl-tab action 触发
+    # switchHlTab（共用 stage3 一套 CSS + 状态记忆 window._slirnSvHlTab）。
+    clip_tabs: list[str] = []
+    clip_panes: list[str] = []
+    root: Path | None = None
+    if repo_root:
+        try:
+            root = Path(str(repo_root))
+        except Exception:  # noqa: BLE001
+            root = None
+    if root and task_id and project_id and hl_list:
+        for i, hl in enumerate(hl_list, start=1):
+            try:
+                per_hl = _sv_opt.load_per_hl(root, task_id, project_id, i)
+                effective = _sv_opt.effective_subtitle_lines(root, task_id, project_id, i)
+            except Exception:  # noqa: BLE001
+                per_hl = {}
+                effective = []
+            title = hl.get("title") or f"片段 {i}"
+            is_first = len(clip_panes) == 0
+            _tab_label = title if len(title) <= 10 else title[:10] + "…"
+            clip_tabs.append(
+                f'<button class="slirn-stage4-hl-tab{" active" if is_first else ""}" '
+                f'data-action="sv-stage4-hl-tab" data-hl-index="{i}" '
+                f'title="{esc(title)}">#{i} {esc(_tab_label)}</button>'
+            )
+            clip_panes.append(
+                f'<div class="slirn-stage4-hl-pane{" active" if is_first else ""}" '
+                f'data-hl-index="{i}">'
+                f'{_render_stage4_clip_card(i, hl, per_hl, effective)}'
+                f'</div>'
+            )
+    if clip_panes:
+        clip_html = (
+            '<div class="slirn-stage4-clips">'
+            '<div class="slirn-stage4-hl-tabs">' + "".join(clip_tabs) + '</div>'
+            + "".join(clip_panes) +
+            '</div>'
+        )
+    else:
+        clip_html = '<div class="slirn-stage4-clips">（无 highlight，请先完成 Stage 3）</div>'
+
     return f'''<div class="slirn-stage" data-stage="4">
   <div class="slirn-stage-head">
     <span class="slirn-stage-num">4</span>
@@ -755,15 +876,46 @@ def _stage4_optimize(project: dict) -> str:
     <div class="slirn-sv-muted slirn-stage4-opt-help">
       按标题让大模型优化每条短视频的字幕：<strong>切分长行</strong>（子句拼接须逐字等于原文，时间戳按占比估算）、
       <strong>修改文字</strong>（去口水/错字）、<strong>删除冗余行</strong>。
-      结果写回 Stage 3 字幕（首次优化前自动备份），可回 Stage 3 页签微调；拼接与后续阶段将作废重跑。
+      结果写回 Stage 3 字幕（首次优化前自动备份），下方可逐条手动微调；拼接与后续阶段将作废重跑。
     </div>
+
+    <div class="slirn-stage4-prompt-card">
+      <label class="slirn-sv-wide slirn-stage4-prompt-label">优化提示词 {default_badge}
+        <textarea id="slirn-stage4-prompt" class="slirn-stage4-prompt-input" rows="6"
+          placeholder="录入「内容优化」所用的提示词；可「引用系统提示词」「设为默认」或「存入列表」复用">{esc(initial_prompt)}</textarea>
+      </label>
+      <div class="slirn-stage4-prompt-toolbar">
+        <div class="slirn-stage4-prompt-actions">
+          <button class="slirn-btn-mini" data-action="sv-stage4-use-system-prompt"
+            data-prompt="{esc(STAGE4_SYSTEM_PROMPT)}"
+            title="把系统内置的优化提示词填入文本域（独立于默认/历史；可继续编辑后再优化或设为默认）">🧭 引用系统提示词</button>
+          <button class="slirn-btn-mini slirn-btn-mini-primary"
+            data-action="sv-stage4-save-default"
+            title="把当前文本域提示词保存为 Stage 4 默认提示词（全局生效，新项目初始填充）">💾 设为默认</button>
+          <button class="slirn-btn-mini" data-action="sv-stage4-save-history"
+            title="存入提示词列表（最多保留最新 10 条）">📜 存入列表</button>
+          <button class="slirn-btn-mini" data-action="sv-stage4-clear-prompt"
+            title="清空文本域">🧹 清空</button>
+        </div>
+      </div>
+      <details class="slirn-stage4-prompts-section">
+        <summary>📜 Stage 4 历史提示词（最新 10 条 · ⭐ 为默认 · 点击条目查看完整内容）</summary>
+        <div class="slirn-stage4-hist-list">{hist_html}</div>
+      </details>
+    </div>
+
     <div class="slirn-sv-card-actions">
       {run_btn}
+      <button class="slirn-btn slirn-btn-primary" data-action="sv-stage4-go-coarse-all"{disabled_attr}
+        title="切换到 Stage 5 并触发全量粗剪（7 条）">🎬 生成初剪文件（全部 {len(hl_list) or 0} 条）</button>
     </div>
     <div class="slirn-stage4-opt-detail">{detail_html}</div>
     {warn_html}
     {error_html}
     {_stage_logs(s4o)}
+
+    <div class="slirn-stage4-section-title">逐条编辑（手动覆盖：仅本项目，不回写 Stage 3）</div>
+    {clip_html}
   </div>
 </div>'''
 
@@ -1392,10 +1544,15 @@ def _stage_nav_state(status: object) -> str:
     return "pending"
 
 
-def render_project(project: dict, all_tasks: list[dict] | None = None) -> str:
+def render_project(project: dict, all_tasks: list[dict] | None = None,
+                    *, repo_root: str | Path | None = None) -> str:
     task_id = str(project.get("task_id") or "")
     project_id = str(project.get("id") or "")
     pipeline = project.get("pipeline") or {}
+    if repo_root is not None:
+        # 注入到 project dict 副本（不污染原对象），下游 stage 渲染可读
+        project = dict(project)
+        project["_repo_root"] = str(repo_root)
     stage_states = {
         key: _stage_nav_state((pipeline.get(stage_key) or {}).get("status"))
         for key, _num, _title, _desc, stage_key in _SV_STAGE_NAV
@@ -1426,7 +1583,10 @@ def render_project(project: dict, all_tasks: list[dict] | None = None) -> str:
             source_url=_source_video_url(project),
             srt_lines=(pipeline.get("stage3_analyze", {}) or {}).get("srt_lines") or [],
         )),
-        ("stage4", _stage4_optimize(project)),
+        ("stage4", _stage4_optimize(
+            project, task_id=task_id, project_id=project_id,
+            repo_root=project.get("_repo_root"),
+        )),
         ("stage5", _stage5_coarse(project)),
         ("stage6", _stage6_refine(project)),
         ("stage7", _stage7_finalize(project)),

@@ -169,6 +169,8 @@
       // 修订九：restore/rerun/删除/拼接都走 openProject 重渲染 —— 渲染完
       // 恢复用户上次选中的短视频页签（该条已删则回默认第一条）
       _restoreHlTab(taskId, projectId);
+      // REQ-20261013-108：Stage 4 提示词 textarea + 历史列表加载（不覆盖用户已编辑）
+      loadStage4Prompts();
     });
   }
 
@@ -185,14 +187,14 @@
     var want = String(idx || '');
     var hit = false;
     Array.prototype.forEach.call(
-      document.querySelectorAll('.slirn-stage3-hl-tab'),
+      document.querySelectorAll('.slirn-stage3-hl-tab, .slirn-stage4-hl-tab'),
       function(t) {
         var on = String(t.getAttribute('data-hl-index') || '') === want;
         if (on) hit = true;
         t.classList.toggle('active', on);
       });
     Array.prototype.forEach.call(
-      document.querySelectorAll('.slirn-stage3-hl-pane'),
+      document.querySelectorAll('.slirn-stage3-hl-pane, .slirn-stage4-hl-pane'),
       function(p) {
         p.classList.toggle('active', String(p.getAttribute('data-hl-index') || '') === want);
       });
@@ -204,7 +206,9 @@
     var mem = window._slirnSvHlTab;
     if (!mem || !mem.hl) return;
     if (mem.k !== String(taskId) + '/' + String(projectId)) return;
-    var tab = document.querySelector('.slirn-stage3-hl-tab[data-hl-index="' + mem.hl + '"]');
+    var tab = document.querySelector(
+      '.slirn-stage3-hl-tab[data-hl-index="' + mem.hl + '"], ' +
+      '.slirn-stage4-hl-tab[data-hl-index="' + mem.hl + '"]');
     if (tab) switchHlTab(mem.hl);
     else window._slirnSvHlTab = null;   // 该条已删除 → 回默认第一条
   }
@@ -459,13 +463,15 @@
   }
 
   function stage4OptimizeRun() {
-    // REQ-20261013-100：Stage 4 内容优化 — LLM 按标题逐条优化 Stage 3 字幕
-    // （切分长行 / 修改文字 / 删除冗余行），结果写回 highlights.json；
-    // 完成后刷新页面（Stage 3 页签看优化后字幕，本卡显示统计）。
+    // REQ-20261013-100 + REQ-20261013-108：Stage 4 内容优化 — LLM 按标题逐条
+    // 优化 Stage 3 字幕（切分长行 / 修改文字 / 删除冗余行），结果写回
+    // highlights.json；完成后刷新页面。文本域中的提示词作为「补充要求」
+    // 追加到 system prompt 尾部（也写 pipeline.stage4_optimize.prompt_user）。
     var ctx = innerCtx(); if (!ctx) return;
+    var prompt = _stage4PromptText();
     toast('内容优化中（每条短视频调一次大模型）…');
     postJSON(API + '/short_video_stage4_optimize', {
-      task_id: ctx.taskId, project_id: ctx.projectId
+      task_id: ctx.taskId, project_id: ctx.projectId, prompt: prompt
     }).then(function(r) {
       if (r && r.ok) {
         var st = r.stage4_optimize || {};
@@ -479,6 +485,283 @@
         openProject(ctx.taskId, ctx.projectId);
       }
       else toast((r && r.error) || 'Stage 4 内容优化失败', 'error');
+    });
+  }
+
+  // ---------- REQ-20261013-108：Stage 4 提示词 + 手动编辑 + 预览 + 初剪 ----------
+
+  function _stage4PromptText() {
+    var ta = document.getElementById('slirn-stage4-prompt');
+    return ta ? String(ta.value || '').trim() : '';
+  }
+
+  function _refreshStage4History(historyHtml) {
+    if (!historyHtml) return;
+    var list = document.querySelector('.slirn-stage4-hist-list');
+    if (list) list.innerHTML = historyHtml;
+    var box = document.querySelector('.slirn-stage4-prompts-section');
+    if (box) box.open = true;
+  }
+
+  function stage4UseSystemPrompt(btn) {
+    var ta = document.getElementById('slirn-stage4-prompt');
+    if (!ta) return;
+    var text = btn.getAttribute('data-prompt') || '';
+    if (!text) return;
+    if (ta.value && ta.value.trim() && !window.confirm(
+        '文本域已有内容，用系统提示词覆盖它？')) return;
+    ta.value = text;
+    toast('已引用系统提示词');
+  }
+
+  function stage4ClearPrompt() {
+    var ta = document.getElementById('slirn-stage4-prompt');
+    if (!ta) return;
+    if (ta.value && !window.confirm('清空当前提示词文本域？')) return;
+    ta.value = '';
+  }
+
+  function stage4LoadPrompt(btn) {
+    var ta = document.getElementById('slirn-stage4-prompt');
+    if (!ta) return;
+    var text = btn.getAttribute('data-prompt') || '';
+    if (!text) return;
+    if (ta.value && ta.value.trim() && !window.confirm(
+        '文本域已有内容，用这条历史提示词覆盖它？')) return;
+    ta.value = text;
+    toast('已载入历史提示词');
+  }
+
+  function stage4ToggleHist(btn) {
+    var item = btn.closest ? btn.closest('.slirn-stage4-hist-item') : null;
+    var full = item ? item.querySelector('.slirn-stage4-hist-full') : null;
+    if (full) full.hidden = !full.hidden;
+  }
+
+  function stage4SaveDefault() {
+    var prompt = _stage4PromptText();
+    if (!prompt) return toast('提示词为空，无法设为默认', 'error');
+    postJSON(API + '/short_video_save_default_prompt', {
+      prompt: prompt, stage: 'stage4'
+    }).then(function(r) {
+      if (r && r.ok) {
+        _refreshStage4History(r.history_html);
+        toast('已设为 Stage 4 默认提示词');
+      } else toast((r && r.error) || '保存失败', 'error');
+    });
+  }
+
+  function stage4SaveHistory() {
+    var prompt = _stage4PromptText();
+    if (!prompt) return toast('提示词为空，无法存入列表', 'error');
+    _postStage4PromptHistory(prompt, false);
+  }
+
+  function _postStage4PromptHistory(prompt, confirmOverwrite) {
+    postJSON(API + '/short_video_prompt_history_save', {
+      prompt: prompt, confirm: !!confirmOverwrite, stage: 'stage4'
+    }).then(function(r) {
+      if (!r || !r.ok) return toast((r && r.error) || '保存失败', 'error');
+      if (r.status === 'need_confirm') {
+        if (window.confirm('提示词列表已满 ' + (r.max || 10) + ' 条。\n'
+            + '继续保存将覆盖最旧的一条，是否覆盖？')) {
+          _postStage4PromptHistory(prompt, true);
+        } else {
+          toast('已取消保存');
+        }
+        return;
+      }
+      _refreshStage4History(r.history_html);
+      toast('已存入 Stage 4 提示词列表');
+    });
+  }
+
+  // 拉取 stage3 + stage4 提示词 + 系统常量 + 项目级 prompt_user
+  // 写入对应文本域与历史列表（不覆盖正在编辑的内容 — 只在为空时填）
+  function loadStage4Prompts() {
+    var ctx = innerCtx(); if (!ctx) return;
+    postJSON(API + '/short_video_load_prompts', {
+      task_id: ctx.taskId, project_id: ctx.projectId
+    }).then(function(r) {
+      if (!r || !r.ok) return;
+      var settings = r.settings || {};
+      var sys = r.system_prompts || {};
+      var proj = r.project_prompts || {};
+      var hh = r.history_html || {};
+      // stage4 历史列表
+      _refreshStage4History(hh.stage4);
+      // 文本域：项目级 prompt_user 优先；为空 → 全局默认；再空 → 留空（不强行填系统）
+      var ta4 = document.getElementById('slirn-stage4-prompt');
+      if (ta4 && !ta4.value.trim()) {
+        if (proj.stage4) {
+          ta4.value = proj.stage4;
+        } else {
+          var def4 = (settings.stage4 || {}).default_prompt;
+          if (def4 && def4.prompt) ta4.value = def4.prompt;
+        }
+      }
+    });
+  }
+
+  // 整行替换 text（fix）
+  function stage4LineEdit(btn) {
+    var row = btn.closest ? btn.closest('.slirn-stage4-sub-row') : null;
+    if (!row) return;
+    var orig = row.getAttribute('data-orig-text') || row.getAttribute('data-eff-text') || '';
+    var newText = window.prompt('整行替换文字（原行内容已预填）：', orig);
+    if (newText === null) return;
+    var hl = parseInt(row.getAttribute('data-hl-index') || '0', 10);
+    var sid = parseInt(row.getAttribute('data-seg-id') || '0', 10);
+    if (!hl || !sid) return;
+    var ctx = innerCtx(); if (!ctx) return;
+    postJSON(API + '/short_video_stage4_line_edit', {
+      task_id: ctx.taskId, project_id: ctx.projectId,
+      hl_index: hl, src_index: sid, text: newText
+    }).then(function(r) {
+      if (r && r.ok) {
+        row.setAttribute('data-eff-text', newText);
+        row.setAttribute('data-orig-text', newText);
+        var textEl = row.querySelector('.slirn-stage4-sub-text');
+        if (textEl) textEl.textContent = newText;
+        toast('已保存');
+      } else toast((r && r.error) || '保存失败', 'error');
+    });
+  }
+
+  // 整行删除/恢复（toggle）
+  function stage4LineToggle(btn) {
+    var row = btn.closest ? btn.closest('.slirn-stage4-sub-row') : null;
+    if (!row) return;
+    var hl = parseInt(row.getAttribute('data-hl-index') || '0', 10);
+    var sid = parseInt(row.getAttribute('data-seg-id') || '0', 10);
+    if (!hl || !sid) return;
+    var ctx = innerCtx(); if (!ctx) return;
+    postJSON(API + '/short_video_stage4_line_toggle', {
+      task_id: ctx.taskId, project_id: ctx.projectId,
+      hl_index: hl, src_index: sid
+    }).then(function(r) {
+      if (!r || !r.ok) return toast((r && r.error) || '操作失败', 'error');
+      var marked = !!r.marked;
+      row.setAttribute('data-deleted', marked ? '1' : '0');
+      row.classList.toggle('slirn-stage4-sub-row-deleted', marked);
+      // 切按钮图标与 title
+      var btn2 = row.querySelector('[data-action="sv-stage4-line-toggle"]');
+      if (btn2) {
+        btn2.textContent = marked ? '✚' : '🗑️';
+        btn2.setAttribute('title', marked ? '恢复本行' : '删除本行');
+      }
+      // 增删 badge
+      var actions = row.querySelector('.slirn-stage4-sub-actions');
+      var oldBadge = row.querySelector('.slirn-sv-badge-failed');
+      if (oldBadge) oldBadge.remove();
+      if (marked && actions) {
+        var b = document.createElement('span');
+        b.className = 'slirn-sv-badge slirn-sv-badge-failed';
+        b.textContent = '🗑 已删';
+        actions.insertBefore(b, actions.firstChild);
+      }
+      toast(marked ? '已删除' : '已恢复');
+    });
+  }
+
+  // 一行切分为多段（split）— 用户输入每段文字（按 | 分割）
+  function stage4LineResplit(btn) {
+    var row = btn.closest ? btn.closest('.slirn-stage4-sub-row') : null;
+    if (!row) return;
+    var orig = row.getAttribute('data-eff-text') || row.getAttribute('data-orig-text') || '';
+    var raw = window.prompt(
+      '切分本行为多段（用 | 分隔；按字数比例内插时间戳）：', orig);
+    if (raw === null) return;
+    var parts = String(raw).split('|').map(function(s) { return s.trim(); })
+      .filter(function(s) { return s; });
+    if (parts.length < 2) return toast('至少需要 2 段（用 | 分隔）', 'error');
+    var hl = parseInt(row.getAttribute('data-hl-index') || '0', 10);
+    var sid = parseInt(row.getAttribute('data-seg-id') || '0', 10);
+    if (!hl || !sid) return;
+    var ctx = innerCtx(); if (!ctx) return;
+    postJSON(API + '/short_video_stage4_resplit', {
+      task_id: ctx.taskId, project_id: ctx.projectId,
+      hl_index: hl, src_index: sid, subs: parts
+    }).then(function(r) {
+      if (r && r.ok) {
+        toast('已切分 — 刷新页面查看完整编辑面');
+        openProject(ctx.taskId, ctx.projectId);
+      } else toast((r && r.error) || '切分失败', 'error');
+    });
+  }
+
+  // 预览该高亮（按 per-hl 编辑后拼一段 mp4）
+  function stage4Preview(btn) {
+    var card = btn.closest ? btn.closest('.slirn-stage4-clip') : null;
+    if (!card) return;
+    var hl = parseInt(card.getAttribute('data-hl-index') || '0', 10);
+    if (!hl) return;
+    var ctx = innerCtx(); if (!ctx) return;
+    var status = card.querySelector('.slirn-stage4-clip-preview-status');
+    if (status) status.textContent = '（生成中…）';
+    btn.disabled = true;
+    postJSON(API + '/short_video_stage4_preview', {
+      task_id: ctx.taskId, project_id: ctx.projectId, hl_index: hl
+    }).then(function(r) {
+      btn.disabled = false;
+      if (!r || !r.ok) {
+        if (status) status.textContent = '失败：' + ((r && r.error) || '');
+        return toast((r && r.error) || '预览失败', 'error');
+      }
+      if (status) status.textContent = '✅ 已生成 ' + (r.segments_count || 0)
+        + ' 段 / ' + (r.duration_sec || 0).toFixed(1) + 's';
+      // 移除旧 video
+      var old = card.querySelector('video.slirn-stage4-clip-preview-video');
+      if (old) old.remove();
+      var v = document.createElement('video');
+      v.className = 'slirn-stage4-clip-preview-video';
+      v.src = r.mp4_url;
+      v.controls = true;
+      v.preload = 'metadata';
+      v.style.maxWidth = '100%';
+      v.style.marginTop = '8px';
+      card.appendChild(v);
+      toast('预览已生成');
+    });
+  }
+
+  // 跳到 Stage 5 — 单条粗剪
+  function stage4GoCoarse(btn) {
+    var card = btn.closest ? btn.closest('.slirn-stage4-clip') : null;
+    if (!card) return;
+    var hl = parseInt(card.getAttribute('data-hl-index') || '0', 10);
+    if (!hl) return;
+    var ctx = innerCtx(); if (!ctx) return;
+    if (typeof switchStage === 'function') switchStage('stage5');
+    else location.hash = '#stage5';
+    toast('启动仅该条粗剪…');
+    postJSON(API + '/short_video_stage4_go_coarse', {
+      task_id: ctx.taskId, project_id: ctx.projectId, hl_index: hl
+    }).then(function(r) {
+      if (r && r.ok) {
+        toast('已切到 Stage 5，单条粗剪已启动');
+        if (typeof openProject === 'function') {
+          setTimeout(function() { openProject(ctx.taskId, ctx.projectId); }, 800);
+        }
+      } else toast((r && r.error) || '启动失败', 'error');
+    });
+  }
+
+  // 跳到 Stage 5 — 全量粗剪
+  function stage4GoCoarseAll() {
+    var ctx = innerCtx(); if (!ctx) return;
+    if (typeof switchStage === 'function') switchStage('stage5');
+    else location.hash = '#stage5';
+    toast('启动全量粗剪…');
+    postJSON(API + '/short_video_stage4_go_coarse', {
+      task_id: ctx.taskId, project_id: ctx.projectId
+    }).then(function(r) {
+      if (r && r.ok) {
+        toast('已切到 Stage 5，全量粗剪已启动');
+        if (typeof openProject === 'function') {
+          setTimeout(function() { openProject(ctx.taskId, ctx.projectId); }, 800);
+        }
+      } else toast((r && r.error) || '启动失败', 'error');
     });
   }
 
@@ -1736,9 +2019,23 @@
     if (action === 'sv-stage3-restore-order') return stage3RestoreOrder(btn);
     if (action === 'sv-stage3-preview') return stage3PreviewHl(btn);
     if (action === 'sv-stage4-optimize-run') return stage4OptimizeRun();
+    // REQ-20261013-108：Stage 4 提示词 / 手动编辑 / 预览 / 跳 Stage 5
+    if (action === 'sv-stage4-use-system-prompt') return stage4UseSystemPrompt(btn);
+    if (action === 'sv-stage4-save-default') return stage4SaveDefault();
+    if (action === 'sv-stage4-save-history') return stage4SaveHistory();
+    if (action === 'sv-stage4-clear-prompt') return stage4ClearPrompt();
+    if (action === 'sv-stage4-load-prompt') return stage4LoadPrompt(btn);
+    if (action === 'sv-stage4-toggle-hist') return stage4ToggleHist(btn);
+    if (action === 'sv-stage4-line-edit') return stage4LineEdit(btn);
+    if (action === 'sv-stage4-line-resplit') return stage4LineResplit(btn);
+    if (action === 'sv-stage4-line-toggle') return stage4LineToggle(btn);
+    if (action === 'sv-stage4-preview') return stage4Preview(btn);
+    if (action === 'sv-stage4-go-coarse') return stage4GoCoarse(btn);
+    if (action === 'sv-stage4-go-coarse-all') return stage4GoCoarseAll();
     if (action === 'sv-stage3-rerun') return stage3RerunOne(btn);
     if (action === 'sv-stage3-remove-hl') return stage3RemoveHl(btn);
     if (action === 'sv-stage3-hl-tab') return switchHlTab(btn.getAttribute('data-hl-index'));
+    if (action === 'sv-stage4-hl-tab') return switchHlTab(btn.getAttribute('data-hl-index'));
     if (action === 'sv-stage3-save-default') return stage3SaveDefault();
     if (action === 'sv-stage3-save-history') return stage3SaveHistory();
     if (action === 'sv-stage3-load-prompt') return stage3LoadPrompt(btn);

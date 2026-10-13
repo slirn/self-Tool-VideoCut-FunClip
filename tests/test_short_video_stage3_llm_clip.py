@@ -1042,10 +1042,14 @@ def test_stage3_hl_tabs_wiring():
     assert "_restoreHlTab(taskId, projectId);" in js
     assert "window._slirnSvHlTab" in js
     # CSS：面板默认隐藏、激活显示；tab 单行横排可横滚
-    assert ".slirn-stage3-hl-tab.active {" in css
-    assert ".slirn-stage3-hl-pane {\n  display: none;\n}" in css
-    assert ".slirn-stage3-hl-pane.active {\n  display: block;\n}" in css
-    assert "overflow-x: auto" in css.split(".slirn-stage3-hl-tabs {", 1)[1][:200]
+    # REQ-20261013-109：stage3 与 stage4 共用选择器（逗号并列）
+    assert ".slirn-stage3-hl-tab.active," in css
+    assert ".slirn-stage4-hl-tab.active" in css
+    assert ".slirn-stage3-hl-pane," in css
+    assert ".slirn-stage4-hl-pane" in css
+    assert "display: none" in css.split(".slirn-stage3-hl-pane,", 1)[1][:200]
+    assert "display: block" in css.split(".slirn-stage3-hl-pane.active,", 1)[1][:200]
+    assert "overflow-x: auto" in css.split(".slirn-stage3-hl-tabs,", 1)[1][:200]
 
 
 # ---------- 修订十：系统级提示词 + 「🧭 引用系统提示词」按钮 ----------

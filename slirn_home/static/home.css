@@ -5603,7 +5603,9 @@ input[type="checkbox"]:focus-visible {
 
 /* REQ-20261004-UX：Stage 3 highlights 字幕预览 */
 /* 修订九：N 条短视频逐条页签 —— tab bar 单行横排（多了横向滚动），面板只显示激活页 */
-.slirn-stage3-hl-tabs {
+/* REQ-20261013-109：Stage 4 也用同一套 tab 视觉（共用选择器，0 行 CSS 重复） */
+.slirn-stage3-hl-tabs,
+.slirn-stage4-hl-tabs {
   display: flex;
   flex-wrap: nowrap;
   gap: 4px;
@@ -5611,7 +5613,8 @@ input[type="checkbox"]:focus-visible {
   overflow-x: auto;
   border-bottom: 1px solid #e2e8f0;
 }
-.slirn-stage3-hl-tab {
+.slirn-stage3-hl-tab,
+.slirn-stage4-hl-tab {
   flex: 0 1 auto;
   max-width: 220px;
   overflow: hidden;
@@ -5626,20 +5629,24 @@ input[type="checkbox"]:focus-visible {
   font-size: 12px;
   cursor: pointer;
 }
-.slirn-stage3-hl-tab:hover {
+.slirn-stage3-hl-tab:hover,
+.slirn-stage4-hl-tab:hover {
   background: #f1f5f9;
   color: #1e293b;
 }
-.slirn-stage3-hl-tab.active {
+.slirn-stage3-hl-tab.active,
+.slirn-stage4-hl-tab.active {
   background: #fafafa;
   border-color: #e2e8f0;
   color: #4338ca;
   font-weight: 600;
 }
-.slirn-stage3-hl-pane {
+.slirn-stage3-hl-pane,
+.slirn-stage4-hl-pane {
   display: none;
 }
-.slirn-stage3-hl-pane.active {
+.slirn-stage3-hl-pane.active,
+.slirn-stage4-hl-pane.active {
   display: block;
 }
 .slirn-stage3-hl-row {
@@ -6085,6 +6092,204 @@ input[type="checkbox"]:focus-visible {
 .slirn-stage4-clip:only-child,
 .slirn-stage5-clip:only-child,
 .slirn-stage6-clip:only-child { grid-column: 1 / -1; }   /* REQ-20261013-107 v3：单 highlight 时卡片撑满 1fr 横向，避免 3 列均分 367px */
+
+/* REQ-20261013-108：Stage 4 提示词卡 + 手动编辑 + 预览/初剪按钮（镜像 stage3 prompt 风格） */
+.slirn-stage4-prompt-card {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 8px;
+  background: #fff;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.slirn-stage4-prompt-label {
+  font-size: 12px;
+  color: #475569;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.slirn-stage4-prompt-input {
+  width: 100%;
+  min-height: 110px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 8px 10px;
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 6px;
+  resize: vertical;
+  color: #0f172a;
+  background: #f8fafc;
+}
+.slirn-stage4-prompt-input:focus {
+  outline: 2px solid #6366f1;
+  outline-offset: -1px;
+  background: #fff;
+}
+.slirn-stage4-prompt-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  justify-content: space-between;
+}
+.slirn-stage4-prompt-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.slirn-stage4-prompts-section {
+  font-size: 12px;
+  color: #475569;
+}
+.slirn-stage4-prompts-section > summary {
+  cursor: pointer;
+  padding: 4px 0;
+  user-select: none;
+}
+.slirn-stage4-hist-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+.slirn-stage4-hist-item {
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 6px;
+  padding: 6px 8px;
+  background: #f8fafc;
+}
+.slirn-stage4-hist-item-default {
+  background: #fef3c7;
+  border-color: #f59e0b;
+}
+.slirn-stage4-hist-head {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.slirn-stage4-hist-preview {
+  flex: 1 1 200px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: #1e293b;
+  background: #fff;
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 4px;
+  padding: 4px 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.slirn-stage4-hist-full {
+  margin-top: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: #0f172a;
+  background: #fff;
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 4px;
+  padding: 6px 8px;
+  max-height: 240px;
+  overflow: auto;
+}
+
+/* 每 highlight 一卡内的字幕行（与 stage3 hl-sub 风格一致） */
+.slirn-stage4-clip-no {
+  display: inline-block;
+  min-width: 28px;
+  padding: 1px 6px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: #64748b;
+  background: #e2e8f0;
+  border-radius: 4px;
+  text-align: center;
+  flex-shrink: 0;
+}
+.slirn-stage4-clip-title {
+  font-weight: 600;
+  color: #0f172a;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.slirn-stage4-clip-subs {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 360px;
+  overflow: auto;
+  padding: 4px;
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 6px;
+  background: #f8fafc;
+}
+.slirn-stage4-sub-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  background: #fff;
+  border: 1px solid transparent;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.slirn-stage4-sub-row:hover {
+  border-color: var(--border, #e2e8f0);
+}
+.slirn-stage4-sub-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  word-break: break-word;
+  color: #0f172a;
+}
+.slirn-stage4-sub-actions {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.slirn-stage4-sub-row-deleted {
+  background: #fee2e2;
+  text-decoration: line-through;
+  color: #94a3b8;
+  opacity: 0.65;
+}
+.slirn-stage4-sub-row-deleted .slirn-stage4-sub-text {
+  text-decoration: line-through;
+}
+.slirn-stage4-sub-row-split {
+  border-left: 3px solid #6366f1;
+  background: #eef2ff;
+}
+.slirn-stage4-clip-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  margin-top: 4px;
+}
+.slirn-stage4-clip-preview-status {
+  grid-column: 1 / -1;
+  font-size: 11px;
+  color: #64748b;
+  text-align: center;
+}
+.slirn-stage4-clip-preview-video {
+  width: 100%;
+  max-height: 240px;
+  border-radius: 6px;
+  background: #000;
+  margin-top: 4px;
+}
 .slirn-stage4-clip-head,
 .slirn-stage5-clip-head,
 .slirn-stage6-clip-head {
