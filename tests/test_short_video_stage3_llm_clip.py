@@ -1023,6 +1023,27 @@ def test_stage3_ui_use_system_prompt_button(tmp_path):
     assert esc(svc.STAGE3_SYSTEM_PROMPT) in html, "系统提示词全文需嵌入页面"
 
 
+def test_stage3_system_prompt_enforces_60_90_duration():
+    """REQ-20261013-114：60-90 秒时长硬约束必须显式落在系统提示词里。
+    提示词要：① 明确「必须落在 60-90 秒区间」② 给出时长计算口径 ③ 给出
+    凑时长 / 压时长的具体手段 ④ 自检环节把时长检查放第一位。"""
+    s = svc.STAGE3_SYSTEM_PROMPT
+    # 1) 60-90 秒硬约束（多种表述至少出现一种）
+    assert ("60-90" in s) or ("60.0–90.0" in s), "系统提示词缺 60-90 秒硬约束"
+    # 2) 时长计算口径（字符数 / 字数 / 行数 公式）
+    assert ("(本行字符数 + 1) / 4" in s) or ("字符数" in s and "朗读秒数" in s), \
+        "系统提示词缺时长计算口径"
+    # 3) 凑时长 / 压时长手段
+    for key in ("时长 < 60", "时长 > 90", "补行", "砍行"):
+        assert key in s, f"系统提示词缺凑/压时长手段: {key}"
+    # 4) 时长自检放第一位
+    dur_check_idx = s.find("时长硬约束自检")
+    other_check_idx = s.find("其它标准自检") if "其它标准自检" in s else s.find("信息密度")
+    assert dur_check_idx > 0, "系统提示词缺「时长硬约束自检」段"
+    assert other_check_idx > 0
+    assert dur_check_idx < other_check_idx, "时长自检必须在其它标准之前"
+
+
 def test_stage3_use_system_prompt_wiring():
     """前端接线：引用函数（覆盖确认 + 独立 toast）+ 点击分发 + JS 语法。"""
     js = (FUNCLIP_ROOT / "slirn_home" / "static" / "short_video.js").read_text(encoding="utf-8")
