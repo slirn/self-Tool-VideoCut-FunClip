@@ -1,6 +1,6 @@
 # REQ-20261013-106 — 短视频 Stage 7「精剪混编」UI 按长视频「精剪合成」布局重排
 
-> 状态：🚧 实现中
+> 状态：✅ 已闭环（2026-10-13）
 > 父任务：[REQ-20261013-105](REQ-20261013-105-sv-stage7-fine-port.md)（已完成 C1 端点 + helper）
 
 ## 解决什么问题
@@ -61,13 +61,27 @@ C1 已端到端 OK（16 端点 / 17 测试 / 1228 零回归 / 7861 跑通）。�
 6. 7861 重启 + 截图（IDE 内嵌浏览器 + 真实浏览器对照）
 7. 短/长隔离仍 OK（落 `tasks/_global_short_video_fine_profiles.json`，不写长视频）
 
-## 闭环记录（实现完成后回填）
+## 验收（2026-10-13）
+
+1. ✅ 11 block 全部呈现且顺序一致：上传素材 → 背景图区域检测 → 顶部操作条 → 模板条 → 预览 → 三块画布 → 字体 11 项 → 视频源裁剪 → 片头封面 → 背景音乐 → 输出设置
+2. ✅ 卡片渲染：每条 highlight 1 张卡，per-block 元素全部带 `data-clip-index="N"`
+3. ✅ 端到端：7861 用真项目 `20261003-001/sv_20261004_072937_572eb5` 渲染 → 11 block 标题全齐 + 1 张卡 + 43 个 data-clip-index + 0 错
+4. ✅ pytest 1228 全过（80.63s），零回归
+5. ✅ ruff 零新增（5 个 baseline 错误全在 stage1/upload_section，与本次无关）
+6. ✅ node --check short_video.js 通过
+7. ✅ 短/长隔离：纯 UI 改动，后端零动 → C1 隔离测试仍有效
+
+## 闭环记录
 
 | 项 | 值 |
 |---|---|
 | REQ 文档 | REQ-20261013-106-sv-stage7-ui-relayout-by-long-video.md（本文件） |
-| 提交号 | TBD |
-| push ref-update | TBD |
-| 7861 PID | TBD |
-| 测试 | TBD |
-| 验收 | TBD |
+| 提交号 | `9ff69bb`（feat(slirn_home) UI 重排） |
+| push ref-update | `c547318..9ff69bb main -> main` |
+| 7861 PID | b1odjmsc9 |
+| 改动文件 | `slirn_home/short_video_ui.py`（UI 重排 +434 −141）+ `docs/REQM/REQ-20261013-106-...md` |
+| 后端 | 零改动（端点 16 个、helper 3 个、execution_history、short_video.js 全部不动） |
+| 测试 | 1228 passed（80.63s）零回归 |
+| ruff | 0 新增（baseline 5 个错误全在 stage1/upload_section） |
+| node --check | 3 JS 全过 |
+| 端到端 | 真项目渲染 → 11 block 标题齐 + 1 卡 + 43 data-clip-index |
