@@ -308,21 +308,92 @@
     return !!(cb && cb.checked);
   }
 
-  function stage3Run() {
+  // REQ-20261013-111：Stage 3 解析 — 进度卡 + 防重入 + 阶段文字式自估算
+  function stage3Run(btn) {
     var ctx = innerCtx(); if (!ctx) return;
+    // 防重入：闭包标志 + 按钮 disabled 双保险
+    if (btn && btn.disabled) return;
+    if (window._slirnSvStage3Running) {
+      toast('解析正在执行中，请勿重复点击', 'warn'); return;
+    }
+    window._slirnSvStage3Running = true;
     // REQ-099 修订：快速模板 UI 已移除，template 固定默认值（仅作后端兜底链）
     var template = 'hook_first';
     var n = parseInt((document.getElementById('slirn-stage3-n') || {}).value || '4', 10);
     var prompt = _stage3PromptText();
     var useImage = _stage3UseImage();
+
+    var status = document.getElementById('slirn-sv-stage3-status');
+    var msg = status ? status.querySelector('.slirn-sv-stage3-msg') : null;
+    var bar = status ? status.querySelector('.slirn-sv-stage3-bar') : null;
+    var setBtn = function(txt, dis) {
+      if (btn) { btn.textContent = txt; btn.disabled = !!dis; }
+    };
+    var show = function(t, pct) {
+      if (status) status.style.display = '';
+      if (msg) { msg.style.display = ''; msg.textContent = t; }
+      if (bar && pct != null) bar.style.width = pct + '%';
+    };
+
+    setBtn('🔍 解析中…', true);
+    show('⏳ 正在启动解析（请稍候，单次多模态大模型调用可能 10s-3min）…', 5);
     toast('解析短视频内容中…（字幕' + (useImage ? ' + 截图' : '') + ' + 提示词发给 AI）');
+
+    // 阶段进度（每 3s 推一档；后端单次调用耗时方差大，自估算保 UX 流畅）
+    var stages = [
+      { pct: 15, txt: '⏳ 准备字幕 + 提示词…' },
+      { pct: 35, txt: useImage ? '⏳ OCR 解析截图…' : '⏳ 构造请求载荷…' },
+      { pct: 60, txt: '⏳ 调用大模型（单次多模态，可能耗时较久）…' },
+      { pct: 85, txt: '⏳ 解析模型响应（分组 + 校验）…' }
+    ];
+    var stIdx = 0;
+    var stageTimer = setInterval(function() {
+      if (stIdx < stages.length) {
+        show(stages[stIdx].txt, stages[stIdx].pct);
+        stIdx++;
+      } else {
+        // 卡在 90% 等待响应
+        show('⏳ 仍在等待大模型响应（请耐心，可能 1-3 分钟）…', 90);
+      }
+    }, 3000);
+
     postJSON(API + '/short_video_stage3_run', {
       task_id: ctx.taskId, project_id: ctx.projectId,
       template: template, n_clips: n,
       prompt: prompt, use_image: useImage
     }).then(function(r) {
-      if (r && r.ok) { toast('解析完成'); openProject(ctx.taskId, ctx.projectId); }
-      else toast((r && r.error) || 'Stage 3 失败', 'error');
+      clearInterval(stageTimer);
+      if (r && r.ok) {
+        if (bar) {
+          bar.style.width = '100%';
+          bar.classList.add('slirn-progress-bar--done');
+        }
+        var st = r.stage3 || {};
+        var hlCount = (st.highlights || []).length || (st.count || 0);
+        show('✅ 解析完成：共 ' + hlCount + ' 条短视频片段', 100);
+        setBtn('🔍 解析', false);
+        toast('解析完成');
+        openProject(ctx.taskId, ctx.projectId);
+      } else {
+        if (bar) {
+          bar.style.width = '100%';
+          bar.classList.add('slirn-progress-bar--failed');
+        }
+        show('❌ ' + ((r && r.error) || 'Stage 3 解析失败'), 100);
+        setBtn('🔍 解析', false);
+        toast((r && r.error) || 'Stage 3 失败', 'error');
+      }
+    }).catch(function(err) {
+      clearInterval(stageTimer);
+      if (bar) {
+        bar.style.width = '100%';
+        bar.classList.add('slirn-progress-bar--failed');
+      }
+      show('❌ 网络错误：' + (err && err.message || err), 100);
+      setBtn('🔍 解析', false);
+      toast('网络错误：' + (err && err.message || err), 'error');
+    }).then(function() {  // finally
+      window._slirnSvStage3Running = false;
     });
   }
 
@@ -462,17 +533,52 @@
     });
   }
 
-  function stage4OptimizeRun() {
+  // REQ-20261013-111：Stage 4 重新优化 — 进度卡 + 防重入 + N/M 计数式自估算
+  function stage4OptimizeRun(btn) {
     // REQ-20261013-100 + REQ-20261013-108：Stage 4 内容优化 — LLM 按标题逐条
     // 优化 Stage 3 字幕（切分长行 / 修改文字 / 删除冗余行），结果写回
     // highlights.json；完成后刷新页面。文本域中的提示词作为「补充要求」
     // 追加到 system prompt 尾部（也写 pipeline.stage4_optimize.prompt_user）。
     var ctx = innerCtx(); if (!ctx) return;
+    // 防重入：闭包标志 + 按钮 disabled 双保险
+    if (btn && btn.disabled) return;
+    if (window._slirnSvStage4Running) {
+      toast('内容优化正在执行中，请勿重复点击', 'warn'); return;
+    }
+    window._slirnSvStage4Running = true;
+
+    // N = highlights.length（从 DOM tab 数量取，因为 innerCtx 不带 project）
+    var total = document.querySelectorAll('.slirn-stage4-hl-tab').length || 1;
     var prompt = _stage4PromptText();
+
+    var status = document.getElementById('slirn-sv-stage4-status');
+    var msg = status ? status.querySelector('.slirn-sv-stage4-msg') : null;
+    var bar = status ? status.querySelector('.slirn-sv-stage4-bar') : null;
+    var setBtn = function(txt, dis) {
+      if (btn) { btn.textContent = txt; btn.disabled = !!dis; }
+    };
+    var show = function(t) {
+      if (status) status.style.display = '';
+      if (msg) { msg.style.display = ''; msg.textContent = t; }
+    };
+
+    setBtn('✨ 重新优化中…', true);
+    show('⏳ 正在启动内容优化…');
     toast('内容优化中（每条短视频调一次大模型）…');
+
+    // 前端自估算进度（每 1500ms 递增 idx 1/2/3.../total）
+    var idx = 0;
+    var pollTimer = setInterval(function() {
+      if (idx < total) idx++;
+      var pct = Math.round(idx / total * 100);
+      if (bar) bar.style.width = pct + '%';
+      show('⏳ 正在优化第 ' + idx + '/' + total + ' 条字幕（每条约 5-30s，请耐心等待）');
+    }, 1500);
+
     postJSON(API + '/short_video_stage4_optimize', {
       task_id: ctx.taskId, project_id: ctx.projectId, prompt: prompt
     }).then(function(r) {
+      clearInterval(pollTimer);
       if (r && r.ok) {
         var st = r.stage4_optimize || {};
         var hls = st.highlights || [];
@@ -480,11 +586,36 @@
         hls.forEach(function(h) {
           fixedTot += h.fixed || 0; splitTot += h.split || 0; delTot += h.deleted || 0;
         });
+        if (bar) {
+          bar.style.width = '100%';
+          bar.classList.add('slirn-progress-bar--done');
+        }
+        show('✅ 内容优化完成：修改 ' + fixedTot + ' 行 · 切分 ' + splitTot
+          + ' 行 · 删除 ' + delTot + ' 行');
+        setBtn('✨ 重新优化', false);
         toast('内容优化完成：修改 ' + fixedTot + ' 行 · 切分 ' + splitTot
               + ' 行 · 删除 ' + delTot + ' 行');
         openProject(ctx.taskId, ctx.projectId);
+      } else {
+        if (bar) {
+          bar.style.width = '100%';
+          bar.classList.add('slirn-progress-bar--failed');
+        }
+        show('❌ ' + ((r && r.error) || 'Stage 4 内容优化失败'));
+        setBtn('✨ 重新优化', false);
+        toast((r && r.error) || 'Stage 4 内容优化失败', 'error');
       }
-      else toast((r && r.error) || 'Stage 4 内容优化失败', 'error');
+    }).catch(function(err) {
+      clearInterval(pollTimer);
+      if (bar) {
+        bar.style.width = '100%';
+        bar.classList.add('slirn-progress-bar--failed');
+      }
+      show('❌ 网络错误：' + (err && err.message || err));
+      setBtn('✨ 重新优化', false);
+      toast('网络错误：' + (err && err.message || err), 'error');
+    }).then(function() {  // finally
+      window._slirnSvStage4Running = false;
     });
   }
 
@@ -2039,11 +2170,11 @@
     if (action === 'sv-stage1-select') return stage1Select();
     if (action === 'sv-stage2-run') return stage2Run();
     if (action === 'sv-stage2-preview-srt') return previewStage2Srt(btn);
-    if (action === 'sv-stage3-run') return stage3Run();
+    if (action === 'sv-stage3-run') return stage3Run(btn);
     if (action === 'sv-stage3-splice') return stage3Splice();
     if (action === 'sv-stage3-restore-order') return stage3RestoreOrder(btn);
     if (action === 'sv-stage3-preview') return stage3PreviewHl(btn);
-    if (action === 'sv-stage4-optimize-run') return stage4OptimizeRun();
+    if (action === 'sv-stage4-optimize-run') return stage4OptimizeRun(btn);
     // REQ-20261013-108：Stage 4 提示词 / 手动编辑 / 预览 / 跳 Stage 5
     if (action === 'sv-stage4-use-system-prompt') return stage4UseSystemPrompt(btn);
     if (action === 'sv-stage4-save-default') return stage4SaveDefault();

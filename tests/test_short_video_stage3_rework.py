@@ -707,10 +707,11 @@ def test_render_project_seven_stages_and_optimize_card(tmp_path):
 
 
 def test_short_video_js_stage4_optimize_wiring():
-    """前端接线：dispatch 指向 stage4OptimizeRun；新端点 URL / 旧 verify 调用清除。"""
+    """前端接线：dispatch 指向 stage4OptimizeRun(btn)；新端点 URL / 旧 verify 调用清除。"""
     js_path = Path(__file__).resolve().parent.parent / "slirn_home" / "static" / "short_video.js"
     js = js_path.read_text(encoding="utf-8")
-    assert "sv-stage4-optimize-run') return stage4OptimizeRun()" in js
+    # REQ-20261013-111：dispatcher 必须把 btn 传给 handler（防重入 + 按钮 disabled）
+    assert "sv-stage4-optimize-run') return stage4OptimizeRun(btn)" in js
     assert "'/short_video_stage4_optimize'" in js
     assert "stage4OptimizeRun" in js
     assert "stage3VerifyRun" not in js

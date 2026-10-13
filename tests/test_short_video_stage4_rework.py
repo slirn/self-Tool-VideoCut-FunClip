@@ -605,3 +605,79 @@ def test_stage4_detail_body_color_is_explicit():
     body = m.group(1)
     assert re.search(r"color\s*:\s*#0f172a", body), f"detail-body 缺 #0f172a 深字：{body}"
 
+
+# ---------- REQ-20261013-111：Stage 3/4 进度卡 + 防重入 ----------
+
+def test_stage3_status_card_dom_exists(tmp_path):
+    """REQ-20261013-111：_stage3_analyze 渲染含 #slirn-sv-stage3-status + bar + msg 3 件套。"""
+    from slirn_home import short_video_ui as ui
+    tid, pid = _make_project(tmp_path)
+    project = {"task_id": tid, "id": pid, "name": "test",
+               "pipeline": {"stage3_analyze": {"status": "pending", "count": 0}}}
+    html = ui._stage3_analyze(project)
+    assert 'id="slirn-sv-stage3-status"' in html, "缺进度卡容器"
+    assert 'class="slirn-progress-bar slirn-sv-stage3-bar"' in html, "缺进度条"
+    assert 'slirn-sv-stage3-msg' in html, "缺消息行"
+    # 默认隐藏，等 JS 触发
+    assert 'style="display:none;"' in html
+
+
+def test_stage3_run_btn_has_id():
+    """REQ-20261013-111：「解析」按钮含 id 供 JS 抓取。"""
+    from pathlib import Path
+    css_text = Path("slirn_home/short_video_ui.py").read_text(encoding="utf-8")
+    # 模板里硬编码 id
+    assert 'id="slirn-sv-stage3-run-btn"' in css_text
+    assert 'data-action="sv-stage3-run"' in css_text
+
+
+def test_stage4_status_card_dom_exists(tmp_path):
+    """REQ-20261013-111：_stage4_optimize 渲染含 #slirn-sv-stage4-status + bar + msg 3 件套。"""
+    from slirn_home import short_video_ui as ui
+    tid, pid = _make_project(tmp_path)
+    project = {"task_id": tid, "id": pid, "name": "test",
+               "pipeline": {"stage4_optimize": {"status": "done", "highlights": []},
+                            "stage3_analyze": {"highlights": [{"index": 1}]}}}
+    html = ui._stage4_optimize(project, task_id=tid, project_id=pid, repo_root=tmp_path)
+    assert 'id="slirn-sv-stage4-status"' in html, "缺进度卡容器"
+    assert 'class="slirn-progress-bar slirn-sv-stage4-bar"' in html, "缺进度条"
+    assert 'slirn-sv-stage4-msg' in html, "缺消息行"
+    assert 'style="display:none;"' in html
+
+
+def test_stage4_run_btn_has_id():
+    """REQ-20261013-111：「重新优化」按钮含 id 供 JS 抓取。"""
+    from pathlib import Path
+    css_text = Path("slirn_home/short_video_ui.py").read_text(encoding="utf-8")
+    assert 'id="slirn-sv-stage4-run-btn"' in css_text
+    assert 'data-action="sv-stage4-optimize-run"' in css_text
+
+
+def test_progress_bar_done_failed_css_has_important():
+    """REQ-20261013-111：进度条 done/failed 色必须 !important 抗 .prose * 陷阱。"""
+    from pathlib import Path
+    css = (Path(__file__).parent.parent / "slirn_home" / "static" / "home.css").read_text(encoding="utf-8")
+    import re
+    # done
+    m = re.search(r"\.slirn-progress-bar--done\s*\{([^}]+)\}", css, re.DOTALL)
+    assert m, "缺 .slirn-progress-bar--done 规则"
+    assert "!important" in m.group(1)
+    assert re.search(r"background\s*:\s*#10b981", m.group(1)), "done 色应 #10b981"
+    # failed
+    m = re.search(r"\.slirn-progress-bar--failed\s*\{([^}]+)\}", css, re.DOTALL)
+    assert m, "缺 .slirn-progress-bar--failed 规则"
+    assert "!important" in m.group(1)
+    assert re.search(r"background\s*:\s*#ef4444", m.group(1)), "failed 色应 #ef4444"
+
+
+def test_stage3_stage4_dispatchers_pass_btn():
+    """REQ-20261013-111：JS 派发器把 btn 传给 stage3Run / stage4OptimizeRun。"""
+    from pathlib import Path
+    js = Path("slirn_home/static/short_video.js").read_text(encoding="utf-8")
+    # 两处 dispatch 都要带 btn
+    assert "return stage3Run(btn);" in js
+    assert "return stage4OptimizeRun(btn);" in js
+    # 防重入标志
+    assert "_slirnSvStage3Running" in js
+    assert "_slirnSvStage4Running" in js
+

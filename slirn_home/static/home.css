@@ -1249,6 +1249,50 @@ input[type="checkbox"]:focus-visible {
   margin-bottom: 12px;
 }
 
+/* REQ-20261013-111：Stage 3 解析 + Stage 4 重新优化 进度卡
+   - 仿 stage5/7 status-card 结构
+   - .slirn-progress 是进度条外层容器（区别于上面更早的 .slirn-progress-track）
+   - .slirn-progress-bar--done/--failed 用 !important 抗 .prose * 陷阱
+*/
+.slirn-rc-status-card {
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  font-size: 12px;
+  color: #0f172a !important;  /* 显式深字，防御 .prose * 通配 */
+}
+.slirn-rc-status-card .slirn-sub-meta {
+  color: #475569 !important;
+  font-weight: 600;
+}
+.slirn-progress {
+  height: 8px;
+  background: #e2e8f0;
+  border-radius: 4px;
+  overflow: hidden;
+  margin-top: 6px;
+}
+.slirn-progress-bar {
+  height: 100%;
+  background: #6366f1;
+  width: 0%;
+  transition: width 0.3s linear;
+}
+.slirn-progress-bar--done {
+  background: #10b981 !important;
+}
+.slirn-progress-bar--failed {
+  background: #ef4444 !important;
+}
+.slirn-sv-stage3-msg,
+.slirn-sv-stage4-msg {
+  margin-top: 6px;
+  color: #475569 !important;  /* 显式色，防御 .prose * */
+  font-size: 12px;
+}
+
 /* ============ 空状态 ============ */
 .slirn-empty {
   text-align: center;

@@ -637,6 +637,20 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
     splice_note = ""
     if splice.get("status") == "failed" and splice.get("error"):
         splice_note = f'<div class="slirn-stage-error">{esc(splice["error"])}</div>'
+
+    # REQ-20261013-111：Stage 3 解析进度卡（仿 stage5/7 status-card 结构）
+    stage3_status_card = (
+        f'<div class="slirn-rc-status-card" id="slirn-sv-stage3-status" '
+        f'data-task-id="{esc(task_id)}" data-project-id="{esc(project_id)}" '
+        f'style="display:none;">'
+        f'<div class="slirn-sub-meta">🔍 解析短视频内容</div>'
+        f'<div class="slirn-progress" style="margin-top:6px;">'
+        f'<div class="slirn-progress-bar slirn-sv-stage3-bar" style="width:0%;"></div>'
+        f'</div>'
+        f'<div class="slirn-status-msg slirn-sv-stage3-msg" style="display:none;"></div>'
+        f'</div>'
+    )
+
     splice_card = (
         '<div class="slirn-stage3-splice-card">'
         f'<div class="slirn-stage3-splice-head"><strong>🎞 短视频截取拼接</strong>'
@@ -697,10 +711,11 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
       <label>片段数<input type="number" min="3" max="5" id="slirn-stage3-n" value="{n}"></label>
     </div>
     <div class="slirn-sv-card-actions">
-      <button class="slirn-btn slirn-btn-primary" data-action="sv-stage3-run">🔍 解析</button>
+      <button id="slirn-sv-stage3-run-btn" class="slirn-btn slirn-btn-primary" data-action="sv-stage3-run">🔍 解析</button>
       <span class="slirn-sv-muted">{int(s3.get("count") or 0)} 条内容片段</span>
       {prompt_badge}{img_used_badge}
     </div>
+    {stage3_status_card}
     <div class="slirn-stage3-hl-list">{hl_list}</div>
     {splice_card}
     {error_html}
@@ -811,8 +826,22 @@ def _stage4_optimize(project: dict, *, task_id: str = "", project_id: str = "",
     btn_class = "slirn-btn" if status == "done" else "slirn-btn slirn-btn-primary"
     disabled_attr = "" if can_run else " disabled title=\"请先完成 Stage 3 解析短视频内容\""
     run_btn = (
-        f'<button class="{btn_class}" data-action="sv-stage4-optimize-run"{disabled_attr}>'
+        f'<button id="slirn-sv-stage4-run-btn" class="{btn_class}" '
+        f'data-action="sv-stage4-optimize-run"{disabled_attr}>'
         f'{btn_label}</button>'
+    )
+
+    # REQ-20261013-111：Stage 4 重新优化进度卡（仿 stage5/7 status-card 结构）
+    stage4_status_card = (
+        f'<div class="slirn-rc-status-card" id="slirn-sv-stage4-status" '
+        f'data-task-id="{esc(task_id)}" data-project-id="{esc(project_id)}" '
+        f'style="display:none;">'
+        f'<div class="slirn-sub-meta">🔄 内容优化进度</div>'
+        f'<div class="slirn-progress" style="margin-top:6px;">'
+        f'<div class="slirn-progress-bar slirn-sv-stage4-bar" style="width:0%;"></div>'
+        f'</div>'
+        f'<div class="slirn-status-msg slirn-sv-stage4-msg" style="display:none;"></div>'
+        f'</div>'
     )
 
     # 提示词区（REQ-20261013-108）
@@ -946,6 +975,7 @@ def _stage4_optimize(project: dict, *, task_id: str = "", project_id: str = "",
       <button class="slirn-btn slirn-btn-primary" data-action="sv-stage4-go-coarse-all"{disabled_attr}
         title="切换到 Stage 5 并触发全量粗剪（7 条）">🎬 生成初剪文件（全部 {len(hl_list) or 0} 条）</button>
     </div>
+    {stage4_status_card}
     {error_html}
     {_stage4_detail(detail_html, warn_html)}
     {_stage_logs(s4o)}
