@@ -952,11 +952,16 @@ def _stage6_refine(project: dict) -> str:
 
 
 def _stage7_finalize(project: dict) -> str:
-    """Stage 7 精剪混编 v1 完整版 UI（REQ-20261013-105）。
+    """Stage 7 精剪混编 v1 完整版 UI（REQ-20261013-105 + REQ-20261013-106 重排）。
 
-    仿长视频 _render_fine_cut_zone 形态：6 素材卡 + 字体 11 项 + 输出 + BGM
-    + 预览 2-30s + 异步导出 + bg 检测 + AI 智能布局 + 全局模板。
+    REQ-20261013-106：按长视频「精剪合成」11 block 顺序重排 UI：
+      1) 素材上传（6 项）  2) 背景图区域检测  3) 顶部操作条（导出+参数导入导出）
+      4) 模板条           5) 预览          6) 视频/字幕/背景 三块画布
+      7) 字幕字体设置      8) 视频源裁剪     9) 片头封面
+      10) 背景音乐        11) 输出设置
 
+    每条 highlight 各自一份完整卡片（仿 stage5/6 clip 卡片风格），每条卡片
+    顶部是产物（视频+下载/查看 srt/预览），下面 11 block 字段集。
     短/长隔离：params 落 project.json → stage7_finalize.params；模板落
     tasks/_global_short_video_fine_profiles.json（不写长视频）。
     """
@@ -971,180 +976,395 @@ def _stage7_finalize(project: dict) -> str:
     layout = p.get("layout") or {}
     materials = p.get("materials") or {}
     detected = p.get("detected_region")
-
-    # ---- 6 素材卡 ----
-    mat_rows = []
-    for slot, label, hint in [
-        ("video", "🎬 主视频", "必选 · 来自 Stage 5 粗剪"),
-        ("subtitle", "📝 字幕", "必选 · 来自 Stage 6 优化"),
-        ("cover", "🖼 封面", "可选 · 顶部封面图"),
-        ("bg", "🎨 背景", "可选 · 背景图"),
-        ("reference", "🔖 参考图", "可选 · AI 智能布局输入"),
-        ("audio", "🎵 附加音频", "可选 · 独立音轨"),
-    ]:
-        val = materials.get(slot) or ""
-        mat_rows.append(
-            f'<div class="slirn-sv-mat-row" data-slot="{slot}">'
-            f'<label class="slirn-sv-mat-label">{esc(label)}</label>'
-            f'<input type="text" class="slirn-sv-mat-input" data-mat-slot="{slot}" '
-            f'value="{esc(val)}" placeholder="{esc(hint)}" '
-            f'style="flex:1; min-width:200px; padding:4px 8px;">'
-            f'</div>'
-        )
-
-    # ---- 字体 11 项 ----
-    font_rows = []
-    for key, label, default in [
-        ("family", "字体", "STHeitiMedium.ttc"),
-        ("size", "字号", "48"),
-        ("bold", "加粗", "false"),
-        ("align", "对齐", "center"),
-        ("offset_ms", "偏移 ms", "0"),
-        ("stroke_width", "描边宽", "2"),
-        ("color", "字色", "#FFFFFF"),
-        ("stroke_color", "描边色", "#000000"),
-        ("bg_enabled", "字幕背景", "false"),
-        ("bg_color", "背景色", "#000000"),
-        ("bg_opacity", "背景透明度", "0.5"),
-        ("bg_radius", "背景圆角", "8"),
-    ]:
-        val = str(font.get(key) if font.get(key) is not None else default)
-        font_rows.append(
-            f'<div class="slirn-sv-font-row">'
-            f'<label>{esc(label)}</label>'
-            f'<input type="text" class="slirn-sv-font-input" data-font-key="{key}" '
-            f'value="{esc(val)}" style="width:120px; padding:3px 6px;">'
-            f'</div>'
-        )
-
-    # ---- 输出 / BGM / 预览 ----
     res = output.get("resolution") or "720p"
     audio_enabled = "checked" if audio.get("enabled") else ""
     preview_dur = int(preview.get("duration_sec") or 5)
 
     # ---- 异步状态卡（仿 Stage 5 顶部卡） ----
+    n_hl = len(s6.get("highlights") or [])
     status_card = f'''<div class="slirn-rc-status-card" id="slirn-sv-stage7-status"
         data-task-id="{esc(task_id)}" data-project-id="{esc(project_id)}">
-      <div class="slirn-sub-meta">🎞️ 精剪混编 · {esc(res)} · {int(s6.get("count") or len(s6.get("highlights") or []))} 条</div>
+      <div class="slirn-sub-meta">🎞️ 精剪混编 · {esc(res)} · {n_hl} 条</div>
       <div class="slirn-progress" style="margin-top:6px;">
         <div class="slirn-progress-bar" style="width:0%;"></div>
       </div>
       <div class="slirn-status-msg slirn-sv-stage7-msg" style="display:none;"></div>
     </div>'''
 
-    # ---- 产物列表 ----
-    rows = []
-    for hl in (s6.get("highlights") or []):
-        idx = hl.get("index") or len(rows) + 1
+    def _render_one_card(idx: int, hl: dict | None) -> str:
+        """单 highlight 卡片：11 block。hl=None 时用占位数据。"""
+        if hl is None:
+            hl = {}
+        status = hl.get("status") or "pending"
+        err = hl.get("error") or ""
+        dur = float(hl.get("duration_sec") or 0)
         mp4_name = Path(str(hl.get("final_mp4") or "")).name
         srt_name = Path(str(hl.get("continuous_srt") or "")).name
         mp4_url = _file_url(task_id, project_id, "stage6", mp4_name) if mp4_name else ""
         srt_url = _file_url(task_id, project_id, "stage6", srt_name) if srt_name else ""
-        dur = float(hl.get("duration_sec") or 0)
-        status = hl.get("status") or "pending"
-        err = hl.get("error") or ""
-        video = f'<video controls preload="metadata" src="{esc(mp4_url)}"></video>' if mp4_url else '<span class="slirn-sv-muted">未生成</span>'
+        video_block = (
+            f'<video controls preload="metadata" src="{esc(mp4_url)}" style="max-width:100%; max-height:280px;"></video>'
+            if mp4_url else '<span class="slirn-sv-muted">未生成（点「💾 导出最终视频」渲染）</span>'
+        )
         err_html = f'<div class="slirn-stage-error">{esc(err)}</div>' if err else ""
-        rows.append(
-            f'<div class="slirn-stage6-clip" data-clip-index="{idx}">'
-            f'<div class="slirn-stage6-clip-head">'
-            f'<span class="slirn-sv-row-no">#{idx}</span>'
-            f'{_stage_badge(status)}'
-            f'<span class="slirn-sv-muted">{dur:.1f}s</span>'
-            f'<a class="slirn-btn-mini" href="{esc(mp4_url)}" download>下载</a>'
-            f'<button class="slirn-btn-mini" data-action="sv-stage7-preview" data-clip-index="{idx}">🎬 预览</button>'
-            f'<button class="slirn-btn-mini" data-action="sv-preview-srt" data-url="{esc(srt_url)}">查看 srt</button>'
+
+        # 6 素材卡：video/subtitle 自动从 stage5/6 推导；其他 4 项 UI 显示但留空
+        auto_video = materials.get("video") or mp4_name
+        auto_subtitle = materials.get("subtitle") or srt_name
+        mat_rows = []
+        for slot, label, hint, val in [
+            ("video",     "🎬 视频",     "必选 · 来自 Stage 5 粗剪",  auto_video),
+            ("subtitle",  "📝 字幕",     "必选 · 来自 Stage 6 优化",  auto_subtitle),
+            ("cover",     "🖼 封面",     "可选 · 顶部封面图",         materials.get("cover", "")),
+            ("bg",        "🎨 背景",     "可选 · 背景图",            materials.get("bg", "")),
+            ("reference", "🔖 参考图",   "可选 · AI 智能布局输入",    materials.get("reference", "")),
+            ("audio",     "🎵 附加音频", "可选 · 独立音轨",          materials.get("audio", "")),
+        ]:
+            mat_rows.append(
+                f'<div class="slirn-sv-mat-row" data-slot="{esc(slot)}">'
+                f'<label class="slirn-sv-mat-label">{esc(label)}</label>'
+                f'<input type="text" class="slirn-sv-mat-input" data-mat-slot="{esc(slot)}" '
+                f'data-clip-index="{esc(idx)}" '
+                f'value="{esc(str(val))}" placeholder="{esc(hint)}" '
+                f'style="flex:1; min-width:200px; padding:4px 8px;">'
+                f'</div>'
+            )
+        upload_html = (
+            f'<details class="slirn-fine-section" open>'
+            f'<summary class="slirn-fine-section-summary">📁 上传素材（6 项）</summary>'
+            f'<div class="slirn-sv-mat-grid">{"".join(mat_rows)}</div>'
+            f'</details>'
+        )
+
+        # block 2：背景图区域检测
+        detected_info = ""
+        if detected and isinstance(detected, dict):
+            detected_info = (
+                f'<div class="slirn-sv-muted">检测结果：x={int(detected.get("x") or 0)}, '
+                f'y={int(detected.get("y") or 0)}, w={int(detected.get("w") or 0)}, '
+                f'h={int(detected.get("h") or 0)} (ratio={detected.get("content_ratio", 0):.2%})</div>'
+            )
+        bg_detect_block = (
+            f'<details class="slirn-fine-section">'
+            f'<summary class="slirn-fine-section-summary">🎨 背景图区域检测（4 角点 + 宽高）</summary>'
+            f'<div class="slirn-sv-card-actions" style="margin:6px 0;">'
+            f'<button class="slirn-btn-mini" data-action="sv-stage7-detect-bg" data-clip-index="{esc(idx)}">🔍 检测区域</button>'
+            f'<button class="slirn-btn-mini" data-action="sv-stage7-apply-detected" data-clip-index="{esc(idx)}">✅ 填充到视频位置和裁剪</button>'
+            f'<button class="slirn-btn-mini" data-action="sv-stage7-parse-layout" data-clip-index="{esc(idx)}">🤖 AI 智能识别布局</button>'
             f'</div>'
-            f'{video}'
-            f'{err_html}'
+            f'{detected_info}'
+            f'</details>'
+        )
+
+        # block 3：顶部操作条
+        actions_bar_1 = (
+            f'<div class="slirn-fine-actions-bar">'
+            f'<button class="slirn-btn slirn-btn-primary" data-action="sv-stage7-export" data-clip-index="{esc(idx)}">💾 导出最终视频</button>'
+            f'<button class="slirn-btn" data-action="sv-stage7-save-params" data-clip-index="{esc(idx)}">📤 导出参数</button>'
+            f'<button class="slirn-btn" data-action="sv-stage7-load-default" data-clip-index="{esc(idx)}">📥 导入参数</button>'
+            f'<span class="slirn-sv-muted">导出后输出在 stage6/final_*.mp4</span>'
             f'</div>'
         )
 
-    detected_info = ""
-    if detected and isinstance(detected, dict):
-        detected_info = (
-            f'<div class="slirn-sv-muted">检测结果：x={int(detected.get("x") or 0)}, '
-            f'y={int(detected.get("y") or 0)}, w={int(detected.get("w") or 0)}, '
-            f'h={int(detected.get("h") or 0)} (ratio={detected.get("content_ratio", 0):.2%})</div>'
+        # block 4：模板条
+        actions_bar_2 = (
+            f'<div class="slirn-fine-actions-bar">'
+            f'<button class="slirn-btn slirn-btn-primary" data-action="sv-stage7-profiles-save" data-clip-index="{esc(idx)}">💾 保存参数为模板</button>'
+            f'<span class="slirn-fine-actions-label">模板名</span>'
+            f'<input type="text" class="slirn-sv-profile-name" data-clip-index="{esc(idx)}" '
+            f'placeholder="（可选）填了名另存为模板" maxlength="30" autocomplete="off">'
+            f'<button class="slirn-btn" data-action="sv-stage7-profiles-apply" data-clip-index="{esc(idx)}">📥 引用参数（本地）</button>'
+            f'<span class="slirn-sv-muted">未保存</span>'
+            f'</div>'
         )
+
+        # block 5：预览
+        preview_block = (
+            f'<details class="slirn-fine-section" open>'
+            f'<summary class="slirn-fine-section-summary">🎬 生成预览（开始时间 + 时长 2–30 秒）</summary>'
+            f'<div style="display:flex; align-items:center; gap:8px; margin:6px 0;">'
+            f'<button class="slirn-btn slirn-btn-primary" data-action="sv-stage7-preview" data-clip-index="{esc(idx)}">🎬 生成预览</button>'
+            f'<span class="slirn-fine-actions-label">预览时长</span>'
+            f'<input type="number" class="slirn-sv-preview-duration" data-clip-index="{esc(idx)}" '
+            f'min="2" max="30" value="{preview_dur}" style="width:60px; padding:3px 6px;">'
+            f'<span class="slirn-sv-muted">秒（2-30）</span>'
+            f'</div>'
+            f'</details>'
+        )
+
+        # block 6：视频/字幕/背景 三块画布
+        def _xy_block(mat_key: str, icon: str, name: str, d: dict) -> str:
+            d = d or {}
+            x = int(d.get("x") or 0)
+            y = int(d.get("y") or 0)
+            w = int(d.get("w") or 0)
+            h = int(d.get("h") or 0)
+            return (
+                f'<div class="slirn-fine-layout-block">'
+                f'<div class="slirn-fine-layout-title">'
+                f'<label><input type="checkbox" class="slirn-fine-enabled" data-key="{esc(mat_key)}" '
+                f'data-clip-index="{esc(idx)}" '
+                f'{"checked" if d.get("enabled", True) else ""}> {esc(icon)} {esc(name)}</label>'
+                f'</div>'
+                f'<div class="slirn-fine-params">'
+                f'<div class="slirn-fine-param">'
+                f'<span class="slirn-fine-param-label">X (-1080–1080)</span>'
+                f'<input type="number" class="slirn-fine-num" data-key="{esc(mat_key)}.x" '
+                f'value="{x}" min="-1080" max="1080" step="1">'
+                f'</div>'
+                f'<div class="slirn-fine-param">'
+                f'<span class="slirn-fine-param-label">Y (-1920–1920)</span>'
+                f'<input type="number" class="slirn-fine-num" data-key="{esc(mat_key)}.y" '
+                f'value="{y}" min="-1920" max="1920" step="1">'
+                f'</div>'
+                f'<div class="slirn-fine-param">'
+                f'<span class="slirn-fine-param-label">宽</span>'
+                f'<input type="number" class="slirn-fine-num" data-key="{esc(mat_key)}.w" '
+                f'value="{w}" min="0" max="1080" step="1">'
+                f'</div>'
+                f'<div class="slirn-fine-param">'
+                f'<span class="slirn-fine-param-label">高</span>'
+                f'<input type="number" class="slirn-fine-num" data-key="{esc(mat_key)}.h" '
+                f'value="{h}" min="0" max="1920" step="1">'
+                f'</div>'
+                f'</div>'
+                f'</div>'
+            )
+        canvas_block = (
+            f'<details class="slirn-fine-section">'
+            f'<summary class="slirn-fine-section-summary">🎬 视频  +  📝 字幕  +  🎨 背景（X/Y/W/H）</summary>'
+            f'<div class="slirn-fine-cols">'
+            f'<div class="slirn-fine-col">'
+            f'{_xy_block("video", "🎬", "视频", layout.get("video"))}'
+            f'</div>'
+            f'<div class="slirn-fine-col">'
+            f'{_xy_block("subtitle", "📝", "字幕", layout.get("subtitle"))}'
+            f'{_xy_block("bg", "🎨", "背景", layout.get("bg"))}'
+            f'</div>'
+            f'</div>'
+            f'</details>'
+        )
+
+        # block 7：字幕字体设置 11 项
+        f_family = str(font.get("family") or "STHeitiMedium.ttc")
+        font_family_options = (
+            f'<option value="STHeitiMedium.ttc" {"selected" if "STHeiti" in f_family else ""}>STHeitiMedium（系统）</option>'
+            f'<option value="Noto Sans CJK SC" {"selected" if "Noto" in f_family else ""}>思源黑体 Noto Sans CJK SC</option>'
+        )
+        def _font_row(label: str, ctrl: str) -> str:
+            return (
+                f'<div class="slirn-fine-font-row">'
+                f'<span class="slirn-fine-font-label">{esc(label)}</span>'
+                f'{ctrl}'
+                f'</div>'
+            )
+        # 字段字符串提到外面（f-string 不支持内嵌反斜杠转义）
+        family_ctrl = (
+            '<select class="slirn-fine-font-sel" data-font-key="family" data-clip-index="' + esc(idx) + '">'
+            + font_family_options
+            + '</select>'
+        )
+        size_ctrl = (
+            '<input type="number" class="slirn-fine-font-num" data-font-key="size" data-clip-index="'
+            + esc(idx) + '" min="12" max="96" value="' + str(int(font.get("size") or 48)) + '">'
+        )
+        bold_chk = " checked" if font.get("bold") else ""
+        bold_ctrl = (
+            '<label><input type="checkbox" class="slirn-fine-font-chk" '
+            'data-font-key="bold" data-clip-index="' + esc(idx) + '"' + bold_chk + '> 启用</label>'
+        )
+        align_v = font.get("align") or "center"
+        align_ctrl = (
+            '<select class="slirn-fine-font-sel" data-font-key="align" data-clip-index="'
+            + esc(idx) + '">'
+            + ('<option value="left"' + (' selected' if align_v == "left" else "") + '>左对齐</option>')
+            + ('<option value="center"' + (' selected' if align_v == "center" else "") + '>居中</option>')
+            + ('<option value="right"' + (' selected' if align_v == "right" else "") + '>右对齐</option>')
+            + '</select>'
+        )
+        offset_ctrl = (
+            '<input type="number" class="slirn-fine-font-num" data-font-key="offset_ms" '
+            'data-clip-index="' + esc(idx) + '" min="-1920" max="1920" step="1" value="'
+            + str(int(font.get("offset_ms") or 0)) + '">'
+        )
+        stroke_w_ctrl = (
+            '<input type="number" class="slirn-fine-font-num" data-font-key="stroke_width" '
+            'data-clip-index="' + esc(idx) + '" min="0" max="10" value="'
+            + str(int(font.get("stroke_width") or 2)) + '">'
+        )
+        color_ctrl = (
+            '<input type="color" class="slirn-fine-font-color" data-font-key="color" '
+            'data-clip-index="' + esc(idx) + '" value="'
+            + esc(str(font.get("color") or "#FFFFFF")) + '">'
+        )
+        stroke_color_ctrl = (
+            '<input type="color" class="slirn-fine-font-color" data-font-key="stroke_color" '
+            'data-clip-index="' + esc(idx) + '" value="'
+            + esc(str(font.get("stroke_color") or "#000000")) + '">'
+        )
+        bg_chk = " checked" if font.get("bg_enabled") else ""
+        bg_enabled_ctrl = (
+            '<label><input type="checkbox" class="slirn-fine-font-chk" '
+            'data-font-key="bg_enabled" data-clip-index="' + esc(idx) + '"' + bg_chk + '> 启用</label>'
+        )
+        bg_color_ctrl = (
+            '<input type="color" class="slirn-fine-font-color" data-font-key="bg_color" '
+            'data-clip-index="' + esc(idx) + '" value="'
+            + esc(str(font.get("bg_color") or "#000000")) + '">'
+        )
+        bg_op = str(float(font.get("bg_opacity") or 0.5))
+        bg_opacity_ctrl = (
+            '<input type="range" class="slirn-fine-font-slider" data-font-key="bg_opacity" '
+            'data-clip-index="' + esc(idx) + '" min="0" max="1" step="0.05" value="' + bg_op + '">'
+            '<input type="number" class="slirn-fine-num" min="0" max="1" step="0.05" value="' + bg_op + '">'
+        )
+        font_block = (
+            f'<details class="slirn-fine-section">'
+            f'<summary class="slirn-fine-section-summary">🔤 字幕字体设置（11 项）</summary>'
+            f'<div class="slirn-fine-font-block">'
+            f'{_font_row("字体本体", family_ctrl)}'
+            f'{_font_row("字体大小（px）", size_ctrl)}'
+            f'{_font_row("粗体", bold_ctrl)}'
+            f'{_font_row("屏幕对齐", align_ctrl)}'
+            f'{_font_row("偏移量（px）", offset_ctrl)}'
+            f'{_font_row("描边宽度（px）", stroke_w_ctrl)}'
+            f'{_font_row("文字颜色", color_ctrl)}'
+            f'{_font_row("描边颜色", stroke_color_ctrl)}'
+            f'{_font_row("背景框", bg_enabled_ctrl)}'
+            f'{_font_row("背景颜色", bg_color_ctrl)}'
+            f'{_font_row("背景透明度", bg_opacity_ctrl)}'
+            f'</div>'
+            f'</details>'
+        )
+
+        # block 8：视频源裁剪
+        crop_block = (
+            f'<details class="slirn-fine-section">'
+            f'<summary class="slirn-fine-section-summary">🎥 视频源裁剪（从源画面里截一个矩形范围）</summary>'
+            f'<div class="slirn-fine-crop-block">'
+            f'<div class="slirn-fine-crop-presets">'
+            f'<button class="slirn-btn-mini" data-action="sv-stage7-crop-preset" data-preset="full" data-clip-index="{esc(idx)}">📐 全幅（不裁剪）</button>'
+            f'<button class="slirn-btn-mini" data-action="sv-stage7-crop-preset" data-preset="16x9" data-clip-index="{esc(idx)}">🎯 16:9 居中</button>'
+            f'<button class="slirn-btn-mini" data-action="sv-stage7-crop-preset" data-preset="1x1" data-clip-index="{esc(idx)}">⬛ 1:1 居中</button>'
+            f'</div>'
+            f'<label><input type="checkbox" class="slirn-sv-crop-aspect-link" data-clip-index="{esc(idx)}" checked> 🔗 锁定 16:9 比例（防变形）</label>'
+            f'<div class="slirn-sv-muted">短视频源裁剪：X/Y/W/H 滑块（占位，参数 v2 接入）</div>'
+            f'</div>'
+            f'</details>'
+        )
+
+        # block 9：片头封面
+        cover_dur = float((layout.get("cover") or {}).get("duration", 2.0) or 2.0)
+        cover_block = (
+            f'<details class="slirn-fine-section">'
+            f'<summary class="slirn-fine-section-summary">🎞 片头封面（全屏展示 N 秒后切视频）</summary>'
+            f'<div class="slirn-fine-cover-block">'
+            f'<label><input type="checkbox" class="slirn-fine-enabled" data-key="cover" data-clip-index="{esc(idx)}"> 启用片头封面</label>'
+            f'<div class="slirn-fine-params">'
+            f'<div class="slirn-fine-param">'
+            f'<span class="slirn-fine-param-label">展示时长（0–10 秒）</span>'
+            f'<input type="number" class="slirn-fine-num" data-key="cover.duration" value="{cover_dur:.1f}" min="0" max="10" step="0.5">'
+            f'</div>'
+            f'</div>'
+            f'<div class="slirn-form-hint">设为 0 秒 = 不显示片头；建议 1–3 秒（短视频一般不用）。</div>'
+            f'</div>'
+            f'</details>'
+        )
+
+        # block 10：背景音乐
+        vol_db = int(audio.get("volume_db") or -6)
+        fade_in = int((audio.get("fade_in_ms") or 500) / 1000 * 10) / 10
+        fade_out = int((audio.get("fade_out_ms") or 1000) / 1000 * 10) / 10
+        audio_block = (
+            f'<details class="slirn-fine-section">'
+            f'<summary class="slirn-fine-section-summary">🎵 背景音乐（与原声混合播放，保留说话人语音）</summary>'
+            f'<div class="slirn-fine-audio-block">'
+            f'<label><input type="checkbox" class="slirn-sv-audio-enabled" data-clip-index="{esc(idx)}" {audio_enabled}> 启用背景音乐</label>'
+            f'<div class="slirn-sv-card-actions" style="margin:6px 0;">'
+            f'<button class="slirn-btn-mini" data-action="sv-stage7-list-bgm" data-clip-index="{esc(idx)}">🎵 选系统 BGM</button>'
+            f'<span class="slirn-sv-muted" style="margin-left:6px;">当前：{esc(str(audio.get("bgm_path") or "未选"))}</span>'
+            f'</div>'
+            f'<div class="slirn-fine-params">'
+            f'<div class="slirn-fine-param">'
+            f'<span class="slirn-fine-param-label">音量（dB 衰减，0 = 原曲）</span>'
+            f'<input type="number" class="slirn-fine-num" data-key="audio.volume_db" value="{vol_db}" min="-40" max="0" step="1">'
+            f'</div>'
+            f'<div class="slirn-fine-param">'
+            f'<span class="slirn-fine-param-label">淡入（0–5 秒）</span>'
+            f'<input type="number" class="slirn-fine-num" data-key="audio.fade_in_sec" value="{fade_in}" min="0" max="5" step="0.5">'
+            f'</div>'
+            f'<div class="slirn-fine-param">'
+            f'<span class="slirn-fine-param-label">淡出（0–5 秒）</span>'
+            f'<input type="number" class="slirn-fine-num" data-key="audio.fade_out_sec" value="{fade_out}" min="0" max="5" step="0.5">'
+            f'</div>'
+            f'</div>'
+            f'</div>'
+            f'</details>'
+        )
+
+        # block 11：输出设置
+        output_block = (
+            f'<details class="slirn-fine-section">'
+            f'<summary class="slirn-fine-section-summary">📺 输出设置</summary>'
+            f'<div class="slirn-fine-output-block">'
+            f'<div class="slirn-fine-font-row">'
+            f'<span class="slirn-fine-font-label">分辨率</span>'
+            f'<select class="slirn-sv-output-resolution" data-clip-index="{esc(idx)}" style="margin:0 6px; padding:3px 6px;">'
+            f'<option value="720p" {"selected" if res == "720p" else ""}>720p（1280×720）</option>'
+            f'<option value="1080p" {"selected" if res == "1080p" else ""}>1080p（1920×1080）</option>'
+            f'<option value="source" {"selected" if res == "source" else ""}>源分辨率</option>'
+            f'</select>'
+            f'</div>'
+            f'</div>'
+            f'</details>'
+        )
+
+        return (
+            f'<div class="slirn-stage6-clip slirn-fine-card" data-clip-index="{esc(idx)}">'
+            f'<div class="slirn-stage6-clip-head">'
+            f'<span class="slirn-sv-row-no">#{esc(idx)}</span>'
+            f'{_stage_badge(status)}'
+            f'<span class="slirn-sv-muted">{dur:.1f}s</span>'
+            f'<a class="slirn-btn-mini" href="{esc(mp4_url)}" download>下载 mp4</a>'
+            f'<button class="slirn-btn-mini" data-action="sv-preview-srt" data-url="{esc(srt_url)}">查看 srt</button>'
+            f'</div>'
+            f'<div class="slirn-sv-card-actions" style="margin:6px 0;">'
+            f'<button class="slirn-btn-mini" data-action="sv-stage7-preview" data-clip-index="{esc(idx)}">🎬 预览</button>'
+            f'<button class="slirn-btn-mini" data-action="sv-stage7-save-params" data-clip-index="{esc(idx)}">💾 保存参数</button>'
+            f'<button class="slirn-btn slirn-btn-primary" data-action="sv-stage7-export" data-clip-index="{esc(idx)}">💾 导出最终视频</button>'
+            f'</div>'
+            f'{video_block}'
+            f'{err_html}'
+            f'{actions_bar_1}'
+            f'{actions_bar_2}'
+            f'{upload_html}'
+            f'{bg_detect_block}'
+            f'{preview_block}'
+            f'{canvas_block}'
+            f'{font_block}'
+            f'{crop_block}'
+            f'{cover_block}'
+            f'{audio_block}'
+            f'{output_block}'
+            f'</div>'
+        )
+
+    hls = s6.get("highlights") or []
+    cards = [_render_one_card(i, hl) for i, hl in enumerate(hls, start=1)]
+    if not cards:
+        cards.append(_render_one_card(1, None))
 
     return f'''<div class="slirn-stage" data-stage="7">
   <div class="slirn-stage-head">
     <span class="slirn-stage-num">7</span>
-    <strong>精剪混编（v1 完整版）</strong>
+    <strong>精剪混编（v1 完整版 · 长视频布局对齐）</strong>
     {_stage_badge(s6.get("status"))}
     {_stage_elapsed(s6)}
   </div>
   <div class="slirn-stage-body">
     {status_card}
-
-    <fieldset class="slirn-sv-fs" style="margin-top:10px;">
-      <legend>🎞️ 6 素材卡</legend>
-      <div class="slirn-sv-mat-grid">{"".join(mat_rows)}</div>
-    </fieldset>
-
-    <fieldset class="slirn-sv-fs" style="margin-top:10px;">
-      <legend>🅰️ 字体（11 项）</legend>
-      <div class="slirn-sv-font-grid">{"".join(font_rows)}</div>
-    </fieldset>
-
-    <fieldset class="slirn-sv-fs" style="margin-top:10px;">
-      <legend>📐 布局（4 区域）</legend>
-      <div class="slirn-sv-card-actions" style="margin-bottom:6px;">
-        <button class="slirn-btn-mini" data-action="sv-stage7-detect-bg">🔍 检测区域</button>
-        <button class="slirn-btn-mini" data-action="sv-stage7-apply-detected">✅ 填充到视频位置和裁剪</button>
-        <button class="slirn-btn-mini" data-action="sv-stage7-parse-layout">🤖 AI 智能识别布局</button>
-      </div>
-      {detected_info}
-      <div class="slirn-sv-muted">video: {esc(str(layout.get("video") or {}))}</div>
-      <div class="slirn-sv-muted">subtitle: {esc(str(layout.get("subtitle") or {}))}</div>
-    </fieldset>
-
-    <fieldset class="slirn-sv-fs" style="margin-top:10px;">
-      <legend>📺 输出</legend>
-      <label>分辨率</label>
-      <select class="slirn-sv-output-resolution" style="margin:0 6px; padding:3px 6px;">
-        <option value="720p" {"selected" if res == "720p" else ""}>720p</option>
-        <option value="1080p" {"selected" if res == "1080p" else ""}>1080p</option>
-        <option value="source" {"selected" if res == "source" else ""}>源分辨率</option>
-      </select>
-    </fieldset>
-
-    <fieldset class="slirn-sv-fs" style="margin-top:10px;">
-      <legend>🎵 BGM</legend>
-      <label><input type="checkbox" class="slirn-sv-audio-enabled" {audio_enabled}> 启用 BGM</label>
-      <span style="margin-left:12px;">音量 dB:</span>
-      <input type="number" class="slirn-sv-audio-volume" value="{int(audio.get("volume_db") or -6)}" style="width:60px; padding:3px 6px;">
-      <span style="margin-left:12px;">淡入 ms:</span>
-      <input type="number" class="slirn-sv-audio-fadein" value="{int(audio.get("fade_in_ms") or 500)}" style="width:60px; padding:3px 6px;">
-      <button class="slirn-btn-mini" data-action="sv-stage7-list-bgm" style="margin-left:12px;">🎵 选 BGM</button>
-      <span class="slirn-sv-muted" style="margin-left:6px;">当前：{esc(str(audio.get("bgm_path") or "未选"))}</span>
-    </fieldset>
-
-    <fieldset class="slirn-sv-fs" style="margin-top:10px;">
-      <legend>🎬 预览 + 异步导出</legend>
-      <span>预览时长</span>
-      <input type="number" class="slirn-sv-preview-duration" min="2" max="30" value="{preview_dur}" style="width:50px; padding:3px 6px;">
-      <span class="slirn-sv-muted">秒（2-30）</span>
-      <button class="slirn-btn-mini" data-action="sv-stage7-save-params" style="margin-left:12px;">💾 保存参数</button>
-      <button class="slirn-btn slirn-btn-primary" data-action="sv-stage7-export" style="margin-left:12px;">💾 导出最终视频</button>
-    </fieldset>
-
-    <fieldset class="slirn-sv-fs" style="margin-top:10px;">
-      <legend>📚 全局模板（短视频独立）</legend>
-      <div class="slirn-sv-card-actions">
-        <button class="slirn-btn-mini" data-action="sv-stage7-profiles-list">📋 列表</button>
-        <input type="text" class="slirn-sv-profile-name" placeholder="模板名" style="margin:0 6px; padding:3px 6px;">
-        <button class="slirn-btn-mini" data-action="sv-stage7-profiles-save">💾 保存当前为模板</button>
-        <button class="slirn-btn-mini" data-action="sv-stage7-profiles-apply">📥 应用到当前</button>
-        <button class="slirn-btn-mini" data-action="sv-stage7-profiles-rename">✏️ 重命名</button>
-        <button class="slirn-btn-mini" data-action="sv-stage7-profiles-export">📤 导出 JSON</button>
-        <button class="slirn-btn-mini" data-action="sv-stage7-profiles-delete">🗑️ 删除</button>
-        <select class="slirn-sv-profile-select" style="margin:0 6px; padding:3px 6px;"></select>
-      </div>
-    </fieldset>
-
-    <div class="slirn-stage6-list">{"".join(rows) or '<div class="slirn-sv-muted">先完成 Stage 5/6 才有产物</div>'}</div>
+    <div class="slirn-form-hint">每条 highlight 各自一份完整卡（仿长视频「精剪合成」11 block 布局）。</div>
+    <div class="slirn-stage6-list">{"".join(cards)}</div>
     {_stage_logs(s6)}
   </div>
 </div>'''
