@@ -6082,6 +6082,9 @@ input[type="checkbox"]:focus-visible {
   flex-direction: column;
   gap: 6px;
 }
+.slirn-stage4-clip:only-child,
+.slirn-stage5-clip:only-child,
+.slirn-stage6-clip:only-child { grid-column: 1 / -1; }   /* REQ-20261013-107 v3：单 highlight 时卡片撑满 1fr 横向，避免 3 列均分 367px */
 .slirn-stage4-clip-head,
 .slirn-stage5-clip-head,
 .slirn-stage6-clip-head {
