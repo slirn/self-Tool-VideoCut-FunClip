@@ -605,39 +605,6 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
         '<div class="slirn-sv-muted">解析后将列出各条短视频</div>'
     )
 
-    # 修订六：短视频生成卡 —— 每条（组）按其字幕行时间戳截取拼接成独立 mp4
-    splice = project.get("pipeline", {}).get("stage3_splice") or {}
-    can_splice = bool(hl_rows) and bool(source_url)
-    splice_btn = (
-        f'<button class="slirn-btn slirn-btn-primary" data-action="sv-stage3-splice" '
-        f'title="按各条短视频当前字幕行的时间戳，从源视频逐行截取并拼接成独立视频">'
-        f'✂️ 截取拼接（生成 {len(hl_rows)} 条）</button>'
-        if can_splice else
-        '<button class="slirn-btn slirn-btn-primary" data-action="sv-stage3-splice" disabled '
-        'title="需先在 Stage 1 选源视频并完成 Stage 3 解析">✂️ 截取拼接</button>'
-    )
-    clip_items = []
-    for c in splice.get("clips") or []:
-        clip_items.append(
-            f'<div class="slirn-stage3-clip-item">'
-            f'<span class="slirn-sv-row-no">#{int(c.get("index") or 0)}</span>'
-            f'<span class="slirn-stage3-clip-title">{esc(str(c.get("title") or ""))}</span>'
-            f'<span class="slirn-sv-muted">{_duration_str(float(c.get("total_sec") or 0))}</span>'
-            f'<button class="slirn-btn-mini slirn-btn-mini-primary" data-action="sv-preview" '
-            f'data-url="{_file_url(task_id, project_id, "stage3", str(c.get("mp4") or ""))}" '
-            f'data-name="短视频 #{c.get("index")} {c.get("title") or ""}">🎬 播放</button>'
-            f'<button class="slirn-btn-mini" data-action="sv-preview-srt" '
-            f'data-url="{_file_url(task_id, project_id, "stage3", str(c.get("srt") or ""))}">📖 字幕</button>'
-            f'</div>'
-        )
-    splice_result = (
-        f'<div class="slirn-stage3-clip-list">{"".join(clip_items)}</div>'
-        if clip_items else ""
-    )
-    splice_note = ""
-    if splice.get("status") == "failed" and splice.get("error"):
-        splice_note = f'<div class="slirn-stage-error">{esc(splice["error"])}</div>'
-
     # REQ-20261013-111：Stage 3 解析进度卡（仿 stage5/7 status-card 结构）
     stage3_status_card = (
         f'<div class="slirn-rc-status-card" id="slirn-sv-stage3-status" '
@@ -649,18 +616,6 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
         f'</div>'
         f'<div class="slirn-status-msg slirn-sv-stage3-msg" style="display:none;"></div>'
         f'</div>'
-    )
-
-    splice_card = (
-        '<div class="slirn-stage3-splice-card">'
-        f'<div class="slirn-stage3-splice-head"><strong>🎞 短视频截取拼接</strong>'
-        f'{_stage_badge(splice.get("status"))}</div>'
-        f'<div class="slirn-sv-muted">每组（一条短视频）按当前字幕行的时间戳从源视频'
-        f'逐行截取并拼接为独立视频（行序即拼接顺序）</div>'
-        f'<div class="slirn-stage3-splice-actions">{splice_btn}</div>'
-        f'{splice_result}'
-        f'{splice_note}'
-        '</div>'
     )
 
     prompt_badge = ""
@@ -717,7 +672,6 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
     </div>
     {stage3_status_card}
     <div class="slirn-stage3-hl-list">{hl_list}</div>
-    {splice_card}
     {error_html}
     {_stage_logs(s3)}
   </div>

@@ -1890,10 +1890,18 @@
     var cleared = false;
     var segIdx = 0;
     var manual = false;   // 用户自己拖进度条 → 停止自动逐段推进
+    // REQ-20261013-113：标记「下一次 seeking 是我自己发起的自动跳转」——
+    // 旧版用「t 跳出现段」启发式判定手动，越界就把 manual 置 true，导致
+    // 行序重排后 segs 顺序≠时间序时第一段就 false-trigger，之后再也不跳段。
+    // 现在：自动跳转前先把 expectedSeek=true；seeking 触发时若为 true，
+    // 说明是我们自己跳的，吞掉这次事件；只有 user 真的拖进度条才会置 manual。
+    var expectedSeek = false;
     function onSeeking() {
-      if (cleared || segIdx >= (segs ? segs.length : 0)) return;
+      if (cleared) return;
+      if (expectedSeek) { expectedSeek = false; return; }
+      if (!segs) return;
+      if (segIdx >= segs.length) return;
       var t = v.currentTime;
-      // 当前段的自动 seek 会先触发 seeking —— 只把「跳出现段」的视作手动
       var cur = segs[segIdx];
       if (t < cur[0] - 0.05 || t > cur[1] + 0.05) manual = true;
     }
@@ -1908,7 +1916,8 @@
             v.removeEventListener('timeupdate', onTime);
             v.removeEventListener('seeking', onSeeking);
           } else {
-            try { v.currentTime = segs[segIdx][0]; } catch (e) { /* ignore */ }
+            expectedSeek = true;
+            try { v.currentTime = segs[segIdx][0]; } catch (e) { expectedSeek = false; /* ignore */ }
           }
         }
       } else if (v.currentTime >= endSecFallback()) {
@@ -1921,10 +1930,11 @@
       return Math.max(startMs / 1000 + 0.05, endMs / 1000);
     }
     function onLoaded() {
+      expectedSeek = true;
       try {
         v.currentTime = startSec;
         v.play().catch(function(){});
-      } catch (e) { /* seek 偶发 NotSupported 忽略 */ }
+      } catch (e) { expectedSeek = false; /* seek 偶发 NotSupported 忽略 */ }
       v.addEventListener('timeupdate', onTime);
       if (segs) v.addEventListener('seeking', onSeeking);
     }
@@ -2054,19 +2064,6 @@
     });
   }
 
-  function stage3Splice() {
-    var ctx = innerCtx(); if (!ctx) return;
-    toast('截取拼接中…（每条短视频按其字幕行时间戳独立切片拼接）');
-    postJSON(API + '/short_video_stage3_splice', {
-      task_id: ctx.taskId, project_id: ctx.projectId
-    }).then(function(r) {
-      if (r && r.ok) {
-        toast(r.toast || '拼接完成');
-        openProject(ctx.taskId, ctx.projectId);
-      } else toast((r && r.error) || '拼接失败', 'error');
-    });
-  }
-
   // 修订八：删除一条短视频 —— 必须先弹确认框，用户确认后才真正删除
   function stage3RemoveHl(btn) {
     var ctx = innerCtx(); if (!ctx) return;
@@ -2171,7 +2168,6 @@
     if (action === 'sv-stage2-run') return stage2Run();
     if (action === 'sv-stage2-preview-srt') return previewStage2Srt(btn);
     if (action === 'sv-stage3-run') return stage3Run(btn);
-    if (action === 'sv-stage3-splice') return stage3Splice();
     if (action === 'sv-stage3-restore-order') return stage3RestoreOrder(btn);
     if (action === 'sv-stage3-preview') return stage3PreviewHl(btn);
     if (action === 'sv-stage4-optimize-run') return stage4OptimizeRun(btn);

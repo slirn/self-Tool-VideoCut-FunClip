@@ -5641,6 +5641,13 @@ input[type="checkbox"]:focus-visible {
   white-space: pre-wrap;
   word-break: break-all;
 }
+/* REQ-20261013-112：log body 内所有后代（div.row 等）也强制深字 —— 旧版
+   `color !important` 只在 body 直接命中，row 还是 .prose * 赢。复测：用
+   `* { color !important }` 把每个后代都覆盖一次。 */
+.slirn-stage-log-body,
+.slirn-stage-log-body * {
+  color: #f1f5f9 !important;
+}
 .slirn-stage-log-row + .slirn-stage-log-row {
   border-top: 1px solid rgba(148, 163, 184, 0.25);
 }
@@ -5675,6 +5682,11 @@ input[type="checkbox"]:focus-visible {
   color: #0f172a;  /* REQ-20261013-110：白底显式深字，防御 .prose * 通配 */
   border: 1px solid #e2e8f0;
   border-radius: 6px;
+}
+/* REQ-20261013-112：detail body 内所有后代也强制深字（白底 + 任何子元素） */
+.slirn-stage4-detail-body,
+.slirn-stage4-detail-body * {
+  color: #0f172a !important;
 }
 .slirn-stage4-detail-body .slirn-stage4-opt-warns { margin: 8px 0 0; }
 
@@ -5806,52 +5818,7 @@ input[type="checkbox"]:focus-visible {
   border-top: 2px solid #38bdf8;
 }
 
-/* REQ-20261012-099 修订六：分组短视频（每组一条）+ 截取拼接卡 + OCR 提示 */
-.slirn-stage3-splice-card {
-  margin-top: 12px;
-  padding: 12px;
-  border: 1px solid rgba(148, 163, 184, 0.25);
-  border-radius: 10px;
-  background: rgba(148, 163, 184, 0.06);
-}
-.slirn-stage3-splice-head {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  margin-bottom: 6px;
-}
-.slirn-stage3-splice-actions {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  flex-wrap: wrap;
-  margin-top: 8px;
-}
-.slirn-stage3-clip-list {
-  margin-top: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.slirn-stage3-clip-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  background: #fff;
-  border: 1px solid #e2e8f0;
-  border-radius: 6px;
-}
-.slirn-stage3-clip-title {
-  flex: 1 1 auto;
-  min-width: 0;
-  font-size: 13px;
-  font-weight: 500;
-  color: #0f172a;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+/* REQ-20261012-099 修订六：分组短视频（每组一条）+ OCR 提示 */
 .slirn-stage3-ocr-note {
   display: flex;
   align-items: center;

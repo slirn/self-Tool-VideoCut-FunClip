@@ -277,20 +277,7 @@ def test_run_stage3_json_fallback_annotates(tmp_path):
     assert sls[0]["end_ms"] == 2000
 
 
-def test_run_stage3_resets_splice_state(tmp_path):
-    """重跑解析 → splice 状态重置（修订五 splice_order 已不存在）。"""
-    tid, pid = _make_project(tmp_path)
-    assert _run_stage3_groups(tmp_path, tid, pid)["status"] == "done"
-    proj = svc.load_project(tmp_path, tid, pid)
-    sp = svc.get_stage_state(proj, "stage3_splice")
-    sp["status"] = "done"
-    svc.set_stage_state(proj, "stage3_splice", sp)
-    svc.save_project(tmp_path, proj)
-
-    state = _run_stage3_groups(tmp_path, tid, pid)
-    assert state["status"] == "done"
-    proj = svc.load_project(tmp_path, tid, pid)
-    assert svc.get_stage_state(proj, "stage3_splice").get("status") == "pending"
+# REQ-20261013-112：截取拼接功能已移除，splice 状态及对应测试一并删除
 
 
 # ---------- OCR：截图先提文字再拼参考方向 ----------
@@ -407,12 +394,7 @@ def test_restore_hl_order(tmp_path):
     assert _run_stage3_groups(tmp_path, tid, pid)["status"] == "done"
     _swap_group1_lines(tmp_path, tid, pid)
 
-    # 还原前 splice 标 done，验证还原会作废下游
-    proj = svc.load_project(tmp_path, tid, pid)
-    sp = svc.get_stage_state(proj, "stage3_splice")
-    sp["status"] = "done"
-    svc.set_stage_state(proj, "stage3_splice", sp)
-    svc.save_project(tmp_path, proj)
+    # REQ-20261013-112：截取拼接已移除；下游 stage4/5/6/7 仍按 reset_downstream_stages 作废
 
     hl = sva.restore_hl_order(tmp_path, tid, pid, 1)
     nos = [sl["no"] for sl in hl["subtitle_lines"]]
@@ -423,9 +405,9 @@ def test_restore_hl_order(tmp_path):
     g1 = next(h for h in doc["highlights"] if h["index"] == 1)
     assert [sl["no"] for sl in g1["subtitle_lines"]] == [1, 2]
     assert [sl["src_index"] for sl in g1["subtitle_lines"]] == [3, 1]  # 内容对得上
-    # 下游/拼接作废
+    # 下游（拼接已移除，验证 stage4 起被重置为 pending）
     proj = svc.load_project(tmp_path, tid, pid)
-    assert svc.get_stage_state(proj, "stage3_splice").get("status") == "pending"
+    assert svc.get_stage_state(proj, "stage4_optimize").get("status") == "pending"
 
     # 不存在的组 → 报错
     try:
@@ -435,99 +417,10 @@ def test_restore_hl_order(tmp_path):
         pass
 
 
-# ---------- 截取拼接（逐组独立 mp4 + 重定位 SRT） ----------
-
-def test_run_stage3_splice_per_group(tmp_path, monkeypatch):
-    tid, pid = _make_project(tmp_path)
-    _select_first_source(tmp_path, tid, pid)
-    assert _run_stage3_groups(tmp_path, tid, pid)["status"] == "done"
-    # 用户拖拽：组 1 行序倒过来（no 随行移动）
-    _swap_group1_lines(tmp_path, tid, pid)
-    # 旧产物残留（修订五 splice.* + 上一轮不同组数的 clip_3）
-    stage_dir = svc.stage3_dir(tmp_path, tid, pid)
-    stage_dir.mkdir(parents=True, exist_ok=True)
-    (stage_dir / "splice.mp4").write_bytes(b"old")
-    (stage_dir / "clip_3.mp4").write_bytes(b"old")
-
-    captured: dict[str, list] = {"calls": []}
-
-    def fake_render(source_video, seg_list, out_mp4):
-        captured["calls"].append({
-            "src": Path(source_video).name,
-            "segs": [(round(s, 3), round(e, 3)) for s, e in seg_list],
-            "out": Path(out_mp4).name,
-        })
-        out_mp4.write_bytes(b"fake-clip-mp4" * 200)
-
-    monkeypatch.setattr(coarse, "_render_splice_video", fake_render)
-    state = coarse.run_stage3_splice(tmp_path, tid, pid)
-
-    assert state["status"] == "done", state
-    assert state["count"] == 2
-    # 每组独立 mp4：切割窗按该组**当前行序**（组 1 已被拖拽倒序）
-    by_out = {c["out"]: c for c in captured["calls"]}
-    assert set(by_out) == {"clip_1.mp4", "clip_2.mp4"}
-    assert all(c["src"] == "src.mp4" for c in captured["calls"])
-    # 组 1：no2(src1, 1-2s) 在前 + no1(src3, 8-9s) 在后；end_ost 默认 +100ms
-    assert by_out["clip_1.mp4"]["segs"] == [(1.0, 2.1), (8.0, 9.1)]
-    # 组 2：行序未动（5-6s、10.5-11s）
-    assert by_out["clip_2.mp4"]["segs"] == [(5.0, 6.1), (10.5, 11.1)]
-    # 旧产物清理
-    assert not (stage_dir / "splice.mp4").exists()
-    assert not (stage_dir / "clip_3.mp4").exists()
-    # clips 元数据（标题 + 时长 + 文件名）
-    clips = {c["index"]: c for c in state["clips"]}
-    assert clips[1]["title"] == "主题B"
-    assert clips[2]["title"] == "主题A"
-    assert clips[1]["mp4"] == "clip_1.mp4" and clips[1]["srt"] == "clip_1.srt"
-    assert state["total_sec"] == round(sum(c["total_sec"] for c in state["clips"]), 1)
-
-    # 组 1 SRT：重编号 + 时间轴重定位到拼接后连续时间轴
-    srt1 = (stage_dir / "clip_1.srt").read_text(encoding="utf-8")
-    blocks = [b for b in srt1.split("\n\n") if b.strip()]
-    assert len(blocks) == 2
-    b1, b2 = blocks[0].splitlines(), blocks[1].splitlines()
-    assert b1[0] == "1" and b1[1].startswith("00:00:00,000 -->")
-    assert b1[2] == "第一句"            # 拖拽后 src1 在前
-    assert b2[0] == "2"
-    assert b2[1] == "00:00:01,100 --> 00:00:02,200"  # 1.1s + 1.1s 累加
-    assert b2[2] == "第三句"
-
-
-def test_run_stage3_splice_errors(tmp_path):
-    tid, pid = _make_project(tmp_path)
-    # 未选源视频
-    try:
-        coarse.run_stage3_splice(tmp_path, tid, pid)
-        raise AssertionError("未选源应抛错")
-    except svc.ShortVideoError:
-        pass
-    # 无 highlights
-    _select_first_source(tmp_path, tid, pid)
-    try:
-        coarse.run_stage3_splice(tmp_path, tid, pid)
-        raise AssertionError("未解析应抛错")
-    except svc.ShortVideoError:
-        pass
-
-
-def test_run_stage3_splice_renderer_failure(tmp_path, monkeypatch):
-    tid, pid = _make_project(tmp_path)
-    _select_first_source(tmp_path, tid, pid)
-    assert _run_stage3_groups(tmp_path, tid, pid)["status"] == "done"
-
-    def boom(source_video, seg_list, out_mp4):
-        raise RuntimeError("moviepy 崩了")
-
-    monkeypatch.setattr(coarse, "_render_splice_video", boom)
-    state = coarse.run_stage3_splice(tmp_path, tid, pid)
-    assert state["status"] == "failed"
-    assert "moviepy 崩了" in str(state.get("error"))
-
 
 # ---------- API 端点 ----------
 
-def test_api_restore_and_splice_endpoints(tmp_path, monkeypatch):
+def test_api_restore_endpoint(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
 
     from slirn_home.app import build_app
@@ -536,10 +429,6 @@ def test_api_restore_and_splice_endpoints(tmp_path, monkeypatch):
     _select_first_source(tmp_path, tid, pid)
     monkeypatch.setattr(
         revision_service, "_call_llm", lambda s, u, **kw: _LLM_GROUPS_TEXT,
-    )
-    monkeypatch.setattr(
-        coarse, "_render_splice_video",
-        lambda sv, segs, out: out.write_bytes(b"x" * 2048),
     )
     client = TestClient(build_app(tmp_path).app)
 
@@ -564,13 +453,11 @@ def test_api_restore_and_splice_endpoints(tmp_path, monkeypatch):
     })
     assert resp.status_code == 404
 
-    # 拼接（renderer 已 mock）→ 每组一条
-    r = client.post("/slirn/api/short_video_stage3_splice", json={
+    # REQ-20261013-112：截取拼接端点已移除
+    resp = client.post("/slirn/api/short_video_stage3_splice", json={
         "task_id": tid, "project_id": pid,
-    }).json()
-    assert r["ok"] is True, r
-    assert r["stage3_splice"]["count"] == 2
-    assert "2 条短视频" in r["toast"]
+    })
+    assert resp.status_code == 404
 
 
 # ---------- UI 渲染（走 short_video_get —— highlights 由端点层注入 state） ----------
@@ -602,13 +489,13 @@ def test_stage3_ui_line_no_timestamps_and_restore(tmp_path):
     # 修订五行拖拽把柄 / 拼接顺序展示已移除
     assert "slirn-stage3-hl-dragseg" not in html
     assert "拼接顺序：" not in html
-    # 拼接卡（已选源 + 已解析 → 可点）
-    assert "短视频截取拼接" in html
-    assert 'data-action="sv-stage3-splice"' in html
-    assert 'data-action="sv-stage3-splice" disabled' not in html
+    # REQ-20261013-112：截取拼接卡已移除
+    assert "短视频截取拼接" not in html
+    assert 'data-action="sv-stage3-splice"' not in html
 
 
-def test_stage3_ui_ocr_note_and_clip_list(tmp_path, monkeypatch):
+def test_stage3_ui_ocr_note(tmp_path, monkeypatch):
+    """OCR 提示 + 查看提取文字入口（截取拼接功能已移除，clip_list 断言一并删除）。"""
     from fastapi.testclient import TestClient
 
     from slirn_home.app import build_app
@@ -618,10 +505,6 @@ def test_stage3_ui_ocr_note_and_clip_list(tmp_path, monkeypatch):
     img = tmp_path / "shot.png"
     img.write_bytes(b"\x89PNG-fake")
     svc.save_stage3_image(tmp_path, tid, pid, img)
-    monkeypatch.setattr(
-        coarse, "_render_splice_video",
-        lambda sv, segs, out: out.write_bytes(b"x" * 2048),
-    )
     # 直接跑 run_stage3（显式 vision entry；API 端点用 get_current_entry，
     # 本机真实配置可能是非 vision 模型，端点路径的 vision 校验另有单测）
     orig_llm = revision_service._call_llm
@@ -642,35 +525,15 @@ def test_stage3_ui_ocr_note_and_clip_list(tmp_path, monkeypatch):
         assert "截图文字已提取" in html
         assert "ocr_text.txt" in html
 
-        # 拼接 → clips 列表
-        r = client.post("/slirn/api/short_video_stage3_splice", json={
-            "task_id": tid, "project_id": pid,
-        }).json()
-        assert r["ok"] is True, r
-        html = client.post("/slirn/api/short_video_get", json={
-            "task_id": tid, "project_id": pid,
-        }).json()["html"]
-        assert html.count("slirn-stage3-clip-item") == 2
-        assert "clip_1.mp4" in html and "clip_1.srt" in html
+        # REQ-20261013-112：截取拼接已移除 → 无 clip_*.mp4 / clip_*.srt 入口
+        assert "slirn-stage3-clip-item" not in html
+        assert "clip_1.mp4" not in html
+        # 解析产物（标题）仍正常展示
         assert "主题B" in html and "主题A" in html
     finally:
         revision_service._call_llm = orig_llm
         revision_service._call_llm_vision = orig_vis
 
-
-def test_stage3_ui_splice_card_before_parse(tmp_path):
-    """未解析 → 拼接按钮禁用 + 空列表（不报错）。"""
-    from fastapi.testclient import TestClient
-
-    from slirn_home.app import build_app
-
-    tid, pid = _make_project(tmp_path)
-    client = TestClient(build_app(tmp_path).app)
-    html = client.post("/slirn/api/short_video_get", json={
-        "task_id": tid, "project_id": pid,
-    }).json()["html"]
-    assert "短视频截取拼接" in html
-    assert 'data-action="sv-stage3-splice" disabled' in html
 
 
 # ---------- 修订七：只显示一组 bug（state 镜像 ≠ doc） ----------
@@ -805,9 +668,9 @@ def test_llm_groups_js_wiring():
     assert "function stage3RestoreOrder(btn)" in js
     assert "short_video_stage3_restore_order" in js
     assert "action === 'sv-stage3-restore-order'" in js
-    # 拼接动作 + 分发
-    assert "function stage3Splice()" in js
-    assert "action === 'sv-stage3-splice'" in js
+    # REQ-20261013-112：截取拼接动作 + 分发已移除
+    assert "function stage3Splice()" not in js
+    assert "action === 'sv-stage3-splice'" not in js
     # 修订五行拖拽已移除
     assert ".slirn-stage3-hl-dragseg" not in js
     assert "short_video_stage3_reorder_highlights" not in js
@@ -818,6 +681,76 @@ def test_llm_groups_js_wiring():
         capture_output=True, text=True, timeout=30,
     )
     assert r.returncode == 0, f"short_video.js 语法错误\nstderr={r.stderr[:1000]}"
+
+
+# ---------- REQ-20261013-112：截取拼接全栈移除回归 ----------
+
+def test_splice_feature_fully_removed():
+    """JS / CSS / Python 三层 splice 痕迹全清。"""
+    js = (FUNCLIP_ROOT / "slirn_home" / "static" / "short_video.js").read_text(encoding="utf-8")
+    css = (FUNCLIP_ROOT / "slirn_home" / "static" / "home.css").read_text(encoding="utf-8")
+
+    # JS：handler + 派发 + 端点全删
+    assert "function stage3Splice" not in js
+    assert "stage3Splice()" not in js
+    assert "sv-stage3-splice" not in js
+    assert "short_video_stage3_splice" not in js
+    # CSS：splice 卡片样式全删
+    assert ".slirn-stage3-splice-card" not in css
+    assert ".slirn-stage3-splice-head" not in css
+    assert ".slirn-stage3-splice-actions" not in css
+    assert ".slirn-stage3-clip-list" not in css
+    assert ".slirn-stage3-clip-item" not in css
+    assert ".slirn-stage3-clip-title" not in css
+
+
+def test_stage3_analyze_no_splice_card_in_html(tmp_path):
+    """_stage3_analyze 渲染不再含 splice 卡 / splice 按钮。"""
+    from fastapi.testclient import TestClient
+
+    from slirn_home.app import build_app
+
+    tid, pid = _make_project(tmp_path)
+    _select_first_source(tmp_path, tid, pid)
+    assert _run_stage3_groups(tmp_path, tid, pid)["status"] == "done"
+    client = TestClient(build_app(tmp_path).app)
+    html = client.post("/slirn/api/short_video_get", json={
+        "task_id": tid, "project_id": pid,
+    }).json()["html"]
+    assert "短视频截取拼接" not in html
+    assert "data-action=\"sv-stage3-splice\"" not in html
+
+
+def test_stage3_splice_endpoint_returns_404(tmp_path):
+    """移除的 splice 端点必须 404（防止误调残留代码）。"""
+    from fastapi.testclient import TestClient
+
+    from slirn_home.app import build_app
+
+    tid, pid = _make_project(tmp_path)
+    client = TestClient(build_app(tmp_path).app)
+    r = client.post("/slirn/api/short_video_stage3_splice", json={
+        "task_id": tid, "project_id": pid,
+    })
+    assert r.status_code == 404
+
+
+# ---------- REQ-20261013-113：预览片段逐段播放 —— 引擎修复 ----------
+
+def test_preview_segment_engine_skips_seeking_heuristic():
+    """JS 引擎用 expectedSeek 标志区分自动跳转 vs 用户拖动。"""
+    js = (FUNCLIP_ROOT / "slirn_home" / "static" / "short_video.js").read_text(encoding="utf-8")
+    # expectedSeek 标志在跳段前 + 初始 seek 前置 true
+    assert "var expectedSeek" in js
+    assert "expectedSeek = true" in js
+    # onSeeking 不再用「越界 = 手动」启发式（已替换为 expectedSeek 消费）
+    # 旧启发式残留检测：onSeeking 内不再有「t > cur[1] + 0.05」分支
+    seg_idx = js.find("function onSeeking")
+    if seg_idx >= 0:
+        onSeeking_body = js[seg_idx:js.find("function onTime", seg_idx)]
+        # onSeeking 只检查 expectedSeek + manual，越界启发式已删
+        assert "expectedSeek = false" in onSeeking_body
+        assert "cur[1] + 0.05" not in onSeeking_body or "expectedSeek" in onSeeking_body
 
 
 # ---------- 修订八：预览逐段播放 / 删除确认 / 重解析提示词重组 ----------
@@ -892,11 +825,7 @@ def test_remove_hl_flow(tmp_path):
     tid, pid = _make_project(tmp_path)
     _select_first_source(tmp_path, tid, pid)
     assert _run_stage3_groups(tmp_path, tid, pid)["status"] == "done"
-    proj = svc.load_project(tmp_path, tid, pid)
-    sp = svc.get_stage_state(proj, "stage3_splice")
-    sp["status"] = "done"
-    svc.set_stage_state(proj, "stage3_splice", sp)
-    svc.save_project(tmp_path, proj)
+    # REQ-20261013-112：截取拼接已移除，删除 hl 时不再需要预先标 splice=done
 
     client = TestClient(build_app(tmp_path).app)
     r = client.post("/slirn/api/short_video_stage3_remove_hl", json={
@@ -912,7 +841,6 @@ def test_remove_hl_flow(tmp_path):
     proj = svc.load_project(tmp_path, tid, pid)
     s3 = proj["pipeline"]["stage3_analyze"]
     assert s3["count"] == 1 and len(s3["highlights"]) == 1  # 镜像整表同步
-    assert svc.get_stage_state(proj, "stage3_splice").get("status") == "pending"
 
     r = client.post("/slirn/api/short_video_stage3_remove_hl", json={
         "task_id": tid, "project_id": pid, "hl_index": 9,
@@ -927,7 +855,8 @@ def test_remove_hl_flow(tmp_path):
         "task_id": tid, "project_id": pid,
     }).json()["html"]
     assert html.count('class="slirn-stage3-hl-row"') == 0
-    assert 'data-action="sv-stage3-splice" disabled' in html
+    # REQ-20261013-112：截取拼接已移除
+    assert 'data-action="sv-stage3-splice"' not in html
     # 修订九：删光后页签栏也不渲染（回「解析后将列出」空态）
     assert "slirn-stage3-hl-tabs" not in html
 

@@ -681,3 +681,31 @@ def test_stage3_stage4_dispatchers_pass_btn():
     assert "_slirnSvStage3Running" in js
     assert "_slirnSvStage4Running" in js
 
+
+# ---------- REQ-20261013-112：日志 body / 详情 body 颜色强覆盖 ----------
+
+def test_log_body_color_covers_all_descendants():
+    """日志 body 用 `*` 强制每个后代颜色（旧版只 body 直接命中，子元素被
+    .prose * 翻盘 → 用户连续反馈「文字看不到」）。"""
+    from pathlib import Path
+    css = (Path(__file__).parent.parent / "slirn_home" / "static" / "home.css").read_text(encoding="utf-8")
+    # log body：必须存在「body, body * { color: #f1f5f9 !important; }」类规则
+    import re
+    m = re.search(
+        r"\.slirn-stage-log-body,\s*\n\s*\.slirn-stage-log-body\s*\*\s*\{\s*color:\s*#f1f5f9\s*!important",
+        css,
+    )
+    assert m is not None, "日志 body 缺少 * 强制颜色规则（用户反馈「看不到文字」）"
+
+
+def test_stage4_detail_body_color_covers_all_descendants():
+    """详情 body 同样用 `*` 强制覆盖。"""
+    from pathlib import Path
+    css = (Path(__file__).parent.parent / "slirn_home" / "static" / "home.css").read_text(encoding="utf-8")
+    import re
+    m = re.search(
+        r"\.slirn-stage4-detail-body,\s*\n\s*\.slirn-stage4-detail-body\s*\*\s*\{\s*color:\s*#0f172a\s*!important",
+        css,
+    )
+    assert m is not None, "Stage 4 详情 body 缺少 * 强制颜色规则"
+

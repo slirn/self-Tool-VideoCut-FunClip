@@ -10486,32 +10486,6 @@ def _register_slirn_api(
             toast=f"#{hl_index} 已删除" + (f"，剩余 {left} 条" if left else "（已无剩余，可重新解析）"),
         )
 
-    @app.app.post("/slirn/api/short_video_stage3_splice")
-    async def short_video_stage3_splice(body: dict = Body(default_factory=dict)):
-        """REQ-20261012-099 修订六：逐组截取拼接 —— 每条短视频各自成片。
-
-        body: task_id / project_id。按 highlights.json 各组当前字幕行顺序
-        从源视频逐行截取并拼接 → stage3/clip_<N>.mp4 + clip_<N>.srt。
-        """
-        from slirn_home import short_video_coarse as _sv_coarse
-
-        tid = (body.get("task_id") or "").strip()
-        pid = (body.get("project_id") or "").strip()
-        if not tid or not pid:
-            return _err("缺少 task_id 或 project_id")
-        try:
-            state = _sv_coarse.run_stage3_splice(repo_root, tid, pid)
-        except Exception as e:  # noqa: BLE001
-            log.exception("stage3 splice failed")
-            return _err(f"拼接失败: {e}")
-        if state.get("status") != "done":
-            return _err(f"拼接失败: {state.get('error') or state.get('status')}")
-        return _ok(
-            stage3_splice=state,
-            toast=f"已生成 {state.get('count', '?')} 条短视频（合计 "
-                  f"{state.get('total_sec', 0)}s）",
-        )
-
     @app.app.post("/slirn/api/short_video_save_custom_prompt")
     async def short_video_save_custom_prompt(body: dict = Body(default_factory=dict)):
         """REQ-20261004-stage3-prompt-edit：保存用户对某个模板的修改提示词。

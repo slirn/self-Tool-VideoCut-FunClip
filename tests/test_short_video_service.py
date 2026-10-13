@@ -865,7 +865,7 @@ def _seed_optimize_project(tmp_path):
 
 def test_optimize_run_end_to_end(tmp_path):
     """run_stage4_optimize：fix/split/删除落地 + no 重编 + 首次备份 + 下游重置
-    （含 stage3_splice）+ Stage 3 state 镜像同步。"""
+    + Stage 3 state 镜像同步。"""
     import json as _json
     from slirn_home import revision_service
     from slirn_home import short_video_service as svcs
@@ -877,7 +877,7 @@ def test_optimize_run_end_to_end(tmp_path):
     tid, pid = _seed_optimize_project(tmp_path)
     # 下游先标 done，验证优化后全部重置
     proj = load_project(tmp_path, tid, pid)
-    for key in ("stage3_splice", "stage5_coarse", "stage6_refine", "stage7_finalize"):
+    for key in ("stage5_coarse", "stage6_refine", "stage7_finalize"):
         proj["pipeline"][key] = {"status": "done"}
     save_project(tmp_path, proj)
 
@@ -931,9 +931,9 @@ def test_optimize_run_end_to_end(tmp_path):
     backup_doc = _json.loads(backup.read_text(encoding="utf-8"))
     assert backup_doc["highlights"][0]["subtitle_lines"][0]["text"] == "大家好呀今天"
 
-    # 下游全部重置（含 Stage 3 拼接）
+    # 下游全部重置
     proj2 = load_project(tmp_path, tid, pid)
-    for key in ("stage3_splice", "stage5_coarse", "stage6_refine", "stage7_finalize"):
+    for key in ("stage5_coarse", "stage6_refine", "stage7_finalize"):
         assert proj2["pipeline"][key]["status"] == "pending", key
     # Stage 3 state 镜像同步（页签渲染读这份）
     s3 = svcs.get_stage_state(proj2, "stage3_analyze")
@@ -1101,7 +1101,7 @@ def test_reorder_subtitle_line_end_to_end(tmp_path):
     # 验证下游 stage 被重置
     proj2 = load_project(tmp_path, tid, pid)
     pl = proj2.get("pipeline", {})
-    for stage_key in ["stage3_splice", "stage4_optimize", "stage5_coarse",
+    for stage_key in ["stage4_optimize", "stage5_coarse",
                       "stage6_refine", "stage7_finalize"]:
         s = pl.get(stage_key, {})
         assert s.get("status") == "pending", f"{stage_key} 应被重置为 pending，实际 {s}"

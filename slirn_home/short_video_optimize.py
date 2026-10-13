@@ -284,11 +284,10 @@ def run_stage4_optimize(
     doc["optimized_at"] = svc.now_iso()
     hp.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    # 下游作废：粗剪及之后 + 拼接（行变了旧 clip 失效）
+    # 下游作废：粗剪及之后（行变了旧产物失效）
     svc.reset_downstream_stages(project, "stage4_optimize")
     pipeline = project.setdefault("pipeline", {})
-    if "stage3_splice" in pipeline:
-        pipeline["stage3_splice"] = {"status": "pending"}
+    pipeline.pop("stage3_splice", None)
 
     # done（含 state 镜像整表同步 — 与 rerun/restore 同一口径）
     state = svc.get_stage_state(project, "stage4_optimize")
