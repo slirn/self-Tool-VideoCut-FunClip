@@ -2031,6 +2031,10 @@
               parent.insertBefore(movedEl, el.nextSibling);
               showToast('字幕重排失败：' + (data.body && data.body.error || '未知错误'), 'error');
             } else {
+              // 同步刷新「↩️ 还原顺序」按钮状态：行序变了，禁用态可能已失效
+              // （per slirn-real-time-vs-persistent-state：拖拽改 server 状态后
+              // 必须就地同步 UI 状态，不能只靠下次 openProject 重渲染）
+              _refreshRestoreBtn(parseInt(ctx.hlIndex || '0', 10));
               showToast('字幕顺序已更新（下游 Stage 4-7 已重置）', 'ok');
             }
           })
@@ -2045,6 +2049,41 @@
   function initSubtitleSortAll() {
     // 给当前可见的所有 .slirn-stage3-hl-preview 容器绑定拖拽（幂等）
     document.querySelectorAll('.slirn-stage3-hl-preview').forEach(bindSubtitleSort);
+  }
+
+  // REQ-20261013-115：拖拽完成后，必须就地刷新「↩️ 还原顺序」按钮的禁用态。
+  // 否则用户看到行序已乱但按钮仍 disabled（被 server 旧渲染的 HTML 锁住），
+  // 体验上等同「按钮失灵」。计算口径与 short_video_ui.py:571 的
+  // is_original = nos == sorted(nos) 一致（读每个 .slirn-stage3-hl-no 节点的
+  // 文本号 = dict['no']）。
+  function _refreshRestoreBtn(hlIndex) {
+    if (!hlIndex) return;
+    var btn = document.querySelector(
+      '.slirn-stage3-hl-row[data-hl-index="' + hlIndex + '"] ' +
+      '[data-action="sv-stage3-restore-order"]'
+    );
+    if (!btn) return;
+    var rows = document.querySelectorAll(
+      '.slirn-stage3-hl-preview[data-hl-index="' + hlIndex + '"] ' +
+      '.slirn-stage3-hl-sub'
+    );
+    var nos = [];
+    rows.forEach(function(r) {
+      var noEl = r.querySelector('.slirn-stage3-hl-no');
+      if (!noEl) return;
+      var m = (noEl.textContent || '').match(/(\d+)/);
+      if (m) nos.push(parseInt(m[1], 10));
+    });
+    var isOriginal = nos.length > 0 && nos.every(function(n, i, arr) {
+      return i === 0 || n >= arr[i - 1];
+    });
+    if (isOriginal) {
+      btn.setAttribute('disabled', 'disabled');
+      btn.setAttribute('title', '当前已是大模型最初顺序');
+    } else {
+      btn.removeAttribute('disabled');
+      btn.setAttribute('title', '把该条短视频的字幕行还原为大模型最初给出的顺序（编号不变）');
+    }
   }
 
   // ---------- REQ-20261012-099 修订六：还原字幕顺序（回到大模型最初顺序） ----------

@@ -753,6 +753,44 @@ def test_preview_segment_engine_skips_seeking_heuristic():
         assert "cur[1] + 0.05" not in onSeeking_body or "expectedSeek" in onSeeking_body
 
 
+# ---------- REQ-20261013-115：拖拽后「↩️ 还原顺序」按钮就地刷新 ----------
+
+def test_drag_reorder_refreshes_restore_btn_inline():
+    """拖拽完成后，JS 必须就地调用 _refreshRestoreBtn(hlIndex) 同步按钮的
+    disabled 态。否则 server 旧渲染的 disabled HTML 一直锁住按钮，用户看到
+    行序已乱但按钮仍 disabled，等同「按钮失灵」。
+    """
+    js = (FUNCLIP_ROOT / "slirn_home" / "static" / "short_video.js").read_text(encoding="utf-8")
+    # 1. _refreshRestoreBtn 函数存在
+    assert "function _refreshRestoreBtn" in js
+    # 2. 拖拽成功的 then 分支里有 _refreshRestoreBtn 调用
+    drop_idx = js.find("'sv-stage3-restore-order'")
+    # 找到 bindSubtitleSort 内部的成功回调
+    success_idx = js.find("字幕顺序已更新（下游 Stage 4-7 已重置）")
+    assert success_idx > 0
+    success_body = js[success_idx: success_idx + 800]
+    assert "_refreshRestoreBtn" in success_body
+    # 3. 解析 row 编号的口径 = 读 .slirn-stage3-hl-no 节点文本
+    fn_idx = js.find("function _refreshRestoreBtn")
+    assert fn_idx > 0
+    fn_body = js[fn_idx: fn_idx + 1200]
+    assert "slirn-stage3-hl-no" in fn_body
+    # 4. 按升序判「已是原序」（与 server is_original = nos == sorted(nos) 一致）
+    assert "n >= arr[i - 1]" in fn_body
+    # 5. 失败回滚分支不能调 _refreshRestoreBtn（行序未变，按钮态也不该变）
+    # 抽取 success 与 fail 各自的函数体，按出现的 } else { 分界
+    fail_marker = "字幕重排失败：' + (data.body"
+    fail_idx = js.find(fail_marker)
+    assert fail_idx > 0
+    fail_body = js[fail_idx: fail_idx + 400]
+    # fail_body 末尾可能在 success_body 之后；只看 fail_body 自身前 200 字符
+    # 应只含 showToast（用于提示失败），不应含 _refreshRestoreBtn
+    fail_short = fail_body[:200]
+    assert "_refreshRestoreBtn" not in fail_short, (
+        "失败回滚分支不应调 _refreshRestoreBtn（行序未变，按钮态也不该变）"
+    )
+
+
 # ---------- 修订八：预览逐段播放 / 删除确认 / 重解析提示词重组 ----------
 
 def test_filter_ocr_for_title():
