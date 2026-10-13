@@ -221,6 +221,33 @@ def _stage_logs(state: dict) -> str:
     )
 
 
+# REQ-20261013-110：Stage 4 优化详情 + 警告的折叠面板。
+# 与 _stage_logs 同款 <details> shell，但 body 走浅色（不混入 dark monospace，
+# 因为 stats 行的 badge 在暗色底上会失真）。
+def _stage4_detail(detail_html: str, warn_html: str) -> str:
+    body = (detail_html or "") + (warn_html or "")
+    if not body.strip():
+        return ""
+    return (
+        f'<details class="slirn-stage4-detail">'
+        f'<summary>📊 优化详情与警告</summary>'
+        f'<div class="slirn-stage4-detail-body">{body}</div>'
+        f'</details>'
+    )
+
+
+# REQ-20261013-110：毫秒 → SRT 格式 00:00:00,000（项目惯例 2 位小时）。
+# 与 slirn_home.short_video_coarse._fmt_srt_time / compose_service._ms_to_srt_time 同款。
+# 负数 / None 钳到 0（防御性）。
+def _fmt_srt_time(ms: int | float | None) -> str:
+    ms_i = max(0, int(ms or 0))
+    h, rem = divmod(ms_i, 3600 * 1000)
+    m, rem = divmod(rem, 60 * 1000)
+    s, msec = divmod(rem, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{msec:03d}"
+
+
+
 def _material_options(materials: list[dict], kind: str, selected: str = "",
                        empty_label: str = "（无可用素材）") -> str:
     rows = []
@@ -700,13 +727,23 @@ def _render_stage4_sub_row(hl_index: int, sl: dict, per_hl: dict) -> str:
         badge = '<span class="slirn-sv-badge slirn-sv-badge-failed">🗑 已删</span>'
     elif is_split:
         badge = f'<span class="slirn-sv-badge slirn-sv-badge-warning">✂ 已切 {len(splits)} 段</span>'
+    # REQ-20261013-110：4 字段 — 井N / @SRT#K / 时间段 / 文字
+    new_no = int(sl.get("no") or 0)
+    raw_src = int(sl.get("src_index") or 0)
+    split_from = sl.get("split_from")
+    # split 子行优先显示父 src_index（更易对应回原 SRT）
+    display_src = int(split_from) if split_from is not None else raw_src
+    start_ms = int(sl.get("start_ms") or 0)
+    end_ms = int(sl.get("end_ms") or start_ms)
+    time_range = f"{_fmt_srt_time(start_ms)} → {_fmt_srt_time(end_ms)}"
     return (
         f'<div class="{cls}" data-seg-id="{esc(sid)}" data-hl-index="{hl_index}" '
-        f'data-start-ms="{int(sl.get("start_ms") or 0)}" '
-        f'data-end-ms="{int(sl.get("end_ms") or 0)}" '
+        f'data-start-ms="{start_ms}" data-end-ms="{end_ms}" '
         f'data-orig-text="{esc(text)}" data-eff-text="{esc(text)}" '
         f'data-deleted="{1 if is_marked else 0}">'
-        f'<span class="slirn-sv-muted">#{int(sl.get("no") or 0)}</span>'
+        f'<span class="slirn-stage4-sub-no" title="本段在 effective 顺序里的位置（编辑后重编）">#{new_no}</span>'
+        f'<span class="slirn-stage4-sub-srt" title="原始 SRT 行号（编辑/重排前固定）">@SRT#{display_src}</span>'
+        f'<span class="slirn-stage4-sub-time" title="本段时间戳（来自原 SRT）">{time_range}</span>'
         f'<span class="slirn-stage4-sub-text">{esc(text)}</span>'
         f'<span class="slirn-stage4-sub-actions">'
         f'{badge}'
@@ -909,9 +946,8 @@ def _stage4_optimize(project: dict, *, task_id: str = "", project_id: str = "",
       <button class="slirn-btn slirn-btn-primary" data-action="sv-stage4-go-coarse-all"{disabled_attr}
         title="切换到 Stage 5 并触发全量粗剪（7 条）">🎬 生成初剪文件（全部 {len(hl_list) or 0} 条）</button>
     </div>
-    <div class="slirn-stage4-opt-detail">{detail_html}</div>
-    {warn_html}
     {error_html}
+    {_stage4_detail(detail_html, warn_html)}
     {_stage_logs(s4o)}
 
     <div class="slirn-stage4-section-title">逐条编辑（手动覆盖：仅本项目，不回写 Stage 3）</div>

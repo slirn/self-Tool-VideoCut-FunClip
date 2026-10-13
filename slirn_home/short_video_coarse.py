@@ -75,11 +75,14 @@ def start_coarse_async(
     *,
     start_ost_ms: int = 0,
     end_ost_ms: int = 100,
+    hl_index: int | None = None,
 ) -> bool:
     """启动异步粗剪线程。已在跑 → False。
 
     仿 ``compose_service.start_compose`` 模式：daemon 线程跑 run_stage4，
     通过 progress_cb 回调更新 _JOBS[(tid, pid)] 进度。
+
+    REQ-20261013-108：hl_index 可选 — 透传给 run_stage4 做单 highlight 粗剪。
     """
     key = _job_key(task_id, project_id)
     with _JOBS_LOCK:
@@ -127,7 +130,8 @@ def start_coarse_async(
         try:
             run_stage4(repo_root, task_id, project_id,
                        start_ost_ms=start_ost_ms, end_ost_ms=end_ost_ms,
-                       progress_cb=_cb)
+                       progress_cb=_cb,
+                       hl_index=hl_index)
             # run_stage4 内部已通过 _cb 把 state 推到 done/failed；这里取最终
             final = _JOBS.get(key, {})
             ok = final.get("state") == "done"
@@ -314,6 +318,7 @@ def run_stage4(
     start_ost_ms: int = 0,
     end_ost_ms: int = 100,
     progress_cb=None,
+    hl_index: int | None = None,
 ) -> dict:
     """Stage 5: 读 highlights.json + 源视频 → ``stage4/coarse_NN.{mp4,srt}``。
 
@@ -324,7 +329,10 @@ def run_stage4(
     - ``stage4_clip_failed``: {"index": idx, "error": ...}
     - ``stage4_done`` / ``stage4_failed``: {"count": N}
 
-    返回最新 pipeline.stage5_coarse 状态。
+    REQ-20261013-108：增加 ``hl_index`` 可选参数 — 仅跑一条 highlight
+    （Stage 4 预览跳转时使用）。``None`` / 0 = 全量（默认，保持向后兼容）；
+    int = 只处理 index == hl_index 的那一条，其他 highlight 的 coarse_NN.mp4
+    文件**不会被删**（与全量跑行为一致 — 不动既有产物）。
     """
     """Stage 4: 读 highlights.json + 源视频 → ``stage4/coarse_NN.{mp4,srt}``。
 
@@ -353,6 +361,19 @@ def run_stage4(
     raw_highlights = hl_doc.get("highlights") or []
     if not raw_highlights:
         raise svc.ShortVideoError("highlights.json 没有有效片段")
+
+    # REQ-20261013-108：hl_index 过滤 — None / 0 / 越界 = 全量；int = 只跑一条。
+    # 注意：其他 highlight 的 coarse_NN.{mp4,srt} 文件**不会被删**（只覆盖 hl_index 那条）。
+    if hl_index:
+        try:
+            want = int(hl_index)
+        except (TypeError, ValueError):
+            want = 0
+        if want > 0:
+            raw_highlights = [h for h in raw_highlights
+                              if int(h.get("index") or 0) == want]
+            if not raw_highlights:
+                raise svc.ShortVideoError(f"hl#{want} 不存在")
 
     # 解析 raw.srt：subtitle_lines[].src_index → SRT 行 (start_ms, end_ms)
     # 用于按字幕行时间戳多窗拼接（REQ-20261004-stage3-restructure）。
@@ -434,10 +455,8 @@ def run_stage4(
     state = svc.get_stage_state(project, "stage5_coarse")
     state["status"] = "done" if not any_failed else "failed"
     state["finished_at"] = svc.now_iso()
-    # REQ-20261013-103：增量字段 — 所有 done 片段时长累加；前端状态卡显示用
-    state["total_duration_sec"] = round(
-        sum(r.duration_sec for r in results if r.status == "done"), 3)
-    state["highlights"] = [
+    # REQ-20261013-103 + REQ-20261013-108：增量字段 — 总时长按 highlights 累加
+    new_highlights = [
         {
             "index": r.index,
             "coarse_mp4": svc._rel(root, r.coarse_mp4) if r.coarse_mp4 else "",
@@ -449,6 +468,24 @@ def run_stage4(
         }
         for r in results
     ]
+    # REQ-20261013-108：hl_index 单条模式 — 保留其他 highlight 的既有状态，
+    # 只把新结果按 index 覆盖合并（避免单条粗剪把全表清空）。
+    if hl_index:
+        old_by_idx = {int(h.get("index") or 0): h
+                      for h in (state.get("highlights") or [])}
+        for h in new_highlights:
+            old_by_idx[int(h.get("index") or 0)] = h
+        state["highlights"] = sorted(
+            old_by_idx.values(), key=lambda h: int(h.get("index") or 0),
+        )
+    else:
+        state["highlights"] = new_highlights
+    state["total_duration_sec"] = round(
+        sum(float(h.get("duration_sec") or 0)
+            for h in state["highlights"]
+            if h.get("status") == "done"),
+        3,
+    )
     _log_lines = list(state.get("logs") or [])
     for r in results:
         _log_lines.append(
@@ -903,6 +940,141 @@ def _cli() -> int:
     )
     print(json.dumps(state, ensure_ascii=False, indent=2))
     return 0 if state.get("status") == "done" else 1
+
+
+# ---------- REQ-20261013-108：Stage 4 预览（per-highlight 拼接） ----------
+# 与 _coarse_one 同源（moviepy subclip+concat），但输入是绝对时间区间列表
+# （来自 effective_subtitle_lines），输出落到 stage4_optimize/preview_hl{NN}.mp4，
+# **不写 stage4/coarse_NN.mp4**（不污染 Stage 5 粗剪产物）。
+
+def preview_highlight(
+    repo_root: Path | str,
+    task_id: str,
+    project_id: str,
+    hl_index: int,
+) -> dict:
+    """按 per-hl 编辑后的实际字幕行时间戳拼一段 mp4（Stage 4 预览用）。
+
+    Returns: {mp4_path, srt_text, duration_sec, segments_count, status, error}
+    """
+    from slirn_home import short_video_optimize as _sv_opt
+    from slirn_home.compose_service import format_srt
+
+    root = Path(repo_root)
+    project = svc.load_project(root, task_id, project_id)
+    src_id = project.get("base_material_id") or ""
+    src = next(
+        (m for m in project.get("materials") or []
+         if m.get("id") == src_id and m.get("kind") == "video"),
+        None,
+    )
+    if not src:
+        return {"status": "failed", "error": "Stage 4 需要先在 Stage 1 选源视频"}
+    source_video = svc.material_abs_path(root, project, src["id"])
+    if not source_video.is_file():
+        return {"status": "failed", "error": f"源视频不存在: {source_video}"}
+
+    eff = _sv_opt.effective_subtitle_lines(root, task_id, project_id, hl_index)
+    if not eff:
+        return {"status": "failed", "error": f"hl#{hl_index} 没有有效字幕行"}
+
+    # 组装 intervals：每个字幕行一个 [start_ms, end_ms]（按 raw.srt 解析过的）
+    intervals: list[tuple[int, int]] = []
+    units: list[dict] = []
+    for s in eff:
+        sm = int(s.get("start_ms") or 0)
+        em = int(s.get("end_ms") or sm)
+        if em <= sm:
+            continue
+        intervals.append((sm, em))
+        units.append({
+            "id": str(s.get("no") or len(units) + 1),
+            "start_ms": sm,
+            "end_ms": em,
+            "text": str(s.get("text") or ""),
+        })
+    if not intervals:
+        return {"status": "failed", "error": "所有字幕行时间戳无效"}
+
+    # 输出路径
+    out_dir = svc.stage4_optimize_dir(root, task_id, project_id) / "previews"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_mp4 = out_dir / f"preview_hl{int(hl_index):02d}.mp4"
+    out_srt_text = format_srt(units)
+
+    t0 = time.time()
+    try:
+        import moviepy.editor as mpy
+        video = mpy.VideoFileClip(str(source_video))
+        try:
+            vid_dur = video.duration
+            seg_list: list[tuple[float, float]] = []
+            for s_ms, e_ms in intervals:
+                s_sec = max(0, s_ms) / 1000.0
+                e_sec = min(vid_dur, e_ms) / 1000.0
+                if e_sec <= s_sec:
+                    continue
+                seg_list.append((s_sec, e_sec))
+            if not seg_list:
+                raise ValueError("所有区间都被丢弃")
+            clips = [video.subclip(s, e) for s, e in seg_list]
+            try:
+                if len(clips) == 1:
+                    final = clips[0]
+                else:
+                    final = mpy.concatenate_videoclips(clips)
+                try:
+                    final.write_videofile(
+                        str(out_mp4),
+                        audio_codec="aac",
+                        codec="libx264",
+                        preset="medium",
+                        verbose=False,
+                        logger=None,
+                    )
+                finally:
+                    final.close()
+            finally:
+                for c in clips:
+                    try:
+                        c.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+        finally:
+            video.close()
+    except Exception as e:  # noqa: BLE001
+        return {"status": "failed",
+                "error": f"moviepy subclip/concat 失败: {e}",
+                "srt": out_srt_text,
+                "segments_count": len(intervals)}
+
+    if not out_mp4.is_file() or out_mp4.stat().st_size < 1024:
+        return {"status": "failed", "error": "write_videofile 未产出有效 mp4",
+                "srt": out_srt_text, "segments_count": len(intervals)}
+
+    duration_sec = sum(max(0, e - s) for s, e in intervals) / 1000.0
+    try:
+        import subprocess
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", str(out_mp4)],
+            capture_output=True, text=True, timeout=30, encoding="utf-8",
+        )
+        if probe.returncode == 0:
+            duration_sec = max(0.0, float((probe.stdout or "").strip()))
+    except Exception:  # noqa: BLE001
+        pass
+
+    rel = out_mp4.resolve().relative_to(root.resolve()).as_posix()
+    return {
+        "status": "done",
+        "mp4_path": str(out_mp4),
+        "rel_path": rel,
+        "srt": out_srt_text,
+        "duration_sec": duration_sec,
+        "segments_count": len(intervals),
+        "elapsed_sec": int(time.time() - t0),
+    }
 
 
 if __name__ == "__main__":

@@ -23,14 +23,9 @@ from slirn_home import short_video_service as svc
 
 WARNINGS_CAP = 20
 
-_OPTIMIZE_SYSTEM_PROMPT = """你是短视频字幕编辑。输入一条短视频的标题和带编号的字幕行，按规则优化并只输出一个 JSON 对象。
-规则：
-1. keep：字幕合适 → 原样保留，输出 {"no": 行号, "op": "keep"}。
-2. fix：修改文字（去口语冗余、语气词、错别字），保持原意与信息量，输出 {"no": 行号, "op": "fix", "text": "修改后文字"}。
-3. split：一行太长（约 30 字以上）或一句里含两个意思 → 切成多行，输出 {"no": 行号, "op": "split", "splits": ["子句一", "子句二", ...]}；切分子文本按顺序拼接必须与该行原文逐字一致（不改写、不遗漏、不新增）；想改写就同时需要 fix 的语义时，先放弃 split 只做 fix。
-4. delete：纯口水话、重复、与标题主题无关、无信息量的行 → 在输出 lines 中省略该编号（即删除）。
-5. 不改变行的先后顺序；不新增原文没有的内容；标题不改。
-只输出 JSON：{"lines": [...]}，不要任何解释或代码块标记。"""
+# REQ-20261013-108：使用 short_video_service.STAGE4_SYSTEM_PROMPT 作为系统提示词
+# 旧版 _OPTIMIZE_SYSTEM_PROMPT 保留为别名（向后兼容 — 任何外部导入都不破）。
+_OPTIMIZE_SYSTEM_PROMPT = svc.STAGE4_SYSTEM_PROMPT
 
 _OPTIMIZE_USER_TMPL = """短视频标题：{title}
 
@@ -112,6 +107,10 @@ def _parse_optimize_result(raw: str, src_lines: list[dict]) -> tuple[dict, list[
             else:
                 ops[no] = {"op": "split", "splits": splits}
         else:
+            # REQ-20261013-110：兼容 LLM 误用 `op: "delete"`（prompt 明确说 delete = 省略，
+            # 但部分 LLM 仍会输出 "delete"）。静默忽略，不警告（避免噪音）。
+            if op == "delete":
+                continue
             warnings.append(f"#{no} 未知 op「{op}」，保留原行")
             ops[no] = {"op": "keep"}
     return ops, warnings
@@ -196,7 +195,9 @@ def run_stage4_optimize(
     state["status"] = "running"
     state["started_at"] = svc.now_iso()
     state["count"] = len(highlights)
-    state["prompt"] = str(prompt or "")[:500]
+    # REQ-20261013-108：项目级用户提示词（"prompt_user" 区别于旧的 "prompt" 补充要求）
+    state["prompt_user"] = str(prompt or "")[:2000]
+    state["prompt"] = str(prompt or "")[:500]  # 兼容旧字段
     state["logs"] = list(state.get("logs") or []) + [
         f"[{svc.now_iso()}] stage4_optimize start, highlights={len(highlights)}",
     ]
@@ -305,3 +306,303 @@ def run_stage4_optimize(
     svc.set_stage_state(project, "stage4_optimize", state)
     svc.save_project(root, project)
     return state
+
+
+# ---------- REQ-20261013-108：Stage 4 per-highlight 用户编辑状态 ----------
+# 路径：<proj>/stage4_optimize/per_hl/<hl_index>.json
+# 形态：{line_edits: {src_index: text}, line_marks: [src_index, ...], split_marks: {src_index: [text, ...]},
+#        line_order: [src_index, ...] | None}  # REQ-20261013-110：段内重排白名单
+# 注意：仅存用户手动编辑，**不污染** stage3/highlights.json（LLM 真相源）。
+# 读侧用 _effective_subtitle_lines 合并 highlights + per_hl 后再消费。
+
+_PER_HL_FILENAME = "subs.json"
+
+
+def per_hl_dir(repo_root: Path | str, task_id: str, project_id: str) -> Path:
+    """per-highlight 用户编辑状态的目录。"""
+    opt_dir = svc.stage4_optimize_dir(repo_root, task_id, project_id)
+    d = opt_dir / "per_hl"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def per_hl_path(repo_root: Path | str, task_id: str, project_id: str, hl_index: int) -> Path:
+    """per-highlight 用户编辑状态文件路径。"""
+    return per_hl_dir(repo_root, task_id, project_id) / f"{int(hl_index):02d}_{_PER_HL_FILENAME}"
+
+
+def _empty_per_hl() -> dict:
+    return {"line_edits": {}, "line_marks": [], "split_marks": {}, "line_order": None}
+
+
+def load_per_hl(repo_root: Path | str, task_id: str, project_id: str, hl_index: int) -> dict:
+    """读 per-hl 用户编辑状态。无 / 损坏 → 空。"""
+    p = per_hl_path(repo_root, task_id, project_id, hl_index)
+    if not p.is_file():
+        return _empty_per_hl()
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return _empty_per_hl()
+    if not isinstance(data, dict):
+        return _empty_per_hl()
+    out = _empty_per_hl()
+    le = data.get("line_edits") or {}
+    if isinstance(le, dict):
+        for k, v in le.items():
+            if str(v or "").strip():
+                out["line_edits"][str(k)] = str(v)
+    lm = data.get("line_marks") or []
+    if isinstance(lm, list):
+        for x in lm:
+            try:
+                out["line_marks"].append(int(x))
+            except (TypeError, ValueError):
+                pass
+    sm = data.get("split_marks") or {}
+    if isinstance(sm, dict):
+        for k, v in sm.items():
+            if isinstance(v, list) and all(isinstance(x, str) for x in v):
+                out["split_marks"][str(k)] = [str(x) for x in v]
+    # REQ-20261013-110：line_order 是段内重排白名单（None = 保持原序）
+    lo = data.get("line_order")
+    if isinstance(lo, list) and lo:
+        clean = []
+        for x in lo:
+            try:
+                clean.append(int(x))
+            except (TypeError, ValueError):
+                pass
+        if clean:
+            out["line_order"] = clean
+    return out
+
+
+def save_per_hl(repo_root: Path | str, task_id: str, project_id: str,
+                hl_index: int, line_edits: dict | None = None,
+                line_marks: list | None = None,
+                split_marks: dict | None = None,
+                reorder: list | None = None) -> dict:
+    """写 per-hl 用户编辑状态（合并覆盖，未传字段保留旧值）。
+
+    REQ-20261013-110：``reorder`` 接受 ``None``（清除重排）or ``list[int]``
+    （段内重排白名单）。传 ``[]`` 视为 None（空列表清空）。
+
+    Returns: 写入后的完整 doc。
+    """
+    cur = load_per_hl(repo_root, task_id, project_id, hl_index)
+    if line_edits is not None:
+        cur["line_edits"] = {str(k): str(v) for k, v in (line_edits or {}).items()
+                              if str(v or "").strip()}
+    if line_marks is not None:
+        cur["line_marks"] = [int(x) for x in (line_marks or [])
+                              if str(x).strip().lstrip("-").isdigit()]
+    if split_marks is not None:
+        cur["split_marks"] = {str(k): [str(x) for x in (v or [])]
+                               for k, v in (split_marks or {}).items()
+                               if isinstance(v, list) and v}
+    if reorder is not None:
+        # None 或 [] → 清除重排
+        if not reorder:
+            cur["line_order"] = None
+        else:
+            cur["line_order"] = [int(x) for x in reorder
+                                 if str(x).strip().lstrip("-").isdigit()]
+    p = per_hl_path(repo_root, task_id, project_id, hl_index)
+    p.write_text(json.dumps(cur, ensure_ascii=False, indent=2), encoding="utf-8")
+    return cur
+
+
+def _interpolate_subs_time(orig: dict, subs: list[str]) -> list[dict]:
+    """按字数占比在原行 [start_ms, end_ms] 内插子段时间戳（无字级时间戳时回退）。"""
+    start_ms = int(orig.get("start_ms") or 0)
+    end_ms = int(orig.get("end_ms") or start_ms)
+    total_ms = max(1, end_ms - start_ms)
+    total_len = sum(len(str(s or "")) for s in subs) or 1
+    out: list[dict] = []
+    cursor = start_ms
+    for i, text in enumerate(subs):
+        share = len(str(text or "")) / total_len
+        sub_start = cursor
+        sub_end = start_ms + int(total_ms * (sum(len(str(s or "")) for s in subs[: i + 1])) / total_len) \
+            if i < len(subs) - 1 else end_ms
+        out.append({
+            "no": int(orig.get("no") or 0) * 1000 + i + 1,  # 子行 no 编码（与 src_index 不冲突）
+            "src_index": int(orig.get("src_index") or 0) * 1000 + i + 1,  # 子行 src_index 编码
+            "text": str(text or ""),
+            "start_ms": int(sub_start),
+            "end_ms": int(sub_end),
+            "split_from": int(orig.get("src_index") or 0),  # 标记父行 src_index
+        })
+        cursor = sub_end
+    return out
+
+
+def _resolve_srt_line_times(repo_root: Path, task_id: str, project_id: str) -> dict[int, tuple[int, int]]:
+    """raw.srt → {src_index: (start_ms, end_ms)}。空 / 失败 → {}。"""
+    try:
+        srt_path = svc.stage_raw_srt_path(repo_root, task_id, project_id)
+    except Exception:  # noqa: BLE001
+        return {}
+    if not srt_path.is_file():
+        return {}
+    try:
+        from slirn_home.short_video_analyze import _parse_srt_lines
+        lines = _parse_srt_lines(srt_path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
+    return {int(ln.index): (int(ln.start_ms), int(ln.end_ms)) for ln in lines
+            if int(ln.end_ms) > int(ln.start_ms)}
+
+
+def effective_subtitle_lines(repo_root: Path | str, task_id: str, project_id: str,
+                              hl_index: int) -> list[dict]:
+    """合并 highlights.json + per-hl 后的实际字幕行（用于预览 / 粗剪 / 展示）。
+
+    顺序：先按 line_marks 删 → 再 line_edits 改 text → 再 split_marks 切分。
+    每行输出：{src_index, text, start_ms, end_ms, no} — start_ms/end_ms 来自
+    raw.srt 按 src_index 查询；找不到则用 highlight 全段时间（按字数占比内插）。
+    切分子行用原行 [start_ms, end_ms] 按字数内插。
+    """
+    root = Path(repo_root)
+    hp = svc.stage_highlights_path(root, task_id, project_id)
+    if not hp.is_file():
+        return []
+    doc = json.loads(hp.read_text(encoding="utf-8"))
+    highlights = doc.get("highlights") or []
+    if hl_index < 1 or hl_index > len(highlights):
+        return []
+    hl = highlights[hl_index - 1]
+    base = [dict(sl) for sl in (hl.get("subtitle_lines") or [])]
+    srt_index_to_time = _resolve_srt_line_times(root, task_id, project_id)
+    hl_start = int(hl.get("start_ms") or 0)
+    hl_end = int(hl.get("end_ms") or hl_start)
+    # 给每行补上 start_ms / end_ms / no
+    for i, s in enumerate(base):
+        sid = int(s.get("src_index") or 0)
+        if sid in srt_index_to_time:
+            sm, em = srt_index_to_time[sid]
+        else:
+            # fallback: 整个 highlight 区间按字数占比内插
+            total = sum(len(str(x.get("text") or "")) for x in base) or 1
+            cum = sum(len(str(base[j].get("text") or "")) for j in range(i))
+            cur_len = len(str(s.get("text") or ""))
+            sm = hl_start + int((hl_end - hl_start) * cum / total)
+            em = hl_start + int((hl_end - hl_start) * (cum + cur_len) / total)
+        s["start_ms"] = sm
+        s["end_ms"] = em
+        s["no"] = i + 1
+    per = load_per_hl(root, task_id, project_id, hl_index)
+    marks = set(int(x) for x in per.get("line_marks") or [])
+    if marks:
+        base = [s for s in base if int(s.get("src_index") or 0) not in marks]
+    # split_marks：按子段替换原行（子行内插时间）
+    splits = per.get("split_marks") or {}
+    if splits:
+        new_base: list[dict] = []
+        for s in base:
+            sid = str(s.get("src_index") or 0)
+            if sid in splits:
+                new_base.extend(_interpolate_subs_time(s, splits[sid]))
+            else:
+                new_base.append(s)
+        base = new_base
+    # line_edits：整行替换 text（保留 start_ms / end_ms）
+    edits = per.get("line_edits") or {}
+    if edits:
+        for s in base:
+            sid = str(s.get("src_index") or 0)
+            if sid in edits:
+                s["text"] = edits[sid]
+    # REQ-20261013-110：line_order 段内重排白名单（仅对原始 src_index 行重排；
+    # split 子行带 split_from 字段，随父行一起走）。未列入的按原序追加到末尾。
+    line_order = per.get("line_order")
+    if line_order:
+        by_src: dict[int, dict] = {}
+        rest: list[dict] = []
+        for s in base:
+            if s.get("split_from") is not None:
+                rest.append(s)  # split 子行不参与重排（跟随父行）
+                continue
+            sid = int(s.get("src_index") or 0)
+            by_src[sid] = s
+        ordered: list[dict] = []
+        for sid in line_order:
+            if sid in by_src:
+                ordered.append(by_src.pop(sid))
+        # 未列入 reorder 的剩余原始行按原序追加；split 子行穿插在原位之后整体追加
+        ordered.extend(by_src.values())
+        ordered.extend(rest)
+        base = ordered
+    # 重新按出现顺序编 no 1..M
+    for i, s in enumerate(base):
+        s["no"] = i + 1
+    return base
+
+
+def per_hl_apply_line_edit(repo_root: Path | str, task_id: str, project_id: str,
+                            hl_index: int, src_index: int, new_text: str) -> dict:
+    """整行替换 text（fix）。Returns 写入后的 per-hl doc。"""
+    save_per_hl(repo_root, task_id, project_id, hl_index,
+                line_edits={str(src_index): str(new_text)})
+    return load_per_hl(repo_root, task_id, project_id, hl_index)
+
+
+def per_hl_toggle_line_mark(repo_root: Path | str, task_id: str, project_id: str,
+                             hl_index: int, src_index: int) -> dict:
+    """整行删除/恢复（toggle）。Returns 写入后的 per-hl doc。"""
+    cur = load_per_hl(repo_root, task_id, project_id, hl_index)
+    marks = list(cur.get("line_marks") or [])
+    sid = int(src_index)
+    if sid in marks:
+        marks.remove(sid)
+    else:
+        marks.append(sid)
+    save_per_hl(repo_root, task_id, project_id, hl_index, line_marks=marks)
+    return load_per_hl(repo_root, task_id, project_id, hl_index)
+
+
+def per_hl_resplit(repo_root: Path | str, task_id: str, project_id: str,
+                    hl_index: int, src_index: int, target_subs: list[str]) -> dict:
+    """把一行切分为多段（split）。Returns 写入后的 per-hl doc。"""
+    if not target_subs or not all(str(x or "").strip() for x in target_subs):
+        raise svc.ShortVideoError("切分子段不能为空")
+    save_per_hl(repo_root, task_id, project_id, hl_index,
+                split_marks={str(src_index): [str(x) for x in target_subs]})
+    return load_per_hl(repo_root, task_id, project_id, hl_index)
+
+
+def per_hl_unsplit(repo_root: Path | str, task_id: str, project_id: str,
+                    hl_index: int, src_index: int) -> dict:
+    """取消切分（unsplit）。Returns 写入后的 per-hl doc。"""
+    cur = load_per_hl(repo_root, task_id, project_id, hl_index)
+    splits = dict(cur.get("split_marks") or {})
+    splits.pop(str(src_index), None)
+    save_per_hl(repo_root, task_id, project_id, hl_index, split_marks=splits)
+    return load_per_hl(repo_root, task_id, project_id, hl_index)
+
+
+def per_hl_reorder(repo_root: Path | str, task_id: str, project_id: str,
+                   hl_index: int, order: list[int]) -> dict:
+    """REQ-20261013-110：段内重排（白名单）。
+
+    ``order`` 是 src_index 列表，按出现顺序应用。**未列入的原始 src_index
+    按原序追加到末尾**（白名单语义，不会丢行）。传 ``[]`` 或 ``None`` = 清除
+    重排，恢复原 src 顺序。
+
+    写入后**不**自动 reset 下游 stage（coarse cut 暂不读 per-hl；UI 会在
+    旁注里提示用户「重排后需重新优化才能影响 Stage 5 粗剪」）。
+    """
+    if order is not None and not isinstance(order, list):
+        raise svc.ShortVideoError("order 必须是 list[int] 或 None")
+    if not order:
+        # 清除重排
+        save_per_hl(repo_root, task_id, project_id, hl_index, reorder=[])
+    else:
+        # 校验：所有 src_index 必须是 int，且至少 1 个
+        clean = [int(x) for x in order if str(x).strip().lstrip("-").isdigit()]
+        if not clean:
+            raise svc.ShortVideoError("order 至少包含 1 个有效 src_index")
+        save_per_hl(repo_root, task_id, project_id, hl_index, reorder=clean)
+    return load_per_hl(repo_root, task_id, project_id, hl_index)
+

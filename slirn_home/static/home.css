@@ -5601,6 +5601,38 @@ input[type="checkbox"]:focus-visible {
   border-top: 1px solid rgba(148, 163, 184, 0.25);
 }
 
+/* REQ-20261013-110：Stage 4 优化详情 + 警告折叠面板（与 _stage_logs 同款 shell，浅色 body） */
+.slirn-stage4-detail {
+  margin-top: 10px;
+  font-size: 12px;
+}
+.slirn-stage4-detail > summary {
+  cursor: pointer;
+  padding: 4px 8px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  user-select: none;
+  list-style: none;
+  display: inline-block;
+}
+.slirn-stage4-detail > summary::-webkit-details-marker { display: none; }
+.slirn-stage4-detail > summary::before {
+  content: "▶ ";
+  font-size: 10px;
+  margin-right: 4px;
+  color: #64748b;
+}
+.slirn-stage4-detail[open] > summary::before { content: "▼ "; }
+.slirn-stage4-detail-body {
+  margin-top: 6px;
+  padding: 10px 12px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+}
+.slirn-stage4-detail-body .slirn-stage4-opt-warns { margin: 8px 0 0; }
+
 /* REQ-20261004-UX：Stage 3 highlights 字幕预览 */
 /* 修订九：N 条短视频逐条页签 —— tab bar 单行横排（多了横向滚动），面板只显示激活页 */
 /* REQ-20261013-109：Stage 4 也用同一套 tab 视觉（共用选择器，0 行 CSS 重复） */
@@ -6247,6 +6279,10 @@ input[type="checkbox"]:focus-visible {
 .slirn-stage4-sub-row:hover {
   border-color: var(--border, #e2e8f0);
 }
+/* REQ-20261013-110：每行 4 字段（井N / @SRT#K / 时间段 / 文字） */
+.slirn-stage4-sub-no   { color: #6366f1; font-weight: 600; flex: 0 0 auto; }
+.slirn-stage4-sub-srt  { color: #94a3b8; font-size: 11px; flex: 0 0 auto; }
+.slirn-stage4-sub-time { color: #64748b; font-size: 11px; flex: 0 0 auto; }
 .slirn-stage4-sub-text {
   flex: 1 1 auto;
   min-width: 0;

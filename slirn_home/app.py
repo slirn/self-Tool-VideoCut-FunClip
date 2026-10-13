@@ -9727,7 +9727,7 @@ def _register_slirn_api(
         except Exception as e:  # noqa: BLE001
             return _err(f"读取项目失败: {e}")
         _inject_stage3_highlights(project)
-        return _ok(project=project, html=_sv_ui.render_project(project))
+        return _ok(project=project, html=_sv_ui.render_project(project, repo_root=repo_root))
 
     @app.app.post("/slirn/api/short_video_save")
     async def short_video_save(body: dict = Body(default_factory=dict)):
@@ -9739,7 +9739,7 @@ def _register_slirn_api(
             project = _sv_service.update_project(repo_root, tid, pid, body)
         except Exception as e:  # noqa: BLE001
             return _err(f"保存项目失败: {e}")
-        return _ok(project=project, html=_sv_ui.render_project(project), toast="项目已保存")
+        return _ok(project=project, html=_sv_ui.render_project(project, repo_root=repo_root), toast="项目已保存")
 
     @app.app.post("/slirn/api/short_video_ai_storyboard")
     async def short_video_ai_storyboard(body: dict = Body(default_factory=dict)):
@@ -9766,7 +9766,7 @@ def _register_slirn_api(
             return _err(f"生成分镜失败: {e}")
         return _ok(
             project=project,
-            html=_sv_ui.render_project(project),
+            html=_sv_ui.render_project(project, repo_root=repo_root),
             toast=f"分镜已生成（{(project.get('storyboard') or {}).get('model') or 'local'}）",
         )
 
@@ -9864,7 +9864,7 @@ def _register_slirn_api(
             project = _sv_service.remove_material(repo_root, tid, pid, mid)
         except Exception as e:  # noqa: BLE001
             return _err(f"删除素材失败: {e}")
-        return _ok(project=project, html=_sv_ui.render_project(project), toast="素材已删除")
+        return _ok(project=project, html=_sv_ui.render_project(project, repo_root=repo_root), toast="素材已删除")
 
     @app.app.post("/slirn/api/short_video_stage6_run")
     async def short_video_stage6_run(body: dict = Body(default_factory=dict)):
@@ -9903,7 +9903,7 @@ def _register_slirn_api(
             project = _sv_service.select_source_material(repo_root, tid, pid, mid)
         except Exception as e:  # noqa: BLE001
             return _err(f"选源失败: {e}")
-        return _ok(project=project, html=_sv_ui.render_project(project), toast="已选源视频")
+        return _ok(project=project, html=_sv_ui.render_project(project, repo_root=repo_root), toast="已选源视频")
 
     @app.app.post("/slirn/api/short_video_stage2_run")
     async def short_video_stage2_run(body: dict = Body(default_factory=dict)):
@@ -10021,7 +10021,7 @@ def _register_slirn_api(
         _inject_stage3_highlights(project)
         return _ok(
             image=entry, project=project,
-            html=_sv_ui.render_project(project), toast="截图已上传",
+            html=_sv_ui.render_project(project, repo_root=repo_root), toast="截图已上传",
         )
 
     @app.app.post("/slirn/api/short_video_stage3_remove_image")
@@ -10039,13 +10039,54 @@ def _register_slirn_api(
         _inject_stage3_highlights(project)
         return _ok(
             removed=removed, project=project,
-            html=_sv_ui.render_project(project),
+            html=_sv_ui.render_project(project, repo_root=repo_root),
             toast="截图已移除" if removed else "本就没有截图",
         )
 
+    @app.app.post("/slirn/api/short_video_load_prompts")
+    async def short_video_load_prompts(body: dict = Body(default_factory=dict)):
+        """REQ-20261013-108：一次性返回 stage3 + stage4 的全局默认 / 历史 + 系统级
+        提示词常量 + 项目级用户覆盖（``task_id`` + ``project_id`` 给出时）。
+
+        前端两个 stage 共享一次 roundtrip；避免 4 个端点轮询。
+        """
+        from slirn_home import short_video_service as _svc
+        all_settings = _svc.load_all_prompt_settings(repo_root)
+        system_prompts = {
+            "stage3": _svc.STAGE3_SYSTEM_PROMPT,
+            "stage4": _svc.STAGE4_SYSTEM_PROMPT,
+        }
+        result: dict = {
+            "settings": all_settings,
+            "history_html": {
+                s: _sv_ui.render_prompt_history_list(all_settings.get(s) or {})
+                for s in ("stage3", "stage4")
+            },
+            "system_prompts": system_prompts,
+        }
+        result.pop("html", None)  # 去掉无关空字段
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        if tid and pid:
+            try:
+                project = _svc.load_project(repo_root, tid, pid)
+                pl = project.get("pipeline", {}) or {}
+                s3 = pl.get("stage3_analyze", {}) or {}
+                s4 = pl.get("stage4_optimize", {}) or {}
+                result["project_prompts"] = {
+                    "stage3": (s3.get("prompt_user") or s3.get("prompt") or ""),
+                    "stage4": (s4.get("prompt_user") or s4.get("prompt") or ""),
+                }
+            except Exception:  # noqa: BLE001
+                result["project_prompts"] = {"stage3": "", "stage4": ""}
+        else:
+            result["project_prompts"] = {"stage3": "", "stage4": ""}
+        return _ok(**result)
+
     @app.app.post("/slirn/api/short_video_save_default_prompt")
     async def short_video_save_default_prompt(body: dict = Body(default_factory=dict)):
-        """REQ-20261012-099：把当前提示词保存为全局默认提示词。
+        """REQ-20261012-099 + REQ-20261013-108：把当前提示词保存为指定 stage
+        的全局默认（stage 默认为 ``stage3``，保持旧调用兼容）。
 
         服务层会尽力同步进历史列表；``history_html`` 供前端原地刷新
         （默认条目在列表中标 ⭐）。
@@ -10053,21 +10094,24 @@ def _register_slirn_api(
         prompt = str(body.get("prompt") or "")
         if not prompt.strip():
             return _err("提示词不能为空")
+        stage = str(body.get("stage") or "stage3").strip().lower() or "stage3"
         try:
-            entry = _sv_service.save_default_prompt(repo_root, prompt)
+            entry = _sv_service.save_default_prompt(repo_root, prompt, stage=stage)
         except Exception as e:  # noqa: BLE001
             return _err(f"保存默认提示词失败: {e}")
-        settings = _sv_service.load_prompt_settings(repo_root)
+        settings = _sv_service.load_prompt_settings(repo_root, stage=stage)
         return _ok(
             default_prompt=entry,
             history=settings["history"],
             history_html=_sv_ui.render_prompt_history_list(settings),
             toast="已设为默认提示词",
+            stage=stage,
         )
 
     @app.app.post("/slirn/api/short_video_prompt_history_save")
     async def short_video_prompt_history_save(body: dict = Body(default_factory=dict)):
-        """REQ-20261012-099：提示词存入历史列表（≤ 10 条最新）。
+        """REQ-20261012-099 + REQ-20261013-108：提示词存入指定 stage 的历史
+        列表（≤ 10 条最新，stage 默认 ``stage3`` 保持兼容）。
 
         已满且新提示词 → ``status=need_confirm``；前端确认后带
         ``confirm=true`` 重发（覆盖最旧）。成功时附 ``history_html`` 片段，
@@ -10077,8 +10121,11 @@ def _register_slirn_api(
         if not prompt.strip():
             return _err("提示词不能为空")
         confirm = bool(body.get("confirm"))
+        stage = str(body.get("stage") or "stage3").strip().lower() or "stage3"
         try:
-            result = _sv_service.save_prompt_history(repo_root, prompt, confirm=confirm)
+            result = _sv_service.save_prompt_history(
+                repo_root, prompt, confirm=confirm, stage=stage,
+            )
         except Exception as e:  # noqa: BLE001
             return _err(f"保存提示词列表失败: {e}")
         if result.get("status") == "need_confirm":
@@ -10086,20 +10133,23 @@ def _register_slirn_api(
                 status="need_confirm", history=result.get("history"),
                 max=result.get("max"),
                 toast=f"列表已满 {result.get('max')} 条，是否覆盖最旧一条？",
+                stage=stage,
             )
-        settings = _sv_service.load_prompt_settings(repo_root)
+        settings = _sv_service.load_prompt_settings(repo_root, stage=stage)
         return _ok(
             status="saved", history=result.get("history"),
             history_html=_sv_ui.render_prompt_history_list(settings),
             toast="已存入提示词列表",
+            stage=stage,
         )
 
     @app.app.post("/slirn/api/short_video_stage4_optimize")
     async def short_video_stage4_optimize(body: dict = Body(default_factory=dict)):
-        """REQ-20261013-100：Stage 4「内容优化」（替换原 Stage 3.5 字幕一致性
-        核验）：把 Stage 3 全部短视频的标题+字幕行交给大模型 — 长行切分（子
-        文本拼接须逐字等于原文，时间戳按占比内插）、文字修改、整行删除；结果
-        写回 highlights.json（首次优化前备份原表到 stage4_optimize/），拼接与
+        """REQ-20261013-100 + REQ-20261013-108：Stage 4「内容优化」（替换原
+        Stage 3.5 字幕一致性核验）：把 Stage 3 全部短视频的标题+字幕行交给
+        大模型 — 长行切分（子文本拼接须逐字等于原文，时间戳按占比内插）、
+        文字修改、整行删除；结果写回 highlights.json（首次优化前备份原表到
+        stage4_optimize/），拼接与
         粗剪及之后作废。
         """
         from slirn_home import short_video_optimize as _sv_opt
@@ -10118,6 +10168,219 @@ def _register_slirn_api(
         return _ok(
             stage4_optimize=state,
             toast="内容优化完成，可回 Stage 3 查看/微调字幕",
+        )
+
+    @app.app.post("/slirn/api/short_video_stage4_line_edit")
+    async def short_video_stage4_line_edit(body: dict = Body(default_factory=dict)):
+        """REQ-20261013-108：Stage 4 整行替换 text（fix）。
+
+        body: {task_id, project_id, hl_index, src_index, text}。
+        写 per_hl JSON（**不污染** stage3/highlights.json — LLM 真相源）。
+        """
+        from slirn_home import short_video_optimize as _sv_opt
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        try:
+            hl_index = int(body.get("hl_index") or 0)
+        except (TypeError, ValueError):
+            return _err("hl_index 无效")
+        try:
+            src_index = int(body.get("src_index") or 0)
+        except (TypeError, ValueError):
+            return _err("src_index 无效")
+        new_text = str(body.get("text") or "")
+        if not tid or not pid or hl_index <= 0 or src_index <= 0:
+            return _err("缺少 task_id / project_id / hl_index / src_index")
+        try:
+            doc = _sv_opt.per_hl_apply_line_edit(
+                repo_root, tid, pid, hl_index, src_index, new_text,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.exception("stage4_line_edit failed")
+            return _err(f"保存失败: {e}")
+        return _ok(per_hl=doc, toast="已保存")
+
+    @app.app.post("/slirn/api/short_video_stage4_line_toggle")
+    async def short_video_stage4_line_toggle(body: dict = Body(default_factory=dict)):
+        """REQ-20261013-108：Stage 4 整行删除/恢复（toggle）。"""
+        from slirn_home import short_video_optimize as _sv_opt
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        try:
+            hl_index = int(body.get("hl_index") or 0)
+        except (TypeError, ValueError):
+            return _err("hl_index 无效")
+        try:
+            src_index = int(body.get("src_index") or 0)
+        except (TypeError, ValueError):
+            return _err("src_index 无效")
+        if not tid or not pid or hl_index <= 0 or src_index <= 0:
+            return _err("缺少 task_id / project_id / hl_index / src_index")
+        try:
+            doc = _sv_opt.per_hl_toggle_line_mark(
+                repo_root, tid, pid, hl_index, src_index,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.exception("stage4_line_toggle failed")
+            return _err(f"操作失败: {e}")
+        marked = int(src_index) in [int(x) for x in (doc.get("line_marks") or [])]
+        return _ok(per_hl=doc, marked=marked, toast="已删除" if marked else "已恢复")
+
+    @app.app.post("/slirn/api/short_video_stage4_line_reorder")
+    async def short_video_stage4_line_reorder(body: dict = Body(default_factory=dict)):
+        """REQ-20261013-110：Stage 4 段内重排（白名单）。空 list = 清除重排。
+
+        Body: {task_id, project_id, hl_index, order: [src_index, ...]}
+        写入 per-hl line_order 字段；不重算下游 stage（coarse cut 暂不读 per-hl）。
+        """
+        from slirn_home import short_video_optimize as _sv_opt
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        try:
+            hl_index = int(body.get("hl_index") or 0)
+        except (TypeError, ValueError):
+            return _err("hl_index 无效")
+        order_raw = body.get("order")
+        if order_raw is None:
+            order: list[int] = []
+        elif not isinstance(order_raw, list):
+            return _err("order 必须是 list[src_index] 或 null")
+        else:
+            order = [int(x) for x in order_raw if str(x).strip().lstrip("-").isdigit()]
+        if not tid or not pid or hl_index <= 0:
+            return _err("缺少 task_id / project_id / hl_index")
+        try:
+            doc = _sv_opt.per_hl_reorder(
+                repo_root, tid, pid, hl_index, order,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.exception("stage4_line_reorder failed")
+            return _err(f"重排失败: {e}")
+        cleared = not doc.get("line_order")
+        return _ok(per_hl=doc, line_order=doc.get("line_order"),
+                   toast="已清除重排" if cleared else f"已重排 {len(order)} 行")
+
+    @app.app.post("/slirn/api/short_video_stage4_resplit")
+    async def short_video_stage4_resplit(body: dict = Body(default_factory=dict)):
+        """REQ-20261013-108：Stage 4 一行切分为多段（split）。"""
+        from slirn_home import short_video_optimize as _sv_opt
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        try:
+            hl_index = int(body.get("hl_index") or 0)
+        except (TypeError, ValueError):
+            return _err("hl_index 无效")
+        try:
+            src_index = int(body.get("src_index") or 0)
+        except (TypeError, ValueError):
+            return _err("src_index 无效")
+        subs = body.get("subs") or []
+        if not isinstance(subs, list) or not subs:
+            return _err("subs 必须是非空字符串列表")
+        if not tid or not pid or hl_index <= 0 or src_index <= 0:
+            return _err("缺少 task_id / project_id / hl_index / src_index")
+        try:
+            doc = _sv_opt.per_hl_resplit(
+                repo_root, tid, pid, hl_index, src_index, [str(s) for s in subs],
+            )
+        except Exception as e:  # noqa: BLE001
+            log.exception("stage4_resplit failed")
+            return _err(f"切分失败: {e}")
+        return _ok(per_hl=doc, toast="已切分")
+
+    @app.app.post("/slirn/api/short_video_stage4_unsplit")
+    async def short_video_stage4_unsplit(body: dict = Body(default_factory=dict)):
+        """REQ-20261013-108：Stage 4 取消切分（unsplit）。"""
+        from slirn_home import short_video_optimize as _sv_opt
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        try:
+            hl_index = int(body.get("hl_index") or 0)
+        except (TypeError, ValueError):
+            return _err("hl_index 无效")
+        try:
+            src_index = int(body.get("src_index") or 0)
+        except (TypeError, ValueError):
+            return _err("src_index 无效")
+        if not tid or not pid or hl_index <= 0 or src_index <= 0:
+            return _err("缺少 task_id / project_id / hl_index / src_index")
+        try:
+            doc = _sv_opt.per_hl_unsplit(
+                repo_root, tid, pid, hl_index, src_index,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.exception("stage4_unsplit failed")
+            return _err(f"取消切分失败: {e}")
+        return _ok(per_hl=doc, toast="已取消切分")
+
+    @app.app.post("/slirn/api/short_video_stage4_preview")
+    async def short_video_stage4_preview(body: dict = Body(default_factory=dict)):
+        """REQ-20261013-108：按 per-hl 编辑后的实际字幕行时间戳拼一段 mp4。
+
+        body: {task_id, project_id, hl_index}。
+        输出落到 ``stage4_optimize/previews/preview_hl{NN}.mp4``（不入 stage4/
+        也不入 stage5_coarse）。前端用返回的 ``mp4_url`` 弹/嵌播放器。
+        """
+        from slirn_home import short_video_coarse as _sv_coarse
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        try:
+            hl_index = int(body.get("hl_index") or 0)
+        except (TypeError, ValueError):
+            return _err("hl_index 无效")
+        if not tid or not pid or hl_index <= 0:
+            return _err("缺少 task_id / project_id / hl_index")
+        try:
+            res = _sv_coarse.preview_highlight(repo_root, tid, pid, hl_index)
+        except Exception as e:  # noqa: BLE001
+            log.exception("stage4_preview failed")
+            return _err(f"预览失败: {e}")
+        if res.get("status") != "done":
+            return _err(res.get("error") or "预览失败")
+        mp4_url = f"/slirn/api/short_video_file?kind=stage4_optimize&name=previews/preview_hl{int(hl_index):02d}.mp4"
+        return _ok(
+            hl_index=hl_index,
+            mp4_url=mp4_url,
+            rel_path=res.get("rel_path"),
+            srt=res.get("srt"),
+            duration_sec=res.get("duration_sec"),
+            segments_count=res.get("segments_count"),
+            elapsed_sec=res.get("elapsed_sec"),
+            toast=f"预览已生成（{res.get('segments_count')} 段 / {res.get('duration_sec', 0):.1f}s）",
+        )
+
+    @app.app.post("/slirn/api/short_video_stage4_go_coarse")
+    async def short_video_stage4_go_coarse(body: dict = Body(default_factory=dict)):
+        """REQ-20261013-108：触发 Stage 5 粗剪（透传到 stage5_export）。
+
+        body: {task_id, project_id, hl_index?} — 不传 hl_index = 全量；传 = 单条。
+        前端切到 stage5 后调此端点即可同时完成"跳转+触发"。
+        """
+        from slirn_home import short_video_coarse as _sv_coarse
+        tid = (body.get("task_id") or "").strip()
+        pid = (body.get("project_id") or "").strip()
+        hl_raw = body.get("hl_index")
+        hl_index = None
+        if hl_raw is not None and str(hl_raw).strip():
+            try:
+                hl_index = int(hl_raw)
+            except (TypeError, ValueError):
+                return _err("hl_index 无效")
+        if not tid or not pid:
+            return _err("缺少 task_id / project_id")
+        try:
+            started = _sv_coarse.start_coarse_async(
+                repo_root, tid, pid, hl_index=hl_index,
+            )
+        except Exception as e:  # noqa: BLE001
+            log.exception("stage4_go_coarse failed")
+            return _err(f"启动粗剪失败: {e}")
+        job = _sv_coarse.coarse_job_status(tid, pid) or {}
+        return _ok(
+            running=bool(started),
+            job=job,
+            hl_index=hl_index,
+            toast="🎬 粗剪已启动" if started else "⏳ 粗剪已在进行中",
         )
 
     @app.app.post("/slirn/api/short_video_stage3_reorder_subtitles")
@@ -10323,11 +10586,23 @@ def _register_slirn_api(
     # REQ-20261013-103：Stage 5 粗剪按长视频 compose_rough 整套搬（异步 + 状态轮询 + 删除 + 连续 SRT）
     @app.app.post("/slirn/api/short_video_stage5_export")
     async def short_video_stage5_export(request: Request, body: dict = Body(default_factory=dict)):
-        """异步启动 Stage 5 粗剪合成（仿 compose_rough / start_compose）。"""
+        """异步启动 Stage 5 粗剪合成（仿 compose_rough / start_compose）。
+
+        REQ-20261013-108：可选 ``hl_index`` — 不传或 0 = 全量（默认，保持向
+        后兼容）；int = 只跑一条 highlight（Stage 4 预览跳转用）。其他
+        highlight 的 coarse_NN.{mp4,srt} 文件**不会被删**。
+        """
         from slirn_home import short_video_coarse as _sv_coarse
 
         tid = (body.get("task_id") or "").strip()
         pid = (body.get("project_id") or "").strip()
+        hl_raw = body.get("hl_index")
+        hl_index = None
+        if hl_raw is not None and str(hl_raw).strip():
+            try:
+                hl_index = int(hl_raw)
+            except (TypeError, ValueError):
+                return _err("hl_index 无效")
         if not tid or not pid:
             return _err("缺少 task_id 或 project_id")
         try:
@@ -10335,6 +10610,7 @@ def _register_slirn_api(
                 repo_root, tid, pid,
                 start_ost_ms=int(body.get("start_ost") or 0),
                 end_ost_ms=int(body.get("end_ost") or 100),
+                hl_index=hl_index,
             )
         except Exception as e:  # noqa: BLE001
             log.exception("stage5 export failed")
@@ -10343,6 +10619,7 @@ def _register_slirn_api(
         return _ok(
             running=bool(started),
             job=job,
+            hl_index=hl_index,
             toast="🎬 粗剪已启动" if started else "⏳ 粗剪已在进行中",
         )
 
@@ -10877,6 +11154,23 @@ def _register_slirn_api(
                 "stage5": _sv_service.stage5_dir,
             }[kind]
             stage_root = stage_dir_fn(repo_root, task_id, project_id).resolve()
+            target = (stage_root / safe_name).resolve()
+            if not target.is_relative_to(stage_root):
+                return _err("非法文件路径")
+        elif kind == "stage4_optimize":
+            # REQ-20261013-108：Stage 4 预览产物（per-highlight 拼接 mp4，固定
+            # 在 previews/ 子目录；name 只允许 ``preview_hl{NN}.mp4`` 形式，
+            # 不允许越层访问 per_hl/backup 等其他子目录）。
+            safe_name = Path(name or "").name
+            if not safe_name or safe_name != name:
+                return _err("非法文件名")
+            if not safe_name.startswith("preview_hl") or not safe_name.endswith(".mp4"):
+                return _err("仅允许访问 previews/preview_hl*.mp4")
+            stage_root = (
+                _sv_service.stage4_optimize_dir(repo_root, task_id, project_id)
+                / "previews"
+            ).resolve()
+            stage_root.mkdir(parents=True, exist_ok=True)
             target = (stage_root / safe_name).resolve()
             if not target.is_relative_to(stage_root):
                 return _err("非法文件路径")

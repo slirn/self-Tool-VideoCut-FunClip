@@ -1055,6 +1055,13 @@ PROMPT_HISTORY_MAX = 10
 STAGE3_IMAGE_BASENAME = "input_image"
 ALLOWED_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 
+# REQ-20261013-108：多 stage 提示词存储（全局默认 + 历史）
+# 数据形态：{stage3: {default_prompt, history}, stage4: {default_prompt, history}}
+# 旧形态（顶层 default_prompt / history）自动视为 stage3。
+_PROMPT_DEFAULT_KEY = "default_prompt"
+_PROMPT_HISTORY_KEY = "history"
+_PROMPT_VALID_STAGES = ("stage3", "stage4")
+
 # REQ-20261012-099 修订十：Stage 3 系统级提示词 —— 内置在系统里、独立于
 # 用户「默认 / 历史」两级存储（不占历史名额、不被用户保存覆盖）。
 # 「🧭 引用系统提示词」按钮把它一键填入文本域，之后照常编辑 / 解析 / 设为默认。
@@ -1096,68 +1103,163 @@ STAGE3_SYSTEM_PROMPT = """你是一个短视频内容导演，输入一门课程
 - 最后一句是否对主题形成收束，而不是戛然而止？
 - 中间是否缺少让逻辑成立的关键过渡句？"""
 
+# REQ-20261013-108：Stage 4「内容优化」系统级提示词
+# 「🧭 引用系统提示词」按钮把本字符串一键填入文本域；用户编辑后照常
+# 「💾 设为默认 / 📜 存入列表」覆盖全局默认 / 历史。
+# 核心改进（vs 旧 _OPTIMIZE_SYSTEM_PROMPT）：
+# REQ-20261013-110 重写要点：
+# 1) 放开「段内可重排」（原强约束 1「不改变行的先后顺序」是当前 8 卡堆叠下「重复 / 逻辑问题」的根因）
+# 2) 新增「逻辑校验」维度（去重 + 重复度 + 承上启下自检）
+# 3) 显式禁用 `op: "delete"`（消除「未知 op [delete] 保留原行」警告噪音）
+# 4) 顶部加「任务目标」段 — 鼓励重排 + 强调逻辑通顺
+STAGE4_SYSTEM_PROMPT = """你是短视频字幕优化师。输入一条短视频的标题和带编号的字幕行（每行 1 个 src_index 引用了原 SRT 的真实时间），按规则重组并只输出一个 JSON 对象。
+
+# 任务目标
+让这条短视频的字幕在【保持原意 + 信息完整 + 逻辑通顺 + 阅读顺滑】之间取得最优平衡。**重排是被鼓励的**（只要不破坏事实）— 常见的真实场景：相邻两行在说同一件事、句子前后不连贯、举例应先于总结等。**重复 / 顺序错乱比个别字词错误更扎眼，必须优先处理**。
+
+# 优化维度
+1. 去重：重复表达、意思一致的相邻行合并为 1 行（保留时间戳更靠后、字数更多、信息更全的那条）。
+2. 去口水：去掉"嗯""那个""就是说""对吧""然后呢"等无信息量语气词；"那么""所以""其实"等过渡词在保持通顺前提下可省。
+3. 修错别字：按"音近/形近+上下文合理"原则修正，不确定时保持原字。
+4. 切分：单行超过 ~30 字或含 2 个以上独立意思时，按语义切为多行（子文本按顺序拼接必须逐字等于原文，不改写不省略）；子行 start_ms/end_ms 在原行时长内按字数占比内插。
+5. 删冗：与标题主题无关、纯过渡、纯重复、无独立信息量的整行直接删除（输出 lines 中省略对应编号）。
+6. 保留原意：不得新增原文没有的事实、解释或举例；不得改写观点。
+7. 逻辑校验：相邻行内容文本重叠率 > 80% 时必须合并（用信息更全的版本）；输出前自检「相邻行是否在说同一件事」「句间是否承上启下」「总-分-例 / 问题-原因-方案 顺序是否自然」。
+
+# 决策输出（每行 4 选 1）
+- keep：行内容合适 → {"no": 行号, "op": "keep"}
+- fix：改字 → {"no": 行号, "op": "fix", "text": "修改后文字"}
+- split：切分 → {"no": 行号, "op": "split", "splits": ["子句1", "子句2", ...]}
+- delete：**不要输出 `{"op": "delete"}`**！删行 = 在 `lines` 数组中**省略**对应 `no`（不输出）。输出 `op: "delete"` 一律视为保留（系统会忽略并打警告）。
+
+# 强约束
+1. 允许段内重排以提升逻辑通顺性（按主题 / 总-分-例 / 问题-方案 组织）。`lines` 数组中**行的出现顺序**即为该段最终顺序。时间戳跟文本走（不重算）。
+2. split 子文本拼接后必须与原文逐字一致（不改写不省略）；需要改写请改用 fix，两者不可同时存在。
+3. fix 不改变行数，只改 text。
+4. 标题不改。
+5. 输出的 no 必须是输入中真实存在的编号；未列出的 no 视为删除。
+
+只输出严格 JSON：{"lines": [{"no": 1, "op": "keep"}, {"no": 3, "op": "keep"}, {"no": 2, "op": "fix", "text": "..."}, ...]}，不要任何解释、代码块标记或额外文字。注意 `lines` 数组的顺序就是最终顺序，可按需重排。"""
+
 
 def prompt_settings_path(repo_root: Path | str) -> Path:
     """全局提示词设置文件（config/short_video_prompts.json，机器本地运行时状态）。"""
     return Path(repo_root) / PROMPT_SETTINGS_REL
 
 
-def load_prompt_settings(repo_root: Path | str) -> dict:
-    """读全局提示词设置。损坏/不存在 → 空结构。
+def _normalize_stage(stage: str) -> str:
+    """Stage 名规范化（默认 stage3）。非法 → stage3。"""
+    s = str(stage or "stage3").strip().lower()
+    if s not in _PROMPT_VALID_STAGES:
+        return "stage3"
+    return s
 
-    返回 ``{"default_prompt": None | {prompt, updated_at},
-    "history": [{prompt, updated_at}]}``（history 最新在前，≤ 10 条）。
+
+def _empty_stage_node() -> dict:
+    return {_PROMPT_DEFAULT_KEY: None, _PROMPT_HISTORY_KEY: []}
+
+
+def _migrate_legacy_shape(data: dict) -> dict:
+    """旧形态（顶层 default_prompt / history）→ 新形态 {stage3: {...}}。
+
+    旧文件只有一个 stage（Stage 3）的内容；迁移到 stage3 节点后，
+    stage4 节点为空（首次写入时再创建）。
     """
+    if not isinstance(data, dict):
+        return {"stage3": _empty_stage_node(), "stage4": _empty_stage_node()}
+    if "stage3" in data or "stage4" in data:
+        # 已经是新形态
+        out = {"stage3": _empty_stage_node(), "stage4": _empty_stage_node()}
+        for s in _PROMPT_VALID_STAGES:
+            node = data.get(s)
+            if isinstance(node, dict):
+                dp = node.get(_PROMPT_DEFAULT_KEY)
+                if isinstance(dp, dict) and str(dp.get("prompt") or "").strip():
+                    out[s][_PROMPT_DEFAULT_KEY] = {
+                        "prompt": str(dp.get("prompt")),
+                        "updated_at": str(dp.get("updated_at") or ""),
+                    }
+                hist = node.get(_PROMPT_HISTORY_KEY)
+                if isinstance(hist, list):
+                    for item in hist[:PROMPT_HISTORY_MAX]:
+                        if isinstance(item, dict) and str(item.get("prompt") or "").strip():
+                            out[s][_PROMPT_HISTORY_KEY].append({
+                                "prompt": str(item.get("prompt")),
+                                "updated_at": str(item.get("updated_at") or ""),
+                            })
+        return out
+    # 旧形态：顶层 default_prompt / history
+    s3 = _empty_stage_node()
+    dp = data.get(_PROMPT_DEFAULT_KEY)
+    if isinstance(dp, dict) and str(dp.get("prompt") or "").strip():
+        s3[_PROMPT_DEFAULT_KEY] = {
+            "prompt": str(dp.get("prompt")),
+            "updated_at": str(dp.get("updated_at") or ""),
+        }
+    hist = data.get(_PROMPT_HISTORY_KEY)
+    if isinstance(hist, list):
+        for item in hist[:PROMPT_HISTORY_MAX]:
+            if isinstance(item, dict) and str(item.get("prompt") or "").strip():
+                s3[_PROMPT_HISTORY_KEY].append({
+                    "prompt": str(item.get("prompt")),
+                    "updated_at": str(item.get("updated_at") or ""),
+                })
+    return {"stage3": s3, "stage4": _empty_stage_node()}
+
+
+def _read_full_settings(repo_root: Path | str) -> dict:
+    """读全文件（多 stage 形态）。损坏/不存在 → 空多 stage 节点。"""
     p = prompt_settings_path(repo_root)
-    empty = {"default_prompt": None, "history": []}
+    empty = {"stage3": _empty_stage_node(), "stage4": _empty_stage_node()}
     if not p.is_file():
         return empty
     try:
         data = json.loads(p.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001
         return empty
-    if not isinstance(data, dict):
-        return empty
-    out = {"default_prompt": None, "history": []}
-    dp = data.get("default_prompt")
-    if isinstance(dp, dict) and str(dp.get("prompt") or "").strip():
-        out["default_prompt"] = {
-            "prompt": str(dp.get("prompt")),
-            "updated_at": str(dp.get("updated_at") or ""),
-        }
-    hist = data.get("history")
-    if isinstance(hist, list):
-        for item in hist[:PROMPT_HISTORY_MAX]:
-            if isinstance(item, dict) and str(item.get("prompt") or "").strip():
-                out["history"].append({
-                    "prompt": str(item.get("prompt")),
-                    "updated_at": str(item.get("updated_at") or ""),
-                })
-    return out
+    return _migrate_legacy_shape(data)
 
 
-def save_default_prompt(repo_root: Path | str, prompt: str) -> dict:
-    """把当前提示词保存为全局默认（覆盖旧值）。
+def load_prompt_settings(repo_root: Path | str, *, stage: str = "stage3") -> dict:
+    """读全局提示词设置。损坏/不存在 → 空结构。
 
-    同时尽力把该提示词同步进历史列表（已存在 → 置顶去重；未满 → 插入），
-    这样历史列表里能看到哪一条是默认（前端按文本相等标 ⭐）。列表已满且
-    该提示词不在其中 → 跳过（不强制覆盖最旧，覆盖决定权仍归 save_prompt_history
-    的 confirm 流程）。
+    ``stage`` ∈ ``{"stage3", "stage4"}``，默认 stage3（保持 Stage 3 老调用兼容）。
+    返回 ``{"default_prompt": None | {prompt, updated_at},
+    "history": [{prompt, updated_at}]}``（history 最新在前，≤ 10 条）。
+    """
+    full = _read_full_settings(repo_root)
+    s = _normalize_stage(stage)
+    return dict(full.get(s) or _empty_stage_node())
+
+
+def save_default_prompt(repo_root: Path | str, prompt: str, *, stage: str = "stage3") -> dict:
+    """把当前提示词保存为指定 stage 的全局默认（覆盖旧值）。
+
+    同时尽力把该提示词同步进该 stage 的历史列表（已存在 → 置顶去重；未满
+    → 插入），这样历史列表里能看到哪一条是默认（前端按文本相等标 ⭐）。
+    列表已满且该提示词不在其中 → 跳过（不强制覆盖最旧，覆盖决定权仍归
+    save_prompt_history 的 confirm 流程）。
+
+    注意：旧形态（顶层 default_prompt）调用此函数时 stage 默认为 stage3，
+    第一次保存即触发旧形态 → 新形态迁移。
     """
     text = str(prompt or "").strip()
     if not text:
         raise ShortVideoError("提示词不能为空")
     root = Path(repo_root)
-    data = load_prompt_settings(root)
+    full = _read_full_settings(root)
+    s = _normalize_stage(stage)
+    full.setdefault(s, _empty_stage_node())
     entry = {"prompt": text, "updated_at": now_iso()}
-    data["default_prompt"] = entry
-    _write_json_atomic(prompt_settings_path(root), data)
-    save_prompt_history(root, text)  # need_confirm（满且不存在）时静默跳过
+    full[s][_PROMPT_DEFAULT_KEY] = entry
+    _write_json_atomic(prompt_settings_path(root), full)
+    save_prompt_history(root, text, stage=s)  # need_confirm（满且不存在）时静默跳过
     return entry
 
 
-def save_prompt_history(repo_root: Path | str, prompt: str, *, confirm: bool = False) -> dict:
-    """提示词存入历史列表（最新在前，上限 10 条）。
+def save_prompt_history(repo_root: Path | str, prompt: str, *, confirm: bool = False,
+                        stage: str = "stage3") -> dict:
+    """提示词存入指定 stage 的历史列表（最新在前，上限 10 条）。
 
     - 已存在相同提示词（strip 后相等）→ 更新时间戳并置顶，直接 saved；
     - 未满 10 条 → 插入最前，saved；
@@ -1168,11 +1270,13 @@ def save_prompt_history(repo_root: Path | str, prompt: str, *, confirm: bool = F
     if not text:
         raise ShortVideoError("提示词不能为空")
     root = Path(repo_root)
-    data = load_prompt_settings(root)
-    hist = data["history"]
+    full = _read_full_settings(root)
+    s = _normalize_stage(stage)
+    full.setdefault(s, _empty_stage_node())
+    hist = full[s][_PROMPT_HISTORY_KEY]
     # 去重置顶（不算新增，无需确认）
     for i, item in enumerate(hist):
-        if item["prompt"].strip() == text:
+        if str(item.get("prompt") or "").strip() == text:
             hist.pop(i)
             break
     else:
@@ -1182,8 +1286,17 @@ def save_prompt_history(repo_root: Path | str, prompt: str, *, confirm: bool = F
         if len(hist) >= PROMPT_HISTORY_MAX:
             hist.pop()  # 丢弃最旧（末尾）
     hist.insert(0, {"prompt": text, "updated_at": now_iso()})
-    _write_json_atomic(prompt_settings_path(root), data)
+    _write_json_atomic(prompt_settings_path(root), full)
     return {"status": "saved", "history": hist, "max": PROMPT_HISTORY_MAX}
+
+
+def load_all_prompt_settings(repo_root: Path | str) -> dict:
+    """读全部 stage 的设置（前端一次性拉取，避免 2 次 roundtrip）。
+
+    返回 ``{"stage3": {default_prompt, history}, "stage4": {default_prompt, history}}``。
+    """
+    full = _read_full_settings(repo_root)
+    return {s: dict(full.get(s) or _empty_stage_node()) for s in _PROMPT_VALID_STAGES}
 
 
 # ---------- REQ-20261012-099：Stage 3 截图（解析短视频内容的输入图） ----------

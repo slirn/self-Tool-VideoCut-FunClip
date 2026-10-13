@@ -142,7 +142,8 @@ def test_per_hl_state_roundtrip(tmp_path):
     tid, pid = _make_project(tmp_path)
     # 初始：空
     st = svc_opt.load_per_hl(tmp_path, tid, pid, hl_index=1)
-    assert st == {"line_edits": {}, "line_marks": [], "split_marks": {}}
+    # REQ-20261013-110：新增 line_order 字段（None = 保持原序）
+    assert st == {"line_edits": {}, "line_marks": [], "split_marks": {}, "line_order": None}
     # 写 line_edits
     svc_opt.per_hl_apply_line_edit(tmp_path, tid, pid, hl_index=1, src_index=1, new_text="改后")
     st = svc_opt.load_per_hl(tmp_path, tid, pid, hl_index=1)
@@ -394,3 +395,183 @@ def test_stage4_tabs_stale_index_falls_back():
     # 2) 找不到 tab → 置 null
     assert "if (tab) switchHlTab(mem.hl);" in js
     assert "else window._slirnSvHlTab = null" in js
+
+
+# ---------- REQ-20261013-110：Stage 4 增强（详情折叠 + 4 字段 + 段内重排） ----------
+
+def test_stage4_prompt_allows_intra_hl_reorder():
+    """提示词应明确允许段内重排，并显式禁用 op:\"delete\" 防止误用警告。"""
+    p = svc.STAGE4_SYSTEM_PROMPT
+    # 1) 强约束 1 改为「允许段内重排」（不再有「不改变行的先后顺序」原文）
+    assert "不改变行的先后顺序" not in p
+    assert "段内重排" in p or "允许段内重排" in p
+    # 2) 显式禁 op:"delete"
+    assert "不要输出" in p and "op" in p and "delete" in p
+    # 3) 新增逻辑校验维度
+    assert "逻辑校验" in p or "重复度" in p or "承上启下" in p
+    # 4) 顶部任务目标段
+    assert "任务目标" in p or "逻辑通顺" in p
+
+
+def test_parse_optimize_result_treats_delete_silently():
+    """op:\"delete\" 误用应静默忽略（视为未列入=删除），不产生警告。"""
+    # src 3 行
+    src_lines = [
+        {"no": 1, "text": "A"},
+        {"no": 2, "text": "B"},
+        {"no": 3, "text": "C"},
+    ]
+    # LLM 输出：第 2 行显式 op:delete，第 1/3 行 keep
+    raw = json.dumps({
+        "lines": [
+            {"no": 1, "op": "keep"},
+            {"no": 2, "op": "delete"},
+            {"no": 3, "op": "keep"},
+        ]
+    }, ensure_ascii=False)
+    ops, warnings = svc_opt._parse_optimize_result(raw, src_lines)
+    # 第 2 行应被忽略（未列入），不产生警告
+    assert 1 in ops
+    assert 2 not in ops  # 视同未列入
+    assert 3 in ops
+    assert not any("未知 op" in w for w in warnings), f"delete 应静默，产生警告: {warnings}"
+
+
+def test_effective_subtitle_lines_applies_line_order(tmp_path):
+    """per-hl line_order 字段应让 effective 顺序按白名单重排；未列入的按原序追加。"""
+    tid, pid = _make_project(tmp_path)
+    # hl 1 有 3 行 src_index [1, 2, 3]；重排为 [3, 1]
+    svc_opt.per_hl_reorder(tmp_path, tid, pid, hl_index=1, order=[3, 1])
+    eff = svc_opt.effective_subtitle_lines(tmp_path, tid, pid, hl_index=1)
+    srcs = [int(s.get("src_index") or 0) for s in eff]
+    # [3, 1] 列入；[2] 未列入按原序追加
+    assert srcs == [3, 1, 2]
+    # no 重新编号 1..M
+    nos = [int(s.get("no") or 0) for s in eff]
+    assert nos == [1, 2, 3]
+
+
+def test_effective_subtitle_lines_unlisted_appended(tmp_path):
+    """line_order 只列部分 src_index，未列入的应按原序追加（白名单语义，不丢行）。"""
+    tid, pid = _make_project(tmp_path)
+    svc_opt.per_hl_reorder(tmp_path, tid, pid, hl_index=1, order=[2])
+    eff = svc_opt.effective_subtitle_lines(tmp_path, tid, pid, hl_index=1)
+    srcs = [int(s.get("src_index") or 0) for s in eff]
+    assert srcs == [2, 1, 3]
+
+
+def test_per_hl_reorder_clear_with_empty_list(tmp_path):
+    """传 [] 或 None 应清除重排，恢复原序。"""
+    tid, pid = _make_project(tmp_path)
+    svc_opt.per_hl_reorder(tmp_path, tid, pid, hl_index=1, order=[3, 2, 1])
+    eff = svc_opt.effective_subtitle_lines(tmp_path, tid, pid, hl_index=1)
+    assert [int(s.get("src_index") or 0) for s in eff] == [3, 2, 1]
+    # 清除
+    svc_opt.per_hl_reorder(tmp_path, tid, pid, hl_index=1, order=[])
+    eff = svc_opt.effective_subtitle_lines(tmp_path, tid, pid, hl_index=1)
+    assert [int(s.get("src_index") or 0) for s in eff] == [1, 2, 3]
+
+
+def test_per_hl_reorder_rejects_empty_when_not_clearing(tmp_path):
+    """非空 list 校验：传空字符串元素应被跳过（防御性）。"""
+    tid, pid = _make_project(tmp_path)
+    # 正常写入
+    per = svc_opt.per_hl_reorder(tmp_path, tid, pid, hl_index=1, order=[3, 1])
+    assert per["line_order"] == [3, 1]
+    # 加载
+    per2 = svc_opt.load_per_hl(tmp_path, tid, pid, hl_index=1)
+    assert per2["line_order"] == [3, 1]
+
+
+def test_stage4_sub_row_has_4_fields(tmp_path):
+    """_render_stage4_sub_row 输出应含 4 个字段 span：no / srt / time / text。"""
+    from slirn_home import short_video_ui as ui
+    sl = {
+        "no": 1, "src_index": 5,
+        "text": "测试文本",
+        "start_ms": 12345, "end_ms": 23456,
+    }
+    per_hl = {}
+    html = ui._render_stage4_sub_row(hl_index=1, sl=sl, per_hl=per_hl)
+    # 4 个 span 都在
+    assert 'class="slirn-stage4-sub-no"' in html
+    assert 'class="slirn-stage4-sub-srt"' in html
+    assert 'class="slirn-stage4-sub-time"' in html
+    assert 'class="slirn-stage4-sub-text"' in html
+    # 4 字段内容
+    assert "#1" in html
+    assert "@SRT#5" in html
+    assert "00:00:12,345" in html  # start_ms
+    assert "00:00:23,456" in html  # end_ms
+    assert "测试文本" in html
+    # 不应再含旧的 slirn-sv-muted 单 span 行号
+    assert '<span class="slirn-sv-muted">#1</span>' not in html
+
+
+def test_stage4_ui_red_box_moved_to_detail_fold(tmp_path):
+    """_stage4_optimize 主页面不应含顶层 opt-detail / opt-warns，应有 detail fold。"""
+    from slirn_home import short_video_ui as ui
+    tid, pid = _make_project(tmp_path)
+    # 构造项目数据：1 条 highlight 已优化完成
+    project = {
+        "task_id": tid, "id": pid,
+        "name": "test",
+        "pipeline": {
+            "stage4_optimize": {
+                "status": "done",
+                "highlights": [
+                    {"index": 1, "title": "片段一", "start_ms": 0, "end_ms": 12000,
+                     "status": "ok", "lines_before": 3, "lines_after": 3,
+                     "kept": 3, "fixed": 0, "split": 0, "deleted": 0,
+                     "warning_count": 1},
+                ],
+                "warnings": ["#1 未知 op [delete]，保留原行"],
+            },
+            "stage3_analyze": {
+                "srt_lines": [],
+                "highlights": [
+                    {"index": 1, "title": "片段一", "start_time": 0, "end_time": 12,
+                     "srt_lines": [{"index": 1, "text": "a"}, {"index": 2, "text": "b"}]},
+                ],
+                "hl_status": [
+                    {"index": 1, "status": "ok", "lines_before": 3, "lines_after": 3,
+                     "kept": 3, "fixed": 0, "split": 0, "deleted": 0},
+                ],
+            },
+        },
+    }
+    html = ui._stage4_optimize(project, task_id=tid, project_id=pid, repo_root=tmp_path)
+    # 1) 主页面无顶层 opt-detail / opt-warns（应在 detail fold 内）
+    # 简单判定：detail fold summary 存在 + 至少含一条 ul.slirn-stage4-opt-warns 子节点
+    assert '<details class="slirn-stage4-detail">' in html
+    assert "📊 优化详情与警告" in html
+    # ul 应在 detail-body 内（不是顶层）
+    body_start = html.find('<div class="slirn-stage4-detail-body">')
+    assert body_start > 0
+    # 整个 ul 块都在 detail-body 之内
+    ul_start = html.find('<ul class="slirn-stage4-opt-warns">')
+    assert ul_start > body_start, "警告 ul 必须在 detail-body 之内"
+    # 2) 顶层不应再有 <div class="slirn-stage4-opt-detail">（之前的红框）
+    # 简单判定：detail-body 之前的区域没有 opt-detail 块
+    pre_body = html[:body_start]
+    assert 'class="slirn-stage4-opt-detail"' not in pre_body
+    # 3) 4 字段 row 已应用
+    assert 'class="slirn-stage4-sub-no"' in html
+    assert 'class="slirn-stage4-sub-srt"' in html
+    # 4) 顶部 detail fold 存在
+    assert '<details class="slirn-stage4-detail">' in html
+    assert "📊 优化详情与警告" in html
+
+
+def test_fmt_srt_time_helper():
+    """_fmt_srt_time 毫秒 → SRT 格式 00:00:00,000（项目惯例 2 位小时）。"""
+    from slirn_home import short_video_ui as ui
+    assert ui._fmt_srt_time(0) == "00:00:00,000"
+    assert ui._fmt_srt_time(12345) == "00:00:12,345"
+    assert ui._fmt_srt_time(60000) == "00:01:00,000"
+    assert ui._fmt_srt_time(3661001) == "01:01:01,001"
+    assert ui._fmt_srt_time(3600000) == "01:00:00,000"
+    # None / 负数兜底
+    assert ui._fmt_srt_time(None) == "00:00:00,000"
+    assert ui._fmt_srt_time(-5) == "00:00:00,000"
+

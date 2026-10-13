@@ -690,6 +690,31 @@
     });
   }
 
+  // 段内重排 — 用户输入 src_index 列表（白名单：未列入的按原序追加）
+  // data-order="1,3,2" 形式；不传 data-order 则清空重排
+  function stage4LineReorder(btn) {
+    var card = btn.closest ? btn.closest('.slirn-stage4-clip') : null;
+    if (!card) return;
+    var hl = parseInt(card.getAttribute('data-hl-index') || '0', 10);
+    if (!hl) return;
+    var orderAttr = btn.getAttribute('data-order') || '';
+    var order = [];
+    if (orderAttr) {
+      order = orderAttr.split(',').map(function(s) { return parseInt(s.trim(), 10); })
+        .filter(function(n) { return n > 0; });
+    }
+    var ctx = innerCtx(); if (!ctx) return;
+    postJSON(API + '/short_video_stage4_line_reorder', {
+      task_id: ctx.taskId, project_id: ctx.projectId,
+      hl_index: hl, order: order
+    }).then(function(r) {
+      if (r && r.ok) {
+        toast(order.length ? ('已重排 ' + order.length + ' 行') : '已清除重排');
+        openProject(ctx.taskId, ctx.projectId);
+      } else toast((r && r.error) || '重排失败', 'error');
+    });
+  }
+
   // 预览该高亮（按 per-hl 编辑后拼一段 mp4）
   function stage4Preview(btn) {
     var card = btn.closest ? btn.closest('.slirn-stage4-clip') : null;
@@ -2029,6 +2054,7 @@
     if (action === 'sv-stage4-line-edit') return stage4LineEdit(btn);
     if (action === 'sv-stage4-line-resplit') return stage4LineResplit(btn);
     if (action === 'sv-stage4-line-toggle') return stage4LineToggle(btn);
+    if (action === 'sv-stage4-line-reorder') return stage4LineReorder(btn);
     if (action === 'sv-stage4-preview') return stage4Preview(btn);
     if (action === 'sv-stage4-go-coarse') return stage4GoCoarse(btn);
     if (action === 'sv-stage4-go-coarse-all') return stage4GoCoarseAll();
