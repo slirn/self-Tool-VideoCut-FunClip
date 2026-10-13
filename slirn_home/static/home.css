@@ -162,6 +162,8 @@ footer { display: none !important; }
   display: inline-flex; align-items: center; gap: 6px;
   text-decoration: none;
   font-family: inherit;
+  white-space: nowrap;          /* REQ-20261013-107：actions-bar 换行时 button 内部不再竖排 */
+  flex-shrink: 0;                /* REQ-20261013-107：button 保持自身最小宽度，不被父容器压窄 */
 }
 .slirn-btn:hover { background: var(--hover-bg); transform: translateY(-1px); }
 .slirn-btn-primary {
@@ -3931,8 +3933,9 @@ input[type="checkbox"]:focus-visible {
   background: var(--hover-bg, rgba(255,255,255,0.4));
   border: 1px solid var(--border, rgba(128,128,128,0.25));
   border-radius: 10px;
-  flex-wrap: nowrap;
-  overflow-x: auto;
+  flex-wrap: wrap;            /* REQ-20261013-107：详情面板窄宽下按钮换行，避免文字被压成一字一行 */
+  overflow-x: visible;
+  row-gap: 6px;
 }
 /* 视觉分组：AI/预览/导出 vs 模板名/保存/引用 — 用一根细竖线分开 */
 .slirn-fine-actions-bar-sep {
