@@ -24,30 +24,37 @@
 
 | # | 文件 | 改动 | 原因 |
 |---|------|------|------|
-| 1 | `slirn_home/static/home.css:3934-3936` | `.slirn-fine-actions-bar` 的 `flex-wrap: nowrap; overflow-x: auto` → `flex-wrap: wrap; overflow-x: visible; row-gap: 6px` | 窄空间下 button **换行到下一行**而非文字竖排；长视频窄屏同样受益 |
-| 2 | `slirn_home/static/home.css:162-163` | `.slirn-btn` 加 `white-space: nowrap; flex-shrink: 0` | button 内部文字保持一行，button 保持自身最小宽度不压缩 |
+| 1 | `slirn_home/static/home.css:3934-3936` | `.slirn-fine-actions-bar` 的 `flex-wrap: nowrap; overflow-x: auto` → **保留 nowrap + overflow-x: auto**（v1 wrap 改回 nowrap，v2 最终） | v1 试用 wrap：3 button 换行到 3 行 137px 高（h 137），视觉空荡；v2 改回 nowrap + overflow-x: auto：3 button 排一行 64px 高（h 64，比 v1 减少 73px），超出部分横向滚动 |
+| 2 | `slirn_home/static/home.css:162-163` | `.slirn-btn` 加 `white-space: nowrap; flex-shrink: 0` | button 内部文字保持一行，button 保持自身最小宽度不压缩；与 nowrap 容器配合实现"完整 button + 横向滚动" |
+
+### v1 → v2 调整理由
+
+v1 wrap 修复了"文字竖排"问题（每个 button 不再被压成 16px 宽），但实测 card 367px 宽时 3 button (143+117+117=377) 换行到 3 行 + row-gap 6px = **h 137px**——视觉空荡像"每行一个按钮"，与 v1 修复前的"按钮竖排"观感相似。
+
+v2 改回 nowrap + overflow-x: auto（不换行），3 button 横向排一行 + **横向滚动**（scrollW=540 > w=349），**h 64px**（仅一行 button 高度），更紧凑。
 
 ## 验证（2026-10-13）
 
-### 端到端实测（headless Chrome via CDP，1280×800）
+### 端到端实测（headless Chrome via CDP，1756×2044 — 用户实际视口）
 
 真项目 `20261003-001/sv_20261004_072937_572eb5`：
 
-- **修复前**（推断）：actions-bar 内 3 个 button 各 16-20px 宽，文字"导出最终视频"一字一行
-- **修复后**（实测）：
-  - card 宽度 282px
-  - actions-bar 1（264px × 182px 高，3 个 button 跨 3 行）：
-    - `💾 导出最终视频` — 143px × 40px
-    - `📤 导出参数` — 117px × 42px
-    - `📥 导入参数` — 117px × 42px
-  - actions-bar 2（264px × 155px 高，2 个 button 跨 2 行）：
-    - `💾 保存参数为模板` — 157px × 40px
-    - `📥 引用参数（本地）` — 173px × 42px
-- 截图 `sv_stage7_v3.png`：紫色主按钮"导出最终视频"独占一行（不再竖排），其他辅助按钮换到下一行
+- **修复前**（用户截图）：actions-bar 内 3 个 button 各 16-20px 宽，文字"导出最终视频"一字一行
+- **v1 修复**（flex-wrap: wrap）：3 button 各占一行（h 137px），仍空荡
+- **v2 修复**（flex-wrap: nowrap + overflow-x: auto，**最终版**）：
+  - card 宽度 367px
+  - actions-bar 1（w=349 / h=64 / scrollW=540，**3 button 单行 + 横向滚动**）：
+    - `💾 导出最终视频` — 143px × 40px @ x=13
+    - `📤 导出参数` — 117px × 42px @ x=164
+    - `📥 导入参数` — 117px × 42px @ x=289
+  - actions-bar 2（w=349 / h=81 / scrollW=591，**2 button + input 单行**）：
+    - `💾 保存参数为模板` — 157px × 40px @ x=13
+    - `📥 引用参数（本地）` — 173px × 42px @ x=385
+- 截图 `sv_stage7_v3_final.png`：3 button 横向排一行（容器右下有横向滚动条），无竖排
 
 ### 回归验证
 
-- pytest 1228 passed（80.74s）零回归
+- pytest 1228 passed（81.03s）零回归
 - node --check 3 JS 全过（short_video.js / router.js / pipeline.js）
 - ruff：home.css 不被 ruff 处理（跳过）
 
@@ -63,8 +70,8 @@
 | 项 | 值 |
 |---|---|
 | REQ 文档 | REQ-20261013-107-sv-stage7-actions-bar-wrap.md（本文件） |
-| 改动文件 | `slirn_home/static/home.css`（+5 −2） |
-| 7861 PID | bzh1reutb（已 restart） |
+| 改动文件 | `slirn_home/static/home.css`（v1 + v2 合并 +5 −2） |
+| 7861 PID | bj8p4tp38（v2 已 restart） |
 | 端点 / helper / JS | 零改动 |
-| 测试 | 1228 passed（80.74s）零回归 |
+| 测试 | 1228 passed（81.03s）零回归 |
 | 验证 | 真项目端到端，headless Chrome via CDP，截图确认 |
