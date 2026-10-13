@@ -5585,7 +5585,7 @@ input[type="checkbox"]:focus-visible {
   margin-top: 6px;
   padding: 10px 12px;
   background: #0f172a;
-  color: #f1f5f9;
+  color: #f1f5f9 !important;  /* REQ-20261013-110：!important 抗 .prose * 通配陷阱（深底继承改回深字） */
   border: 1px solid #334155;
   border-radius: 6px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -5628,6 +5628,7 @@ input[type="checkbox"]:focus-visible {
   margin-top: 6px;
   padding: 10px 12px;
   background: #fff;
+  color: #0f172a;  /* REQ-20261013-110：白底显式深字，防御 .prose * 通配 */
   border: 1px solid #e2e8f0;
   border-radius: 6px;
 }

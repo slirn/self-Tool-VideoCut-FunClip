@@ -575,3 +575,33 @@ def test_fmt_srt_time_helper():
     assert ui._fmt_srt_time(None) == "00:00:00,000"
     assert ui._fmt_srt_time(-5) == "00:00:00,000"
 
+
+def test_stage_log_body_color_has_important_for_dark_bg():
+    """REQ-20261013-110：.slirn-stage-log-body 深底浅字必须 !important 防 .prose * 陷阱。
+
+    沙拉 stage 区域是 gr.HTML 渲染，会被 .prose * 通配改回 inherit，深底上
+    看不到字。规则里必须显式 color + !important 才能稳。
+    """
+    from pathlib import Path
+    css = (Path(__file__).parent.parent / "slirn_home" / "static" / "home.css").read_text(encoding="utf-8")
+    # 找 .slirn-stage-log-body { ... } 块
+    import re
+    m = re.search(r"\.slirn-stage-log-body\s*\{([^}]+)\}", css, re.DOTALL)
+    assert m, "未找到 .slirn-stage-log-body 规则"
+    body = m.group(1)
+    # 必须显式给 color（不是仅 inherit / 不用 var）
+    assert re.search(r"color\s*:\s*#", body), f"log-body 缺显式 color：{body}"
+    # 必须有 !important 抗 .prose *
+    assert "!important" in body, f"log-body color 缺 !important 防御：{body}"
+
+
+def test_stage4_detail_body_color_is_explicit():
+    """REQ-20261013-110：.slirn-stage4-detail-body 浅底必须显式深字，防御 .prose *。"""
+    from pathlib import Path
+    css = (Path(__file__).parent.parent / "slirn_home" / "static" / "home.css").read_text(encoding="utf-8")
+    import re
+    m = re.search(r"\.slirn-stage4-detail-body\s*\{([^}]+)\}", css, re.DOTALL)
+    assert m, "未找到 .slirn-stage4-detail-body 规则"
+    body = m.group(1)
+    assert re.search(r"color\s*:\s*#0f172a", body), f"detail-body 缺 #0f172a 深字：{body}"
+
