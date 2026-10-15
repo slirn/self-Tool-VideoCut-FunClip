@@ -38,6 +38,25 @@ class CoarseClipResult:
     error: str = ""
 
 
+def _clamp_segments_ms(pairs_ms, vid_dur_sec: float) -> list[tuple[float, float]]:
+    """毫秒区间列表 → 秒区间列表，并夹在视频时长内（返回可能为空）。
+
+    REQ-20261015-118 回归修复：修复前把 min(vid_dur, 毫秒值) 的结果再除
+    1000 —— 秒（video.duration）和毫秒（字幕时间戳）直接比大小，任何起点
+    晚于 vid_dur*1000 毫秒（≈6.1s）的区间都被夹到 ≤ vid_dur 秒、比起点
+    还小，整段被丢 → 全部 clip 报「segments 为空或全部无效」粗剪失败。
+    除法必须放在 min 之前（先统一单位再比较）。
+    """
+    out: list[tuple[float, float]] = []
+    for s_ms, e_ms in pairs_ms:
+        s_sec = max(0, s_ms) / 1000.0
+        e_sec = min(vid_dur_sec, e_ms / 1000.0)
+        if e_sec <= s_sec:
+            continue
+        out.append((s_sec, e_sec))
+    return out
+
+
 # ---------- REQ-20261013-103：异步粗剪（仿 compose_service.start_compose） ----------
 
 # 内存 job 表：key = (task_id, project_id) 元组，区分不同项目
@@ -238,13 +257,7 @@ def _coarse_one(
         try:
             # 把所有 segments 限制在 video.duration 内
             vid_dur = video.duration
-            seg_list: list[tuple[float, float]] = []
-            for s_ms, e_ms in segments:
-                s_sec = max(0, s_ms) / 1000.0
-                e_sec = min(vid_dur, e_ms) / 1000.0
-                if e_sec <= s_sec:
-                    continue
-                seg_list.append((s_sec, e_sec))
+            seg_list = _clamp_segments_ms(segments, vid_dur)
             if not seg_list:
                 raise ValueError("segments 为空或全部无效")
 
@@ -756,13 +769,7 @@ def preview_highlight(
         video = mpy.VideoFileClip(str(source_video))
         try:
             vid_dur = video.duration
-            seg_list: list[tuple[float, float]] = []
-            for s_ms, e_ms in intervals:
-                s_sec = max(0, s_ms) / 1000.0
-                e_sec = min(vid_dur, e_ms) / 1000.0
-                if e_sec <= s_sec:
-                    continue
-                seg_list.append((s_sec, e_sec))
+            seg_list = _clamp_segments_ms(intervals, vid_dur)
             if not seg_list:
                 raise ValueError("所有区间都被丢弃")
             clips = [video.subclip(s, e) for s, e in seg_list]

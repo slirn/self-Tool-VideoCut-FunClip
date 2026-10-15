@@ -361,3 +361,41 @@ def test_delete_coarse_does_not_touch_long_video_outputs(tmp_path, monkeypatch):
     long_files_after = sorted(p.name for p in long_outputs.iterdir())
     assert long_files_before == long_files_after, \
         f"长视频 outputs 不应被污染: before={long_files_before} after={long_files_after}"
+
+
+# ---------- REQ-20261015-118：粗剪单位错位回归 ----------
+
+def test_clamp_segments_ms_unit_regression():
+    """毫秒区间夹视频时长（秒）——修复前全项目 4 条 clip 粗剪全失败。
+
+    2026-10-15 真实故障值：6099.033s 源视频、hl 起止 2168020/2171820ms。
+    旧写法 ``min(vid_dur, e_ms) / 1000.0`` 拿秒比毫秒 → e_sec 被夹成
+    6.099s < s_sec=2168.02 → 区间被丢 → 「segments 为空或全部无效」。
+    """
+    from slirn_home.short_video_coarse import _clamp_segments_ms
+
+    # ① 真实故障区间必须存活（分钟级起点）
+    segs = _clamp_segments_ms([(2168020, 2171820)], 6099.033)
+    assert segs == [(2168.02, 2171.82)], f"分钟级起点区间被丢: {segs}"
+
+    # ② 尾部越界截到 vid_dur，不整段丢
+    segs = _clamp_segments_ms([(6098000, 6200000)], 6099.033)
+    assert segs == [(6098.0, 6099.033)]
+
+    # ③ 起点已超出时长 → 丢弃（返回空，由调用方报错）
+    assert _clamp_segments_ms([(6100000, 6200000)], 6099.033) == []
+
+    # ④ 负起点钳 0；短区间正常
+    assert _clamp_segments_ms([(-500, 3000)], 6099.033) == [(0.0, 3.0)]
+
+
+def test_coarse_clamp_no_unit_mismatch_left():
+    """源码守卫：旧单位错位写法不得回归，两个调用点必须走同一 helper。"""
+    src = (Path(__file__).resolve().parent.parent
+           / "slirn_home" / "short_video_coarse.py").read_text(encoding="utf-8")
+    assert "min(vid_dur, e_ms) / 1000.0" not in src, (
+        "秒/毫秒直接比大小的旧写法不得回归（REQ-20261015-118）"
+    )
+    assert src.count("_clamp_segments_ms(") >= 3, (
+        "定义 + 两个调用点都应使用 _clamp_segments_ms"
+    )
