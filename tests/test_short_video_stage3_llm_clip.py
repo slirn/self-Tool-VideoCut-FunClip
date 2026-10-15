@@ -1450,3 +1450,93 @@ def test_stage3_duration_range_wiring():
     assert js.count("duration_min_sec: dur[0]") == 2, (
         "stage3Run + stage3RerunOne 都要带区间"
     )
+
+
+# ---------- REQ-20261015-121：系统提示词参数化 + 三参数一行 + 输入框边框 ----------
+# 用户要求：系统默认提示词里的条数与时长上下限按参数动态注入；页面标签
+# 明确是「每个片段」的时长上下限；三参数同一行；number 输入框边框可见。
+
+def test_stage3_system_prompt_builder_dynamic_params():
+    """builder 按参数渲染：条数/上下限/行数指引/示例全部跟着参数走。"""
+    s = svc.stage3_system_prompt(3, 40, 80)
+    assert "挑选并组织出 3 条独立的短视频" in s
+    assert "时长硬约束（40-80 秒）" in s
+    assert "必须落在 40-80 秒区间（含端点）" in s
+    assert "低于 40 秒或高于 80 秒" in s
+    assert "时长 < 40 秒（短了）" in s
+    assert "时长 > 80 秒（长了）" in s
+    assert "拉到 40-80 区间内" in s
+    assert "落在 [40, 80] 区间？" in s
+    assert "通常需要 20-40 行" in s, "行数指引 = 区间半值（40/80 → 20-40）"
+    assert "总时长 ≈ 60 秒" in s, "示例 = 区间中值（(40+80)/2）"
+    assert "60-90" not in s and "90.0" not in s and "25-45" not in s, \
+        "自定义参数下不得残留默认区间字样"
+
+
+def test_stage3_system_prompt_builder_guards():
+    """非正值回默认；倒挂互换；常量 = 默认渲染（向后兼容）。"""
+    assert "60-90" in svc.stage3_system_prompt(4, 0, 0)
+    s = svc.stage3_system_prompt(4, 80, 40)
+    assert "80-80" not in s and "40-80" in s, "倒挂互换后按 40-80 渲染"
+    assert svc.STAGE3_SYSTEM_PROMPT == svc.stage3_system_prompt()
+    assert "挑选并组织出 4 条独立的短视频" in svc.STAGE3_SYSTEM_PROMPT
+    assert "60-90" in svc.STAGE3_SYSTEM_PROMPT, "默认渲染保持 60-90"
+
+
+def test_stage3_system_prompt_template_has_tokens():
+    tmpl = svc.stage3_system_prompt_template()
+    for tok in ("{n}", "{dmin}", "{dmax}", "{dmin2}", "{dmax2}",
+                "{ex_sec}", "{ex_lines}"):
+        assert tok in tmpl, f"模板缺占位符 {tok}"
+    assert "{" not in tmpl.replace("{n}", "").replace("{dmin}", "") \
+        .replace("{dmax}", "").replace("{dmin2}", "").replace("{dmax2}", "") \
+        .replace("{ex_sec}", "").replace("{ex_lines}", ""), \
+        "模板不得含其它字面花括号（.format 会炸）"
+
+
+def test_stage3_params_row_labels_and_template_attr():
+    """UI：三参数同一行（--3col）；标签明确「每条」口径；按钮带模板属性。"""
+    from slirn_home import short_video_ui as ui
+
+    project = {
+        "id": "p1", "task_id": "t1", "name": "d", "materials": [],
+        "pipeline": {"stage1_source": {"status": "done"}},
+    }
+    html = ui.render_project(project)
+    assert "slirn-sv-form-grid--3col" in html
+    assert ">每条时长下限(秒)<" in html, "标签须明确是每个片段的下限"
+    assert ">每条时长上限(秒)<" in html, "标签须明确是每个片段的上限"
+    assert ">片段数<" in html
+    # 三参数同一容器（--3col 的 div 内三个 input）
+    i_grid = html.index("slirn-sv-form-grid--3col")
+    grid_html = html[i_grid:i_grid + 1600]
+    for iid in ("slirn-stage3-n", "slirn-stage3-dmin", "slirn-stage3-dmax"):
+        assert f'id="{iid}"' in grid_html, f"{iid} 应与片段数同容器"
+    # 引用按钮带模板（JS 点击时按当前输入值替换）
+    i_sys = html.index('data-action="sv-stage3-use-system-prompt"')
+    btn_html = html[i_sys:i_sys + 4000]
+    assert "data-prompt-tmpl=" in btn_html
+    assert "{dmin}" in btn_html and "{n}" in btn_html, "模板占位符须嵌入按钮"
+
+
+def test_stage3_params_row_css_wiring():
+    """CSS：3 列一行 + number 边框显式可见 + 窄屏折叠。"""
+    css = (FUNCLIP_ROOT / "slirn_home" / "static" / "home.css").read_text(encoding="utf-8")
+    assert ".slirn-sv-form-grid--3col {" in css
+    assert "grid-template-columns: repeat(3, minmax(0, 1fr));" in css, \
+        "三参数必须同一行（3 列网格）"
+    # 边框：旧 --border 是 rgba(148,163,184,0.2)（白底上不可见）→ 实色
+    i_3col = css.index(".slirn-sv-form-grid--3col input")
+    assert "#94a3b8" in css[i_3col:i_3col + 200], \
+        "number 输入框须用实色边框（防透明度边框不可见）"
+    assert "  .slirn-sv-form-grid--3col," in css, "窄屏（≤900px）须折叠为单列"
+
+
+def test_stage3_use_system_prompt_js_render_wiring():
+    """JS：模板渲染函数 + 点击时优先 data-prompt-tmpl。"""
+    js = (FUNCLIP_ROOT / "slirn_home" / "static" / "short_video.js").read_text(encoding="utf-8")
+    assert "function _stage3RenderSystemPrompt(tmpl)" in js
+    assert "_stage3DurationRange()" in js.split("function _stage3RenderSystemPrompt")[1][:600], \
+        "渲染函数须读当前时长输入"
+    assert "data-prompt-tmpl" in js, "stage3UseSystemPrompt 须优先取模板属性"
+    assert "split('{' + k + '}').join(String(vals[k]))" in js, "占位符替换实现"

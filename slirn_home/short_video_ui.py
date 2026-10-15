@@ -14,7 +14,11 @@ import json
 from pathlib import Path
 from urllib.parse import quote
 
-from .short_video_service import STAGE3_SYSTEM_PROMPT, STAGE4_SYSTEM_PROMPT
+from .short_video_service import (
+    STAGE3_SYSTEM_PROMPT,
+    STAGE4_SYSTEM_PROMPT,
+    stage3_system_prompt_template,
+)
 from . import short_video_optimize as _sv_opt
 
 
@@ -657,7 +661,8 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
       <div class="slirn-stage3-prompt-actions2">
         <button class="slirn-btn-mini" data-action="sv-stage3-use-system-prompt"
           data-prompt="{esc(STAGE3_SYSTEM_PROMPT)}"
-          title="把系统内置的解析提示词填入文本域（独立于默认/历史；可继续编辑后再解析或设为默认）">🧭 引用系统提示词</button>
+          data-prompt-tmpl="{esc(stage3_system_prompt_template())}"
+          title="把系统内置的解析提示词填入文本域（独立于默认/历史；可继续编辑后再解析或设为默认）；条数与时长上下限按当前设置值自动代入">🧭 引用系统提示词</button>
         <button class="slirn-btn-mini slirn-btn-mini-primary" data-action="sv-stage3-save-default"
           title="把当前文本域提示词保存为默认提示词（全局生效，新项目初始填充）">💾 设为默认</button>
         <button class="slirn-btn-mini" data-action="sv-stage3-save-history"
@@ -677,10 +682,10 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
       {image_area}
       {ocr_note}
     </div>
-    <div class="slirn-sv-form-grid">
-      <label>片段数<input type="number" min="3" max="5" id="slirn-stage3-n" value="{n}"></label>
-      <label title="每条短视频的总时长（选中字幕行秒数之和）必须落在该区间（含端点）；解析提示词与结果核查都按此区间执行">时长下限(秒)<input type="number" min="10" max="600" step="5" id="slirn-stage3-dmin" value="{dmin_v}"></label>
-      <label title="同上：时长区间上限（含端点）">时长上限(秒)<input type="number" min="20" max="900" step="5" id="slirn-stage3-dmax" value="{dmax_v}"></label>
+    <div class="slirn-sv-form-grid slirn-sv-form-grid--3col">
+      <label title="本次解析要挑选出的短视频条数（3-5）">片段数<input type="number" min="3" max="5" id="slirn-stage3-n" value="{n}"></label>
+      <label title="每个片段的总时长（选中字幕行秒数之和）必须 ≥ 该下限；解析提示词与结果核查都按此执行">每条时长下限(秒)<input type="number" min="10" max="600" step="5" id="slirn-stage3-dmin" value="{dmin_v}"></label>
+      <label title="每个片段的总时长（选中字幕行秒数之和）必须 ≤ 该上限；解析提示词与结果核查都按此执行">每条时长上限(秒)<input type="number" min="20" max="900" step="5" id="slirn-stage3-dmax" value="{dmax_v}"></label>
     </div>
     <div class="slirn-sv-card-actions">
       <button id="slirn-sv-stage3-run-btn" class="slirn-btn slirn-btn-primary" data-action="sv-stage3-run">🔍 解析</button>

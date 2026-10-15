@@ -321,6 +321,35 @@
     return [a, b];
   }
 
+  // REQ-20261015-121：系统提示词模板按当前三个输入框的值渲染。
+  // 占位符与后端 stage3_system_prompt() 同一套（{n}/{dmin}/{dmax}/
+  // {dmin2}/{dmax2}/{ex_sec}/{ex_lines}），公式双端一致：
+  // dmin2/dmax2 = 区间半值（每行约 2s）；ex_sec = 区间中值；
+  // ex_lines = ex_sec / 2.2。值取整展示（与后端 {dmin:.0f} 口径一致）。
+  function _stage3RenderSystemPrompt(tmpl) {
+    var dur = _stage3DurationRange();
+    var dmin = dur[0], dmax = dur[1];
+    if (!dmin || !dmax) { dmin = 60; dmax = 90; }
+    if (dmax < dmin) { var t = dmin; dmin = dmax; dmax = t; }
+    var nEl = document.getElementById('slirn-stage3-n');
+    var n = parseInt(nEl ? nEl.value : '', 10);
+    if (!n || n < 1) n = 4;
+    dmin = Math.round(dmin); dmax = Math.round(dmax);
+    var exSec = Math.round((dmin + dmax) / 2);
+    var vals = {
+      n: n, dmin: dmin, dmax: dmax,
+      dmin2: Math.max(1, Math.round(dmin / 2)),
+      dmax2: Math.max(1, Math.round(dmax / 2)),
+      ex_sec: exSec,
+      ex_lines: Math.max(1, Math.round(exSec / 2.2))
+    };
+    var out = tmpl;
+    Object.keys(vals).forEach(function(k) {
+      out = out.split('{' + k + '}').join(String(vals[k]));
+    });
+    return out;
+  }
+
   // REQ-20261013-111：Stage 3 解析 — 进度卡 + 防重入 + 阶段文字式自估算
   function stage3Run(btn) {
     var ctx = innerCtx(); if (!ctx) return;
@@ -506,16 +535,20 @@
   }
 
   // 修订十：一键引用系统级提示词（内置在系统里，独立于默认/历史两级存储；
-  // 填入文本域后可继续编辑，再按需「设为默认」——覆盖确认逻辑与「载入」一致）
+  // 填入文本域后可继续编辑，再按需「设为默认」——覆盖确认逻辑与「载入」一致）。
+  // REQ-20261015-121：优先用 data-prompt-tmpl 模板 + 当前输入框值渲染
+  // （片段数 / 每条时长上下限动态代入）；模板缺失时回退 data-prompt 默认全文。
   function stage3UseSystemPrompt(btn) {
     var ta = document.getElementById('slirn-stage3-prompt');
     if (!ta) return;
-    var text = btn.getAttribute('data-prompt') || '';
+    var tmpl = btn.getAttribute('data-prompt-tmpl') || '';
+    var text = tmpl ? _stage3RenderSystemPrompt(tmpl)
+      : (btn.getAttribute('data-prompt') || '');
     if (!text) return;
     if (ta.value && ta.value.trim() && !window.confirm(
         '文本域已有内容，用系统提示词覆盖它？')) return;
     ta.value = text;
-    toast('已引用系统提示词');
+    toast('已引用系统提示词（条数 / 时长上下限按当前设置代入）');
   }
 
   function stage3ClearPrompt() {

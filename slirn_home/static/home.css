@@ -4851,6 +4851,17 @@ input[type="checkbox"]:focus-visible {
   padding: 8px 10px;
 }
 
+/* REQ-20261015-121：Stage 3 参数行（片段数 + 每条时长上下限）三列同一行；
+   number 输入框边框显式可见——旧规则用 --border（rgba 20% 透明度）在
+   白底上几乎不可见（用户反馈「看不到边框一片白」），改实色。 */
+.slirn-sv-form-grid--3col {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.slirn-sv-form-grid--3col input[type="number"] {
+  border: 1px solid #94a3b8;
+}
+
 .slirn-sv-wide {
   grid-column: 1 / -1;
 }
@@ -6379,6 +6390,7 @@ input[type="checkbox"]:focus-visible {
 
 @media (max-width: 900px) {
   .slirn-sv-form-grid,
+  .slirn-sv-form-grid--3col,
   .slirn-sv-row,
   .slirn-sv-overlay,
   .slirn-sv-subtitle {
