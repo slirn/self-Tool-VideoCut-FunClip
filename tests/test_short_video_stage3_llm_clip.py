@@ -1540,3 +1540,35 @@ def test_stage3_use_system_prompt_js_render_wiring():
         "渲染函数须读当前时长输入"
     assert "data-prompt-tmpl" in js, "stage3UseSystemPrompt 须优先取模板属性"
     assert "split('{' + k + '}').join(String(vals[k]))" in js, "占位符替换实现"
+
+
+# ---------- REQ-20261015-124：系统默认提示词补充（独立性/逐条时长/开头引子/结尾收束） ----------
+
+
+def test_stage3_system_prompt_independence_and_per_clip_duration():
+    from slirn_home import short_video_service as svc
+
+    p = svc.stage3_system_prompt(3, 40, 80)
+    # 相互独立硬性声明（含占位符渲染）
+    assert "最终生成的 3 条短视频，相互之间不存在任何前后关系或依赖关系" in p
+    assert "说的都是自己独立的一件事" in p
+    assert "不允许一条承接、引用或延续另一条的内容" in p
+    # 逐条判断、禁止平均
+    assert "禁止用各条的平均时长来代替判断" in p
+    assert "不允许用各条平均时长代替" in p
+    assert p.count("平均") >= 3
+
+
+def test_stage3_system_prompt_opening_and_ending_requirements():
+    from slirn_home import short_video_service as svc
+
+    p = svc.STAGE3_SYSTEM_PROMPT
+    # 开头引子
+    assert "开头有引子" in p
+    assert "禁止第一句是莫名其妙" in p
+    # 结尾关闭话题
+    assert "结尾关闭话题" in p
+    assert "把话题关闭" in p
+    # 自检同步强化
+    assert "能自然引入话题的引子" in p
+    assert "而不是戛然而止或话说到一半" in p
