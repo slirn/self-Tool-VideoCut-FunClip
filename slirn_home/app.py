@@ -9942,6 +9942,9 @@ def _register_slirn_api(
         custom_prompt = str(body.get("custom_prompt") or "")
         prompt = str(body.get("prompt") or "")
         use_image = bool(body.get("use_image"))
+        # REQ-20261015-120：每条时长区间（秒）直接取用户设置；非法值由后端兜底
+        duration_min_sec = body.get("duration_min_sec")
+        duration_max_sec = body.get("duration_max_sec")
         entry = llm_config.get_current_entry(repo_root)
         try:
             state = _sv_analyze.run_stage3(
@@ -9949,6 +9952,8 @@ def _register_slirn_api(
                 template=template, n_clips=n_clips,
                 custom_prompt=custom_prompt, entry=entry,
                 prompt=prompt, use_image=use_image,
+                duration_min_sec=duration_min_sec,
+                duration_max_sec=duration_max_sec,
             )
         except Exception as e:  # noqa: BLE001
             log.exception("stage3 run failed")
@@ -9983,6 +9988,8 @@ def _register_slirn_api(
                 prompt=str(body.get("prompt") or ""),
                 use_image=bool(body.get("use_image")),
                 entry=entry,
+                duration_min_sec=body.get("duration_min_sec"),
+                duration_max_sec=body.get("duration_max_sec"),
             )
         except Exception as e:  # noqa: BLE001
             log.exception("stage3 rerun-one failed")

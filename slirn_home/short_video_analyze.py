@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 _TEMPLATE_BASE_SYSTEM = (
     "你是一个短视频内容导演，输入是一段长视频的 SRT 字幕。\n"
     "你的任务是从字幕里**重新组织和编排** {n_clips} 条**独立短视频**（highlights），\n"
-    "每条约 60 秒（±20 秒）。\n\n"
+    "每条总时长 = 选中各行真实时长之和，必须落在 60-90 秒（含端点）。\n\n"
     "⚠️ **重要前提**：highlights **不是**源视频的连续切片，而是**独立的短视频**。\n"
     "每条都要有完整的开场钩子-主体内容-收尾点题；片段之间**不连续**、不重叠、不按源时间顺序排列。\n"
     "每条 highlight 的 ``start_ms`` / ``end_ms`` 是一个**大致时间窗口**（用于粗剪定位），\n"
@@ -469,10 +469,15 @@ def _call_highlights_llm(
     *,
     entry: dict | None,
 ) -> str:
-    """调 revision_service._call_llm。"""
+    """调 revision_service._call_llm。
+
+    REQ-20261015-119：max_tokens 提到 8192 —— 60-90 秒硬时长约束下
+    4 组 × 30-45 行的分组输出会顶爆默认 4096（stop_reason=max_tokens
+    截断，E2E 实测），4 组约 5-6K tokens，8192 留余量。
+    """
     from slirn_home import revision_service
     return revision_service._call_llm(
-        system_prompt, user_payload, entry=entry, retries=1,
+        system_prompt, user_payload, entry=entry, retries=1, max_tokens=8192,
     )
 
 
@@ -525,11 +530,16 @@ _OUTPUT_FORMAT_CONSTRAINT = (
 # 偏离点：不拼上游 llm_inference 里的「视频实际时长 / 不低于 50% 时长」
 # 注记 —— 那是上游「全片摘要」取向，与拆条（n 条）目标冲突。
 _UPSTREAM_CLIP_SYSTEM_PROMPT = (
-    "你是一个视频srt字幕分析剪辑器，输入视频的srt字幕，"
+    "你是一个视频srt字幕分析剪辑器，输入视频的srt字幕"
+    "（每行字幕末尾用（X.Xs）标注了该行的真实时长），"
     "从中整理出{n}条独立的短视频：每条围绕一个标题展开，由若干条字幕组成，"
-    "全部字幕的时长合计约70秒；各条字幕按该标题的叙事需要排序，"
-    "可以与srt原顺序不同。注意确保文字与时间戳的正确匹配，"
-    "时间戳必须取自srt中真实存在的时间。"
+    "**每条短视频的总时长 = 组内全部选中行末尾（X.Xs）标注之和，必须落在"
+    " {dmin:.0f}–{dmax:.0f} 秒区间（含端点）**——低于 {dmin:.0f} 秒必须继续"
+    "增选与主题相关的行，超过 {dmax:.0f} 秒必须删减行；按常见语速（每行约"
+    " 2 秒）估算，一条达标短视频通常需要 {dmin2:.0f}–{dmax2:.0f} 行字幕。"
+    "各条字幕按该标题的叙事需要排序，可以与srt原顺序不同。注意确保文字与"
+    "时间戳的正确匹配，时间戳必须取自srt中真实存在的时间（不要把行末的"
+    "秒数标注抄进输出）。"
     "输出需严格按照规定的分组格式（组标题行 + 编号字幕行），"
     '时间连接符是"-"，开始/结束时间使用 HH:MM:SS,mmm 格式。'
 )
@@ -545,8 +555,9 @@ _GROUPS_OUTPUT_CONSTRAINT = (
     "组内每行一条字幕，格式为：行号. [开始时间-结束时间] 该行字幕文本。\n"
     "要求：组序号 1~{n}；行号从 1 连续编号；时间戳取自上方 srt 中真实存在的"
     '时间（HH:MM:SS,mmm），连接符为"-"；行顺序按该组标题的叙事需要排列'
-    "（可以与 srt 原顺序不同）；每组全部字幕的时长合计约 70 秒。"
-    "除此之外不要输出任何内容。"
+    "（可以与 srt 原顺序不同）；每组总时长 = 组内各行末尾（X.Xs）标注之和，"
+    "必须落在 {dmin:.0f}–{dmax:.0f} 秒（含端点）；输出行不要复制（X.Xs）"
+    "秒数标注。除此之外不要输出任何内容。"
 )
 
 # 修订六：截图先 OCR 提文字，再作为「参考方向」拼进 user payload
@@ -592,6 +603,270 @@ def _parse_llm_time(token: str) -> int:
     return (h * 3600 + m * 60 + s) * 1000 + ms
 
 
+# ---------- REQ-20261015-119：行级真实秒数标注 + 时长硬约束 ----------
+
+# 行末秒数标注（（2.1s）/ (2.1s)）：输入侧由 _annotate_srt_seconds 生成；
+# LLM 不小心把标注抄进输出时用它清洗。
+_DUR_TAG_RE = re.compile(r"\s*[（(]\s*\d+(?:\.\d+)?\s*s\s*[）)]\s*$")
+
+# SRT 块（序号行 + 时间轴行 + 文本，文本可多行），用于给文本尾部追加标注
+_SRT_BLOCK_RE = re.compile(
+    r"(?ms)^(\d+)\s*\n"
+    r"(\d{1,2}:\d{2}(?::\d{2})?[,.]\d{1,3})\s*-->\s*"
+    r"(\d{1,2}:\d{2}(?::\d{2})?[,.]\d{1,3})[^\n]*\n"
+    r"(.*?)(?=\n\s*\n|\Z)"
+)
+
+# 时长硬约束（REQ-20261013-114 口径延续，含端点）。默认 60-90；
+# REQ-20261015-120：区间可由用户在 Stage 3 设置（蓝色框区）逐次指定。
+_DURATION_MIN_SEC = 60.0
+_DURATION_MAX_SEC = 90.0
+
+
+def _norm_duration_range(
+    duration_min_sec=None, duration_max_sec=None,
+) -> tuple[float, float]:
+    """把用户输入的时长区间规范化（非法/缺省回默认，钳到 sane 范围）。
+
+    REQ-20261015-120：后端不再自行推算区间，直接取用户设置值；本函数只做
+    兜底（防 NaN / 倒挂 / 离谱值）：下限 ∈ [10, 600]，上限 ∈ [下限+5, 900]。
+    """
+    try:
+        dmin = float(duration_min_sec)
+    except (TypeError, ValueError):
+        dmin = _DURATION_MIN_SEC
+    try:
+        dmax = float(duration_max_sec)
+    except (TypeError, ValueError):
+        dmax = _DURATION_MAX_SEC
+    if dmin != dmin or dmax != dmax:  # NaN
+        return _DURATION_MIN_SEC, _DURATION_MAX_SEC
+    if dmin <= 0 or dmax <= 0:  # 非正值 = 未填 → 回默认区间
+        return _DURATION_MIN_SEC, _DURATION_MAX_SEC
+    dmin = min(max(dmin, 10.0), 600.0)
+    dmax = min(max(dmax, dmin + 5.0), 900.0)
+    return dmin, dmax
+
+
+def _duration_prompt_ctx(dmin: float, dmax: float) -> dict:
+    """提示词模板的时长占位符（dmin/dmax 秒 + 按每行 2s 折算的行数量级）。"""
+    return {
+        "dmin": dmin, "dmax": dmax,
+        "dmin2": dmin / 2.0, "dmax2": dmax / 2.0,
+    }
+
+
+def _annotate_srt_seconds(srt_text: str) -> str:
+    """每行字幕文本末尾追加真实行时长标注（如「（2.1s）」）。
+
+    REQ-20261015-119：真实数据（20260924-001，行均 2.07s）证明 LLM 没有
+    可靠口径自估总时长——按字符公式估 57-64s 自以为达标，实际拼出来
+    32-41s。把每行可加总的秒数直接标在文本上，求和口径才成立。
+    时间戳无法解析的块原样保留。
+    """
+    def _tag(m: re.Match) -> str:
+        start_ms = _parse_llm_time(m.group(2))
+        end_ms = _parse_llm_time(m.group(3))
+        if start_ms < 0 or end_ms <= start_ms:
+            return m.group(0)
+        dur = (end_ms - start_ms) / 1000.0
+        text = m.group(4).rstrip()
+        return f"{m.group(1)}\n{m.group(2)} --> {m.group(3)}\n{text}（{dur:.1f}s）"
+
+    # 时间轴行原样回写时用 " --> " 连接（丢弃轴上可能存在的坐标尾巴）
+    return _SRT_BLOCK_RE.sub(_tag, srt_text)
+
+
+def strip_duration_tag(text: str) -> str:
+    """去掉文本尾部被 LLM 误抄的（X.Xs）秒数标注。"""
+    return _DUR_TAG_RE.sub("", str(text or "")).rstrip()
+
+
+def hl_lines_duration_sec(hl: dict) -> float:
+    """一条短视频的真实时长 = subtitle_lines 各行 (end-start) 之和（秒）。
+
+    分组 / JSON 两条解析路径的行都带 start_ms/end_ms（后者由
+    _annotate_subtitle_lines 补齐），与 Stage 5 粗剪拼接口径一致。
+    """
+    total_ms = 0
+    for sl in hl.get("subtitle_lines") or []:
+        try:
+            total_ms += max(
+                0, int(sl.get("end_ms") or 0) - int(sl.get("start_ms") or 0)
+            )
+        except (TypeError, ValueError):
+            continue
+    return total_ms / 1000.0
+
+
+def duration_feedback(
+    validated: list[dict],
+    *,
+    duration_min_sec: float = _DURATION_MIN_SEC,
+    duration_max_sec: float = _DURATION_MAX_SEC,
+) -> str:
+    """逐组核对时长硬约束，产出反馈文本（全达标 → 空串）。
+
+    反馈直接拼进重试轮的 user payload：写明每组现值 / 差多少 /
+    按每行约 2s 折算还需增选的行数。
+    """
+    out: list[str] = []
+    for h in validated:
+        sec = hl_lines_duration_sec(h)
+        title = str(h.get("title") or "")[:20]
+        idx = h.get("index") or "?"
+        if sec < duration_min_sec:
+            need = duration_min_sec - sec
+            rows = int(need / 2.0) + 1
+            out.append(
+                f"- 第 {idx} 组「{title}」现合计 {sec:.1f}s，"
+                f"低于 {duration_min_sec:.0f}s 下限，还差 {need:.1f}s："
+                f"请增选与该主题相关、时间相邻的字幕行"
+                f"（按每行约 2s 计约需再选 {rows} 行）"
+            )
+        elif sec > duration_max_sec:
+            out.append(
+                f"- 第 {idx} 组「{title}」现合计 {sec:.1f}s，"
+                f"超过 {duration_max_sec:.0f}s 上限 "
+                f"{sec - duration_max_sec:.1f}s：请删减与主题弱相关或重复的行"
+            )
+    return "\n".join(out)
+
+
+def duration_retry_warnings(
+    validated: list[dict],
+    *,
+    duration_min_sec: float = _DURATION_MIN_SEC,
+    duration_max_sec: float = _DURATION_MAX_SEC,
+) -> list[str]:
+    """终态逐组时长告警（重试后仍不达标时如实写入 warnings）。"""
+    out: list[str] = []
+    for h in validated:
+        sec = hl_lines_duration_sec(h)
+        title = str(h.get("title") or "")[:20]
+        idx = h.get("index") or "?"
+        if sec < duration_min_sec:
+            out.append(
+                f"第 {idx} 组「{title}」字幕合计 {sec:.1f}s，"
+                f"未达 {duration_min_sec:.0f}s 下限"
+                "（可在 Stage 4 编辑或单条重新解析）"
+            )
+        elif sec > duration_max_sec:
+            out.append(
+                f"第 {idx} 组「{title}」字幕合计 {sec:.1f}s，"
+                f"超过 {duration_max_sec:.0f}s 上限"
+                "（可在 Stage 4 删行）"
+            )
+    return out
+
+
+def _parse_groups_or_json(
+    raw: str,
+    srt_lines: list[SrtLine],
+    *,
+    n_groups: int = 4,
+    title_fallback: str = "",
+    duration_min_sec: float = _DURATION_MIN_SEC,
+    duration_max_sec: float = _DURATION_MAX_SEC,
+) -> tuple[list[dict], list[str]]:
+    """统一解析入口：优先分组编号字幕列表；模型按旧 JSON 输出时兜底旧解析。
+
+    run_stage3 / rerun_stage3_one / 时长反馈重试共用，保证三条路径行为一致。
+    """
+    try:
+        return _parse_llm_clip_groups(
+            raw, srt_lines, n_groups=n_groups, title_fallback=title_fallback,
+            duration_min_sec=duration_min_sec,
+            duration_max_sec=duration_max_sec,
+        )
+    except svc.ShortVideoError:
+        if "highlights" not in raw:
+            raise
+        payload = _strip_json_block(raw)
+        validated, warnings = _validate_highlights(
+            payload, srt_lines, title_fallback=title_fallback,
+        )
+        _annotate_subtitle_lines(validated, srt_lines)
+        return validated, warnings
+
+
+def _duration_retry_loop(
+    sys_p: str,
+    user_payload: str,
+    raw: str,
+    srt_lines: list[SrtLine],
+    validated: list[dict],
+    warnings: list[str],
+    *,
+    n_groups: int,
+    title_fallback: str = "",
+    entry: dict | None = None,
+    duration_min_sec: float = _DURATION_MIN_SEC,
+    duration_max_sec: float = _DURATION_MAX_SEC,
+) -> tuple[str, list[dict], list[str], bool, int]:
+    """REQ-20261015-119：时长硬约束核查 + 一轮带反馈重试。
+
+    区间（REQ-20261015-120）由调用方传入（用户在 Stage 3 设置的值），
+    本函数只做核查与反馈，不自行推算。
+
+    返回 (raw, validated, warnings, retried, extra_elapsed_sec)：
+    - 全达标 → 原样返回（retried=False）
+    - 有组不达标 → 把逐组现值/缺口写进 user payload 再调一次 LLM；
+      二次结果可解析则整体替换（哪怕仍不达标——差距通常显著缩小），
+      不可解析/调用失败则保留第一次结果并告警
+    - 终态仍不达标的组由 duration_retry_warnings 如实告警（调用方拼接）
+    """
+    feedback = duration_feedback(
+        validated,
+        duration_min_sec=duration_min_sec,
+        duration_max_sec=duration_max_sec,
+    )
+    if not feedback:
+        return raw, validated, warnings, False, 0
+
+    retry_payload = (
+        user_payload
+        + "\n\n# 时长核查反馈（上一轮选行不达标，请修正后重新输出）\n"
+        + feedback
+        + "\n请重新输出全部组：不达标的组按上述反馈增/删行，已达标的组"
+        "内容可保持不变（也须完整输出）。"
+    )
+    extra_sec = 0
+    t0 = time.time()
+    raw2 = ""
+    try:
+        raw2 = _call_highlights_llm(sys_p, retry_payload, entry=entry)
+    except Exception as e:  # noqa: BLE001
+        log.warning("Stage 3 时长反馈重试调用失败，保留第一轮结果: %s", e)
+    extra_sec = int(time.time() - t0)
+
+    if not raw2:
+        warnings.append("时长反馈重试调用失败，已保留第一轮结果")
+        return raw, validated, warnings, False, extra_sec
+    try:
+        validated2, warnings2 = _parse_groups_or_json(
+            raw2, srt_lines, n_groups=n_groups, title_fallback=title_fallback,
+            duration_min_sec=duration_min_sec,
+            duration_max_sec=duration_max_sec,
+        )
+    except Exception as e:  # noqa: BLE001
+        warnings.append(f"时长反馈重试的返回无法解析（{e}），已保留第一轮结果")
+        return raw, validated, warnings, False, extra_sec
+
+    combined_raw = raw + "\n\n===== 时长反馈重试 =====\n\n" + raw2
+    # 第一轮的时长告警描述的是已丢弃的结果，混进终态会误导（结果达标了
+    # 却还挂着「未达下限」）——重试解析成功时只保留非时长类告警。
+    _dur_w = (
+        f"未达 {duration_min_sec:.0f}s 下限",
+        f"超过 {duration_max_sec:.0f}s 上限",
+    )
+    kept_first = [w for w in warnings if not any(k in w for k in _dur_w)]
+    merged_warnings = kept_first + [
+        "已执行一轮时长反馈重试（第一轮选行未达时长硬约束）",
+    ] + list(warnings2)
+    return combined_raw, validated2, merged_warnings, True, extra_sec
+
+
 def _match_group_title(line: str) -> str | None:
     """识别组标题行，返回标题文本（空标题 → ""，非标题行 → None）。"""
     s = line.strip()
@@ -630,6 +905,8 @@ def _parse_llm_clip_groups(
     *,
     n_groups: int = 4,
     title_fallback: str = "",
+    duration_min_sec: float = _DURATION_MIN_SEC,
+    duration_max_sec: float = _DURATION_MAX_SEC,
 ) -> tuple[list[dict], list[str]]:
     """解析「分组短视频」编号字幕列表 → highlights 同构列表（一组 = 一条短视频）。
 
@@ -639,7 +916,7 @@ def _parse_llm_clip_groups(
     - 每行时间戳与 raw.srt 行做**单行最佳重叠匹配**（时间/文本以源行为准）；
       未匹配上的行保留 LLM 时间戳并告警
     - 无任何组标题行时兜底：每条编号行视为独立一组（修订五扁平格式兼容）
-    - 组数超 n_groups 截断告警；组内合计时长偏离 70s（<45s 或 >110s）告警
+    - 组数超 n_groups 截断告警；组内合计时长越 60-90s 硬约束（<60s / >90s）告警
     - subtitle_lines 带 no/start_ms/end_ms（UI 显示时间戳 + Stage 3 拼接用）
 
     Raises: ShortVideoError —— 整个返回里没有可识别的字幕行。
@@ -666,7 +943,7 @@ def _parse_llm_clip_groups(
             if end_ms <= start_ms:
                 warnings.append(f"第 {lineno} 行结束时间不晚于开始时间，已跳过")
                 continue
-            text = m.group(3).strip()
+            text = strip_duration_tag(m.group(3)).strip()
             src = _best_overlap_src(start_ms, end_ms, srt_sorted)
             if src is not None:
                 entry = {
@@ -717,10 +994,16 @@ def _parse_llm_clip_groups(
         start_ms = min(e["start_ms"] for e in lines)
         end_ms = max(e["end_ms"] for e in lines)
         total_ms = sum(max(0, e["end_ms"] - e["start_ms"]) for e in lines)
-        if total_ms < 45_000:
-            warnings.append(f"组 #{gi}「{title}」字幕合计仅 {total_ms / 1000:.0f}s（目标约 70s）")
-        elif total_ms > 110_000:
-            warnings.append(f"组 #{gi}「{title}」字幕合计 {total_ms / 1000:.0f}s，明显超过 70s 目标")
+        if total_ms < duration_min_sec * 1000:
+            warnings.append(
+                f"组 #{gi}「{title}」字幕合计仅 {total_ms / 1000:.0f}s"
+                f"（未达 {duration_min_sec:.0f}s 下限）"
+            )
+        elif total_ms > duration_max_sec * 1000:
+            warnings.append(
+                f"组 #{gi}「{title}」字幕合计 {total_ms / 1000:.0f}s"
+                f"（超过 {duration_max_sec:.0f}s 上限）"
+            )
         groups.append({
             "id": f"h{gi}",
             "index": gi,
@@ -760,6 +1043,8 @@ def _resolve_stage3_system_prompt(
     custom_prompt: str = "",
     prompt: str = "",
     n_clips: int = 4,
+    duration_min_sec: float = _DURATION_MIN_SEC,
+    duration_max_sec: float = _DURATION_MAX_SEC,
 ) -> tuple[str, str]:
     """决定 Stage 3 的 system 提示词。
 
@@ -776,7 +1061,10 @@ def _resolve_stage3_system_prompt(
     返回 (system_prompt, source)——source 取 "user" / "custom_override" /
     "template" / "custom"，写入 state 溯源。
     """
-    default_system = _UPSTREAM_CLIP_SYSTEM_PROMPT.format(n=max(1, int(n_clips or 4)))
+    default_system = _UPSTREAM_CLIP_SYSTEM_PROMPT.format(
+        n=max(1, int(n_clips or 4)),
+        **_duration_prompt_ctx(duration_min_sec, duration_max_sec),
+    )
     custom_overrides = svc.load_custom_prompts(repo_root, task_id, project_id)
     override = ""
     if template in _PROMPT_TEMPLATES:
@@ -863,6 +1151,8 @@ def run_stage3(
     prompt: str = "",
     use_image: bool = False,
     entry: dict | None = None,
+    duration_min_sec=None,
+    duration_max_sec=None,
 ) -> dict:
     """Stage 3「解析短视频内容」：LLM 读 raw.srt（+ 截图）→
     ``stage3/highlights.json`` + ``stage3/llm_raw.txt``。
@@ -874,6 +1164,9 @@ def run_stage3(
         prompt: REQ-20261012-099 用户录入的解析提示词；非空时优先作为 system
         use_image: 把 Stage 3 上传的截图一并发给多模态模型
         entry: llm_config 注册项；None 时用当前默认模型
+        duration_min_sec / duration_max_sec: REQ-20261015-120 每条短视频的
+            时长区间（秒，含端点）；用户在 Stage 3 设置区录入，后端直接取
+            值拼进提示词并按此核查，缺省 60-90
     """
     root = Path(repo_root)
     project = svc.load_project(root, task_id, project_id)
@@ -888,10 +1181,14 @@ def run_stage3(
         raise svc.ShortVideoError("raw.srt 解析后无有效字幕行")
 
     n_clips = max(3, min(5, int(n_clips or 4)))
+    # REQ-20261015-120：时长区间直接取用户设置（缺省/非法回默认 60-90）
+    dmin, dmax = _norm_duration_range(duration_min_sec, duration_max_sec)
+    dur_ctx = _duration_prompt_ctx(dmin, dmax)
     sys_p, prompt_source = _resolve_stage3_system_prompt(
         root, task_id, project_id,
         template=template, custom_prompt=custom_prompt, prompt=prompt,
         n_clips=n_clips,
+        duration_min_sec=dmin, duration_max_sec=dmax,
     )
     image_path = _resolve_stage3_image(
         root, task_id, project_id, use_image=use_image, entry=entry,
@@ -903,6 +1200,8 @@ def run_stage3(
     state["started_at"] = svc.now_iso()
     state["template"] = template
     state["n_clips"] = n_clips
+    # REQ-20261015-120：记录本次生效的时长区间（UI 回填 + 溯源）
+    state["duration_range"] = [round(dmin, 1), round(dmax, 1)]
     state["prompt_source"] = prompt_source
     state["custom_prompt_used"] = prompt_source in ("custom", "custom_override")
     if image_path is not None:
@@ -957,13 +1256,18 @@ def run_stage3(
             svc.set_stage_state(project, "stage3_analyze", state)
             svc.save_project(root, project)
 
-    # user 侧 = [截图参考方向] + 上游固定前缀 + 原始 SRT 整文 + 分组要求
+    # user 侧 = [截图参考方向] + 上游固定前缀 + 秒数标注版 SRT + 分组要求
+    # REQ-20261015-119：SRT 每行末尾带真实秒数（2.1s），LLM 按标注求和
+    # 而不是自由心证「约 70 秒」。
+    # REQ-20261015-120：区间数字取用户设置（dmin/dmax）。
     user_payload = (
         (_OCR_REFERENCE_TMPL.format(ocr_text=ocr_text) if ocr_text else "")
-        + _UPSTREAM_CLIP_USER_PREFIX + "\n\n" + srt_text.strip()
+        + _UPSTREAM_CLIP_USER_PREFIX + "\n\n" + _annotate_srt_seconds(srt_text).strip()
         + f"\n\n请从上述字幕中整理出 {n_clips} 条短视频"
-          "（每条围绕一个标题，全部字幕时长合计约 70 秒）。"
-        + _GROUPS_OUTPUT_CONSTRAINT.format(n=n_clips)
+          f"（每条围绕一个标题；每条总时长 = 选中各行末尾（X.Xs）标注之和，"
+          f"必须落在 {dmin:.0f}–{dmax:.0f} 秒含端点，按每行约 2s 一般需"
+          f" {dur_ctx['dmin2']:.0f}–{dur_ctx['dmax2']:.0f} 行）。"
+        + _GROUPS_OUTPUT_CONSTRAINT.format(n=n_clips, **dur_ctx)
     )
 
     t0 = time.time()
@@ -991,17 +1295,21 @@ def run_stage3(
 
     # 解析 + 校验：优先分组编号字幕列表；模型仍按旧 JSON 输出时兜底旧解析
     try:
-        try:
-            validated, warnings = _parse_llm_clip_groups(
-                raw, srt_lines, n_groups=n_clips,
-            )
-        except svc.ShortVideoError:
-            if "highlights" not in raw:
-                raise
-            payload = _strip_json_block(raw)
-            validated, warnings = _validate_highlights(payload, srt_lines)
-            _annotate_subtitle_lines(validated, srt_lines)
+        validated, warnings = _parse_groups_or_json(
+            raw, srt_lines, n_groups=n_clips,
+            duration_min_sec=dmin, duration_max_sec=dmax,
+        )
         warnings = pre_warnings + list(warnings)
+        # REQ-20261015-119：时长硬约束核查 + 一轮带反馈重试（按用户区间）
+        raw, validated, warnings, retried, extra = _duration_retry_loop(
+            sys_p, user_payload, raw, srt_lines, validated, warnings,
+            n_groups=n_clips, entry=entry,
+            duration_min_sec=dmin, duration_max_sec=dmax,
+        )
+        elapsed += extra
+        warnings = warnings + duration_retry_warnings(
+            validated, duration_min_sec=dmin, duration_max_sec=dmax,
+        )
     except Exception as e:  # noqa: BLE001
         state = svc.get_stage_state(project, "stage3_analyze")
         state["status"] = "failed"
@@ -1018,6 +1326,8 @@ def run_stage3(
     # 写 highlights.json（修订六：flow=llm_groups 溯源；一组 = 一条短视频）
     highlights_path = svc.stage_highlights_path(root, task_id, project_id)
     model_id = (entry or {}).get("id") or "default"
+    # 重试轮可能更新了 raw（拼上第二轮原文）→ 重写落档，保完整溯源
+    llm_raw_path.write_text(raw, encoding="utf-8")
     out_doc = {
         "project_id": project_id,
         "source_srt": svc._rel(root, raw_srt),
@@ -1026,6 +1336,7 @@ def run_stage3(
         "flow": "llm_groups",
         "prompt": sys_p if prompt_source == "user" else "",
         "image": image_path.name if image_path is not None else "",
+        "duration_range": [round(dmin, 1), round(dmax, 1)],
         "n_clips": len(validated),
         "highlights": validated,
         "warnings": warnings,
@@ -1044,6 +1355,12 @@ def run_stage3(
     state["warnings"] = warnings
     state["count"] = len(validated)
     state["flow"] = "llm_groups"
+    # REQ-20261015-119：时长核查终态（重试是否发生 + 每条真实秒数）
+    state["duration_retry"] = retried
+    state["hl_duration_sec"] = {
+        str(h.get("index")): round(hl_lines_duration_sec(h), 1)
+        for h in validated
+    }
     state.pop("splice_order", None)
     # 修订七：整跑产出全新 doc → 清掉旧镜像（rerun/上一轮留下的 highlights、
     # 可能过期的 srt_lines），由 GET 层 _inject_stage3_highlights 按 doc 重注。
@@ -1066,11 +1383,12 @@ def run_stage3(
 
 # ---------- REQ-20261012-099：单片段重新解析 ----------
 
-def _rerun_one_suffix(title: str) -> str:
+def _rerun_one_suffix(title: str, dmin: float, dmax: float) -> str:
     """定向指令。title 用户可编辑（可能含 { }），不用 .format 防 KeyError。
 
     修订六：与整跑同一套分组输出格式（1 组 = 1 条短视频，组内多行）。
     修订八：明确「只围绕该主题选行」+「选中的字幕要有条理地组织」。
+    REQ-20261015-120：时长区间随调用方传入（整跑记录 / 本次 UI 设置）。
     """
     return (
         "\n\n# 本次任务：单片段重新解析\n"
@@ -1079,7 +1397,7 @@ def _rerun_one_suffix(title: str) -> str:
         "- 组内各字幕行的时间戳取自源字幕真实时间\n"
         "- 把选中的字幕行**有条理地组织**成一条连贯的短视频：按叙事/逻辑先后"
         "排列（可以与 srt 原顺序不同），有起点、有展开、有收束\n"
-        "- 全部字幕时长合计约 70 秒"
+        f"- 组内各行末尾（X.Xs）标注之和必须落在 {dmin:.0f}–{dmax:.0f} 秒（含端点）"
     )
 
 
@@ -1118,12 +1436,16 @@ def rerun_stage3_one(
     prompt: str = "",
     use_image: bool = False,
     entry: dict | None = None,
+    duration_min_sec=None,
+    duration_max_sec=None,
 ) -> dict:
     """针对单个片段（按其标题/主题）重新解析，原位替换。
 
     - system = 用户提示词（空则回退 highlights.json 里上次整跑的 prompt，
       再空回退当前模板生效文本——与整跑同一优先级链）
     - 定向指令拼在 system 尾部（只出 1 条、围绕该主题）
+    - 时长区间（REQ-20261015-120）：优先取本次入参（UI 当前设置）；
+      缺省回退 doc 里上次整跑记录的 ``duration_range``，再缺省 60-90
     - 校验取第 1 条 validated；title 为空时保留旧 title
     - 替换 highlights.json 中 ``index == hl_index`` 的条目 + 同步 state 镜像
       + ``reset_downstream_stages("stage3_analyze")``
@@ -1151,6 +1473,15 @@ def rerun_stage3_one(
         raise svc.ShortVideoError("raw.srt 解析后无有效字幕行")
 
     title = str(target.get("title") or f"片段 {hl_index}").strip()
+    # REQ-20261015-120：时长区间 = 本次入参 → 上次整跑记录 → 默认 60-90
+    if duration_min_sec is None and duration_max_sec is None:
+        try:
+            prev_range = doc.get("duration_range") or []
+            duration_min_sec, duration_max_sec = float(prev_range[0]), float(prev_range[1])
+        except (TypeError, ValueError, IndexError):
+            pass
+    dmin, dmax = _norm_duration_range(duration_min_sec, duration_max_sec)
+    dur_ctx = _duration_prompt_ctx(dmin, dmax)
     # system：用户提示词 → 上次整跑 prompt → 模板生效文本
     template = str(doc.get("template") or svc.HIGHLIGHT_TEMPLATE_HOOK_FIRST)
     if template not in _PROMPT_TEMPLATES and template != "custom":
@@ -1158,13 +1489,14 @@ def rerun_stage3_one(
     sys_p, prompt_source = _resolve_stage3_system_prompt(
         root, task_id, project_id,
         template=template, custom_prompt="", prompt=prompt,
+        duration_min_sec=dmin, duration_max_sec=dmax,
     )
     if not str(prompt or "").strip():
         last_prompt = str(doc.get("prompt") or "").strip()
         if last_prompt:
             sys_p = last_prompt
             prompt_source = "last_run"
-    sys_p = sys_p + _rerun_one_suffix(title)
+    sys_p = sys_p + _rerun_one_suffix(title, dmin, dmax)
 
     image_path = _resolve_stage3_image(
         root, task_id, project_id, use_image=use_image, entry=entry,
@@ -1197,10 +1529,13 @@ def rerun_stage3_one(
     user_payload = (
         ocr_ref
         + f"本次任务：只解析主题「{title}」这 1 条短视频。\n\n"
-        + _UPSTREAM_CLIP_USER_PREFIX + "\n\n" + srt_text.strip()
-        + "\n\n请从上述字幕中只整理出 1 组短视频（只围绕上述主题，全部字幕"
-          "时长合计约 70 秒，选中的字幕行要按叙事逻辑有条理地组织）。"
-        + _GROUPS_OUTPUT_CONSTRAINT.format(n=1)
+        + _UPSTREAM_CLIP_USER_PREFIX + "\n\n"
+        + _annotate_srt_seconds(srt_text).strip()
+        + f"\n\n请从上述字幕中只整理出 1 组短视频（只围绕上述主题；总时长 ="
+          f"选中各行末尾（X.Xs）标注之和，必须落在 {dmin:.0f}–{dmax:.0f} 秒"
+          f"含端点，按每行约 2s 一般需 {dur_ctx['dmin2']:.0f}–{dur_ctx['dmax2']:.0f} 行，"
+          "选中的字幕行要按叙事逻辑有条理地组织）。"
+        + _GROUPS_OUTPUT_CONSTRAINT.format(n=1, **dur_ctx)
     )
 
     t0 = time.time()
@@ -1227,19 +1562,22 @@ def rerun_stage3_one(
     raw_path.write_text(raw, encoding="utf-8")
 
     try:
-        try:
-            # 修订六：分组格式（单片段重解析 = 取第 1 组）
-            validated, warnings = _parse_llm_clip_groups(
-                raw, srt_lines, n_groups=1, title_fallback=title,
-            )
-        except svc.ShortVideoError:
-            if "highlights" not in raw:
-                raise
-            payload = _strip_json_block(raw)
-            validated, warnings = _validate_highlights(
-                payload, srt_lines, title_fallback=title,
-            )
-            _annotate_subtitle_lines(validated, srt_lines)
+        # 修订六：分组格式（单片段重解析 = 取第 1 组）；JSON 兜底同整跑
+        validated, warnings = _parse_groups_or_json(
+            raw, srt_lines, n_groups=1, title_fallback=title,
+            duration_min_sec=dmin, duration_max_sec=dmax,
+        )
+        # REQ-20261015-119：时长硬约束核查 + 一轮带反馈重试（按生效区间）
+        raw, validated, warnings, _retried, extra = _duration_retry_loop(
+            sys_p, user_payload, raw, srt_lines, validated, warnings,
+            n_groups=1, title_fallback=title, entry=entry,
+            duration_min_sec=dmin, duration_max_sec=dmax,
+        )
+        elapsed += extra
+        warnings = warnings + duration_retry_warnings(
+            validated, duration_min_sec=dmin, duration_max_sec=dmax,
+        )
+        raw_path.write_text(raw, encoding="utf-8")
     except Exception as e:  # noqa: BLE001
         project = svc.load_project(root, task_id, project_id)
         state = svc.get_stage_state(project, "stage3_analyze")
@@ -1277,6 +1615,8 @@ def rerun_stage3_one(
         doc["prompt"] = str(prompt or "").strip()
     # 镜像同步（多入口写同一份状态必须对称）：rerun 是否带了截图
     doc["image"] = image_path.name if image_path is not None else ""
+    # REQ-20261015-120：记录重解析生效的区间（下次 rerun 的回退来源）
+    doc["duration_range"] = [round(dmin, 1), round(dmax, 1)]
     svc._write_json_atomic(hp, doc)
 
     # 同步 state 镜像 + 下游作废
@@ -1293,6 +1633,12 @@ def rerun_stage3_one(
         state.pop("image_used", None)
     state.pop("error", None)
     state["warnings"] = (list(state.get("warnings") or []) + warnings)[-20:]
+    state["duration_range"] = [round(dmin, 1), round(dmax, 1)]
+    # REQ-20261015-119：单条重解析后的时长终态（与整跑口径对称）
+    state["hl_duration_sec"] = {
+        str(h.get("index")): round(hl_lines_duration_sec(h), 1)
+        for h in hls
+    }
     state["logs"] = list(state.get("logs") or []) + [
         f"[{svc.now_iso()}] stage3 rerun-one #{hl_index} done, "
         f"lines={len(new_hl.get('subtitle_lines') or [])}, elapsed={elapsed}s",

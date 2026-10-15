@@ -482,6 +482,28 @@ def test_anthropic_request_build(monkeypatch):
     assert body["model"] == "claude-sonnet-4-5" and body["max_tokens"] > 0
 
 
+def test_anthropic_max_tokens_passthrough(monkeypatch):
+    """REQ-20261015-119：max_tokens 可按调用方提额（默认仍 4096）。
+
+    Stage 3 硬时长约束（60-90s → 4 组 × 30-45 行）输出会顶爆默认 4096
+    （stop_reason=max_tokens 截断，E2E 实测），_call_llm 需支持透传更高上限。
+    """
+    from slirn_home import revision_service
+
+    captured: dict = {}
+
+    def _fake(url, json=None, headers=None, timeout=None):
+        captured["body"] = json
+        return _fake_anthropic_resp(contents=[{"type": "text", "text": "ok"}])
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setattr("httpx.post", _fake)
+    revision_service._call_llm("s", "u", entry=ANTHROPIC_ENTRY, max_tokens=8192)
+    assert captured["body"]["max_tokens"] == 8192
+    revision_service._call_llm("s", "u", entry=ANTHROPIC_ENTRY)
+    assert captured["body"]["max_tokens"] == 4096, "未传时保持默认 4096"
+
+
 def test_anthropic_base_url_with_v1_not_duplicated(monkeypatch):
     """base 已带 /v1 → 拼 /messages 而非 /v1/v1/messages（兼容网关前缀写法）。"""
     from slirn_home import revision_service

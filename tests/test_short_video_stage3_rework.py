@@ -267,7 +267,9 @@ def test_run_stage3_vision_call(tmp_path):
         )
         assert state["status"] == "done"
         # OCR 一次 + 主文本调用一次；system 用用户提示词
-        assert captured["vision"] == 1 and captured["llm"] == 1
+        assert captured["vision"] == 1 and captured["llm"] == 2, (
+    "REQ-20261015-119：短 SRT 必触发一轮时长反馈重试（第二次 LLM 调用）"
+)
         assert captured["sys"] == "VISION-PROMPT"
         assert captured["vis_entry"]["id"] == "qwen-vl-max"
         assert len(captured["images"]) == 1
@@ -344,7 +346,8 @@ def test_run_stage3_format_constraint_and_unchanged_prompt(tmp_path):
         assert doc["prompt"] == ""
 
         # prompt 恰好等于生效默认（上游提示词）→ 归类为模板路径
-        default_system = sva._UPSTREAM_CLIP_SYSTEM_PROMPT.format(n=4)
+        default_system = sva._UPSTREAM_CLIP_SYSTEM_PROMPT.format(
+            n=4, **sva._duration_prompt_ctx(60.0, 90.0))
         state = sva.run_stage3(
             tmp_path, tid, pid, template="hook_first", prompt=default_system,
         )

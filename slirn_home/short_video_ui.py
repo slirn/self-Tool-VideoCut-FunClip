@@ -385,6 +385,15 @@ def _stage2_extract(project: dict) -> str:
 def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None = None) -> str:
     s3 = project.get("pipeline", {}).get("stage3_analyze", {}) or {}
     n = int(s3.get("n_clips") or 4)
+    # REQ-20261015-120：时长区间输入初值 = 上次运行的生效区间（缺省 60-90）
+    try:
+        _dr = s3.get("duration_range") or []
+        dmin_v = int(float(_dr[0]))
+        dmax_v = int(float(_dr[1]))
+    except (TypeError, ValueError, IndexError):
+        dmin_v, dmax_v = 60, 90
+    dmin_v = min(max(dmin_v, 10), 600)
+    dmax_v = min(max(dmax_v, dmin_v + 5), 900)
     template = str(s3.get("template") or "hook_first")
     prompt_state = s3.get("prompt_state") or {}
     custom_prompts = prompt_state.get("custom") or {}
@@ -578,6 +587,12 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
             f'<button class="slirn-btn-mini" data-action="sv-stage3-restore-order" '
             f'data-hl-index="{idx}" disabled title="当前已是大模型最初顺序">↩️ 还原顺序</button>'
         )
+        # REQ-20261015-120：合计时长越出当前区间 → ⚠ 标记（区间来自上次运行）
+        total_sec = total_ms / 1000.0
+        dur_flag = (
+            f' ⚠️ 未达 {dmin_v}s' if total_sec < dmin_v
+            else (f' ⚠️ 超 {dmax_v}s' if total_sec > dmax_v else "")
+        )
         hl_rows.append(
             # 修订九：每条短视频包一层页签面板（tab bar 在列表头部），点页签切换显示
             f'<div class="slirn-stage3-hl-pane{" active" if is_first else ""}" data-hl-index="{idx}">'
@@ -585,7 +600,7 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
             f'<div class="slirn-stage3-hl-head">'
             f'<span class="slirn-sv-row-no">#{idx}</span>'
             f'<input type="text" class="slirn-stage3-hl-title" data-hl-field="title" value="{esc(title)}" placeholder="标题">'
-            f'<span class="slirn-sv-muted slirn-stage3-hl-meta">{_format_ms(start)} - {_format_ms(end)} · 字幕合计 {total_ms / 1000:.0f}s · {sub_count} 行</span>'
+            f'<span class="slirn-sv-muted slirn-stage3-hl-meta">{_format_ms(start)} - {_format_ms(end)} · 字幕合计 {total_sec:.0f}s{dur_flag} · {sub_count} 行</span>'
             f'{preview_btn}'
             f'{restore_btn}'
             f'<button class="slirn-btn-mini" data-action="sv-stage3-rerun" data-hl-index="{idx}" '
@@ -664,6 +679,8 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
     </div>
     <div class="slirn-sv-form-grid">
       <label>片段数<input type="number" min="3" max="5" id="slirn-stage3-n" value="{n}"></label>
+      <label title="每条短视频的总时长（选中字幕行秒数之和）必须落在该区间（含端点）；解析提示词与结果核查都按此区间执行">时长下限(秒)<input type="number" min="10" max="600" step="5" id="slirn-stage3-dmin" value="{dmin_v}"></label>
+      <label title="同上：时长区间上限（含端点）">时长上限(秒)<input type="number" min="20" max="900" step="5" id="slirn-stage3-dmax" value="{dmax_v}"></label>
     </div>
     <div class="slirn-sv-card-actions">
       <button id="slirn-sv-stage3-run-btn" class="slirn-btn slirn-btn-primary" data-action="sv-stage3-run">🔍 解析</button>

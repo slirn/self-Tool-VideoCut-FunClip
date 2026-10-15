@@ -308,7 +308,8 @@ def _extract_anthropic_resp(resp, entry: dict) -> str:
 
 
 def _chat_completion(entry: dict, messages: list[dict],
-                     retries: int = 2, timeout: float = 180.0) -> str:
+                     retries: int = 2, timeout: float = 180.0,
+                     max_tokens: int | None = None) -> str:
     """按注册项协议调用大模型（httpx，gradio 既有依赖）— REQ-20260916-001 双协议。
 
     entry: llm_config 注册项 {"id","provider","base_url","api_key_env","protocol"}
@@ -316,7 +317,9 @@ def _chat_completion(entry: dict, messages: list[dict],
       body {model, messages, stream:false}
     - protocol=anthropic：POST ``{base_url}/v1/messages``（base 已带 /v1 则
       ``{base_url}/messages``），headers x-api-key + anthropic-version，
-      body {model, max_tokens, system, messages}（system 提到顶层，max_tokens 必填）
+      body {model, max_tokens, system, messages}（system 提到顶层，max_tokens 必填；
+      max_tokens 入参可覆盖默认 4096——REQ-20261015-119：Stage 3 硬时长约束
+      下 4 组×30-45 行输出会顶爆 4096 截断）
 
     Key 从 entry.api_key_env 指定的系统环境变量读取（界面不存储 Key）。
     瞬时失败退避重试；确定性业务错误 → LLMBusinessError 直接上抛；截断 →
@@ -341,7 +344,7 @@ def _chat_completion(entry: dict, messages: list[dict],
         system = "\n".join(m.get("content", "") for m in messages if m.get("role") == "system")
         body = {
             "model": entry.get("id", ""),
-            "max_tokens": 4096,  # Anthropic 必填；20 段/批输出约 2K tokens，留余量
+            "max_tokens": int(max_tokens) if max_tokens else 4096,  # Anthropic 必填；默认 20 段/批输出约 2K tokens
             "messages": [m for m in messages if m.get("role") != "system"],
         }
         if system:
@@ -372,11 +375,13 @@ def _chat_completion(entry: dict, messages: list[dict],
     raise RuntimeError(f"网络/服务端错误（重试 {retries} 次后仍失败）: {last_err}")
 
 
-def _call_llm(system: str, user: str, entry: dict | None = None, retries: int = 2) -> str:
+def _call_llm(system: str, user: str, entry: dict | None = None, retries: int = 2,
+              max_tokens: int | None = None) -> str:
     """调用注册的大模型 → 文本响应。瞬时失败退避重试（2s/4s）。
 
     entry: llm_config 注册项（app.py 传入用户选择的当前模型，REQ-20260915-008）；
     None 时回退默认注册项 + SLIRN_LLM_MODEL 环境变量覆盖模型 id（向后兼容）。
+    max_tokens: anthropic 协议输出上限（None → 4096 默认）。
     """
     if entry is None:
         from slirn_home.llm_config import DEFAULT_MODELS
@@ -388,7 +393,7 @@ def _call_llm(system: str, user: str, entry: dict | None = None, retries: int = 
         {"role": "user", "content": user},
     ]
     try:
-        return _chat_completion(entry, messages, retries=retries)
+        return _chat_completion(entry, messages, retries=retries, max_tokens=max_tokens)
     except ValueError:
         raise  # 截断：上层减半重试
     except Exception as e:  # noqa: BLE001

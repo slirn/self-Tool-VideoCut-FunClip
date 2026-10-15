@@ -135,8 +135,8 @@ def test_parse_groups_renumber_and_line_no():
     assert g1[0]["text"] == "第三句"
     # 组窗口 = 组内行时间的 min/max
     assert groups[0]["start_ms"] == 1000 and groups[0]["end_ms"] == 9000
-    # 测试 SRT 很短 → 两组都触发「合计不足 70s」提醒
-    assert any("目标约 70s" in w for w in warnings)
+    # 测试 SRT 很短 → 两组都触发「未达 60s 下限」告警
+    assert any("未达 60s 下限" in w for w in warnings)
 
 
 def test_parse_groups_flat_fallback():
@@ -212,7 +212,7 @@ def test_parse_groups_duration_over_warns():
     )
     groups, warnings = sva._parse_llm_clip_groups(raw, lines, n_groups=4)
     assert groups[0]["total_ms"] == 130_000
-    assert any("明显超过 70s" in w for w in warnings)
+    assert any("超过 90s 上限" in w for w in warnings)
 
 
 # ---------- run_stage3 分组链路 ----------
@@ -240,11 +240,14 @@ def test_run_stage3_groups_flow(tmp_path):
     # system = 上游默认（srt字幕分析剪辑器，n 按 4 模板化）
     assert "srt字幕分析剪辑器" in captured["sys"]
     assert "整理出4条" in captured["sys"]
-    # user = 上游前缀 + 原始 SRT + 分组格式约束
+    # REQ-20261015-119：system 带 60-90 硬约束 + 标注求和口径
+    assert "60–90" in captured["sys"]
+    # user = 上游前缀 + 秒数标注版 SRT + 分组格式约束
     assert captured["user"].startswith("这是待裁剪的视频srt字幕：")
     assert "00:00:08,000 --> 00:00:09,000" in captured["user"]
     assert "只输出 4 组" in captured["user"]
-    assert "约 70 秒" in captured["user"]
+    assert "60–90" in captured["user"]
+    assert "第一句（1.0s）" in captured["user"], "SRT 每行末尾须带真实秒数标注"
 
     hp = svc.stage_highlights_path(tmp_path, tid, pid)
     doc = json.loads(hp.read_text(encoding="utf-8"))
@@ -253,8 +256,13 @@ def test_run_stage3_groups_flow(tmp_path):
     hls = doc["highlights"]
     assert [h["index"] for h in hls] == [1, 2]
     assert [sl["no"] for sl in hls[0]["subtitle_lines"]] == [1, 2]
-    # LLM 原文落档
-    assert svc.stage_llm_raw_path(tmp_path, tid, pid).read_text(encoding="utf-8") == _LLM_GROUPS_TEXT
+    # 测试 SRT 极短（每组 2s/1.5s）→ 必触发时长反馈重试；两轮原文都落档
+    assert state["duration_retry"] is True
+    raw_saved = svc.stage_llm_raw_path(tmp_path, tid, pid).read_text(encoding="utf-8")
+    assert raw_saved.startswith(_LLM_GROUPS_TEXT)
+    assert "===== 时长反馈重试 =====" in raw_saved
+    # 终态逐组时长如实告警（重试后仍不达标）
+    assert any("未达 60s 下限" in w for w in state["warnings"])
 
 
 def test_run_stage3_json_fallback_annotates(tmp_path):
@@ -315,12 +323,17 @@ def test_run_stage3_ocr_reference_flow(tmp_path):
             tmp_path, tid, pid, use_image=True, entry=_VISION_ENTRY,
         )
         assert state["status"] == "done"
-        assert calls == {"vision": 1, "llm": 1}
+        # REQ-20261015-119：测试 SRT 极短（组 2s/1.5s）→ 主调用后必有
+        # 一轮时长反馈重试（mock 返回同文，重试后仍不达标但流程完整）
+        assert calls == {"vision": 1, "llm": 2}
+        assert state["duration_retry"] is True
         # OCR 文字作为参考方向拼在 user payload 头部（带明确「仅供参考」声明）
         assert "【课程重点参考" in captured["user"]
         assert "重点一：如何选课" in captured["user"]
         assert "仅作为选题与叙事方向的参考" in captured["user"]
         assert "这是待裁剪的视频srt字幕：" in captured["user"]
+        assert "重点一：如何选课（" not in captured["user"].split("这是待裁剪的视频srt字幕：")[1][:50], \
+            "OCR 参考段不应混进 SRT 正文"
         # ocr_text.txt 落档 + state.ocr 元数据
         ocr_file = svc.stage3_dir(tmp_path, tid, pid) / "ocr_text.txt"
         assert ocr_file.read_text(encoding="utf-8") == "重点一：如何选课\n重点二：如何剪辑"
@@ -1066,11 +1079,13 @@ def test_stage3_system_prompt_enforces_60_90_duration():
     提示词要：① 明确「必须落在 60-90 秒区间」② 给出时长计算口径 ③ 给出
     凑时长 / 压时长的具体手段 ④ 自检环节把时长检查放第一位。"""
     s = svc.STAGE3_SYSTEM_PROMPT
-    # 1) 60-90 秒硬约束（多种表述至少出现一种）
-    assert ("60-90" in s) or ("60.0–90.0" in s), "系统提示词缺 60-90 秒硬约束"
-    # 2) 时长计算口径（字符数 / 字数 / 行数 公式）
-    assert ("(本行字符数 + 1) / 4" in s) or ("字符数" in s and "朗读秒数" in s), \
-        "系统提示词缺时长计算口径"
+    # 1) 60-90 秒硬约束（service 提示词用 ASCII 连字符表述）
+    assert "60-90" in s, "系统提示词缺 60-90 秒硬约束"
+    # 2) 时长计算口径（以行末标注真实秒数为准，禁止字符估算）
+    assert ("（X.Xs）" in s) and ("标注" in s), \
+        "系统提示词缺时长计算口径（行末秒数标注求和）"
+    assert "(本行字符数 + 1) / 4" not in s, \
+        "字符数公式对快语速课程高估约一倍，必须移除"
     # 3) 凑时长 / 压时长手段
     for key in ("时长 < 60", "时长 > 90", "补行", "砍行"):
         assert key in s, f"系统提示词缺凑/压时长手段: {key}"
@@ -1095,3 +1110,343 @@ def test_stage3_use_system_prompt_wiring():
         capture_output=True, text=True, timeout=30,
     )
     assert r.returncode == 0, f"short_video.js 语法错误\nstderr={r.stderr[:1000]}"
+
+
+# ---------- REQ-20261015-119：60-90 秒硬约束（秒数标注口径 + 反馈重试） ----------
+# 真实故障（20260924-001，行均 2.07s）：旧口径「约 70 秒」无计算方法，
+# LLM 自由心证；字符公式又高估一倍 → 实际拼出 32-41s。
+
+def _fmt_ts(ms: int) -> str:
+    h, rem = divmod(ms, 3_600_000)
+    m, rem = divmod(rem, 60_000)
+    s, ms2 = divmod(rem, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms2:03d}"
+
+
+def _dur_srt(n_lines: int = 40) -> str:
+    """n 行、每行恰 2s（行间隔 1s）的 SRT——行时长可直接心算。"""
+    blocks = []
+    for i in range(1, n_lines + 1):
+        start = (i - 1) * 3000
+        blocks.append(f"{i}\n{_fmt_ts(start)} --> {_fmt_ts(start + 2000)}\n内容第{i}句\n")
+    return "\n".join(blocks) + "\n"
+
+
+def _group_text(title: str, line_ids) -> str:
+    """按 _dur_srt 的行号集合构造分组输出（行号从 1 连续编）。"""
+    rows = []
+    for no, i in enumerate(line_ids, start=1):
+        start = (i - 1) * 3000
+        rows.append(f"{no}. [{_fmt_ts(start)}-{_fmt_ts(start + 2000)}] 内容第{i}句")
+    return f"# 1 | {title}\n" + "\n".join(rows) + "\n"
+
+
+def _make_project_dur(tmp_path: Path):
+    tid, pid = _make_project(tmp_path)
+    svc.stage_raw_srt_path(tmp_path, tid, pid).write_text(
+        _dur_srt(40), encoding="utf-8",
+    )
+    return tid, pid
+
+
+def test_annotate_srt_seconds_and_strip():
+    """每行文本末尾追加真实秒数；多行文本标在最后一行；误抄可清洗。"""
+    srt = (
+        "1\n00:00:01,000 --> 00:00:02,500\n第一句\n\n"
+        "2\n00:00:05,000 --> 00:00:06,000\n第二句上半\n第二句下半\n\n"
+    )
+    out = sva._annotate_srt_seconds(srt)
+    assert "第一句（1.5s）" in out
+    assert "第二句上半\n第二句下半（1.0s）" in out
+    # 标注后仍可被正常解析（时间轴未被破坏）
+    lines = sva._parse_srt_lines(out)
+    assert [ln.index for ln in lines] == [1, 2]
+    assert [ln.text for ln in lines] == ["第一句（1.5s）", "第二句上半 第二句下半（1.0s）"]
+    # strip_duration_tag 只清行尾标注
+    assert sva.strip_duration_tag("内容第3句（2.0s）") == "内容第3句"
+    assert sva.strip_duration_tag("内容第3句(2.5 s)") == "内容第3句"
+    assert sva.strip_duration_tag("正常（括号）文本") == "正常（括号）文本"
+
+
+def test_upstream_prompt_and_constraint_hard_duration():
+    """默认链 system + 输出约束都换 60–90 硬口径，「约70秒」不得残留。"""
+    sys_p = sva._UPSTREAM_CLIP_SYSTEM_PROMPT.format(
+        n=4, **sva._duration_prompt_ctx(60.0, 90.0))
+    assert "60–90" in sys_p
+    assert "（X.Xs）" in sys_p, "必须声明以行末秒数标注为求和口径"
+    assert "30–45 行" in sys_p, "行数指引 = 区间半值（60/90 → 30–45 行）"
+    assert "约70秒" not in sys_p and "约 70 秒" not in sys_p
+
+    c = sva._GROUPS_OUTPUT_CONSTRAINT.format(
+        n=4, **sva._duration_prompt_ctx(60.0, 90.0))
+    assert "60–90" in c
+    assert "不要复制（X.Xs）秒数标注" in c
+
+
+def test_duration_feedback_and_retry_warnings():
+    """反馈生成：短组写缺口 + 增选行数；超长组写删行；达标组不出现。"""
+    short = {"index": 1, "title": "短", "subtitle_lines": [{"start_ms": 0, "end_ms": 10_000}]}
+    ok = {"index": 2, "title": "中", "subtitle_lines": [{"start_ms": 0, "end_ms": 65_000}]}
+    over = {"index": 3, "title": "长", "subtitle_lines": [{"start_ms": 0, "end_ms": 100_000}]}
+
+    fb = sva.duration_feedback([short, ok, over])
+    assert "低于 60s" in fb and "还差 50.0s" in fb
+    assert "约需再选 26 行" in fb
+    assert "超过 90s 上限 10.0s" in fb
+    assert "第 2 组" not in fb, "达标组不产生反馈行"
+    assert sva.duration_feedback([ok]) == ""
+
+    ws = sva.duration_retry_warnings([short, ok, over])
+    assert any("未达 60s 下限" in w for w in ws)
+    assert any("超过 90s 上限" in w for w in ws)
+    assert sva.duration_retry_warnings([ok]) == []
+
+
+def test_run_stage3_duration_retry_fixes_short_group(tmp_path):
+    """第一轮 10s 不达标 → 带反馈重试；第二轮 64s → 终态用第二轮结果。"""
+    tid, pid = _make_project_dur(tmp_path)
+    calls = {"n": 0, "payloads": []}
+    short_raw = _group_text("短组", range(1, 6))       # 5 行 × 2s = 10s
+    fixed_raw = _group_text("达标组", range(1, 33))    # 32 行 × 2s = 64s
+
+    def fake(sys_p, user_p, **kw):
+        calls["n"] += 1
+        calls["payloads"].append(user_p)
+        return short_raw if calls["n"] == 1 else fixed_raw
+
+    orig = revision_service._call_llm
+    revision_service._call_llm = fake
+    try:
+        state = sva.run_stage3(tmp_path, tid, pid, n_clips=4)
+    finally:
+        revision_service._call_llm = orig
+
+    assert state["status"] == "done"
+    assert calls["n"] == 2, "不达标必须恰好触发一轮重试"
+    assert state["duration_retry"] is True
+    # 重试 payload = 原载荷 + 反馈
+    assert "时长核查反馈" in calls["payloads"][1]
+    assert "低于 60s" in calls["payloads"][1]
+    assert "还差 50.0s" in calls["payloads"][1]
+    # 终态 = 第二轮（32 行、64s、无未达告警）
+    doc = json.loads(
+        svc.stage_highlights_path(tmp_path, tid, pid).read_text(encoding="utf-8")
+    )
+    assert len(doc["highlights"][0]["subtitle_lines"]) == 32
+    assert state["hl_duration_sec"] == {"1": 64.0}
+    assert not any("未达 60s" in w for w in state["warnings"])
+    # 两轮原文都落档
+    saved = svc.stage_llm_raw_path(tmp_path, tid, pid).read_text(encoding="utf-8")
+    assert saved.startswith(short_raw)
+    assert "===== 时长反馈重试 =====" in saved
+    assert fixed_raw.strip() in saved
+
+
+def test_run_stage3_no_retry_when_compliant(tmp_path):
+    """第一轮就达标 → 只调一次 LLM，duration_retry=False。"""
+    tid, pid = _make_project_dur(tmp_path)
+    calls = {"n": 0}
+
+    def fake(sys_p, user_p, **kw):
+        calls["n"] += 1
+        return _group_text("达标组", range(1, 33))     # 64s
+
+    orig = revision_service._call_llm
+    revision_service._call_llm = fake
+    try:
+        state = sva.run_stage3(tmp_path, tid, pid, n_clips=4)
+    finally:
+        revision_service._call_llm = orig
+
+    assert state["status"] == "done"
+    assert calls["n"] == 1
+    assert state["duration_retry"] is False
+    assert state["hl_duration_sec"] == {"1": 64.0}
+    assert not any("未达 60s" in w or "超过 90s" in w for w in state["warnings"])
+
+
+def test_rerun_one_payload_uses_annotated_srt_and_hard_duration(tmp_path):
+    """单条重解析同口径：标注版 SRT + 60–90 + 反馈重试。"""
+    tid, pid = _make_project_dur(tmp_path)
+    # 先整跑一次得到 highlights.json（直接达标，1 次调用）
+    short_then_ok = {"n": 0, "payloads": []}
+
+    def fake(sys_p, user_p, **kw):
+        short_then_ok["n"] += 1
+        short_then_ok["payloads"].append((sys_p, user_p))
+        return _group_text("达标组", range(1, 33))
+
+    orig = revision_service._call_llm
+    revision_service._call_llm = fake
+    try:
+        sva.run_stage3(tmp_path, tid, pid, n_clips=4)
+        short_then_ok["n"] = 0
+        short_then_ok["payloads"].clear()
+        state = sva.rerun_stage3_one(tmp_path, tid, pid, 1)
+    finally:
+        revision_service._call_llm = orig
+
+    assert state["status"] == "done"
+    sys_p, user_p = short_then_ok["payloads"][0]
+    assert "60–90" in sys_p, "定向指令须带硬口径"
+    assert "内容第1句（2.0s）" in user_p, "重解析 payload 用秒数标注版 SRT"
+    assert "60–90" in user_p
+    assert "约 70 秒" not in user_p
+    assert state["hl_duration_sec"]["1"] == 64.0
+
+
+# ---------- REQ-20261015-120：每条短视频时长区间设置（蓝色框区） ----------
+# 用户要求：UI 可设区间 → 后端直接取值（不再自行推算）→ 拼进提示词 →
+# 输出按该区间核查（反馈重试 + 终态告警同口径）。
+
+def test_norm_duration_range_clamps():
+    f = sva._norm_duration_range
+    assert f(None, None) == (60.0, 90.0)
+    assert f(0, 0) == (60.0, 90.0), "0 视为未填 → 默认区间"
+    assert f(40, 80) == (40.0, 80.0)
+    assert f(5, 1000) == (10.0, 900.0), "离谱值钳到 [10,600]/[+5,900]"
+    assert f(80, 40) == (80.0, 85.0), "倒挂时上限抬到下限+5（JS 侧已互换）"
+    assert f(float("nan"), 90) == (60.0, 90.0)
+
+
+def test_run_stage3_custom_duration_range_flows_to_prompt(tmp_path):
+    """用户设 40-80 → system/user 提示词、反馈核查、state/doc 全按 40-80。"""
+    tid, pid = _make_project_dur(tmp_path)
+    calls = {"n": 0, "sys": "", "user": ""}
+    ok_raw = _group_text("达标组", range(1, 26))   # 25 行 × 2s = 50s ∈ [40, 80]
+
+    def fake(sys_p, user_p, **kw):
+        calls["n"] += 1
+        calls["sys"] = sys_p
+        calls["user"] = user_p
+        return ok_raw
+
+    orig = revision_service._call_llm
+    revision_service._call_llm = fake
+    try:
+        state = sva.run_stage3(
+            tmp_path, tid, pid, n_clips=4,
+            duration_min_sec=40, duration_max_sec=80,
+        )
+    finally:
+        revision_service._call_llm = orig
+
+    assert state["status"] == "done"
+    assert calls["n"] == 1, "50s 在 40-80 内 → 不触发重试"
+    assert "40–80 秒" in calls["sys"] and "40–80 秒" in calls["user"]
+    assert "60–90" not in calls["sys"] and "60–90" not in calls["user"]
+    assert "20–40 行" in calls["sys"], "行数指引按新区间折算"
+    assert state["duration_range"] == [40.0, 80.0]
+    assert state["hl_duration_sec"] == {"1": 50.0}
+    doc = json.loads(
+        svc.stage_highlights_path(tmp_path, tid, pid).read_text(encoding="utf-8")
+    )
+    assert doc["duration_range"] == [40.0, 80.0]
+
+
+def test_run_stage3_custom_range_feedback_thresholds(tmp_path):
+    """同一 10s 结果：默认区间要重试，区间 5-15 直接达标（阈值跟区间走）。"""
+    tid, pid = _make_project_dur(tmp_path)
+    short_raw = _group_text("短组", range(1, 6))    # 10s
+
+    # ① 区间 [5, 15]：10s 达标 → 一次调用
+    calls = {"n": 0}
+    orig = revision_service._call_llm
+    revision_service._call_llm = lambda s, u, **kw: (calls.__setitem__("n", calls["n"] + 1) or short_raw)
+    try:
+        st = sva.run_stage3(tmp_path, tid, pid, n_clips=4,
+                            duration_min_sec=5, duration_max_sec=15)
+    finally:
+        revision_service._call_llm = orig
+    assert st["duration_retry"] is False
+    assert calls["n"] == 1
+    assert st["duration_range"] == [10.0, 15.0], "下限 5 被钳到最小 10"
+
+    # ② 默认 60-90：10s 不达标 → 重试一轮
+    calls["n"] = 0
+    revision_service._call_llm = lambda s, u, **kw: (calls.__setitem__("n", calls["n"] + 1) or short_raw)
+    try:
+        st2 = sva.run_stage3(tmp_path, tid, pid, n_clips=4)
+    finally:
+        revision_service._call_llm = orig
+    assert st2["duration_retry"] is True
+    assert calls["n"] == 2
+    assert st2["duration_range"] == [60.0, 90.0]
+
+
+def test_rerun_one_falls_back_to_doc_duration_range(tmp_path):
+    """单条重解析不带区间 → 回退 doc 里上次整跑记录的区间。"""
+    tid, pid = _make_project_dur(tmp_path)
+    captured = {"user": ""}
+
+    def fake(sys_p, user_p, **kw):
+        captured["user"] = user_p
+        return _group_text("达标组", range(1, 26))  # 50s
+
+    orig = revision_service._call_llm
+    revision_service._call_llm = fake
+    try:
+        sva.run_stage3(tmp_path, tid, pid, n_clips=4,
+                       duration_min_sec=40, duration_max_sec=80)
+        sva.rerun_stage3_one(tmp_path, tid, pid, 1)   # 不带区间参数
+    finally:
+        revision_service._call_llm = orig
+
+    assert "40–80 秒" in captured["user"], "rerun 应回退 doc 记录的 40-80"
+
+
+def test_stage3_duration_inputs_rendered():
+    """设置区渲染两个区间输入（默认 60/90；随上次运行区间回填）+ 越界 ⚠。"""
+    from slirn_home import short_video_ui as ui
+
+    def _proj(range_, hl_secs):
+        lines = [
+            {"no": i, "src_index": i, "text": f"行{i}",
+             "start_ms": (i - 1) * 3000, "end_ms": (i - 1) * 3000 + hl_secs * 1000}
+            for i in range(1, 3)
+        ]
+        return {
+            "id": "p1", "task_id": "t1", "name": "d", "materials": [],
+            "pipeline": {
+                "stage1_source": {"status": "done"},
+                "stage3_analyze": {
+                    "status": "done",
+                    "duration_range": range_,
+                    "highlights": [{
+                        "index": 1, "id": "h1", "title": "t",
+                        "start_ms": 0, "end_ms": 60000,
+                        "subtitle_lines": lines,
+                    }],
+                },
+            },
+        }
+
+    # ① 无记录 → 默认 60/90
+    html = ui.render_project(_proj(None, 30))
+    assert 'id="slirn-stage3-dmin" value="60"' in html
+    assert 'id="slirn-stage3-dmax" value="90"' in html
+    # ② 上次 40/75 → 回填；两行各 30s = 合计 60s ∈ [40,75] → 无 ⚠
+    html = ui.render_project(_proj([40, 75], 30))
+    assert 'id="slirn-stage3-dmin" value="40"' in html
+    assert 'id="slirn-stage3-dmax" value="75"' in html
+    assert "字幕合计 60s" in html and "⚠️" not in html
+    # ③ 合计 60s < 下限 70 → ⚠ 未达
+    html = ui.render_project(_proj([70, 90], 30))
+    assert "字幕合计 60s ⚠️ 未达 70s" in html
+
+
+def test_stage3_duration_range_wiring():
+    """端点透传 + JS 读取/发送接线（source-grep 守卫）。"""
+    app_src = (FUNCLIP_ROOT / "slirn_home" / "app.py").read_text(encoding="utf-8")
+    assert "duration_min_sec=duration_min_sec" in app_src
+    assert "duration_max_sec=duration_max_sec" in app_src
+    assert app_src.count("body.get(\"duration_min_sec\")") == 2, (
+        "run + rerun_one 两个端点都要透传"
+    )
+
+    js = (FUNCLIP_ROOT / "slirn_home" / "static" / "short_video.js").read_text(encoding="utf-8")
+    assert "function _stage3DurationRange" in js
+    assert "duration_min_sec: dur[0], duration_max_sec: dur[1]" in js
+    assert js.count("duration_min_sec: dur[0]") == 2, (
+        "stage3Run + stage3RerunOne 都要带区间"
+    )

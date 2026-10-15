@@ -308,6 +308,19 @@
     return !!(cb && cb.checked);
   }
 
+  // REQ-20261015-120：读时长区间输入（[下限, 上限] 秒）；输入框缺失/非法
+  // → null（后端回退到上次运行区间或默认 60-90）。只做最基本的反转保护，
+  // 完整钳制由后端 _norm_duration_range 兜底。
+  function _stage3DurationRange() {
+    var mn = document.getElementById('slirn-stage3-dmin');
+    var mx = document.getElementById('slirn-stage3-dmax');
+    if (!mn || !mx) return [null, null];
+    var a = parseFloat(mn.value), b = parseFloat(mx.value);
+    if (isNaN(a) || isNaN(b)) return [null, null];
+    if (a > b) { var t = a; a = b; b = t; }
+    return [a, b];
+  }
+
   // REQ-20261013-111：Stage 3 解析 — 进度卡 + 防重入 + 阶段文字式自估算
   function stage3Run(btn) {
     var ctx = innerCtx(); if (!ctx) return;
@@ -320,6 +333,8 @@
     // REQ-099 修订：快速模板 UI 已移除，template 固定默认值（仅作后端兜底链）
     var template = 'hook_first';
     var n = parseInt((document.getElementById('slirn-stage3-n') || {}).value || '4', 10);
+    // REQ-20261015-120：时长区间（秒）直接取用户设置，后端拼提示词并按此核查
+    var dur = _stage3DurationRange();
     var prompt = _stage3PromptText();
     var useImage = _stage3UseImage();
 
@@ -360,7 +375,8 @@
     postJSON(API + '/short_video_stage3_run', {
       task_id: ctx.taskId, project_id: ctx.projectId,
       template: template, n_clips: n,
-      prompt: prompt, use_image: useImage
+      prompt: prompt, use_image: useImage,
+      duration_min_sec: dur[0], duration_max_sec: dur[1]
     }).then(function(r) {
       clearInterval(stageTimer);
       if (r && r.ok) {
@@ -408,11 +424,14 @@
     if (!window.confirm('针对「' + (title || '#' + hlIndex) + '」单独重新解析？\n'
         + '该片段的时间段与字幕内容将被替换，下游 Stage 4/5/6/7 重置。')) return;
     toast('片段 #' + hlIndex + ' 重新解析中…');
+    // REQ-20261015-120：单条重解析同样带当前时长区间设置
+    var dur = _stage3DurationRange();
     postJSON(API + '/short_video_stage3_rerun_one', {
       task_id: ctx.taskId, project_id: ctx.projectId,
       hl_index: hlIndex,
       prompt: _stage3PromptText(),
-      use_image: _stage3UseImage()
+      use_image: _stage3UseImage(),
+      duration_min_sec: dur[0], duration_max_sec: dur[1]
     }).then(function(r) {
       if (r && r.ok) { toast('片段 #' + hlIndex + ' 已更新'); openProject(ctx.taskId, ctx.projectId); }
       else toast((r && r.error) || '重新解析失败', 'error');
