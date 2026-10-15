@@ -1467,3 +1467,44 @@ def test_run_funasr_extract_model_whitelist_and_hotwords_norm(tmp_path, monkeypa
     cmd = captured["cmd"]
     assert cmd[cmd.index("--model") + 1] == "paraformer"
     assert cmd[cmd.index("--hotwords") + 1] == "智能体 Agent"
+
+
+# ---------- REQ-20261015-123：Stage 2 热词自动保存（落盘 + 回填） ----------
+
+
+def test_stage2_hotwords_saved_and_rendered_back(tmp_path, monkeypatch):
+    from slirn_home import short_video_extract as ex
+    from slirn_home import short_video_service as svc
+    from slirn_home import short_video_ui as ui
+
+    _mgr, task = _make_task(tmp_path)
+    project = svc.create_project(tmp_path, task.task_id, "热词测试", "开场 Hook", {
+        "allow_external_llm": False,
+    })
+    project = svc.update_project(tmp_path, task.task_id, project["id"],
+                                 {"base_material_id": project["materials"][0]["id"]})
+
+    srt_path = svc.stage_raw_srt_path(tmp_path, task.task_id, project["id"])
+    srt_path.parent.mkdir(parents=True, exist_ok=True)
+    srt_path.write_text("1\n00:00:00,000 --> 00:00:02,000\n测试字幕行\n", encoding="utf-8")
+
+    def fake_extract(**kwargs):
+        return ex.FunasrRunResult(
+            srt_path=srt_path, raw_json=None, elapsed_sec=1,
+            stderr_tail="", returncode=0,
+        )
+
+    monkeypatch.setattr(ex, "_run_funasr_extract", fake_extract)
+    state = ex.run_stage2(
+        tmp_path, task.task_id, project["id"],
+        hotwords="智能体,Agent，工作流",
+    )
+    assert state["status"] == "done"
+    # 存用户原始输入（逗号归一在 _run_funasr_extract 内做，不在这里）
+    assert state["hotwords"] == "智能体,Agent，工作流"
+
+    # 重新加载 + 渲染：热词应回填输入框
+    reloaded = svc.load_project(tmp_path, task.task_id, project["id"])
+    html = ui.render_project(reloaded)
+    assert 'id="slirn-stage2-hotwords"' in html
+    assert 'value="智能体,Agent，工作流"' in html

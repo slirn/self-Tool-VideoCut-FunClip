@@ -358,6 +358,8 @@ def _stage2_extract(project: dict) -> str:
         if srt_url else ""
     )
     meta = f'<span class="slirn-sv-muted">{srt_chars} 字</span>' if srt_chars else ""
+    # REQ-20261015-123：热词随 Stage 2 运行落盘，重渲染/刷新后回填输入框。
+    hotwords_v = esc(s2.get("hotwords") or "")
     return f'''<div class="slirn-stage" data-stage="2">
   <div class="slirn-stage-head">
     <span class="slirn-stage-num">2</span>
@@ -368,7 +370,7 @@ def _stage2_extract(project: dict) -> str:
   </div>
   <div class="slirn-stage-body">
     <div class="slirn-sv-form-grid">
-      <label class="slirn-sv-wide">热词（可选）<input id="slirn-stage2-hotwords" placeholder="半角逗号分隔，提升专有名词识别"></label>
+      <label class="slirn-sv-wide">热词（可选）<input id="slirn-stage2-hotwords" value="{hotwords_v}" placeholder="半角逗号分隔，提升专有名词识别"></label>
     </div>
     <div class="slirn-sv-card-actions">
       <button class="slirn-btn slirn-btn-primary" data-action="sv-stage2-run">提取字幕</button>

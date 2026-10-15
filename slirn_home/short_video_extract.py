@@ -261,6 +261,9 @@ def run_stage2(
     state["started_at"] = svc.now_iso()
     state["model"] = model
     state["lang"] = lang
+    # REQ-20261015-123：热词落盘（存用户原始输入，归一在 _run_funasr_extract
+    # 内做），UI 重渲染时回填输入框，否则提取完一刷新就丢。
+    state["hotwords"] = hotwords
     state["logs"] = list(state.get("logs") or []) + [
         f"[{svc.now_iso()}] stage2 start, model={model} lang={lang}",
     ]
