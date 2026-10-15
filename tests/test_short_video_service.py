@@ -1386,3 +1386,84 @@ def test_run_stage3_uses_custom_prompt(tmp_path):
     # REQ-20261012-099 修订五：未自定义的模板 → 上游「大模型智能剪辑」默认提示词
     assert any("srt字幕分析剪辑器" in c for c in captured2["calls"]), \
         f"应使用上游大模型智能剪辑默认提示词"
+
+
+# ---------- REQ-20261015-122：Stage 2 去掉模型/语言选择 + 热词半角逗号分隔 ----------
+
+
+def test_stage2_ui_removes_model_lang_selectors(tmp_path):
+    from slirn_home import short_video_service as svc
+    from slirn_home import short_video_ui as ui
+
+    _mgr, task = _make_task(tmp_path)
+    project = svc.create_project(tmp_path, task.task_id, "UI 测试", "开场 Hook", {
+        "allow_external_llm": False,
+    })
+    project = svc.update_project(tmp_path, task.task_id, project["id"],
+                                 {"base_material_id": project["materials"][0]["id"]})
+    html = ui.render_project(project)
+    # 模型/语言选择已移除（含历史坏选项 seaco_paraformer）
+    assert 'id="slirn-stage2-model"' not in html
+    assert 'id="slirn-stage2-lang"' not in html
+    assert "seaco_paraformer" not in html
+    assert "SenseVoiceSmall" not in html
+    # 热词框保留，提示改半角逗号分隔
+    assert 'id="slirn-stage2-hotwords"' in html
+    assert "半角逗号分隔，提升专有名词识别" in html
+    assert "空格分隔，提升专有名词识别" not in html
+
+
+def test_stage2_js_drops_model_lang_keeps_hotwords():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    js = (root / "slirn_home" / "static" / "short_video.js").read_text(encoding="utf-8")
+    start = js.index("function stage2Run")
+    end = js.index("function", start + 10)
+    body = js[start:end]
+    assert "slirn-stage2-model" not in body
+    assert "slirn-stage2-lang" not in body
+    assert "slirn-stage2-hotwords" in body
+    assert "model:" not in body and "lang:" not in body
+    # 整个文件不再引用已删除的元素
+    assert "slirn-stage2-model" not in js
+    assert "slirn-stage2-lang" not in js
+
+
+def test_norm_hotwords_comma_to_space():
+    from slirn_home.short_video_extract import _norm_hotwords
+
+    assert _norm_hotwords("智能体,Agent，工作流") == "智能体 Agent 工作流"
+    assert _norm_hotwords("智能体 Agent") == "智能体 Agent"  # 旧空格输入原样通过
+    assert _norm_hotwords("  a , , b ， ") == "a b"
+    assert _norm_hotwords("") == ""
+
+
+def test_run_funasr_extract_model_whitelist_and_hotwords_norm(tmp_path, monkeypatch):
+    """白名单外的模型（历史 seaco_paraformer）回默认；热词逗号归一为空格。"""
+    from slirn_home import short_video_extract as ex
+
+    # _resolve_extract_subtitle 要求脚本存在（候选第一项 = slirn/skill/...）
+    skill_dir = tmp_path / "slirn" / "skill" / "video-subtitle-extractor" / "scripts"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "extract_subtitle.py").write_text("# fake", encoding="utf-8")
+
+    captured = {}
+
+    class _Proc:
+        returncode = 1
+        stderr = ""
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _Proc()
+
+    monkeypatch.setattr(ex.subprocess, "run", fake_run)
+    ex._run_funasr_extract(
+        input_video=tmp_path / "in.mp4", output_srt=tmp_path / "out.srt",
+        repo_root=tmp_path, model="seaco_paraformer", lang="zh",
+        hotwords="智能体,Agent",
+    )
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("--model") + 1] == "paraformer"
+    assert cmd[cmd.index("--hotwords") + 1] == "智能体 Agent"

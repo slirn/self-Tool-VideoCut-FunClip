@@ -124,6 +124,20 @@ def _runner_path() -> Path:
 
 # ---------- 通用 funasr 子进程调用 ----------
 
+# 与 extract_subtitle.py 的 argparse choices 保持同步（漏同步 = 子进程
+# invalid choice 退出码 2 直接失败）。
+_FUNASR_MODEL_WHITELIST = ("paraformer", "fun-asr-nano", "sensevoice")
+
+
+def _norm_hotwords(hotwords: str) -> str:
+    """REQ-20261015-122：UI 热词改半角逗号分隔；funasr hotword 参数要空格分隔。
+
+    把半角/全角逗号切开重排为空格分隔；空格分隔的旧输入原样通过。
+    """
+    parts = [p.strip() for p in re.split(r"[,，]", hotwords or "")]
+    return " ".join(p for p in parts if p)
+
+
 @dataclass
 class FunasrRunResult:
     srt_path: Path
@@ -154,6 +168,12 @@ def _run_funasr_extract(
     output_srt.parent.mkdir(parents=True, exist_ok=True)
     target = _resolve_extract_subtitle(repo_root)
     runner = _runner_path()
+
+    # REQ-20261015-122：模型/语言不再由用户选择。白名单外的值（如历史选项
+    # seaco_paraformer，argparse 不收）一律回默认 paraformer-zh。
+    if model not in _FUNASR_MODEL_WHITELIST:
+        model = "paraformer"
+    hotwords = _norm_hotwords(hotwords)
 
     cmd = [
         sys.executable, str(runner), str(target),

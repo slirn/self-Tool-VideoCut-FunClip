@@ -368,13 +368,7 @@ def _stage2_extract(project: dict) -> str:
   </div>
   <div class="slirn-stage-body">
     <div class="slirn-sv-form-grid">
-      <label>模型<select id="slirn-stage2-model">
-        <option value="paraformer">paraformer-zh（默认）</option>
-        <option value="seaco_paraformer">seaco_paraformer（更准）</option>
-        <option value="sensevoice">SenseVoiceSmall</option>
-        </select></label>
-      <label>语言<input id="slirn-stage2-lang" value="zh" placeholder="zh / en"></label>
-      <label class="slirn-sv-wide">热词（可选）<input id="slirn-stage2-hotwords" placeholder="空格分隔，提升专有名词识别"></label>
+      <label class="slirn-sv-wide">热词（可选）<input id="slirn-stage2-hotwords" placeholder="半角逗号分隔，提升专有名词识别"></label>
     </div>
     <div class="slirn-sv-card-actions">
       <button class="slirn-btn slirn-btn-primary" data-action="sv-stage2-run">提取字幕</button>

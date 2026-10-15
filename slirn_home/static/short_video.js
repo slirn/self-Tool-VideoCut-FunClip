@@ -282,13 +282,12 @@
 
   function stage2Run() {
     var ctx = innerCtx(); if (!ctx) return;
-    var model = (document.getElementById('slirn-stage2-model') || {}).value || 'paraformer';
-    var lang = (document.getElementById('slirn-stage2-lang') || {}).value || 'zh';
+    // REQ-20261015-122：模型/语言不再由用户选择，固定 paraformer-zh（后端默认值）。
     var hotwords = (document.getElementById('slirn-stage2-hotwords') || {}).value || '';
     toast('funasr 提取字幕中…');
     postJSON(API + '/short_video_stage2_run', {
       task_id: ctx.taskId, project_id: ctx.projectId,
-      model: model, lang: lang, hotwords: hotwords, sd_switch: 'no'
+      hotwords: hotwords, sd_switch: 'no'
     }).then(function(r) {
       if (r && r.ok) { toast('Stage 2 完成'); openProject(ctx.taskId, ctx.projectId); }
       else toast((r && r.error) || 'Stage 2 失败', 'error');
