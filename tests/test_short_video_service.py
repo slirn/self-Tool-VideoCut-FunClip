@@ -1508,3 +1508,80 @@ def test_stage2_hotwords_saved_and_rendered_back(tmp_path, monkeypatch):
     html = ui.render_project(reloaded)
     assert 'id="slirn-stage2-hotwords"' in html
     assert 'value="智能体,Agent，工作流"' in html
+
+
+# ---------- REQ-20261016-125：Stage 2 进度卡 + 崩溃诊断 ----------
+
+
+def test_stage2_status_card_dom_exists(tmp_path):
+    """Stage 2 卡片含进度状态卡 + 按钮有 id（防重入与进度显示的 DOM 基建）。"""
+    from slirn_home import short_video_service as svc
+    from slirn_home import short_video_ui as ui
+
+    _mgr, task = _make_task(tmp_path)
+    project = svc.create_project(tmp_path, task.task_id, "进度卡测试", "开场 Hook", {
+        "allow_external_llm": False,
+    })
+    project = svc.update_project(tmp_path, task.task_id, project["id"],
+                                 {"base_material_id": project["materials"][0]["id"]})
+    html = ui.render_project(project)
+    assert 'id="slirn-sv-stage2-status"' in html
+    assert "slirn-sv-stage2-bar" in html
+    assert "slirn-sv-stage2-msg" in html
+    assert 'id="slirn-sv-stage2-run-btn"' in html
+
+
+def test_stage2_js_progress_elapsed_and_guard():
+    """stage2Run：防重入标志 + 真实已耗时 + 阶段进度 + 失败态 + 路由传 btn。"""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    js = (root / "slirn_home" / "static" / "short_video.js").read_text(encoding="utf-8")
+    # 防重入（闭包标志）与按钮禁用
+    assert "window._slirnSvStage2Running" in js
+    assert "字幕提取正在执行中，请勿重复点击" in js
+    assert "setBtn('🎧 提取中…', true)" in js
+    # 真实已耗时 + 阶段文字（模型加载/音频提取/语音识别）
+    assert "已耗时 " in js
+    assert "加载 funasr 模型" in js
+    assert "提取音频（ffmpeg 单声道 16kHz）" in js
+    assert "语音识别中" in js
+    # 终态：完成（绿）/失败（红）+ 恢复按钮
+    assert "slirn-progress-bar--done" in js
+    assert "slirn-progress-bar--failed" in js
+    assert "setBtn('提取字幕', false)" in js
+    # 路由把 btn 传给 stage2Run（REQ-111 教训：dispatcher 必须传 btn）
+    assert "return stage2Run(btn)" in js
+
+
+def test_diagnose_extract_error_oom_and_native_crash():
+    """OOM（numpy 分配失败）与原生层 0xC0000005 翻译成可行动提示。"""
+    from slirn_home.short_video_extract import _diagnose_extract_error
+
+    oom = _diagnose_extract_error(
+        1, "numpy.core._exceptions._ArrayMemoryError: Unable to allocate 2.00 GiB")
+    assert "内存不足" in oom
+    native = _diagnose_extract_error(3221225477, "")
+    assert "0xC0000005" in native
+    assert _diagnose_extract_error(1, "some other error") == ""
+
+
+def test_extract_subtitle_script_bypasses_moviepy_video_recog():
+    """skill 脚本不再走 video_recog 的 44.1kHz 立体声路径（2GiB 内存炸弹），
+    改为 ffmpeg 直抽单声道 16kHz + 直接调 clipper.recog。"""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    script = None
+    for cand in (
+        root / "slirn" / "skill" / "video-subtitle-extractor" / "scripts" / "extract_subtitle.py",
+        root.parent / "slirn-standalone" / "skill" / "video-subtitle-extractor" / "scripts" / "extract_subtitle.py",
+    ):
+        if cand.is_file():
+            script = cand.read_text(encoding="utf-8")
+            break
+    assert script, "extract_subtitle.py 未找到（slirn submodule 或 slirn-standalone）"
+    assert "clipper.video_recog" not in script
+    assert "recog_video(" in script
+    assert "'-ac', '1', '-ar', '16000'" in script
+    assert "clipper.recog(" in script

@@ -373,8 +373,15 @@ def _stage2_extract(project: dict) -> str:
       <label class="slirn-sv-wide">热词（可选）<input id="slirn-stage2-hotwords" value="{hotwords_v}" placeholder="半角逗号分隔，提升专有名词识别"></label>
     </div>
     <div class="slirn-sv-card-actions">
-      <button class="slirn-btn slirn-btn-primary" data-action="sv-stage2-run">提取字幕</button>
+      <button id="slirn-sv-stage2-run-btn" class="slirn-btn slirn-btn-primary" data-action="sv-stage2-run">提取字幕</button>
       {preview_btn}
+    </div>
+    <div class="slirn-rc-status-card" id="slirn-sv-stage2-status" style="display:none;">
+      <div class="slirn-sub-meta">🎧 funasr 提取字幕</div>
+      <div class="slirn-progress" style="margin-top:6px;">
+        <div class="slirn-progress-bar slirn-sv-stage2-bar" style="width:0%;"></div>
+      </div>
+      <div class="slirn-status-msg slirn-sv-stage2-msg" style="display:none;"></div>
     </div>
     {error_html}
     {_stage_logs(s2)}

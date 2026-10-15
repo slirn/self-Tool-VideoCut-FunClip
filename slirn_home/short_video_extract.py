@@ -230,6 +230,22 @@ def _run_funasr_extract(
 
 # ---------- Stage 2 ----------
 
+def _diagnose_extract_error(returncode: int, stderr_tail: str) -> str:
+    """REQ-20261016-125：把 funasr 子进程崩溃翻译成用户可行动的中文提示。
+
+    实测两类崩溃同源（内存耗尽）：``_ArrayMemoryError`` 退出码 1（numpy
+    分配失败），以及原生层 0xC0000005 退出码 3221225477（临界时原生分配
+    直接访问冲突）。长视频整段音频加载是数 GB 级分配，系统提交内存不足
+    即触发。
+    """
+    tail = stderr_tail or ""
+    if "Unable to allocate" in tail or "_ArrayMemoryError" in tail or "MemoryError" in tail:
+        return "（内存不足：长视频音频加载需要数 GB 内存，请关闭其他占内存的程序后重试）"
+    if returncode == 3221225477:
+        return "（原生层崩溃 0xC0000005：多为内存耗尽所致，请关闭其他占内存的程序后重试）"
+    return ""
+
+
 def run_stage2(
     repo_root: Path | str,
     task_id: str,
@@ -282,7 +298,8 @@ def run_stage2(
     if result.returncode != 0 or not result.srt_path.is_file() or result.srt_path.stat().st_size < 4:
         state["status"] = "failed"
         state["finished_at"] = svc.now_iso()
-        state["error"] = f"funasr 退出码 {result.returncode}"
+        state["error"] = f"funasr 退出码 {result.returncode}" + _diagnose_extract_error(
+            result.returncode, result.stderr_tail)
         state["stderr_tail"] = result.stderr_tail
         state["elapsed_sec"] = result.elapsed_sec
     else:
@@ -359,7 +376,8 @@ def run_stage5_one(
     _logs = list(s5_state.get("logs") or [])
     if result.returncode != 0 or not asr_srt.is_file() or asr_srt.stat().st_size < 4:
         hl["status"] = "failed"
-        hl["asr_error"] = f"funasr 退出码 {result.returncode}"
+        hl["asr_error"] = f"funasr 退出码 {result.returncode}" + _diagnose_extract_error(
+            result.returncode, result.stderr_tail)
         hl["asr_stderr_tail"] = result.stderr_tail
         _logs.append(
             f"[{svc.now_iso()}] clip #{index} ASR failed: funasr 退出码 {result.returncode}"

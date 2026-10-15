@@ -280,17 +280,72 @@
     });
   }
 
-  function stage2Run() {
+  function stage2Run(btn) {
     var ctx = innerCtx(); if (!ctx) return;
+    if (btn && btn.disabled) return;
+    // REQ-20261016-125：防重入双保险（闭包标志 + 按钮 disabled），
+    // 提取是 5-30 分钟的阻塞调用，必须能看见进度且不能误点第二次。
+    if (window._slirnSvStage2Running) {
+      toast('字幕提取正在执行中，请勿重复点击', 'warn'); return;
+    }
+    window._slirnSvStage2Running = true;
+
     // REQ-20261015-122：模型/语言不再由用户选择，固定 paraformer-zh（后端默认值）。
     var hotwords = (document.getElementById('slirn-stage2-hotwords') || {}).value || '';
-    toast('funasr 提取字幕中…');
+    var status = document.getElementById('slirn-sv-stage2-status');
+    var msg = status ? status.querySelector('.slirn-sv-stage2-msg') : null;
+    var bar = status ? status.querySelector('.slirn-sv-stage2-bar') : null;
+    var setBtn = function(txt, dis) { if (btn) { btn.textContent = txt; btn.disabled = !!dis; } };
+    var show = function(t, pct) {
+      if (status) status.style.display = '';
+      if (msg) { msg.style.display = ''; msg.textContent = t; }
+      if (bar && pct != null) bar.style.width = pct + '%';
+    };
+    var t0 = Date.now();
+    var elapsedTxt = function() { return '已耗时 ' + _fmtElapsed((Date.now() - t0) / 1000); };
+
+    setBtn('🎧 提取中…', true);
+    show('⏳ 启动 funasr 模型（约 10-30 秒）… · ' + elapsedTxt(), 4);
+    toast('funasr 提取字幕中…（长视频可能 5-30 分钟，进度见下方状态卡）');
+
+    // 阶段文字 + 真实已耗时（1s 节奏）。识别是大头且时长随视频长度浮动，
+    // 进度条按已耗时缓慢爬升、90% 封顶等后端响应，完成时一次性跳 100%。
+    var timer = setInterval(function() {
+      var sec = (Date.now() - t0) / 1000;
+      if (sec < 20) show('⏳ 加载 funasr 模型… · ' + elapsedTxt(), Math.min(8, 4 + sec * 0.2));
+      else if (sec < 60) show('⏳ 提取音频（ffmpeg 单声道 16kHz）… · ' + elapsedTxt(), 10 + (sec - 20) * 0.3);
+      else show('⏳ 语音识别中（最耗时一步，视频越长越久）… · ' + elapsedTxt(), 20 + Math.min(70, (sec - 60) / 60 * 7));
+    }, 1000);
+
     postJSON(API + '/short_video_stage2_run', {
       task_id: ctx.taskId, project_id: ctx.projectId,
       hotwords: hotwords, sd_switch: 'no'
     }).then(function(r) {
-      if (r && r.ok) { toast('Stage 2 完成'); openProject(ctx.taskId, ctx.projectId); }
-      else toast((r && r.error) || 'Stage 2 失败', 'error');
+      clearInterval(timer);
+      var sec = Math.round((Date.now() - t0) / 1000);
+      if (r && r.ok) {
+        var st = r.stage2 || {};
+        var chars = st.srt_chars || 0;
+        if (bar) { bar.style.width = '100%'; bar.classList.add('slirn-progress-bar--done'); }
+        show('✅ 字幕提取完成：' + chars + ' 字 · 总耗时 ' + _fmtElapsed(sec), 100);
+        setBtn('提取字幕', false);
+        toast('Stage 2 提取完成（' + _fmtElapsed(sec) + '）');
+        openProject(ctx.taskId, ctx.projectId);
+      } else {
+        var e = (r && ((r.stage2 && r.stage2.error) || r.error)) || 'Stage 2 提取失败';
+        if (bar) { bar.style.width = '100%'; bar.classList.add('slirn-progress-bar--failed'); }
+        show('❌ ' + e + ' · 总耗时 ' + _fmtElapsed(sec), 100);
+        setBtn('提取字幕', false);
+        toast(e, 'error');
+      }
+    }).catch(function(err) {
+      clearInterval(timer);
+      if (bar) { bar.style.width = '100%'; bar.classList.add('slirn-progress-bar--failed'); }
+      show('❌ 网络错误：' + (err && err.message || err), 100);
+      setBtn('提取字幕', false);
+      toast('网络错误：' + (err && err.message || err), 'error');
+    }).then(function() {
+      window._slirnSvStage2Running = false;
     });
   }
 
@@ -2255,7 +2310,7 @@
 
     // 6 阶段
     if (action === 'sv-stage1-select') return stage1Select();
-    if (action === 'sv-stage2-run') return stage2Run();
+    if (action === 'sv-stage2-run') return stage2Run(btn);
     if (action === 'sv-stage2-preview-srt') return previewStage2Srt(btn);
     if (action === 'sv-stage3-run') return stage3Run(btn);
     if (action === 'sv-stage3-restore-order') return stage3RestoreOrder(btn);
