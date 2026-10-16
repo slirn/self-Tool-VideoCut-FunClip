@@ -313,12 +313,21 @@ def test_stage6_empty_hint_reflects_stage5_artifacts():
     html = ui.render_project(_hint_project({"stage5_coarse": {"status": "pending"}}))
     assert "先完成 Stage 5 粗剪" in html
     assert "尚无优化结果" not in html
-    # ② Stage 5 有产物但未优化 → 引导开始优化，不再误报
+    # ② Stage 5 有产物但未优化 → 渲染出每条 clip 卡片（含「重新 ASR / LLM 优化」按钮）
+    # REQ-20261016-134：不再用「尚无优化结果」空提示，因为用户看不到任何可操作按钮；
+    # 改为从 stage5_coarse.highlights 合成占位条目，每张卡片立刻可点。
     html = ui.render_project(_hint_project({"stage5_coarse": {
         "status": "done",
         "highlights": [{"index": 1, "coarse_mp4": "a.mp4", "duration_sec": 60}],
     }}))
-    assert "尚无优化结果" in html
+    # 1 张合成卡片
+    assert 'class="slirn-stage5-clip"' in html, \
+        "Stage 5 有产物时 Stage 6 必须渲染出可操作的 clip 卡片"
+    # 含「重新 ASR」和「✨ LLM 优化」按钮
+    assert 'data-action="sv-stage5-asr"' in html
+    assert 'data-action="sv-stage6-optimize"' in html
+    # 旧占位文案应消失
+    assert "尚无优化结果" not in html
     assert "先完成 Stage 5 粗剪" not in html, "粗剪已有产物时不应再出现「先完成 Stage 5 粗剪」"
 
 

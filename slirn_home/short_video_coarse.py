@@ -469,9 +469,14 @@ def run_stage4(
     state["status"] = "done" if not any_failed else "failed"
     state["finished_at"] = svc.now_iso()
     # REQ-20261013-103 + REQ-20261013-108：增量字段 — 总时长按 highlights 累加
+    # REQ-20261016-134：title 从 stage3 highlights 透传到 stage4（前端要显示
+    # 在每张 clip 卡片顶部）。hl_by_idx 用 index 索引避免 N² 嵌套循环。
+    hl_by_idx = {int(h.get("index") or 0): h for h in raw_highlights}
     new_highlights = [
         {
             "index": r.index,
+            # REQ-20261016-134：标题透传（无 title 时 None → 前端用「片段 #N」占位）
+            "title": (hl_by_idx.get(r.index) or {}).get("title"),
             "coarse_mp4": svc._rel(root, r.coarse_mp4) if r.coarse_mp4 else "",
             "coarse_srt": svc._rel(root, r.coarse_srt) if r.coarse_srt else "",
             "status": r.status,

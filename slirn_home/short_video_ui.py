@@ -1127,6 +1127,10 @@ def _stage5_coarse(project: dict) -> str:
         dur = float(hl.get("duration_sec") or 0)
         err = hl.get("error") or ""
         status = hl.get("status") or "pending"
+        # REQ-20261016-134：标题置顶（来自 stage3 highlights.title）—— 无标题时
+        # 用 `片段 #N` 占位（永远不为空）
+        raw_title = str(hl.get("title") or "").strip()
+        title_text = raw_title if raw_title else f"片段 #{idx}"
         # REQ-20261016-132：视频不再 inline（占用列表卡高度、抢占页面空间）。
         # 改为「▶ 预览」按钮，点击后弹可拖动+可调大小的浮窗（不遮父页）。
         if url:
@@ -1150,6 +1154,8 @@ def _stage5_coarse(project: dict) -> str:
         )
         rows.append(
             f'<div class="slirn-stage4-clip" data-clip-index="{idx}">'
+            # REQ-20261016-134：标题置顶 + 显眼（用户原话「先显示标题」）
+            f'<div class="slirn-stage4-clip-title-top" title="{esc(title_text)}">{esc(title_text)}</div>'
             f'<div class="slirn-stage4-clip-head">'
             f'<span class="slirn-sv-row-no">#{idx}</span>'
             f'{_stage_badge(status)}'
@@ -1161,6 +1167,16 @@ def _stage5_coarse(project: dict) -> str:
             f'{err_html}'
             f'</div>'
         )
+
+    # REQ-20261013-117：空列表提示按上游真实状态分流。旧版只要没点过
+    # 「合成粗剪」就一律显示「先完成 Stage 3 再粗剪」——Stage 3 早已 done
+    # 时文案在误导（用户截图反馈）。Stage 3 done → 引导点合成按钮。
+    s3_done = str((project.get("pipeline", {}).get("stage3_analyze") or {}).get("status")) == "done"
+    empty_hint_div = (
+        '<div class="slirn-sv-muted">尚无粗剪成品 — 点击上方「🎬 合成粗剪」生成</div>'
+        if s3_done else
+        '<div class="slirn-sv-muted">先完成 Stage 3 解析后再粗剪</div>'
+    )
 
     return f'''<div class="slirn-stage" data-stage="5">
   <div class="slirn-stage-head">
@@ -1178,22 +1194,87 @@ def _stage5_coarse(project: dict) -> str:
       {delete_btn}
     </div>
     {subs_actions}
-    <div class="slirn-stage4-list">{"".join(rows) or '<div class="slirn-sv-muted">先完成 Stage 3 再粗剪</div>'}</div>
+    <div class="slirn-stage4-list">{"".join(rows) or empty_hint_div}</div>
     {_stage_logs(s4)}
   </div>
 </div>'''
+
+
+def _render_stage6_srt_rows(srt_text: str, hl_index: int) -> str:
+    """REQ-20261016-133：Stage 6 per-row 编辑 UI（仿 Stage 4 风格）。
+
+    解析 SRT 文本为行，每行带 ✏️ 编辑 / ✂️ 切分 / 🗑️ 删除 3 按钮。
+    操作（edit/toggle/resplit）由前端 JS 处理，提交保存时
+    ``stage6GatherSrt`` 收集所有行状态重建 SRT 文本。
+    """
+    entries = _parse_srt_entries(srt_text or "")
+    if not entries:
+        return ('<div class="slirn-sv-muted" data-empty="1">'
+                '（暂无字幕行 — 点「重新 ASR」生成）</div>')
+    out = []
+    out.append(f'<div class="slirn-stage6-srt-rows" data-clip-index="{esc(str(hl_index))}">')
+    for ent in entries:
+        no = ent.get("no") or 0
+        sm = int(ent.get("start_ms") or 0)
+        em = int(ent.get("end_ms") or 0)
+        text = ent.get("text") or ""
+        out.append(
+            f'<div class="slirn-stage6-srt-row" data-seg-no="{no}" '
+            f'data-clip-index="{esc(str(hl_index))}" '
+            f'data-start-ms="{sm}" data-end-ms="{em}" '
+            f'data-orig-text="{esc(text)}" data-eff-text="{esc(text)}" '
+            f'data-deleted="0">'
+            f'<span class="slirn-stage6-srt-no" title="本条 SRT 编号">#{no}</span>'
+            f'<span class="slirn-stage6-srt-time" title="本段时间戳">'
+            f'{_fmt_srt_time(sm)} → {_fmt_srt_time(em)}</span>'
+            f'<span class="slirn-stage6-srt-text">{esc(text)}</span>'
+            f'<span class="slirn-stage6-srt-actions">'
+            f'<button type="button" class="slirn-btn-mini" data-action="sv-stage6-line-edit" '
+            f'data-clip-index="{esc(str(hl_index))}" data-seg-no="{no}" '
+            f'title="整行替换文字">✏️</button>'
+            f'<button type="button" class="slirn-btn-mini" data-action="sv-stage6-line-resplit" '
+            f'data-clip-index="{esc(str(hl_index))}" data-seg-no="{no}" '
+            f'title="切分本行为多段（用 | 分隔子段文字）">✂️</button>'
+            f'<button type="button" class="slirn-btn-mini" data-action="sv-stage6-line-toggle" '
+            f'data-clip-index="{esc(str(hl_index))}" data-seg-no="{no}" '
+            f'title="删除/恢复本行（已删除的行保存时会被剔除）">🗑️</button>'
+            f'</span>'
+            f'</div>'
+        )
+    out.append('</div>')
+    return "".join(out)
 
 
 def _stage6_refine(project: dict) -> str:
     """Stage 6 字幕优化 UI（REQ-20261013-104）：每条 clip 加「✨ LLM 优化」+ 词频 chips
     + 行级 ✓/✕/✏/🗑/✂ 5 按钮（行级渲染由前端 JS 拉 occurrences 后填）；
     顶部加批量替换面板（🔍 搜索 → 预览 → ✅ 全部替换）。
+
+    REQ-20261016-133：新增 per-row 编辑 UI（仿 Stage 4 风格，每行 ✏️/✂️/🗑️）。
+    保留 textarea 作为隐藏数据源 + 高级编辑入口。
     """
     task_id = str(project.get("task_id") or "")
     project_id = str(project.get("id") or "")
     s5 = project.get("pipeline", {}).get("stage6_refine", {}) or {}
+    # REQ-20261016-134：Stage 6 卡片必须可见 — 即使 stage6_refine.highlights 为空
+    # （用户从未进过 Stage 6），也要从 stage5_coarse.highlights 合成占位条目并渲染。
+    # 否则用户点进 Stage 6 看不到任何可操作按钮。
+    s5_highlights = list(s5.get("highlights") or [])
+    coarse = project.get("pipeline", {}).get("stage5_coarse", {}) or {}
+    if not s5_highlights and coarse.get("highlights"):
+        # 合成占位：index 沿用 stage5 index；status=pending（用户从未跑过 ASR）
+        for ch in (coarse.get("highlights") or []):
+            s5_highlights.append({
+                "index": ch.get("index"),
+                "status": "pending",
+                "asr_srt": "",
+                "refined_srt": "",
+                "asr_chars": 0,
+            })
+    # REQ-20261016-133：SRT 为空时的占位（提到外面避免 f-string 嵌套反斜杠）
+    empty_srt6_div = '<div class="slirn-sv-muted">点「重新 ASR」生成字幕</div>'
     rows = []
-    for hl in (s5.get("highlights") or []):
+    for hl in s5_highlights:
         idx = hl.get("index") or len(rows) + 1
         status = hl.get("status") or "pending"
         asr_name = Path(str(hl.get("asr_srt") or "")).name
@@ -1272,7 +1353,7 @@ def _stage6_refine(project: dict) -> str:
       <button class="slirn-btn-mini" data-action="sv-stage6-batch-replace">✅ 全部替换</button>
       <div class="slirn-sv-batch-result" style="margin-top:6px;"></div>
     </div>
-    <div class="slirn-stage5-list">{"".join(rows) or '<div class="slirn-sv-muted">先完成 Stage 5 粗剪</div>'}</div>
+    <div class="slirn-stage5-list">{"".join(rows) or empty_hint6_div}</div>
     {_stage_logs(s5)}
   </div>
 </div>'''
@@ -1789,6 +1870,9 @@ def render_project(project: dict, all_tasks: list[dict] | None = None,
   <div class="slirn-sv-pipeline">
     <aside class="slirn-sv-stages-card" aria-label="短视频阶段">
       <div class="slirn-sv-stages-title">阶段</div>
+      <label class="slirn-sv-autonext" title="勾选后：当前阶段的工作完成时，自动打开下一阶段的页面。不勾选则保持在原页面，由用户手动切到下一阶段。">
+        <input type="checkbox" id="slirn-sv-autonext"> 完成后，自动打开下一阶段界面
+      </label>
       <div class="slirn-sv-stage-nav-list">{"".join(nav_items)}</div>
     </aside>
     <div class="slirn-sv-stage-panes">{pane_html}</div>

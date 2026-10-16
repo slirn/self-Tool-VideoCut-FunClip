@@ -3155,6 +3155,18 @@ input[type="checkbox"]:focus-visible {
 .slirn-wb-autonext input[type="checkbox"] { width: 14px; height: 14px; }
 .wb-stages-collapsed .slirn-wb-autonext { display: none; }
 
+/* REQ-20261013-116：短视频 7 阶段同步长视频的「完成后自动打开下一阶段界面」开关 */
+.slirn-sv-autonext {
+  display: flex; align-items: center; gap: 5px;
+  margin: 4px 12px 8px;
+  font-size: 12px;
+  color: #475569;
+  cursor: pointer;
+  user-select: none;
+}
+.slirn-sv-autonext input[type="checkbox"] { width: 14px; height: 14px; cursor: pointer; }
+.slirn-sv-autonext:hover { color: #0f172a; }
+
 /* ============ 执行历史（REQ-20260918-048） ============ */
 .slirn-exec-card {
   margin-top: 10px;
@@ -6403,6 +6415,22 @@ input[type="checkbox"]:focus-visible {
   gap: 8px;
   font-size: 12px;
 }
+/* REQ-20261016-134：Stage 5 卡片标题置顶（来自 stage3 highlights.title） */
+.slirn-stage4-clip-title-top {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: #0f172a;
+  margin: 0 0 6px 0;
+  padding: 0;
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.slirn-stage4-clip-head { margin-top: 0; }
 .slirn-stage4-clip video,
 .slirn-stage6-clip video {
   width: 100%;

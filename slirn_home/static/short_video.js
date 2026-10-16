@@ -129,6 +129,66 @@
     root.querySelectorAll('.slirn-sv-stage-pane').forEach(function(el) {
       el.classList.toggle('active', el.getAttribute('data-stage-key') === stageKey);
     });
+    // REQ-20261013-116：用户主动点 tab → 记下当前阶段，openProject 重渲染后
+    // 按此恢复（不依赖 server focus_key 自动算到「第一个未 done 的阶段」）。
+    try { localStorage.setItem(SV_STAGE_KEY, stageKey); } catch (e) {}
+  }
+
+  // REQ-20261013-116：短视频同步长视频「完成后自动打开下一阶段界面」开关
+  // （参考 REQ-20260918-046 long video 实现 .slirn-wb-autonext）。
+  // - 开关默认关：保持 server focus_key 自动跳下阶段的原行为
+  // - 用户勾选：当前焦点阶段完成时自动切下一阶段 + toast
+  // - 用户取消勾选：当前阶段完成时保持在原页面（用户手动切）
+  var SV_STAGE_KEY = 'slirn.sv.currentStage';
+  var SV_AUTONEXT_KEY = 'slirn.sv.autonext';
+
+  function _svAutoNextOn() {
+    try { return localStorage.getItem(SV_AUTONEXT_KEY) === '1'; }
+    catch (err) { return false; }
+  }
+  function _saveSvAutoNext(on) {
+    try { localStorage.setItem(SV_AUTONEXT_KEY, on ? '1' : ''); }
+    catch (err) {}
+  }
+  function _readSvStage() {
+    try { return localStorage.getItem(SV_STAGE_KEY) || ''; }
+    catch (err) { return ''; }
+  }
+  function applySvAutoNextState() {
+    var el = document.getElementById('slirn-sv-autonext');
+    if (el) el.checked = _svAutoNextOn();
+  }
+  // 改 checkbox → 写 localStorage + toast 提示
+  document.addEventListener('change', function(e) {
+    if (e.target && e.target.id === 'slirn-sv-autonext') {
+      _saveSvAutoNext(!!e.target.checked);
+      toast(e.target.checked
+        ? '✅ 已开启：当前阶段完成后自动打开下一阶段界面'
+        : '↩️ 已关闭：阶段完成后保持在原页面（需手动切下一阶段）');
+    }
+  });
+  // openProject 渲染后调用：对比 prevDone 快照，若「当前焦点阶段刚完成 + 开关开
+  // + 没到底」则切下一阶段。toast 同步长视频风格。
+  function svAutoNextMaybe(prevDone, hadSv, prevActive) {
+    if (!hadSv || !_svAutoNextOn() || !prevActive) return;
+    var stages = [];
+    document.querySelectorAll('#slirn-short-video-inner .slirn-sv-stage-nav').forEach(function(s) {
+      stages.push(s.getAttribute('data-stage-key') || '');
+    });
+    var justDone = '';
+    stages.forEach(function(pk) {
+      var nav = document.querySelector(
+        '#slirn-short-video-inner .slirn-sv-stage-nav[data-stage-key="' + pk + '"]');
+      if (nav && nav.classList.contains('done') && !prevDone[pk] && pk === prevActive) {
+        justDone = pk;
+      }
+    });
+    if (!justDone) return;
+    var idx = stages.indexOf(justDone);
+    if (idx < 0 || idx + 1 >= stages.length) return;  // 最后一个阶段完成 → 不切
+    switchSvStage(stages[idx + 1]);
+    toast('✅ 「' + justDone + '」完成 — 已自动打开下一阶段界面'
+      + '（可关掉阶段上方的「完成后自动打开下一阶段界面」开关改为手动切）');
   }
 
   function loadList(optScope) {
@@ -155,6 +215,20 @@
 
   function openProject(taskId, projectId) {
     _saveSvView(taskId, projectId);
+    // REQ-20261013-116：渲染前快照（哪些阶段已完成 + 用户当前所在阶段）——
+    // 渲染后对比实现「当前阶段刚完成 → 按开关决定是否切下一阶段」。
+    var prevDone = {}, prevActive = '';
+    var hadSv = !!document.querySelector('#slirn-short-video-inner .slirn-sv-stage-nav');
+    if (hadSv) {
+      document.querySelectorAll('#slirn-short-video-inner .slirn-sv-stage-nav.done').forEach(function(s) {
+        prevDone[s.getAttribute('data-stage-key') || ''] = 1;
+      });
+      document.querySelectorAll('#slirn-short-video-inner .slirn-sv-stage-pane').forEach(function(p) {
+        if (p.classList.contains('active')) {
+          prevActive = p.getAttribute('data-stage-key') || '';
+        }
+      });
+    }
     postJSON(API + '/short_video_get', {task_id: taskId, project_id: projectId}).then(function(r) {
       if (r && r.ok) setHTML(r.html);
       else {
@@ -163,6 +237,7 @@
         _saveSvView('', '');
         toast((r && r.error) || '打开失败', 'error');
         loadList();
+        return;
       }
       startElapsedTicker();
       initSubtitleSortAll();
@@ -171,6 +246,19 @@
       _restoreHlTab(taskId, projectId);
       // REQ-20261013-108：Stage 4 提示词 textarea + 历史列表加载（不覆盖用户已编辑）
       loadStage4Prompts();
+      // REQ-20261013-116：① 恢复「自动打开下一阶段」开关状态 ② 按开关决定是否
+      // 切下一阶段（只在「当前焦点阶段刚完成」时触发；只是首次进入或手动点
+      // tab 不会触发）。最后用用户记忆的 stage 覆盖 server focus_key 默认
+      // 焦点（避免 server 把焦点算到「第一个未 done 阶段」抢走用户当前页）。
+      applySvAutoNextState();
+      svAutoNextMaybe(prevDone, hadSv, prevActive);
+      var saved = _readSvStage();
+      if (saved) {
+        // 校验：saved 必须是 server 渲染出来的 7 个 stage 之一
+        var exists = document.querySelector(
+          '#slirn-short-video-inner .slirn-sv-stage-pane[data-stage-key="' + saved + '"]');
+        if (exists) switchSvStage(saved);
+      }
     });
   }
 
@@ -376,10 +464,10 @@
   }
 
   // REQ-20261015-121：系统提示词模板按当前三个输入框的值渲染。
-  // 占位符与后端 stage3_system_prompt() 同一套（{n}/{dmin}/{dmax}/
-  // {dmin2}/{dmax2}/{ex_sec}/{ex_lines}），公式双端一致：
-  // dmin2/dmax2 = 区间半值（每行约 2s）；ex_sec = 区间中值；
-  // ex_lines = ex_sec / 2.2。值取整展示（与后端 {dmin:.0f} 口径一致）。
+  // 占位符与后端 stage3_system_prompt() 同一套（{n}/{dmin}/{dmax}），
+  // 公式双端一致：值取整展示（与后端 {dmin:.0f} 口径一致）。
+  // REQ-20261016-127：去掉「行数 × 平均 2s」折算类占位符
+  // （{dmin2}/{dmax2}/{ex_sec}/{ex_lines}）。
   function _stage3RenderSystemPrompt(tmpl) {
     var dur = _stage3DurationRange();
     var dmin = dur[0], dmax = dur[1];
@@ -389,14 +477,7 @@
     var n = parseInt(nEl ? nEl.value : '', 10);
     if (!n || n < 1) n = 4;
     dmin = Math.round(dmin); dmax = Math.round(dmax);
-    var exSec = Math.round((dmin + dmax) / 2);
-    var vals = {
-      n: n, dmin: dmin, dmax: dmax,
-      dmin2: Math.max(1, Math.round(dmin / 2)),
-      dmax2: Math.max(1, Math.round(dmax / 2)),
-      ex_sec: exSec,
-      ex_lines: Math.max(1, Math.round(exSec / 2.2))
-    };
+    var vals = { n: n, dmin: dmin, dmax: dmax };
     var out = tmpl;
     Object.keys(vals).forEach(function(k) {
       out = out.split('{' + k + '}').join(String(vals[k]));
