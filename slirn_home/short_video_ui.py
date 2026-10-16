@@ -1201,6 +1201,7 @@ def _stage6_refine(project: dict) -> str:
         asr_url = _file_url(task_id, project_id, "stage5", asr_name) if asr_name else ""
         # 读 SRT 内容（如果有 refined）— 文件小直接 inline
         srt_inline = ""
+        srt_rows_html = ""
         if refined_name:
             srt_path = Path(__file__).resolve().parent.parent  # repo root
             full_path = srt_path / "tasks" / task_id / "short_video" / project_id / "stage5" / refined_name
@@ -1208,6 +1209,8 @@ def _stage6_refine(project: dict) -> str:
                 try:
                     txt = full_path.read_text(encoding="utf-8", errors="replace")
                     srt_inline = esc(txt[:3000])
+                    # REQ-20261016-133：解析 + 渲染 per-row 编辑 UI
+                    srt_rows_html = _render_stage6_srt_rows(txt, idx)
                 except Exception:  # noqa: BLE001
                     srt_inline = ""
         asr_chars = int(hl.get("asr_chars") or 0)
@@ -1225,17 +1228,33 @@ def _stage6_refine(project: dict) -> str:
             f'<div class="slirn-sv-card-actions">'
             f'<button class="slirn-btn-mini" data-action="sv-stage5-asr" data-clip-index="{idx}">重新 ASR</button>'
             f'<button class="slirn-btn-mini" data-action="sv-stage5-save" data-clip-index="{idx}">保存修正</button>'
+            f'<button class="slirn-btn-mini" data-action="sv-stage6-toggle-source" '
+            f'data-clip-index="{idx}" title="在行编辑视图与 SRT 源文视图之间切换">📝 切换源</button>'
             f'<button class="slirn-btn-mini" data-action="sv-preview-srt" data-url="{esc(asr_url)}">查看 ASR 字幕</button>'
             f'<button class="slirn-btn slirn-btn-primary" data-action="sv-stage6-optimize" '
             f'data-clip-index="{idx}">✨ LLM 优化</button>'
             f'</div>'
             f'<div class="slirn-sv-stage6-words" data-clip-index="{idx}"></div>'
             f'<div class="slirn-sv-stage6-rows" data-clip-index="{idx}"></div>'
+            # REQ-20261016-133：per-row 编辑（默认显示）
+            f'<div class="slirn-stage6-srt-rows-wrap" data-clip-index="{idx}">'
+            f'{srt_rows_html if srt_rows_html else empty_srt6_div}'
+            f'</div>'
+            # 隐藏 textarea 作为 SRT 源（保存按钮从这里读）
             f'<textarea rows="6" class="slirn-stage5-srt" data-clip-index="{idx}" '
-            f'placeholder="点击「重新 ASR」后再编辑">{srt_inline}</textarea>'
+            f'style="display:none;" placeholder="点「重新 ASR」后再编辑">{srt_inline}</textarea>'
             f'{err_html}'
             f'</div>'
         )
+    # REQ-20261013-117：同 Stage 5 —— 空列表提示按上游真实状态分流，
+    # 粗剪已有产物时不再误报「先完成 Stage 5 粗剪」。
+    coarse_has_artifact = bool(
+        (project.get("pipeline", {}).get("stage5_coarse") or {}).get("highlights"))
+    empty_hint6_div = (
+        '<div class="slirn-sv-muted">尚无优化结果 — 每条 clip 依次「重新 ASR → ✨ LLM 优化」</div>'
+        if coarse_has_artifact else
+        '<div class="slirn-sv-muted">先完成 Stage 5 粗剪</div>'
+    )
     return f'''<div class="slirn-stage" data-stage="6">
   <div class="slirn-stage-head">
     <span class="slirn-stage-num">6</span>

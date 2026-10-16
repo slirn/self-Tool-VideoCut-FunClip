@@ -6508,6 +6508,64 @@ input[type="checkbox"]:focus-visible {
   padding: 6px;
   resize: vertical;
 }
+
+/* ============ REQ-20261016-133：Stage 6 per-row 编辑（仿 Stage 4 风格） ============ */
+.slirn-stage6-srt-rows-wrap {
+  margin-top: 6px;
+  border: 1px solid var(--border, #e2e8f0);
+  border-radius: 6px;
+  background: #f8fafc;
+  max-height: 360px;
+  overflow-y: auto;
+  padding: 4px;
+}
+.slirn-stage6-srt-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.slirn-stage6-srt-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  padding: 4px 6px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.slirn-stage6-srt-row:hover {
+  background: #f1f5f9;
+  border-color: #cbd5e1;
+}
+.slirn-stage6-srt-no {
+  flex: 0 0 36px;
+  color: #475569;
+  font-weight: 600;
+}
+.slirn-stage6-srt-time {
+  flex: 0 0 220px;
+  color: #64748b;
+  font-size: 11px;
+}
+.slirn-stage6-srt-text {
+  flex: 1 1 auto;
+  color: #0f172a;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+.slirn-stage6-srt-actions {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 2px;
+}
+.slirn-stage6-srt-row.slirn-stage6-srt-row-deleted {
+  opacity: 0.45;
+  text-decoration: line-through;
+  background: #fef2f2;
+  border-color: #fca5a5;
+}
 .slirn-srt-pre {
   margin: 0;
   padding: 12px;

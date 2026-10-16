@@ -1810,6 +1810,9 @@
     var ctx = innerCtx(); if (!ctx) return;
     var index = parseInt(btn.getAttribute('data-clip-index') || '0', 10);
     if (!index) return;
+    // REQ-20261016-133：保存前先把 per-row 编辑状态（删/改/切）写回 textarea
+    // （textarea 是后端 stage5_save 端点的输入）
+    stage6RebuildSrt(index);
     var ta = document.querySelector('.slirn-stage5-srt[data-clip-index="' + index + '"]');
     var srt = ta ? ta.value : '';
     if (!srt.trim()) return toast('字幕为空，请先编辑或重新 ASR', 'error');
@@ -1820,6 +1823,154 @@
       if (r && r.ok) { toast('Stage 6 #'+index+' 已保存'); openProject(ctx.taskId, ctx.projectId); }
       else toast((r && r.error) || '保存失败', 'error');
     });
+  }
+
+  // ============ REQ-20261016-133：Stage 6 per-row 编辑（仿 Stage 4） ============
+  // 整行替换文字：prompt 输入新文 → 更新 data-eff-text + 文本节点
+  function stage6LineEdit(btn) {
+    var row = btn.closest ? btn.closest('.slirn-stage6-srt-row') : null;
+    if (!row) return;
+    var orig = row.getAttribute('data-eff-text') || row.getAttribute('data-orig-text') || '';
+    var newText = window.prompt('整行替换文字（原内容已预填）：', orig);
+    if (newText === null) return;
+    newText = String(newText || '').trim();
+    if (!newText) return toast('文字不能为空', 'error');
+    row.setAttribute('data-eff-text', newText);
+    row.setAttribute('data-deleted', '0');
+    row.classList.remove('slirn-stage6-srt-row-deleted');
+    var textEl = row.querySelector('.slirn-stage6-srt-text');
+    if (textEl) textEl.textContent = newText;
+  }
+
+  // 整行删除/恢复（toggle）：CSS 标 + data-deleted 标；保存时剔除
+  function stage6LineToggle(btn) {
+    var row = btn.closest ? btn.closest('.slirn-stage6-srt-row') : null;
+    if (!row) return;
+    var del = row.getAttribute('data-deleted') === '1';
+    if (del) {
+      row.setAttribute('data-deleted', '0');
+      row.classList.remove('slirn-stage6-srt-row-deleted');
+    } else {
+      row.setAttribute('data-deleted', '1');
+      row.classList.add('slirn-stage6-srt-row-deleted');
+    }
+  }
+
+  // 整行切分：prompt 输入 N 段子段（用 | 分隔），替换为多 sub-row，
+  // 时间段按 (end-start)/N 等分。
+  function stage6LineResplit(btn) {
+    var row = btn.closest ? btn.closest('.slirn-stage6-srt-row') : null;
+    if (!row) return;
+    var orig = row.getAttribute('data-eff-text') || row.getAttribute('data-orig-text') || '';
+    var partsRaw = window.prompt(
+      '切分子段（用 | 分隔，如 "前半|后半"）：', orig + '|');
+    if (partsRaw === null) return;
+    var parts = String(partsRaw || '').split('|').map(function(s) { return s.trim(); }).filter(Boolean);
+    if (parts.length < 2) return toast('切分需要至少 2 段（用 | 分隔）', 'error');
+    if (parts.length > 6) return toast('最多支持 6 段', 'error');
+    var sm = parseInt(row.getAttribute('data-start-ms') || '0', 10);
+    var em = parseInt(row.getAttribute('data-end-ms') || sm, 10);
+    var span = Math.max(1, em - sm);
+    var each = Math.floor(span / parts.length);
+    var clipIdx = row.getAttribute('data-clip-index') || '0';
+    var segNoBase = parseInt(row.getAttribute('data-seg-no') || '0', 10);
+    // 找父容器；新 sub-row 插在原行后面
+    var parent = row.parentNode;
+    var after = row.nextSibling;
+    // 先把原行替换为第 1 段（保持 DOM 顺序稳定）
+    var firstStart = sm;
+    var firstEnd = sm + each;
+    row.setAttribute('data-start-ms', firstStart);
+    row.setAttribute('data-end-ms', firstEnd);
+    row.setAttribute('data-eff-text', parts[0]);
+    row.setAttribute('data-orig-text', parts[0]);
+    row.setAttribute('data-deleted', '0');
+    row.classList.remove('slirn-stage6-srt-row-deleted');
+    var tEl = row.querySelector('.slirn-stage6-srt-text');
+    if (tEl) tEl.textContent = parts[0];
+    var timeEl = row.querySelector('.slirn-stage6-srt-time');
+    if (timeEl) timeEl.textContent = _fmtSrtTime(firstStart) + ' → ' + _fmtSrtTime(firstEnd);
+    // 后续 sub-row 插到原行后面
+    for (var i = 1; i < parts.length; i++) {
+      var ssm = sm + i * each;
+      var eem = (i === parts.length - 1) ? em : (sm + (i + 1) * each);
+      var div = document.createElement('div');
+      div.className = 'slirn-stage6-srt-row';
+      div.setAttribute('data-seg-no', segNoBase * 1000 + i);
+      div.setAttribute('data-clip-index', clipIdx);
+      div.setAttribute('data-start-ms', ssm);
+      div.setAttribute('data-end-ms', eem);
+      div.setAttribute('data-orig-text', parts[i]);
+      div.setAttribute('data-eff-text', parts[i]);
+      div.setAttribute('data-deleted', '0');
+      div.innerHTML =
+        '<span class="slirn-stage6-srt-no" title="切分产生的子段（保存时按出现顺序重编）">#'
+        + (segNoBase * 1000 + i) + '</span>'
+        + '<span class="slirn-stage6-srt-time" title="本段时间戳">'
+        + _fmtSrtTime(ssm) + ' → ' + _fmtSrtTime(eem) + '</span>'
+        + '<span class="slirn-stage6-srt-text">' + _escHtml(parts[i]) + '</span>'
+        + '<span class="slirn-stage6-srt-actions">'
+        + '<button type="button" class="slirn-btn-mini" data-action="sv-stage6-line-edit" '
+        + 'data-clip-index="' + clipIdx + '" data-seg-no="' + (segNoBase * 1000 + i) + '">✏️</button>'
+        + '<button type="button" class="slirn-btn-mini" data-action="sv-stage6-line-resplit" '
+        + 'data-clip-index="' + clipIdx + '" data-seg-no="' + (segNoBase * 1000 + i) + '">✂️</button>'
+        + '<button type="button" class="slirn-btn-mini" data-action="sv-stage6-line-toggle" '
+        + 'data-clip-index="' + clipIdx + '" data-seg-no="' + (segNoBase * 1000 + i) + '">🗑️</button>'
+        + '</span>';
+      if (after) parent.insertBefore(div, after);
+      else parent.appendChild(div);
+    }
+  }
+
+  // 切换 row 视图 / SRT 源文视图
+  function stage6ToggleSource(btn) {
+    var idx = btn.getAttribute('data-clip-index') || '0';
+    var wrap = document.querySelector('.slirn-stage6-srt-rows-wrap[data-clip-index="' + idx + '"]');
+    var ta = document.querySelector('.slirn-stage5-srt[data-clip-index="' + idx + '"]');
+    if (!wrap || !ta) return;
+    var showingRows = wrap.style.display !== 'none';
+    if (showingRows) {
+      // 先把行状态回写到 textarea
+      stage6RebuildSrt(parseInt(idx, 10));
+      wrap.style.display = 'none';
+      ta.style.display = '';
+    } else {
+      wrap.style.display = '';
+      ta.style.display = 'none';
+    }
+  }
+
+  // 从当前 per-row DOM 重建 SRT 文本，写回 textarea（保存时 stage5Save 读它）
+  function stage6RebuildSrt(clipIndex) {
+    var wrap = document.querySelector('.slirn-stage6-srt-rows-wrap[data-clip-index="' + clipIndex + '"]');
+    var ta = document.querySelector('.slirn-stage5-srt[data-clip-index="' + clipIndex + '"]');
+    if (!wrap || !ta) return;
+    var rows = wrap.querySelectorAll('.slirn-stage6-srt-row');
+    if (!rows.length) return;
+    var out = [];
+    var no = 1;
+    rows.forEach(function(r) {
+      if (r.getAttribute('data-deleted') === '1') return;
+      var sm = parseInt(r.getAttribute('data-start-ms') || '0', 10);
+      var em = parseInt(r.getAttribute('data-end-ms') || sm, 10);
+      var text = r.getAttribute('data-eff-text') || '';
+      out.push(no);
+      out.push(_fmtSrtTime(sm) + ' --> ' + _fmtSrtTime(em));
+      out.push(text);
+      out.push('');
+      no++;
+    });
+    ta.value = out.join('\n');
+  }
+
+  // 局部时间格式（hh:mm:ss,mmm）；与后端 _fmt_srt_time 一致
+  function _fmtSrtTime(ms) {
+    ms = Math.max(0, parseInt(ms || 0, 10));
+    var h = Math.floor(ms / 3600000); ms -= h * 3600000;
+    var m = Math.floor(ms / 60000);   ms -= m * 60000;
+    var s = Math.floor(ms / 1000);    ms -= s * 1000;
+    function pad(n, w) { var s = String(n); while (s.length < w) s = '0' + s; return s; }
+    return pad(h, 2) + ':' + pad(m, 2) + ':' + pad(s, 2) + ',' + pad(ms, 3);
   }
 
   function stage6Run() {
@@ -2462,6 +2613,11 @@
     if (action === 'sv-stage4-run') return stage4Run();
     if (action === 'sv-stage5-asr') return stage5Asr(btn);
     if (action === 'sv-stage5-save') return stage5Save(btn);
+    // REQ-20261016-133：Stage 6 per-row 编辑
+    if (action === 'sv-stage6-line-edit') return stage6LineEdit(btn);
+    if (action === 'sv-stage6-line-toggle') return stage6LineToggle(btn);
+    if (action === 'sv-stage6-line-resplit') return stage6LineResplit(btn);
+    if (action === 'sv-stage6-toggle-source') return stage6ToggleSource(btn);
     if (action === 'sv-stage6-run') return stage6Run();
     // REQ-20261013-103：Stage 5 粗剪 异步导出/删除/连续 SRT/单条 SRT
     if (action === 'sv-stage5-export') return stage5Export(btn);
