@@ -597,11 +597,17 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
         idx = hl.get("index") or len(hl_rows) + 1
         title = hl.get("title") or f"短视频 #{idx}"
         is_first = len(hl_rows) == 0
-        _tab_label = title if len(title) <= 10 else title[:10] + "…"
+        # REQ-20261016-130：tab 不再截断到 10 字；做成"大按钮"——完整标题在按钮
+        # 内直接可见（#N + 标题 + ▾ 箭头；箭头在 active 态旋转 180° 暗示展开）。
+        # 行为不变：点击仍是互斥切换 pane（sv-stage3-hl-tab → switchHlTab）。
         hl_tabs.append(
             f'<button class="slirn-stage3-hl-tab{" active" if is_first else ""}" '
             f'data-action="sv-stage3-hl-tab" data-hl-index="{idx}" '
-            f'title="{esc(title)}">#{idx} {esc(_tab_label)}</button>'
+            f'title="{esc(title)}">'
+            f'<span class="slirn-stage3-hl-tab-no">#{idx}</span>'
+            f'<span class="slirn-stage3-hl-tab-title">{esc(title)}</span>'
+            f'<span class="slirn-stage3-hl-tab-arrow" aria-hidden="true">▾</span>'
+            f'</button>'
         )
         start = hl.get("start_ms") or 0
         end = hl.get("end_ms") or 0
