@@ -116,7 +116,8 @@ def test_stage6_pane_contains_clip_card():
     assert 'data-action="sv-stage5-asr"' in chunk
     assert 'data-action="sv-stage5-save"' in chunk
     assert 'data-action="sv-stage6-optimize"' in chunk
-    assert 'data-action="sv-stage6-toggle-source"' in chunk
+    # REQ-20261016-138：切换源按钮已移除
+    assert 'data-action="sv-stage6-toggle-source"' not in chunk
     # 标题置顶元素（REQ-134 样式）
     assert 'class="slirn-stage4-clip-title-top"' in chunk
     assert '钩子' in chunk

@@ -1394,8 +1394,6 @@ def _stage6_refine(project: dict) -> str:
             # REQ-20261016-136：按钮名「重新 ASR」→「提取短视频字幕」
             f'<button class="slirn-btn-mini" data-action="sv-stage5-asr" data-clip-index="{idx}">提取短视频字幕</button>'
             f'<button class="slirn-btn-mini" data-action="sv-stage5-save" data-clip-index="{idx}">保存修正</button>'
-            f'<button class="slirn-btn-mini" data-action="sv-stage6-toggle-source" '
-            f'data-clip-index="{idx}" title="在行编辑视图与 SRT 源文视图之间切换">📝 切换源</button>'
             f'<button class="slirn-btn-mini" data-action="sv-preview-srt" data-url="{esc(asr_url)}">查看 ASR 字幕</button>'
             f'{preview_btn}'
             f'<button class="slirn-btn slirn-btn-primary" data-action="sv-stage6-optimize" '

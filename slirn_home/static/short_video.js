@@ -2011,23 +2011,8 @@
     }
   }
 
-  // 切换 row 视图 / SRT 源文视图
-  function stage6ToggleSource(btn) {
-    var idx = btn.getAttribute('data-clip-index') || '0';
-    var wrap = document.querySelector('.slirn-stage6-srt-rows-wrap[data-clip-index="' + idx + '"]');
-    var ta = document.querySelector('.slirn-stage5-srt[data-clip-index="' + idx + '"]');
-    if (!wrap || !ta) return;
-    var showingRows = wrap.style.display !== 'none';
-    if (showingRows) {
-      // 先把行状态回写到 textarea
-      stage6RebuildSrt(parseInt(idx, 10));
-      wrap.style.display = 'none';
-      ta.style.display = '';
-    } else {
-      wrap.style.display = '';
-      ta.style.display = 'none';
-    }
-  }
+  // REQ-20261016-138：移除 stage6ToggleSource（按钮「📝 切换源」已删除；
+  // 用户原话：字幕直接显示在下面，为什么要切换？per-row 编辑器已足够）
 
   // 从当前 per-row DOM 重建 SRT 文本，写回 textarea（保存时 stage5Save 读它）
   function stage6RebuildSrt(clipIndex) {
@@ -2707,7 +2692,6 @@
     if (action === 'sv-stage6-line-edit') return stage6LineEdit(btn);
     if (action === 'sv-stage6-line-toggle') return stage6LineToggle(btn);
     if (action === 'sv-stage6-line-resplit') return stage6LineResplit(btn);
-    if (action === 'sv-stage6-toggle-source') return stage6ToggleSource(btn);
     if (action === 'sv-stage6-run') return stage6Run();
     // REQ-20261013-103：Stage 5 粗剪 异步导出/删除/连续 SRT/单条 SRT
     if (action === 'sv-stage5-export') return stage5Export(btn);

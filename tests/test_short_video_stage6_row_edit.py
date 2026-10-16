@@ -1,11 +1,15 @@
 """REQ-20261016-133 — Stage 6 per-row 编辑（仿 Stage 4 风格）。
 
+REQ-20261016-138：移除「📝 切换源」按钮（用户原话：字幕直接显示在下面，
+为什么要切换？per-row 编辑器已足够）。
+
 覆盖：
 1. _render_stage6_srt_rows 解析 SRT → 每行 3 按钮
 2. _stage6_refine 渲染含 .slirn-stage6-srt-rows-wrap + 隐藏 textarea
 3. 缺 SRT 时显示「点「提取短视频字幕」生成字幕」占位（REQ-136 按钮改名）
-4. JS 路由表里有 sv-stage6-line-edit / line-toggle / line-resplit / toggle-source
-5. JS 函数实现存在
+4. JS 路由表里有 sv-stage6-line-edit / line-toggle / line-resplit
+   （REQ-138：sv-stage6-toggle-source 已移除）
+5. JS 函数实现存在（REQ-138：stage6ToggleSource 已移除）
 6. CSS 块有 per-row 样式（含 deleted 红删线）
 """
 
@@ -100,9 +104,9 @@ def test_stage6_panel_contains_per_row_editor_and_hidden_textarea():
     # 隐藏 textarea
     assert 'class="slirn-stage5-srt"' in s5_chunk
     assert 'style="display:none;"' in s5_chunk
-    # 切换按钮
-    assert 'data-action="sv-stage6-toggle-source"' in s5_chunk
-    assert "📝 切换源" in s5_chunk
+    # REQ-20261016-138：切换源按钮已删除
+    assert 'data-action="sv-stage6-toggle-source"' not in s5_chunk
+    assert "📝 切换源" not in s5_chunk
 
 
 def test_stage6_panel_empty_highlights_shows_placeholder():
@@ -124,12 +128,15 @@ def test_stage6_panel_empty_highlights_shows_placeholder():
 # ---------- 3. JS 路由 + 函数 ----------
 
 def test_short_video_js_dispatches_stage6_row_actions():
-    """JS 路由表里 4 个新 action。"""
+    """JS 路由表里 3 个新 action（REQ-138：toggle-source 已移除）。"""
     src = _src("static/short_video.js")
     assert "action === 'sv-stage6-line-edit'" in src, "缺 sv-stage6-line-edit 路由"
     assert "action === 'sv-stage6-line-toggle'" in src, "缺 sv-stage6-line-toggle 路由"
     assert "action === 'sv-stage6-line-resplit'" in src, "缺 sv-stage6-line-resplit 路由"
-    assert "action === 'sv-stage6-toggle-source'" in src, "缺 sv-stage6-toggle-source 路由"
+    # REQ-20261016-138：切换源 action 已移除
+    assert "action === 'sv-stage6-toggle-source'" not in src, (
+        "REQ-138：sv-stage6-toggle-source 路由应已移除"
+    )
 
 
 def test_short_video_js_defines_stage6_row_helpers():
@@ -139,7 +146,10 @@ def test_short_video_js_defines_stage6_row_helpers():
     assert "function stage6LineToggle(btn)" in src
     assert "function stage6LineResplit(btn)" in src
     assert "function stage6RebuildSrt" in src
-    assert "function stage6ToggleSource" in src
+    # REQ-20261016-138：stage6ToggleSource 函数已移除
+    assert "function stage6ToggleSource" not in src, (
+        "REQ-138：stage6ToggleSource 函数应已移除"
+    )
 
 
 def test_short_video_js_save_uses_rebuild():
