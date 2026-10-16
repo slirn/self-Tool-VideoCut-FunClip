@@ -781,7 +781,7 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
       {ocr_note}
     </div>
     <div class="slirn-sv-form-grid slirn-sv-form-grid--3col">
-      <label title="本次解析要挑选出的短视频条数（3-5）">片段数<input type="number" min="3" max="5" id="slirn-stage3-n" value="{n}"></label>
+      <label title="本次解析要挑选出的短视频条数（1-10）">片段数<input type="number" min="1" max="10" id="slirn-stage3-n" value="{n}"></label>
       <label title="每个片段的总时长（选中字幕行秒数之和）必须 ≥ 该下限；解析提示词与结果核查都按此执行">每条时长下限(秒)<input type="number" min="10" max="600" step="5" id="slirn-stage3-dmin" value="{dmin_v}"></label>
       <label title="每个片段的总时长（选中字幕行秒数之和）必须 ≤ 该上限；解析提示词与结果核查都按此执行">每条时长上限(秒)<input type="number" min="20" max="900" step="5" id="slirn-stage3-dmax" value="{dmax_v}"></label>
     </div>

@@ -1159,7 +1159,7 @@ def run_stage3(
 
     Args:
         template: hook_first / topic_cluster / story_arc / custom（快速模板）
-        n_clips: 期望生成的片段数（3-5），写到 prompt 里
+        n_clips: 期望生成的片段数（1-10，REQ-20261016-129 放宽），写到 prompt 里
         custom_prompt: 当 template="custom" 时使用；否则忽略（向后兼容）
         prompt: REQ-20261012-099 用户录入的解析提示词；非空时优先作为 system
         use_image: 把 Stage 3 上传的截图一并发给多模态模型
@@ -1180,7 +1180,8 @@ def run_stage3(
     if not srt_lines:
         raise svc.ShortVideoError("raw.srt 解析后无有效字幕行")
 
-    n_clips = max(3, min(5, int(n_clips or 4)))
+    # REQ-20261016-129：片段数区间从 3-5 放宽到 1-10（用户确认）
+    n_clips = max(1, min(10, int(n_clips or 4)))
     # REQ-20261015-120：时长区间直接取用户设置（缺省/非法回默认 60-90）
     dmin, dmax = _norm_duration_range(duration_min_sec, duration_max_sec)
     dur_ctx = _duration_prompt_ctx(dmin, dmax)

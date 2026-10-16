@@ -1646,3 +1646,34 @@ def test_stage3_run_prompts_drop_dmin2_dmax2():
         # 必须含新口径措辞
         assert "直接相加" in src or "直接把这些标注" in src, \
             f"{fname} 未含「直接相加」新口径"
+
+
+def test_stage3_n_clips_range_1_to_10():
+    """REQ-20261016-129：片段数区间从 3-5 放宽到 1-10。
+
+    验证：1. UI 输入框 min/max 已改；2. run_stage3 服务端 clamp 是 1-10；
+    3. 上下界外的值会被夹紧到 1 或 10。
+    """
+    import inspect
+    from slirn_home import short_video_ui as svui
+    from slirn_home import short_video_analyze as sva
+
+    # 1) UI 输入框：min=1, max=10, title 标 "1-10"
+    ui_src = inspect.getsource(svui._stage3_analyze)
+    assert 'min="1" max="10"' in ui_src, "UI 片段数输入框 min/max 未改"
+    assert "（1-10）" in ui_src, "UI title 标「1-10」未更新"
+
+    # 2) 服务端 clamp
+    run_src = inspect.getsource(sva.run_stage3)
+    assert "max(1, min(10," in run_src, "run_stage3 区间 clamp 未改"
+    # 必须没有旧的 3-5 clamp 残留
+    assert "max(3, min(5," not in run_src, "run_stage3 残留旧的 3-5 clamp"
+
+    # 3) 实际函数行为：抽 clamp 表达式单独验
+    clamp = lambda v: max(1, min(10, int(v or 4)))
+    assert clamp(1) == 1
+    assert clamp(5) == 5
+    assert clamp(10) == 10
+    assert clamp(11) == 10, "11 应夹到 10"
+    assert clamp(None) == 4, "None 用默认 4"
+    assert clamp(0) == 4, "0 是 falsy → 走默认 4"
