@@ -178,6 +178,69 @@ def test_short_video_stage_navigation_shows_one_pane():
     assert "display: block;" in active_pane_rule
 
 
+# ---------- REQ-20261016-131：阶段导航重设计（去 ✓ 去逗号 / 卡片背景表达状态） ----------
+
+def test_short_video_stage_nav_no_checkmark_no_dot_in_text():
+    """REQ-131：mark 永远显示数字（不写 ✓ / ! 替代），
+    text 区域只显示 title（不写「1 · 选择源视频」式前缀）——数字在左侧 mark 已表达。"""
+    from slirn_home import short_video_ui as ui
+
+    project = {
+        "id": "p1",
+        "task_id": "t1",
+        "name": "demo",
+        "materials": [],
+        "pipeline": {
+            "stage1_source": {"status": "done"},
+            "stage2_extract": {"status": "running"},
+        },
+    }
+    html = ui.render_project(project)
+    import re
+    # 每个 stage-nav 块里的 mark span + copy 块；用正则抠出 stage1 (done) 的卡片
+    s1_match = re.search(
+        r'<button[^>]*data-stage-key="stage1"[^>]*>(.*?)</button>', html, re.DOTALL)
+    assert s1_match, "找不到 stage1 卡片"
+    s1 = s1_match.group(1)
+    # mark 里的内容应是数字 "1"，不是 "✓"
+    s1_mark = re.search(r'<span class="slirn-sv-stage-mark">([^<]*)</span>', s1)
+    assert s1_mark, f"stage1 mark 缺失：{s1[:200]}"
+    assert s1_mark.group(1).strip() == "1", f"done 态 mark 应是数字，实际 {s1_mark.group(1)!r}"
+    # strong 里应只有 title（无「1 · 」前缀、无 · 分隔符）
+    s1_strong = re.search(r'<strong>([^<]*)</strong>', s1)
+    assert s1_strong, f"stage1 strong 缺失：{s1[:200]}"
+    assert s1_strong.group(1) == "选择源视频", f"strong 应只剩 title，实际 {s1_strong.group(1)!r}"
+    # 不能有 "·" 分隔符
+    assert "·" not in s1, f"text 区不应有 · 分隔符：{s1[:200]}"
+
+
+def test_short_video_stage_nav_state_card_bg():
+    """REQ-131：done / current / failed 各自有卡片背景色（用户视觉区分状态）。"""
+    css = _src("static/home.css")
+    # 三态卡片背景必须不同
+    assert ".slirn-sv-stage-nav.done" in css, "缺 .done 卡片背景"
+    assert ".slirn-sv-stage-nav.current" in css, "缺 .current 卡片背景"
+    assert ".slirn-sv-stage-nav.failed" in css, "缺 .failed 卡片背景"
+    # 实际取三段 CSS 比对
+    def _bg(sel):
+        rule = css.split(sel + " {", 1)[1].split("}", 1)[0]
+        for line in rule.splitlines():
+            line = line.strip().rstrip(";").strip()
+            if line.startswith("background:"):
+                return line
+        return ""
+    assert _bg(".slirn-sv-stage-nav.done") != _bg(".slirn-sv-stage-nav.current"), "done/current 背景应不同"
+    assert _bg(".slirn-sv-stage-nav.current") != _bg(".slirn-sv-stage-nav.failed"), "current/failed 背景应不同"
+
+
+def test_short_video_stage_nav_active_no_blue_border():
+    """REQ-131：active 改用 inset 左 3px 蓝条（不与 current 蓝卡背景冲突）。"""
+    css = _src("static/home.css")
+    active_rule = css.split(".slirn-sv-stage-nav.active {", 1)[1].split("}", 1)[0]
+    assert "box-shadow" in active_rule, f"active 应用 box-shadow：{active_rule}"
+    assert "inset" in active_rule, f"active 应用 inset 左条：{active_rule}"
+
+
 # ---------- 截图区块标题 ----------
 
 def test_stage3_image_block_label():
@@ -208,4 +271,125 @@ def test_router_js_syntax_still_valid():
     )
     assert r.returncode == 0, (
         f"router.js 语法错误\nnode --check exit={r.returncode}\nstderr={r.stderr[:1000]}"
+    )
+
+
+# ---------- REQ-20261013-117：空列表提示按上游真实状态分流 ----------
+# 用户截图反馈：Stage 3 已 done，Stage 5 空列表仍显示「先完成 Stage 3 再粗剪」。
+# 根因：提示条件 = 自身产物列表空，与上游状态无关 → 文案误导。
+
+def _hint_project(pipeline_extra: dict) -> dict:
+    base = {
+        "id": "p1", "task_id": "t1", "name": "demo", "materials": [],
+        "pipeline": {"stage1_source": {"status": "done"}},
+    }
+    base["pipeline"].update(pipeline_extra)
+    return base
+
+
+def test_stage5_empty_hint_reflects_stage3_status():
+    from slirn_home import short_video_ui as ui
+
+    # ① Stage 3 未完成 → 保留「先完成 Stage 3」引导
+    html = ui.render_project(_hint_project({"stage3_analyze": {"status": "pending"}}))
+    assert "先完成 Stage 3 解析后再粗剪" in html
+    assert "尚无粗剪成品" not in html
+    # ② Stage 3 done 但未合成 → 引导点合成按钮，不再误报
+    html = ui.render_project(_hint_project({"stage3_analyze": {
+        "status": "done",
+        "highlights": [{"index": 1, "title": "t", "subtitle_lines": []}],
+    }}))
+    assert "尚无粗剪成品 — 点击上方「🎬 合成粗剪」生成" in html
+    assert "先完成 Stage 3 解析后再粗剪" not in html, (
+        "Stage 5 的空列表提示不应再是「先完成 Stage 3」"
+        "（Stage 4 面板另有同字样兜底文案，与 Stage 5 无关）"
+    )
+
+
+def test_stage6_empty_hint_reflects_stage5_artifacts():
+    from slirn_home import short_video_ui as ui
+
+    # ① Stage 5 无产物 → 保留「先完成 Stage 5 粗剪」
+    html = ui.render_project(_hint_project({"stage5_coarse": {"status": "pending"}}))
+    assert "先完成 Stage 5 粗剪" in html
+    assert "尚无优化结果" not in html
+    # ② Stage 5 有产物但未优化 → 引导开始优化，不再误报
+    html = ui.render_project(_hint_project({"stage5_coarse": {
+        "status": "done",
+        "highlights": [{"index": 1, "coarse_mp4": "a.mp4", "duration_sec": 60}],
+    }}))
+    assert "尚无优化结果" in html
+    assert "先完成 Stage 5 粗剪" not in html, "粗剪已有产物时不应再出现「先完成 Stage 5 粗剪」"
+
+
+# ---------- REQ-20261013-116：短视频「完成后自动打开下一阶段界面」开关 ----------
+# 同步长视频 REQ-20260918-046 模式：UI checkbox + localStorage 记忆 + 渲染
+# 后对比快照决定是否切下一阶段。默认关（保持现状 = server focus_key 自动
+# 跳到第一个未 done 阶段）；用户勾选 = 当前焦点阶段完成时自动切下阶段。
+
+def test_sv_autonext_checkbox_rendered():
+    """render_project 渲染的 HTML 必须含 #slirn-sv-autonext checkbox + 标签文字。"""
+    src = _src("short_video_ui.py")
+    assert '<input type="checkbox" id="slirn-sv-autonext">' in src, (
+        "render_project 模板里必须有 #slirn-sv-autonext checkbox（同步长视频）"
+    )
+    assert "完成后，自动打开下一阶段界面" in src, (
+        "checkbox 旁必须有同款文案（用户截图同款）"
+    )
+    assert 'class="slirn-sv-autonext"' in src, (
+        "label 必须挂 .slirn-sv-autonext class（与 CSS 配套）"
+    )
+
+
+def test_sv_autonext_css_rule_exists():
+    """CSS 须定义 .slirn-sv-autonext 样式（对齐 .slirn-wb-autonext 风格）。"""
+    css = _src("static/home.css")
+    # 提取 .slirn-sv-autonext 块（直到下一个 } 即可，不贪心匹配）
+    assert ".slirn-sv-autonext {" in css, (
+        "CSS 必须定义 .slirn-sv-autonext 基础样式"
+    )
+    assert ".slirn-sv-autonext input[type=\"checkbox\"]" in css, (
+        "checkbox 自身大小/光标样式必须有"
+    )
+
+
+def test_sv_autonext_js_helpers_wired():
+    """JS 必须实现：① 读/写 localStorage ② change 事件改 localStorage
+    ③ svAutoNextMaybe 在 openProject 后调用 ④ switchSvStage 写当前 stage。
+    """
+    js = _src("static/short_video.js")
+    # 1. localStorage 键
+    assert "slirn.sv.autonext" in js, "localStorage 开关键必须存在"
+    assert "slirn.sv.currentStage" in js, "localStorage 当前 stage 键必须存在"
+    # 2. 读 / 写 / 应用状态
+    assert "function _svAutoNextOn" in js
+    assert "function _saveSvAutoNext" in js
+    assert "function applySvAutoNextState" in js
+    # 3. change 事件 + toast
+    assert "e.target.id === 'slirn-sv-autonext'" in js, (
+        "checkbox change 事件必须挂在 id 选择器上"
+    )
+    assert "已开启：当前阶段完成后自动打开下一阶段界面" in js
+    assert "已关闭：阶段完成后保持在原页面" in js
+    # 4. 自动跳函数 = svAutoNextMaybe（仿 wb 的 wbAutoNextMaybe）
+    assert "function svAutoNextMaybe" in js
+    assert "switchSvStage(stages[idx + 1])" in js, (
+        "自动跳必须通过 switchSvStage 切到下一阶段（保证同步 localStorage）"
+    )
+    # 5. openProject 渲染后调 apply + maybe
+    open_p_idx = js.find("function openProject(")
+    assert open_p_idx >= 0
+    open_p_body = js[open_p_idx: open_p_idx + 2400]
+    assert "applySvAutoNextState()" in open_p_body, (
+        "openProject 必须调 applySvAutoNextState 恢复开关"
+    )
+    assert "svAutoNextMaybe(prevDone, hadSv, prevActive)" in open_p_body, (
+        "openProject 必须传 prevDone/hadSv/prevActive 快照给 svAutoNextMaybe"
+    )
+    # 6. switchSvStage 写当前 stage（避免用户主动点 tab 后被 server 抢走）
+    fn_idx = js.find("function switchSvStage(")
+    assert fn_idx >= 0
+    fn_body = js[fn_idx: fn_idx + 800]
+    assert "SV_STAGE_KEY" in fn_body, (
+        "switchSvStage 末尾必须把 stageKey 写进 localStorage"
     )

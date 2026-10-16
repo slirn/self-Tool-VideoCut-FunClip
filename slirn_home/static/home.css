@@ -5440,8 +5440,21 @@ input[type="checkbox"]:focus-visible {
   outline-offset: 2px;
 }
 .slirn-sv-stage-nav.active {
-  border-color: var(--accent-solid, #4f7cff);
-  background: var(--bg-hover, rgba(127, 127, 127, 0.08));
+  /* 当前正在查看的 pane：左边一道 3px 蓝条（不与 current 重色） */
+  box-shadow: inset 3px 0 0 var(--accent-solid, #4f7cff);
+}
+/* REQ-20261016-131：状态色用卡片背景表达（mark 仍带深色圆形 + 数字） */
+.slirn-sv-stage-nav.done {
+  background: #d1fae5;     /* 浅绿：完成态卡片 */
+  border-color: #6ee7b7;
+}
+.slirn-sv-stage-nav.current {
+  background: #dbeafe;     /* 浅蓝：当前执行中 */
+  border-color: #93c5fd;
+}
+.slirn-sv-stage-nav.failed {
+  background: #fee2e2;     /* 浅红：失败 */
+  border-color: #fca5a5;
 }
 .slirn-sv-stage-mark {
   display: inline-flex;

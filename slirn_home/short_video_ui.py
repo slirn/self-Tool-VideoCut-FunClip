@@ -1711,14 +1711,17 @@ def render_project(project: dict, all_tasks: list[dict] | None = None,
     nav_items = []
     for key, number, title, desc, _stage_key in _SV_STAGE_NAV:
         state = stage_states[key]
-        mark = "✓" if state == "done" else ("!" if state == "failed" else number)
+        # REQ-20261016-131：mark 永远是数字（不用 ✓ / ! 表达完成/失败，
+        # 改由卡片背景 + mark 颜色表达状态；数字不被遮挡）。
+        mark = number
         active = key == focus_key
         nav_items.append(
             f'<button type="button" class="slirn-sv-stage-nav {state}'
             f'{" active" if active else ""}" data-action="sv-stage-nav" '
             f'data-stage-key="{esc(key)}" aria-current="{"step" if active else "false"}">'
             f'<span class="slirn-sv-stage-mark">{esc(mark)}</span>'
-            f'<span class="slirn-sv-stage-copy"><strong>{esc(number)} · {esc(title)}</strong>'
+            # REQ-20261016-131：text 区域只显示 title（数字在左侧 mark 里，不重复）。
+            f'<span class="slirn-sv-stage-copy"><strong>{esc(title)}</strong>'
             f'<small>{esc(desc)}</small></span></button>'
         )
     panes = (
