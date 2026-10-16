@@ -171,6 +171,11 @@ def render_prompt_history_list(prompt_settings: dict) -> str:
             f'<span class="slirn-sv-muted slirn-stage3-hist-time">{esc(when)}</span></button>'
             f'<button type="button" class="slirn-btn-mini" data-action="sv-stage3-load-prompt" '
             f'data-prompt="{esc(p)}" title="载入到提示词文本域">载入</button>'
+            # REQ-20261016-128：每条历史后加 🗑 删除；若是默认会同时清除默认标记
+            f'<button type="button" class="slirn-btn-mini slirn-btn-mini-danger" '
+            f'data-action="sv-stage3-delete-prompt" data-stage="stage3" '
+            f'data-prompt="{esc(p)}" '
+            f'title="从历史列表删除这一条（若是默认会同时清除默认标记）">🗑 删除</button>'
             f'</div>'
             f'<pre class="slirn-stage3-hist-full" hidden>{esc(p)}</pre>'
             f'</div>'
@@ -755,7 +760,7 @@ def _stage3_analyze(project: dict, source_url: str = "", srt_lines: list | None 
         <button class="slirn-btn-mini" data-action="sv-stage3-use-system-prompt"
           data-prompt="{esc(STAGE3_SYSTEM_PROMPT)}"
           data-prompt-tmpl="{esc(stage3_system_prompt_template())}"
-          title="把系统内置的解析提示词填入文本域（独立于默认/历史；可继续编辑后再解析或设为默认）；条数与时长上下限按当前设置值自动代入">🧭 引用系统提示词</button>
+          title="把系统内置的解析提示词填入文本域（独立于默认/历史；可继续编辑后再解析或设为默认）；条数与时长上下限按当前设置值自动代入">🧭 引用系统提示词<span class="slirn-sv-muted">（可带入片段数和时长限制）</span></button>
         <button class="slirn-btn-mini slirn-btn-mini-primary" data-action="sv-stage3-save-default"
           title="把当前文本域提示词保存为默认提示词（全局生效，新项目初始填充）">💾 设为默认</button>
         <button class="slirn-btn-mini" data-action="sv-stage3-save-history"

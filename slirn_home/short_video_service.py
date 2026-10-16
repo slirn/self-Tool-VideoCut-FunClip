@@ -1296,10 +1296,11 @@ def load_prompt_settings(repo_root: Path | str, *, stage: str = "stage3") -> dic
 def save_default_prompt(repo_root: Path | str, prompt: str, *, stage: str = "stage3") -> dict:
     """把当前提示词保存为指定 stage 的全局默认（覆盖旧值）。
 
-    同时尽力把该提示词同步进该 stage 的历史列表（已存在 → 置顶去重；未满
+    同时把该提示词同步进该 stage 的历史列表（已存在 → 置顶去重；未满
     → 插入），这样历史列表里能看到哪一条是默认（前端按文本相等标 ⭐）。
-    列表已满且该提示词不在其中 → 跳过（不强制覆盖最旧，覆盖决定权仍归
-    save_prompt_history 的 confirm 流程）。
+    列表已满且该提示词不在其中 → **强制覆盖最旧**（confirm=True），
+    保证默认提示词一定出现在历史列表中——否则前端 ⭐ 永不显示
+    （REQ-20261016-128）。
 
     注意：旧形态（顶层 default_prompt）调用此函数时 stage 默认为 stage3，
     第一次保存即触发旧形态 → 新形态迁移。
@@ -1314,8 +1315,41 @@ def save_default_prompt(repo_root: Path | str, prompt: str, *, stage: str = "sta
     entry = {"prompt": text, "updated_at": now_iso()}
     full[s][_PROMPT_DEFAULT_KEY] = entry
     _write_json_atomic(prompt_settings_path(root), full)
-    save_prompt_history(root, text, stage=s)  # need_confirm（满且不存在）时静默跳过
+    # REQ-20261016-128：默认必须能进历史（否则前端 ⭐ 永不显示），
+    # 列表满时强制覆盖最旧（confirm=True），不让默认丢失。
+    save_prompt_history(root, text, confirm=True, stage=s)
     return entry
+
+
+def delete_prompt_history(repo_root: Path | str, prompt: str, *, stage: str = "stage3") -> dict:
+    """从指定 stage 的历史列表移除指定 prompt。
+
+    若被删项的 prompt 与全局默认相等 → 同步将 default_prompt 置 None
+    （"列表里没有默认"——REQ-20261016-128 用户确认语义）。
+
+    Returns
+    -------
+    ``{"removed_default": bool, "history": [...]}``
+        - ``removed_default``: 是否同时清空了默认提示词
+        - ``history``: 移除后的最新历史列表（最新在前）
+    """
+    text = str(prompt or "").strip()
+    if not text:
+        raise ShortVideoError("提示词不能为空")
+    root = Path(repo_root)
+    full = _read_full_settings(root)
+    s = _normalize_stage(stage)
+    full.setdefault(s, _empty_stage_node())
+    hist = full[s][_PROMPT_HISTORY_KEY] or []
+    new_hist = [it for it in hist if str(it.get("prompt") or "").strip() != text]
+    full[s][_PROMPT_HISTORY_KEY] = new_hist
+    removed_default = False
+    cur_default = full[s].get(_PROMPT_DEFAULT_KEY) or {}
+    if str(cur_default.get("prompt") or "").strip() == text:
+        full[s][_PROMPT_DEFAULT_KEY] = None
+        removed_default = True
+    _write_json_atomic(prompt_settings_path(root), full)
+    return {"removed_default": removed_default, "history": new_hist}
 
 
 def save_prompt_history(repo_root: Path | str, prompt: str, *, confirm: bool = False,

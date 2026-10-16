@@ -101,12 +101,15 @@ def test_prompt_settings_default_and_history(tmp_path):
     assert hist[0]["prompt"] == "提示词 3"
     assert sum(1 for h in hist if h["prompt"] == "提示词 3") == 1
 
-    # 列表已满时设默认为「不在列表」的新提示词 → 同步跳过（不强占），默认本体仍生效
+    # 列表已满时设默认为「不在列表」的新提示词 → REQ-20261016-128：
+    # 强制覆盖最旧（让默认进历史 → 前端 ⭐ 可显示），不再静默跳过。
     svc.save_default_prompt(tmp_path, "全新默认 Z")
     st = svc.load_prompt_settings(tmp_path)
     assert st["default_prompt"]["prompt"] == "全新默认 Z"
-    assert all(h["prompt"] != "全新默认 Z" for h in st["history"])
+    # 新默认应入列（置顶），且总数仍为 10（最旧的「提示词 10」被覆盖）
+    assert st["history"][0]["prompt"] == "全新默认 Z"
     assert len(st["history"]) == 10
+    assert sum(1 for h in st["history"] if h["prompt"] == "全新默认 Z") == 1
 
     # 设默认为「已在列表」的提示词 → 置顶（历史第一眼就能看到哪条是默认）
     svc.save_default_prompt(tmp_path, "提示词 5")

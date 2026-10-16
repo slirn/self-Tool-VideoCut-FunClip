@@ -612,6 +612,22 @@
     ta.value = '';
   }
 
+  // REQ-20261016-128：从历史列表删除一条；若是默认则同步清空默认标记。
+  function stage3DeletePrompt(btn) {
+    if (!btn) return;
+    var prompt = btn.getAttribute('data-prompt') || '';
+    var stage = btn.getAttribute('data-stage') || 'stage3';
+    if (!prompt) return toast('该条目无 prompt 文本', 'error');
+    if (!window.confirm('从历史列表删除这条提示词？\n（若是默认将同时清除默认标记）')) return;
+    postJSON(API + '/short_video_prompt_history_delete', {
+      prompt: prompt, stage: stage
+    }).then(function(r) {
+      if (!r || !r.ok) return toast((r && r.error) || '删除失败', 'error');
+      _refreshStage3History(r.history_html);
+      toast(r.toast || '已删除');
+    });
+  }
+
   function stage3UploadImage() {
     var ctx = innerCtx(); if (!ctx) return;
     var fileEl = document.getElementById('slirn-stage3-image-file');
@@ -2335,6 +2351,7 @@
     if (action === 'sv-stage3-use-system-prompt') return stage3UseSystemPrompt(btn);
     if (action === 'sv-stage3-toggle-hist') return stage3ToggleHist(btn);
     if (action === 'sv-stage3-clear-prompt') return stage3ClearPrompt();
+    if (action === 'sv-stage3-delete-prompt') return stage3DeletePrompt(btn);
     if (action === 'sv-stage3-upload-image') return stage3UploadImage();
     if (action === 'sv-stage3-remove-image') return stage3RemoveImage();
     if (action === 'sv-stage4-run') return stage4Run();

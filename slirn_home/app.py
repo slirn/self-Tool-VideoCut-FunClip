@@ -10150,6 +10150,29 @@ def _register_slirn_api(
             stage=stage,
         )
 
+    @app.app.post("/slirn/api/short_video_prompt_history_delete")
+    async def short_video_prompt_history_delete(body: dict = Body(default_factory=dict)):
+        """REQ-20261016-128：从历史列表删除一条；若是默认则同步清空默认。"""
+        prompt = str(body.get("prompt") or "")
+        if not prompt.strip():
+            return _err("提示词不能为空")
+        stage = str(body.get("stage") or "stage3").strip().lower() or "stage3"
+        try:
+            result = _sv_service.delete_prompt_history(
+                repo_root, prompt, stage=stage,
+            )
+        except Exception as e:  # noqa: BLE001
+            return _err(f"删除失败: {e}")
+        settings = _sv_service.load_prompt_settings(repo_root, stage=stage)
+        suffix = "（默认标记已移除）" if result["removed_default"] else ""
+        return _ok(
+            removed_default=result["removed_default"],
+            history=result["history"],
+            history_html=_sv_ui.render_prompt_history_list(settings),
+            stage=stage,
+            toast=f"已删除历史提示词{suffix}",
+        )
+
     @app.app.post("/slirn/api/short_video_stage4_optimize")
     async def short_video_stage4_optimize(body: dict = Body(default_factory=dict)):
         """REQ-20261013-100 + REQ-20261013-108：Stage 4「内容优化」（替换原
