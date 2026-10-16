@@ -1228,6 +1228,111 @@
     });
   }
 
+  // REQ-20261016-132：Stage 5 视频预览浮窗（不遮父页 + 可拖动 + 可调大小）
+  // 单一浮窗（lazy 创建在 document.body），同一时刻只能开 1 个；点 × 或再点
+  // 同一按钮关闭。拖动通过 title-bar mousedown；调大小通过 CSS resize 句柄。
+  function ensureSvVideoPopup() {
+    var el = document.getElementById('slirn-sv-video-popup');
+    if (el) return el;
+    el = document.createElement('div');
+    el.id = 'slirn-sv-video-popup';
+    el.className = 'slirn-sv-video-popup';
+    el.hidden = true;
+    el.innerHTML =
+      '<div class="slirn-sv-video-popup-head">' +
+        '<span class="slirn-sv-video-popup-title">预览</span>' +
+        '<button type="button" class="slirn-sv-video-popup-close" ' +
+        'aria-label="关闭" title="关闭">×</button>' +
+      '</div>' +
+      '<div class="slirn-sv-video-popup-body">' +
+        '<video controls preload="metadata"></video>' +
+      '</div>' +
+      '<div class="slirn-sv-video-popup-resize" aria-hidden="true"></div>';
+    document.body.appendChild(el);
+    // 关闭按钮
+    el.querySelector('.slirn-sv-video-popup-close').addEventListener('click', function() {
+      el.hidden = true;
+      var v = el.querySelector('video');
+      if (v) { v.pause(); v.removeAttribute('src'); v.load(); }
+    });
+    // ESC 关闭
+    el.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape') {
+        el.hidden = true;
+        var v = el.querySelector('video');
+        if (v) { v.pause(); v.removeAttribute('src'); v.load(); }
+      }
+    });
+    // 拖动（按 title bar）
+    bindSvPopupDrag(el);
+    return el;
+  }
+
+  function bindSvPopupDrag(el) {
+    var head = el.querySelector('.slirn-sv-video-popup-head');
+    if (!head) return;
+    var dragging = false, offX = 0, offY = 0;
+    head.addEventListener('mousedown', function(e) {
+      if (e.target.closest('.slirn-sv-video-popup-close')) return;
+      dragging = true;
+      var rect = el.getBoundingClientRect();
+      offX = e.clientX - rect.left;
+      offY = e.clientY - rect.top;
+      // 转成 left/top 定位（拖动 + 调大小都依赖绝对坐标）
+      el.style.left = rect.left + 'px';
+      el.style.top = rect.top + 'px';
+      el.style.right = 'auto';
+      el.style.bottom = 'auto';
+      el.style.width = rect.width + 'px';
+      el.style.height = rect.height + 'px';
+      el.setAttribute('tabindex', '-1');
+      el.focus({preventScroll: true});
+      e.preventDefault();
+    });
+    document.addEventListener('mousemove', function(e) {
+      if (!dragging) return;
+      var w = el.offsetWidth, h = el.offsetHeight;
+      var maxX = Math.max(0, window.innerWidth - w);
+      var maxY = Math.max(0, window.innerHeight - h);
+      var nx = Math.max(0, Math.min(maxX, e.clientX - offX));
+      var ny = Math.max(0, Math.min(maxY, e.clientY - offY));
+      el.style.left = nx + 'px';
+      el.style.top = ny + 'px';
+    });
+    document.addEventListener('mouseup', function() {
+      dragging = false;
+    });
+  }
+
+  function svStage5Preview(btn) {
+    if (!btn) return;
+    var url = btn.getAttribute('data-url') || '';
+    var name = btn.getAttribute('data-clip-name') || '预览';
+    if (!url) return toast('视频 URL 缺失', 'error');
+    var popup = ensureSvVideoPopup();
+    // 二次点击同一按钮 → 关闭（UX 友好）
+    if (!popup.hidden && popup.getAttribute('data-url') === url) {
+      popup.hidden = true;
+      var vv = popup.querySelector('video');
+      if (vv) { vv.pause(); vv.removeAttribute('src'); vv.load(); }
+      return;
+    }
+    popup.setAttribute('data-url', url);
+    popup.querySelector('.slirn-sv-video-popup-title').textContent = name;
+    var v = popup.querySelector('video');
+    v.src = url;
+    v.load();
+    // 首次打开 → 右上角定位 + 60% 宽 / 50% 高
+    if (!popup.style.width) {
+      popup.style.width = Math.min(640, Math.round(window.innerWidth * 0.6)) + 'px';
+      popup.style.height = Math.min(480, Math.round(window.innerHeight * 0.5)) + 'px';
+      popup.style.left = (window.innerWidth - popup.offsetWidth - 24) + 'px';
+      popup.style.top = '80px';
+    }
+    popup.hidden = false;
+    v.play().catch(function() { /* autoplay 阻止忽略 */ });
+  }
+
   // REQ-20261013-104：Stage 6 字幕优化（行级 + 词频 + 批量替换 + 行内切分）
   // 单条 LLM 优化：调 optimize 端点 → 渲染 chips + 行级建议
   function stage6Optimize(btn) {
@@ -2365,6 +2470,8 @@
     if (action === 'sv-stage5-subs-download') return stage5SubsDownload(btn);
     if (action === 'sv-stage5-clip-subs-copy') return stage5ClipSubsCopy(btn);
     if (action === 'sv-stage5-clip-subs-download') return stage5ClipSubsDownload(btn);
+    // REQ-20261016-132：Stage 5 视频预览浮窗
+    if (action === 'sv-stage5-preview') return svStage5Preview(btn);
     // REQ-20261013-104：Stage 6 字幕优化（行级 + 词频 + 批量替换 + 行内切分）
     if (action === 'sv-stage6-optimize') return stage6Optimize(btn);
     if (action === 'sv-stage6-save-decisions') return stage6SaveDecisions(btn);

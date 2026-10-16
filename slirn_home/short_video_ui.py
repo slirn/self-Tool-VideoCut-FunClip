@@ -1127,7 +1127,17 @@ def _stage5_coarse(project: dict) -> str:
         dur = float(hl.get("duration_sec") or 0)
         err = hl.get("error") or ""
         status = hl.get("status") or "pending"
-        video = f'<video controls preload="metadata" src="{esc(url)}"></video>' if url else '<span class="slirn-sv-muted">未生成</span>'
+        # REQ-20261016-132：视频不再 inline（占用列表卡高度、抢占页面空间）。
+        # 改为「▶ 预览」按钮，点击后弹可拖动+可调大小的浮窗（不遮父页）。
+        if url:
+            video = (
+                f'<button type="button" class="slirn-btn-mini slirn-stage5-preview-btn" '
+                f'data-action="sv-stage5-preview" data-url="{esc(url)}" '
+                f'data-clip-index="{idx}" data-clip-name="#{esc(str(idx))}">'
+                f'▶ 预览</button>'
+            )
+        else:
+            video = '<span class="slirn-sv-muted">未生成</span>'
         err_html = f'<div class="slirn-stage-error">{esc(err)}</div>' if err else ""
         clip_subs_actions = (
             f'<button class="slirn-btn-mini" data-action="sv-stage5-clip-subs-copy" '
