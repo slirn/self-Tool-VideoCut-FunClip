@@ -1252,34 +1252,76 @@ def _stage6_refine(project: dict) -> str:
 
     REQ-20261016-133：新增 per-row 编辑 UI（仿 Stage 4 风格，每行 ✏️/✂️/🗑️）。
     保留 textarea 作为隐藏数据源 + 高级编辑入口。
+
+    REQ-20261016-135：改为 tab 化（仿 Stage 3 大按钮）+ 单 pane（仿 Stage 4 REQ-109）。
+    每条 clip 一个 tab，pane 内保留 .slirn-stage5-clip 卡片（per-row 编辑不破）。
+    每 pane 加「▶ 预览」按钮（用 REQ-132 可拖动 + 可调大小浮窗）。
     """
     task_id = str(project.get("task_id") or "")
     project_id = str(project.get("id") or "")
     s5 = project.get("pipeline", {}).get("stage6_refine", {}) or {}
-    # REQ-20261016-134：Stage 6 卡片必须可见 — 即使 stage6_refine.highlights 为空
-    # （用户从未进过 Stage 6），也要从 stage5_coarse.highlights 合成占位条目并渲染。
-    # 否则用户点进 Stage 6 看不到任何可操作按钮。
-    s5_highlights = list(s5.get("highlights") or [])
     coarse = project.get("pipeline", {}).get("stage5_coarse", {}) or {}
-    if not s5_highlights and coarse.get("highlights"):
-        # 合成占位：index 沿用 stage5 index；status=pending（用户从未跑过 ASR）
-        for ch in (coarse.get("highlights") or []):
-            s5_highlights.append({
-                "index": ch.get("index"),
-                "status": "pending",
-                "asr_srt": "",
-                "refined_srt": "",
-                "asr_chars": 0,
-            })
+    # REQ-20261016-135：建 stage6_by_idx（已 ASR/优化过的条目） + coarse_by_idx（粗剪产物）
+    # 以 coarse.highlights 为全集，把 stage6.highlights 叠加上去：
+    #  - 用户已处理的 → 真实数据
+    #  - 用户未处理的 → status=pending 占位（带 coarse_mp4 可点预览）
+    # 此前 REQ-134 仅在 stage6 完全空时合成占位；当 stage6 只有部分条目时，
+    # 未处理过的 clip 就消失了，违反「对应前一阶段所有视频」的诉求。
+    coarse_by_idx: dict[int, dict] = {}
+    for ch in (coarse.get("highlights") or []):
+        try:
+            ix = int(ch.get("index") or 0)
+        except (TypeError, ValueError):
+            continue
+        if ix > 0:
+            coarse_by_idx[ix] = ch
+    stage6_by_idx: dict[int, dict] = {}
+    for sh in (s5.get("highlights") or []):
+        try:
+            ix = int(sh.get("index") or 0)
+        except (TypeError, ValueError):
+            continue
+        if ix > 0:
+            stage6_by_idx[ix] = sh
+    # 以 coarse 为全集，未在 stage6 的补占位
+    s5_highlights = []
+    for ix, ch in sorted(coarse_by_idx.items()):
+        sh = stage6_by_idx.get(ix) or {}
+        # 合并字段：stage6 优先，缺失从 coarse 补
+        merged = dict(ch)
+        for k, v in sh.items():
+            if v not in (None, "", 0):
+                merged[k] = v
+        # 未在 stage6 的，强制 status=pending
+        if ix not in stage6_by_idx:
+            merged["status"] = "pending"
+            merged["asr_srt"] = merged.get("asr_srt") or ""
+            merged["refined_srt"] = merged.get("refined_srt") or ""
+            merged["asr_chars"] = int(merged.get("asr_chars") or 0)
+        s5_highlights.append(merged)
     # REQ-20261016-133：SRT 为空时的占位（提到外面避免 f-string 嵌套反斜杠）
     empty_srt6_div = '<div class="slirn-sv-muted">点「重新 ASR」生成字幕</div>'
-    rows = []
-    for hl in s5_highlights:
-        idx = hl.get("index") or len(rows) + 1
+    hl_tabs = []
+    hl_panes = []
+    for i, hl in enumerate(s5_highlights):
+        try:
+            idx = int(hl.get("index") or 0) or (i + 1)
+        except (TypeError, ValueError):
+            idx = i + 1
+        is_first = (i == 0)
         status = hl.get("status") or "pending"
+        # REQ-20261016-135：标题来源：stage6.hl.title → stage3/coarse.title → 「片段 #N」
+        raw_title = hl.get("title") or (coarse_by_idx.get(idx) or {}).get("title")
+        title = str(raw_title).strip() if raw_title else ""
+        if not title:
+            title = f"片段 #{idx}"
         asr_name = Path(str(hl.get("asr_srt") or "")).name
         refined_name = Path(str(hl.get("refined_srt") or "")).name
         asr_url = _file_url(task_id, project_id, "stage5", asr_name) if asr_name else ""
+        # REQ-20261016-135：coarse_mp4 兜底（老数据 stage6.hl 没存时从 stage5_coarse 取）
+        raw_mp4 = hl.get("coarse_mp4") or (coarse_by_idx.get(idx) or {}).get("coarse_mp4") or ""
+        mp4_name = Path(str(raw_mp4)).name if raw_mp4 else ""
+        mp4_url = _file_url(task_id, project_id, "stage4", mp4_name) if mp4_name else ""
         # 读 SRT 内容（如果有 refined）— 文件小直接 inline
         srt_inline = ""
         srt_rows_html = ""
@@ -1295,16 +1337,50 @@ def _stage6_refine(project: dict) -> str:
                 except Exception:  # noqa: BLE001
                     srt_inline = ""
         asr_chars = int(hl.get("asr_chars") or 0)
-        asr_meta = f'<span class="slirn-sv-muted">ASR {asr_chars} 字</span>' if asr_chars else ""
+        # REQ-20261016-135：视频元信息（ASR 字数 + 时长）
+        meta_parts = []
+        if asr_chars:
+            meta_parts.append(f"ASR {asr_chars} 字")
+        try:
+            duration_sec = float(hl.get("duration_sec") or 0)
+        except (TypeError, ValueError):
+            duration_sec = 0.0
+        if duration_sec > 0:
+            meta_parts.append(f"时长 {duration_sec:.1f}s")
+        meta_html = (
+            '<span class="slirn-sv-muted">' + " · ".join(meta_parts) + '</span>'
+            if meta_parts else ""
+        )
+        # REQ-20261016-135：▶ 预览视频按钮（用 REQ-132 可拖动 + 可调大小浮窗）
+        preview_btn = (
+            f'<button type="button" class="slirn-btn-mini slirn-stage5-preview-btn" '
+            f'data-action="sv-stage5-preview" data-url="{esc(mp4_url)}" '
+            f'data-clip-index="{idx}" data-clip-name="#{esc(str(idx))} 预览">▶ 预览</button>'
+        ) if mp4_url else '<span class="slirn-sv-muted">未生成</span>'
         err_html = ""
         if hl.get("asr_error"):
             err_html = f'<div class="slirn-stage-error">{esc(hl.get("asr_error"))}</div>'
-        rows.append(
+        active_cls = " active" if is_first else ""
+        # REQ-20261016-135：tab 按钮（仿 Stage 3 大按钮：#N + 完整标题 + ▾ 箭头）
+        hl_tabs.append(
+            f'<button class="slirn-stage6-hl-tab{active_cls}" '
+            f'data-action="sv-stage6-hl-tab" data-hl-index="{idx}" '
+            f'title="{esc(title)}">'
+            f'<span class="slirn-stage6-hl-tab-no">#{idx}</span>'
+            f'<span class="slirn-stage6-hl-tab-title">{esc(title)}</span>'
+            f'<span class="slirn-stage6-hl-tab-arrow" aria-hidden="true">▾</span>'
+            f'</button>'
+        )
+        # REQ-20261016-135：pane 容器（单 pane 显示，仿 Stage 4 REQ-109）
+        # 内含 .slirn-stage5-clip 完整卡片（per-row 编辑 + actions + textarea 都不动）
+        hl_panes.append(
+            f'<div class="slirn-stage6-hl-pane{active_cls}" data-hl-index="{idx}">'
+            f'<div class="slirn-stage4-clip-title-top">{esc(title)}</div>'
             f'<div class="slirn-stage5-clip" data-clip-index="{idx}">'
             f'<div class="slirn-stage5-clip-head">'
             f'<span class="slirn-sv-row-no">#{idx}</span>'
             f'{_stage_badge(status)}'
-            f'{asr_meta}'
+            f'{meta_html}'
             f'</div>'
             f'<div class="slirn-sv-card-actions">'
             f'<button class="slirn-btn-mini" data-action="sv-stage5-asr" data-clip-index="{idx}">重新 ASR</button>'
@@ -1312,6 +1388,7 @@ def _stage6_refine(project: dict) -> str:
             f'<button class="slirn-btn-mini" data-action="sv-stage6-toggle-source" '
             f'data-clip-index="{idx}" title="在行编辑视图与 SRT 源文视图之间切换">📝 切换源</button>'
             f'<button class="slirn-btn-mini" data-action="sv-preview-srt" data-url="{esc(asr_url)}">查看 ASR 字幕</button>'
+            f'{preview_btn}'
             f'<button class="slirn-btn slirn-btn-primary" data-action="sv-stage6-optimize" '
             f'data-clip-index="{idx}">✨ LLM 优化</button>'
             f'</div>'
@@ -1325,6 +1402,7 @@ def _stage6_refine(project: dict) -> str:
             f'<textarea rows="6" class="slirn-stage5-srt" data-clip-index="{idx}" '
             f'style="display:none;" placeholder="点「重新 ASR」后再编辑">{srt_inline}</textarea>'
             f'{err_html}'
+            f'</div>'
             f'</div>'
         )
     # REQ-20261013-117：同 Stage 5 —— 空列表提示按上游真实状态分流，
@@ -1353,7 +1431,8 @@ def _stage6_refine(project: dict) -> str:
       <button class="slirn-btn-mini" data-action="sv-stage6-batch-replace">✅ 全部替换</button>
       <div class="slirn-sv-batch-result" style="margin-top:6px;"></div>
     </div>
-    <div class="slirn-stage5-list">{"".join(rows) or empty_hint6_div}</div>
+    <div class="slirn-stage6-hl-tabs">{"".join(hl_tabs)}</div>
+    <div class="slirn-stage6-hl-panes">{"".join(hl_panes) or empty_hint6_div}</div>
     {_stage_logs(s5)}
   </div>
 </div>'''

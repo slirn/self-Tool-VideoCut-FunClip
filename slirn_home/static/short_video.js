@@ -275,14 +275,14 @@
     var want = String(idx || '');
     var hit = false;
     Array.prototype.forEach.call(
-      document.querySelectorAll('.slirn-stage3-hl-tab, .slirn-stage4-hl-tab'),
+      document.querySelectorAll('.slirn-stage3-hl-tab, .slirn-stage4-hl-tab, .slirn-stage6-hl-tab'),
       function(t) {
         var on = String(t.getAttribute('data-hl-index') || '') === want;
         if (on) hit = true;
         t.classList.toggle('active', on);
       });
     Array.prototype.forEach.call(
-      document.querySelectorAll('.slirn-stage3-hl-pane, .slirn-stage4-hl-pane'),
+      document.querySelectorAll('.slirn-stage3-hl-pane, .slirn-stage4-hl-pane, .slirn-stage6-hl-pane'),
       function(p) {
         p.classList.toggle('active', String(p.getAttribute('data-hl-index') || '') === want);
       });
@@ -296,7 +296,8 @@
     if (mem.k !== String(taskId) + '/' + String(projectId)) return;
     var tab = document.querySelector(
       '.slirn-stage3-hl-tab[data-hl-index="' + mem.hl + '"], ' +
-      '.slirn-stage4-hl-tab[data-hl-index="' + mem.hl + '"]');
+      '.slirn-stage4-hl-tab[data-hl-index="' + mem.hl + '"], ' +
+      '.slirn-stage6-hl-tab[data-hl-index="' + mem.hl + '"]');
     if (tab) switchHlTab(mem.hl);
     else window._slirnSvHlTab = null;   // 该条已删除 → 回默认第一条
   }
@@ -2682,6 +2683,7 @@
     if (action === 'sv-stage3-remove-hl') return stage3RemoveHl(btn);
     if (action === 'sv-stage3-hl-tab') return switchHlTab(btn.getAttribute('data-hl-index'));
     if (action === 'sv-stage4-hl-tab') return switchHlTab(btn.getAttribute('data-hl-index'));
+    if (action === 'sv-stage6-hl-tab') return switchHlTab(btn.getAttribute('data-hl-index'));
     if (action === 'sv-stage3-save-default') return stage3SaveDefault();
     if (action === 'sv-stage3-save-history') return stage3SaveHistory();
     if (action === 'sv-stage3-load-prompt') return stage3LoadPrompt(btn);

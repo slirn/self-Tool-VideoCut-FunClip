@@ -5807,6 +5807,61 @@ input[type="checkbox"]:focus-visible {
 .slirn-stage4-hl-pane.active {
   display: block;
 }
+/* REQ-20261016-135：Stage 6 字幕优化 tab 化（沿用 Stage 3 大按钮 + Stage 4 单 pane） */
+.slirn-stage6-hl-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0;
+  padding: 4px 0;
+  border-bottom: 1px solid rgba(0, 0, 0, .08);
+}
+.slirn-stage6-hl-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border: 1px solid rgba(0, 0, 0, .15);
+  border-radius: 6px;
+  background: #f8fafc;
+  color: #0f172a;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all .15s ease;
+}
+.slirn-stage6-hl-tab:hover {
+  background: #e2e8f0;
+}
+.slirn-stage6-hl-tab.active {
+  background: #3b82f6;
+  color: #fff;
+  border-color: #2563eb;
+}
+.slirn-stage6-hl-tab-no {
+  font-weight: 700;
+  opacity: .85;
+}
+.slirn-stage6-hl-tab-title {
+  font-weight: 500;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.slirn-stage6-hl-tab-arrow {
+  font-size: 10px;
+  opacity: .6;
+  transition: transform .2s;
+}
+.slirn-stage6-hl-tab.active .slirn-stage6-hl-tab-arrow {
+  transform: rotate(180deg);
+}
+.slirn-stage6-hl-pane {
+  display: none;
+}
+.slirn-stage6-hl-pane.active {
+  display: block;
+}
 .slirn-stage3-hl-row {
   margin-top: 10px;
   padding: 10px 12px;
