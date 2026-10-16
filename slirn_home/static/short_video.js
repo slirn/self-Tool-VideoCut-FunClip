@@ -1405,10 +1405,16 @@
     v.src = url;
     v.load();
     // 首次打开 → 右上角定位 + 60% 宽 / 50% 高
+    // REQ-20261016-137 bug fix：之前用 popup.offsetWidth 算 left，但此时 popup
+    // 还在 hidden=true 状态（display:none），offsetWidth=0 → left=innerWidth-24，
+    // 弹窗从屏幕右外开始，宽度 60% 向右延伸，绝大多数不可见。
+    // 修复：直接用刚算出的 w/h 推 left，不再读 offsetWidth。
     if (!popup.style.width) {
-      popup.style.width = Math.min(640, Math.round(window.innerWidth * 0.6)) + 'px';
-      popup.style.height = Math.min(480, Math.round(window.innerHeight * 0.5)) + 'px';
-      popup.style.left = (window.innerWidth - popup.offsetWidth - 24) + 'px';
+      var w = Math.min(640, Math.round(window.innerWidth * 0.6));
+      var h = Math.min(480, Math.round(window.innerHeight * 0.5));
+      popup.style.width = w + 'px';
+      popup.style.height = h + 'px';
+      popup.style.left = (window.innerWidth - w - 24) + 'px';
       popup.style.top = '80px';
     }
     popup.hidden = false;
