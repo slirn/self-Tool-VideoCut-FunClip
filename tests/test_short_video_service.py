@@ -1585,3 +1585,86 @@ def test_extract_subtitle_script_bypasses_moviepy_video_recog():
     assert "recog_video(" in script
     assert "'-ac', '1', '-ar', '16000'" in script
     assert "clipper.recog(" in script
+
+
+# ---------- REQ-20261016-126：Stage 2 提取后 SRT 全文内联预览 ----------
+
+
+def test_parse_srt_entries_basic_and_fallback():
+    from slirn_home import short_video_ui as ui
+
+    srt = (
+        "1\n00:00:00,830 --> 00:00:04,475\n那我们有请 CY 老师\n\n"
+        "2\n00:00:07,030 --> 00:00:08,090\n让我欢迎一下\n"
+    )
+    entries = ui._parse_srt_entries(srt)
+    assert len(entries) == 2
+    assert entries[0]["no"] == 1
+    assert entries[0]["start_ms"] == 830
+    assert entries[0]["end_ms"] == 4475
+    assert "CY 老师" in entries[0]["text"]
+    # 空输入/坏块不抛
+    assert ui._parse_srt_entries("") == []
+    assert ui._parse_srt_entries("garbage") == []
+
+
+def test_stage2_inline_srt_preview_after_extract(tmp_path, monkeypatch):
+    """Stage 2 done 后，UI 卡片含 SRT 预览面板（4 字段块），不再是按钮弹窗。"""
+    from slirn_home import short_video_service as svc
+    from slirn_home import short_video_ui as ui
+
+    _mgr, task = _make_task(tmp_path)
+    project = svc.create_project(tmp_path, task.task_id, "SRT 预览测试", "开场 Hook", {
+        "allow_external_llm": False,
+    })
+    project = svc.update_project(tmp_path, task.task_id, project["id"],
+                                 {"base_material_id": project["materials"][0]["id"]})
+
+    # 写一个真 SRT 到项目 stage2/，注入到 project._repo_root + srt_path
+    srt_dir = tmp_path / task.task_id / project["id"] / "stage2"
+    srt_dir.mkdir(parents=True, exist_ok=True)
+    srt_path = srt_dir / "raw.srt"
+    srt_path.write_text(
+        "1\n00:00:00,830 --> 00:00:04,475\n第一句\n\n"
+        "2\n00:00:07,030 --> 00:00:08,090\n第二句\n\n"
+        "3\n00:00:10,000 --> 00:00:12,000\n第三句\n",
+        encoding="utf-8-sig",
+    )
+    rel_srt = str(srt_path.relative_to(tmp_path)).replace("\\", "/")
+    project["pipeline"]["stage2_extract"] = {
+        "status": "done",
+        "srt_path": rel_srt,
+        "srt_chars": 6,
+        "elapsed_sec": 10,
+    }
+    project["_repo_root"] = str(tmp_path)
+
+    html = ui.render_project(project)
+
+    # 内联预览面板存在，4 字段行存在
+    assert 'class="slirn-stage2-srt-preview"' in html
+    assert 'slirn-stage2-srt-row' in html
+    assert "00:00:00,830 → 00:00:04,475" in html
+    assert "第一句" in html
+    assert "第二句" in html
+    # 摘要含行数/字数
+    assert "共 3 行" in html
+    # 按钮变成 <a>（原文件兜底），不再有 data-action="sv-stage2-preview-srt"
+    assert 'data-action="sv-stage2-preview-srt"' not in html
+    assert 'href=' in html and "raw.srt" in html
+
+
+def test_stage2_no_preview_when_not_done(tmp_path):
+    """未完成时（无 SRT 路径）不渲染预览面板（避免空壳/挂错路径）。"""
+    from slirn_home import short_video_service as svc
+    from slirn_home import short_video_ui as ui
+
+    _mgr, task = _make_task(tmp_path)
+    project = svc.create_project(tmp_path, task.task_id, "未完成", "开场 Hook", {
+        "allow_external_llm": False,
+    })
+    project = svc.update_project(tmp_path, task.task_id, project["id"],
+                                 {"base_material_id": project["materials"][0]["id"]})
+    # 状态未 done（默认）
+    html = ui.render_project(project)
+    assert 'class="slirn-stage2-srt-preview"' not in html

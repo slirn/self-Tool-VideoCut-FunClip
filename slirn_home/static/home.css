@@ -6400,3 +6400,43 @@ input[type="checkbox"]:focus-visible {
     flex-direction: column;
   }
 }
+
+/* REQ-20261016-126：Stage 2 SRT 预览（卡片下方内联）— 4 字段只读
+   (#N / 时间段 / 文字)，与 Stage 3/4 编辑行同款视觉但不可点击。 */
+.slirn-stage2-srt-preview {
+  margin-top: 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+.slirn-stage2-srt-rows {
+  max-height: 500px;
+  overflow-y: auto;
+  padding: 6px 10px;
+  font-size: 12px;
+  line-height: 1.55;
+}
+.slirn-stage2-srt-row {
+  display: grid;
+  grid-template-columns: 56px 240px 1fr;
+  gap: 8px;
+  padding: 3px 0;
+  border-bottom: 1px dashed #e2e8f0;
+  color: #0f172a;
+}
+.slirn-stage2-srt-row:last-child { border-bottom: none; }
+.slirn-stage2-srt-no {
+  color: #6366f1;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.slirn-stage2-srt-time {
+  color: #475569;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+}
+.slirn-stage2-srt-text {
+  color: #0f172a;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

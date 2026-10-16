@@ -1846,10 +1846,6 @@
     }).catch(function(e) { toast('读取失败: ' + e, 'error'); });
   }
 
-  function previewStage2Srt(btn) {
-    previewSrtByUrl(btn.getAttribute('data-url') || '');
-  }
-
   function previewVideo(btn) {
     var url = btn.getAttribute('data-url') || '';
     var name = btn.getAttribute('data-name') || '';
@@ -2311,7 +2307,6 @@
     // 6 阶段
     if (action === 'sv-stage1-select') return stage1Select();
     if (action === 'sv-stage2-run') return stage2Run(btn);
-    if (action === 'sv-stage2-preview-srt') return previewStage2Srt(btn);
     if (action === 'sv-stage3-run') return stage3Run(btn);
     if (action === 'sv-stage3-restore-order') return stage3RestoreOrder(btn);
     if (action === 'sv-stage3-preview') return stage3PreviewHl(btn);

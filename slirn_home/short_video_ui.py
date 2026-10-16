@@ -26,6 +26,86 @@ def esc(value: object) -> str:
     return html.escape("" if value is None else str(value), quote=True)
 
 
+# REQ-20261016-126：Stage 2 字幕预览（直接渲染在卡片下方，替代弹窗/新页）
+# 4 字段格式与 REQ-20261013-110 Stage 3/4 一致（#N / 时间段 / 文字），
+# 但只读、不带编辑按钮。SRT 文件 ≤ 几 MB 时整体渲染到 HTML 即可。
+
+
+def _fmt_srt_time_ms(ms: int) -> str:
+    """毫秒 → SRT 文本时间戳 ``HH:MM:SS,mmm``。"""
+    h, ms = divmod(int(ms), 3600 * 1000)
+    m, ms = divmod(ms, 60 * 1000)
+    s, ms = divmod(ms, 1000)
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def _parse_srt_entries(srt_text: str) -> list[dict]:
+    """解析 SRT 文本为 ``{no, start_ms, end_ms, text}`` 列表（按出现顺序）。
+
+    漏掉无法解析的块而不是 raise——单条坏数据不该让整页没 SRT 预览。
+    """
+    import re
+
+    if not srt_text:
+        return []
+    # 去 BOM、按空行切块、过滤空块
+    blocks = [b for b in re.split(r"\r?\n\r?\n+", srt_text.lstrip("﻿").strip()) if b.strip()]
+    entries: list[dict] = []
+    for block in blocks:
+        lines = block.splitlines()
+        if len(lines) < 3:
+            continue
+        try:
+            no = int(lines[0].strip())
+        except ValueError:
+            continue
+        m = re.match(r"\s*(\d+):(\d{2}):(\d{2})[,.](\d{3})\s*-->\s*(\d+):(\d{2}):(\d{2})[,.](\d{3})", lines[1])
+        if not m:
+            continue
+        h1, m1, s1, ms1, h2, m2, s2, ms2 = (int(x) for x in m.groups())
+        start_ms = (h1 * 3600 + m1 * 60 + s1) * 1000 + ms1
+        end_ms = (h2 * 3600 + m2 * 60 + s2) * 1000 + ms2
+        text = "\n".join(lines[2:]).strip()
+        entries.append({"no": no, "start_ms": start_ms, "end_ms": end_ms, "text": text})
+    return entries
+
+
+def _render_srt_preview(srt_path: str) -> str:
+    """渲染 SRT 预览面板（直接内联在 Stage 2 卡片下方，全部条目）。
+
+    SRT 读不到/解析失败时返回空串（不影响卡片）。
+    """
+    if not srt_path:
+        return ""
+    try:
+        text = Path(srt_path).read_text(encoding="utf-8-sig", errors="replace")
+    except OSError:
+        return ""
+    entries = _parse_srt_entries(text)
+    if not entries:
+        return ""
+    total = len(entries)
+    text_chars = sum(len(e["text"]) for e in entries)
+    shown = entries
+    rows = []
+    for e in shown:
+        time_range = f"{_fmt_srt_time_ms(e['start_ms'])} → {_fmt_srt_time_ms(e['end_ms'])}"
+        rows.append(
+            f'<div class="slirn-stage2-srt-row">'
+            f'<span class="slirn-stage2-srt-no" title="SRT 块序号">#{e["no"]}</span>'
+            f'<span class="slirn-stage2-srt-time" title="本段时间戳">{time_range}</span>'
+            f'<span class="slirn-stage2-srt-text">{esc(e["text"])}</span>'
+            f'</div>'
+        )
+    summary = f'📄 字幕预览 · 共 {total} 行 / {text_chars} 字'
+    return (
+        f'<div class="slirn-stage2-srt-preview" data-total="{total}">'
+        f'<div class="slirn-sub-meta" style="margin-top:8px;">{summary}</div>'
+        f'<div class="slirn-stage2-srt-rows">{("".join(rows))}</div>'
+        f'</div>'
+    )
+
+
 def _file_url(task_id: str, project_id: str, kind: str, name: str) -> str:
     return (
         "/slirn/api/short_video_file?"
@@ -345,16 +425,25 @@ def _stage2_extract(project: dict) -> str:
     task_id = str(project.get("task_id") or "")
     project_id = str(project.get("id") or "")
     s2 = project.get("pipeline", {}).get("stage2_extract", {}) or {}
-    srt_path = s2.get("srt_path") or ""
+    srt_path_rel = s2.get("srt_path") or ""
     srt_url = _file_url(task_id, project_id, "stage2", "raw.srt") if s2.get("status") == "done" else ""
     srt_chars = int(s2.get("srt_chars") or 0)
     error_html = ""
     if s2.get("status") == "failed":
         err = (s2.get("error") or "失败") + " · " + (s2.get("stderr_tail") or "")[-200:]
         error_html = f'<div class="slirn-stage-error">{esc(err)}</div>'
+    # REQ-20261016-126：完成后 SRT 全文直接内联在卡片下方（500px 滚动容器）。
+    srt_preview_html = ""
+    if s2.get("status") == "done" and srt_path_rel:
+        repo_root = project.get("_repo_root")
+        if repo_root:
+            srt_abs = Path(str(repo_root)) / srt_path_rel
+        else:
+            srt_abs = Path(srt_path_rel)
+        srt_preview_html = _render_srt_preview(str(srt_abs))
+    # 「查看 raw.srt」作为下载原文件兜底（用户可右键另存为/换行符处理）
     preview_btn = (
-        f'<button class="slirn-btn-mini" data-action="sv-stage2-preview-srt" '
-        f'data-url="{esc(srt_url)}">查看 raw.srt</button>'
+        f'<a class="slirn-btn-mini" href="{esc(srt_url)}" target="_blank" rel="noopener">查看 raw.srt</a>'
         if srt_url else ""
     )
     meta = f'<span class="slirn-sv-muted">{srt_chars} 字</span>' if srt_chars else ""
