@@ -1174,7 +1174,10 @@ def test_upstream_prompt_and_constraint_hard_duration():
         n=4, **sva._duration_prompt_ctx(60.0, 90.0))
     assert "60–90" in sys_p
     assert "（X.Xs）" in sys_p, "必须声明以行末秒数标注为求和口径"
-    assert "30–45 行" in sys_p, "行数指引 = 区间半值（60/90 → 30–45 行）"
+    # REQ-20261016-127：行数指引已删（行数 × 平均 2s 启发式），改用「时间戳加总」新口径
+    assert "30–45 行" not in sys_p, "行数指引 = 行数 × 平均 2s 启发式（REQ-127 已删）"
+    assert "直接把这些标注的秒数相加" in sys_p, "新口径：时间戳加总"
+    assert "不要用「行数 × 平均 2 秒」" in sys_p, "新口径禁止行数 × 平均 2s"
     assert "约70秒" not in sys_p and "约 70 秒" not in sys_p
 
     c = sva._GROUPS_OUTPUT_CONSTRAINT.format(
@@ -1335,7 +1338,10 @@ def test_run_stage3_custom_duration_range_flows_to_prompt(tmp_path):
     assert calls["n"] == 1, "50s 在 40-80 内 → 不触发重试"
     assert "40–80 秒" in calls["sys"] and "40–80 秒" in calls["user"]
     assert "60–90" not in calls["sys"] and "60–90" not in calls["user"]
-    assert "20–40 行" in calls["sys"], "行数指引按新区间折算"
+    # REQ-20261016-127：行数指引已删，改用「时间戳加总」新口径
+    assert "20–40 行" not in calls["sys"], "行数指引已删（行数 × 平均 2s 启发式）"
+    assert "直接把这些标注的秒数相加" in calls["sys"], "新口径：时间戳加总"
+    assert "不要用「行数 × 平均 2 秒」" in calls["user"], "新口径禁止行数 × 平均 2s"
     assert state["duration_range"] == [40.0, 80.0]
     assert state["hl_duration_sec"] == {"1": 50.0}
     doc = json.loads(
@@ -1457,7 +1463,8 @@ def test_stage3_duration_range_wiring():
 # 明确是「每个片段」的时长上下限；三参数同一行；number 输入框边框可见。
 
 def test_stage3_system_prompt_builder_dynamic_params():
-    """builder 按参数渲染：条数/上下限/行数指引/示例全部跟着参数走。"""
+    """builder 按参数渲染：条数/上下限跟着参数走；行数指引/示例已按
+    REQ-20261016-127 去掉「行数 × 平均 2s」折算。"""
     s = svc.stage3_system_prompt(3, 40, 80)
     assert "挑选并组织出 3 条独立的短视频" in s
     assert "时长硬约束（40-80 秒）" in s
@@ -1467,10 +1474,13 @@ def test_stage3_system_prompt_builder_dynamic_params():
     assert "时长 > 80 秒（长了）" in s
     assert "拉到 40-80 区间内" in s
     assert "落在 [40, 80] 区间？" in s
-    assert "通常需要 20-40 行" in s, "行数指引 = 区间半值（40/80 → 20-40）"
-    assert "总时长 ≈ 60 秒" in s, "示例 = 区间中值（(40+80)/2）"
-    assert "60-90" not in s and "90.0" not in s and "25-45" not in s, \
-        "自定义参数下不得残留默认区间字样"
+    # 旧折算类占位符已删除（行数指引 / 区间中值示例 / 2.2s 平均）
+    assert "通常需要 20-40 行" not in s, "行数指引已删（行数 × 平均 2s 启发式）"
+    assert "总时长 ≈ 60 秒" not in s, "示例已从「行数 × 平均 2s」改为时间戳加总"
+    assert "平均 2.2s" not in s, "示例不应再出现 2.2s 平均口径"
+    # 新的时间戳加总示例
+    assert "2.5 + 2.2 + 2.8" in s, "示例应是时间戳秒数加总（2.5+2.2+2.8=7.5s）"
+    assert "60-90" not in s and "90.0" not in s, "自定义参数下不得残留默认区间字样"
 
 
 def test_stage3_system_prompt_builder_guards():
@@ -1484,14 +1494,18 @@ def test_stage3_system_prompt_builder_guards():
 
 
 def test_stage3_system_prompt_template_has_tokens():
+    """REQ-20261016-127：占位符只剩 {n}/{dmin}/{dmax} 三键；行数/平均类
+    折算占位符（{dmin2}/{dmax2}/{ex_sec}/{ex_lines}）已删除。"""
     tmpl = svc.stage3_system_prompt_template()
-    for tok in ("{n}", "{dmin}", "{dmax}", "{dmin2}", "{dmax2}",
-                "{ex_sec}", "{ex_lines}"):
+    for tok in ("{n}", "{dmin}", "{dmax}"):
         assert tok in tmpl, f"模板缺占位符 {tok}"
-    assert "{" not in tmpl.replace("{n}", "").replace("{dmin}", "") \
-        .replace("{dmax}", "").replace("{dmin2}", "").replace("{dmax2}", "") \
-        .replace("{ex_sec}", "").replace("{ex_lines}", ""), \
-        "模板不得含其它字面花括号（.format 会炸）"
+    for dropped in ("{dmin2}", "{dmax2}", "{ex_sec}", "{ex_lines}"):
+        assert dropped not in tmpl, f"折算类占位符 {dropped} 已删除（行数 × 平均 2s 启发式）"
+    # 模板不得含其它字面花括号（.format 会炸）
+    cleaned = tmpl
+    for tok in ("{n}", "{dmin}", "{dmax}"):
+        cleaned = cleaned.replace(tok, "")
+    assert "{" not in cleaned, "模板不得含其它字面花括号（.format 会炸）"
 
 
 def test_stage3_params_row_labels_and_template_attr():
@@ -1572,3 +1586,63 @@ def test_stage3_system_prompt_opening_and_ending_requirements():
     # 自检同步强化
     assert "能自然引入话题的引子" in p
     assert "而不是戛然而止或话说到一半" in p
+
+
+def test_stage3_prompt_no_row_count_avg_shortcut():
+    """REQ-20261016-127：时长口径不再引导「行数 × 平均 2s」折算。
+
+    - 系统提示词 + Stage 3 用户 prompt 不得把「行数 × 平均秒数」作为
+      **推荐**算法（之前用「选 {ex_lines} 行、平均 2.2s → 总时长 ≈」作为
+      正确示例，诱导 LLM 用行数估算）
+    - 必须显式说「时间戳加总」「不要用行数 × 平均 2s 估算」
+    """
+    from slirn_home import short_video_service as svc
+    from slirn_home import short_video_analyze as sva
+
+    sys_p = svc.STAGE3_SYSTEM_PROMPT
+
+    # 1) 旧的「推荐性」捷径示例消失（之前是「选 N 行、平均 X 秒 → 总时长」）
+    #    注意：「行数 × 平均 2 秒」作为「禁止」示例出现是允许的（明示禁令牌）
+    for bad in (
+        "选 {ex_lines} 行、平均 2.2s",     # 旧 example
+        "通常需要 {dmin2}-{dmax2} 行",     # 旧行数量级指引
+        "按每行约 2 秒",                   # 旧假设
+        "平均 2.2s",                       # 旧示例用的平均数
+        "ex_lines", "dmin2", "dmax2",      # 旧占位符
+    ):
+        assert bad not in sys_p, f"系统提示词含旧捷径推荐措辞：{bad!r}"
+
+    # 2) 新口径（时间戳加总 + 显式禁止捷径）
+    assert "把每行末尾的标注当成可加数据直接相加" in sys_p, \
+        "新口径必须明示：把标注秒数直接相加"
+    # 「行数 × 平均 2 秒」必须以「禁止」语态出现
+    assert "不要用「行数 × 平均 2 秒」" in sys_p, \
+        "新口径必须显式禁止「行数 × 平均 2s」捷径"
+    # 新 example 用真实时间戳加总
+    assert "2.5 + 2.2 + 2.8" in sys_p, \
+        "新 example 应是时间戳加总（2.5+2.2+2.8=7.5s）"
+
+    # 3) Stage 3 系统 prompt 同样不得引导捷径（与 3 同样口径）
+    usr_p = sva._UPSTREAM_CLIP_SYSTEM_PROMPT
+    for bad in ("按每行约 2 秒", "通常需要 {dmin2}", "折算", "2.2s"):
+        assert bad not in usr_p, f"Stage 3 系统 prompt 含旧捷径：{bad!r}"
+    assert "直接把这些标注的秒数相加" in usr_p, \
+        "Stage 3 系统 prompt 必须明示「直接把这些标注的秒数相加」"
+    assert "不要用「行数 × 平均 2 秒」" in usr_p, \
+        "Stage 3 系统 prompt 必须显式禁止「行数 × 平均 2s」捷径"
+
+
+def test_stage3_run_prompts_drop_dmin2_dmax2():
+    """run_stage3 / run_stage3_rerun 构造 user_payload 不再传 dmin2/dmax2。"""
+    import inspect
+    from slirn_home import short_video_analyze as sva
+
+    for fname in ("run_stage3", "rerun_stage3_one"):
+        func = getattr(sva, fname, None)
+        assert func is not None, f"缺函数 {fname}"
+        src = inspect.getsource(func)
+        assert "dmin2" not in src and "dmax2" not in src, \
+            f"{fname} 仍引用 dmin2/dmax2（行数折算）"
+        # 必须含新口径措辞
+        assert "直接相加" in src or "直接把这些标注" in src, \
+            f"{fname} 未含「直接相加」新口径"

@@ -534,9 +534,10 @@ _UPSTREAM_CLIP_SYSTEM_PROMPT = (
     "（每行字幕末尾用（X.Xs）标注了该行的真实时长），"
     "从中整理出{n}条独立的短视频：每条围绕一个标题展开，由若干条字幕组成，"
     "**每条短视频的总时长 = 组内全部选中行末尾（X.Xs）标注之和，必须落在"
-    " {dmin:.0f}–{dmax:.0f} 秒区间（含端点）**——低于 {dmin:.0f} 秒必须继续"
-    "增选与主题相关的行，超过 {dmax:.0f} 秒必须删减行；按常见语速（每行约"
-    " 2 秒）估算，一条达标短视频通常需要 {dmin2:.0f}–{dmax2:.0f} 行字幕。"
+    " {dmin:.0f}–{dmax:.0f} 秒区间（含端点）**——直接把这些标注的秒数相加"
+    "得到总时长，**不要用「行数 × 平均 2 秒」之类的捷径估算**（每行实际"
+    "时长在 1.0-4.5s 之间都有，平均估算法几乎一定会偏离 1-3 秒）。低于"
+    " {dmin:.0f} 秒必须继续增选与主题相关的行，超过 {dmax:.0f} 秒必须删减行。"
     "各条字幕按该标题的叙事需要排序，可以与srt原顺序不同。注意确保文字与"
     "时间戳的正确匹配，时间戳必须取自srt中真实存在的时间（不要把行末的"
     "秒数标注抄进输出）。"
@@ -649,10 +650,9 @@ def _norm_duration_range(
 
 
 def _duration_prompt_ctx(dmin: float, dmax: float) -> dict:
-    """提示词模板的时长占位符（dmin/dmax 秒 + 按每行 2s 折算的行数量级）。"""
+    """提示词模板的时长占位符（dmin/dmax 秒；REQ-20261016-127 起去掉按行折算）。"""
     return {
         "dmin": dmin, "dmax": dmax,
-        "dmin2": dmin / 2.0, "dmax2": dmax / 2.0,
     }
 
 
@@ -1265,8 +1265,8 @@ def run_stage3(
         + _UPSTREAM_CLIP_USER_PREFIX + "\n\n" + _annotate_srt_seconds(srt_text).strip()
         + f"\n\n请从上述字幕中整理出 {n_clips} 条短视频"
           f"（每条围绕一个标题；每条总时长 = 选中各行末尾（X.Xs）标注之和，"
-          f"必须落在 {dmin:.0f}–{dmax:.0f} 秒含端点，按每行约 2s 一般需"
-          f" {dur_ctx['dmin2']:.0f}–{dur_ctx['dmax2']:.0f} 行）。"
+          f"必须落在 {dmin:.0f}–{dmax:.0f} 秒含端点，把这些标注秒数直接相加，"
+          f"不要用「行数 × 平均 2 秒」估算）。"
         + _GROUPS_OUTPUT_CONSTRAINT.format(n=n_clips, **dur_ctx)
     )
 
@@ -1533,7 +1533,7 @@ def rerun_stage3_one(
         + _annotate_srt_seconds(srt_text).strip()
         + f"\n\n请从上述字幕中只整理出 1 组短视频（只围绕上述主题；总时长 ="
           f"选中各行末尾（X.Xs）标注之和，必须落在 {dmin:.0f}–{dmax:.0f} 秒"
-          f"含端点，按每行约 2s 一般需 {dur_ctx['dmin2']:.0f}–{dur_ctx['dmax2']:.0f} 行，"
+          f"含端点，把这些标注秒数直接相加，不要用「行数 × 平均 2 秒」估算，"
           "选中的字幕行要按叙事逻辑有条理地组织）。"
         + _GROUPS_OUTPUT_CONSTRAINT.format(n=1, **dur_ctx)
     )

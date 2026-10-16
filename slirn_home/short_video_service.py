@@ -1098,9 +1098,9 @@ _STAGE3_SYSTEM_PROMPT_TMPL = """你是一个短视频内容导演，输入一门
 7. 结尾关闭话题：最后一句必须能收束、关闭本条话题（结论 / 总结 / 点题 / 行动号召），不允许话题开着就结束、戛然而止。
 
 # 时长计算口径（以每行末尾标注的真实秒数为准，禁止用字符数估算）
-- 解析输入的每行字幕末尾都带有真实时长标注（如「（2.1s）」）；每条短视频的总时长 = 该条所有选中行标注秒数之和。
-- 不要用「字符数 / 4」等公式自行估算——快语速课程按字符估会高估约一倍（估出来的时长实际往往只有一半左右）。
-- 例：选 {ex_lines} 行、平均 2.2s → 总时长 ≈ {ex_sec} 秒，落在 {dmin}-{dmax} 区间 ✓；按常见语速（每行约 2 秒）一条达标短视频通常需要 {dmin2}-{dmax2} 行。
+- 解析输入的每行字幕末尾都带有真实时长标注（如「（2.1s）」），这个秒数 = 该行在 srt 中时间戳区间的真实长度（end_ms - start_ms）；每条短视频的总时长 = 该条所有选中行标注秒数之和。
+- 绝对不要用「行数 × 平均 2 秒」之类的捷径估算——课程语速差异大（每行 1.0s~4.5s 都常见），平均估算几乎一定会偏离 1-3 秒。把每行末尾的标注当成可加数据直接相加，才是唯一正确口径。
+- 例：一条短视频选了 3 行，标注分别是「（2.5s）」「（2.2s）」「（2.8s）」→ 总时长 = 2.5 + 2.2 + 2.8 = 7.5 秒，落在 {dmin}-{dmax} 区间 ✓。
 - 阈值边界：低于 {dmin} 秒必须补行（哪怕加一句过渡），超过 {dmax} 秒必须砍行；不允许"差不多就行"。
 
 # 凑时长/压时长的具体手段（按需使用）
@@ -1146,8 +1146,8 @@ def stage3_system_prompt(
 
     - 条数 / 时长上下限直接取调用方参数（与解析端 _norm_duration_range
       的兜底口径一致：这里只做文案渲染，倒挂时互换、非正值回默认）；
-    - {dmin2}/{dmax2} = 行数量级指引（区间半值，每行约 2s）；
-    - {ex_sec}/{ex_lines} = 口径示例（区间中值 / 按 2.2s 每行折算行数）。
+    - REQ-20261016-127：去掉「行数 × 平均 2s」折算类占位符
+      （{dmin2}/{dmax2}/{ex_sec}/{ex_lines}），统一用真实时间戳加总口径。
     """
     dmin = int(round(float(duration_min_sec)))
     dmax = int(round(float(duration_max_sec)))
@@ -1156,11 +1156,8 @@ def stage3_system_prompt(
     if dmax < dmin:
         dmin, dmax = dmax, dmin
     n = int(n_clips) if int(n_clips) > 0 else 4
-    ex_sec = round((dmin + dmax) / 2)
     return _STAGE3_SYSTEM_PROMPT_TMPL.format(
         n=n, dmin=dmin, dmax=dmax,
-        dmin2=max(1, round(dmin / 2)), dmax2=max(1, round(dmax / 2)),
-        ex_sec=ex_sec, ex_lines=max(1, round(ex_sec / 2.2)),
     )
 
 

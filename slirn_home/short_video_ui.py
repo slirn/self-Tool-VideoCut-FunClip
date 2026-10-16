@@ -472,6 +472,7 @@ def _stage2_extract(project: dict) -> str:
       </div>
       <div class="slirn-status-msg slirn-sv-stage2-msg" style="display:none;"></div>
     </div>
+    {srt_preview_html}
     {error_html}
     {_stage_logs(s2)}
   </div>
