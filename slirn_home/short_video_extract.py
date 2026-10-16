@@ -364,7 +364,7 @@ def run_stage5_one(
     svc.save_project(root, project)
 
     asr_srt = svc.stage5_default_srt_path(root, task_id, project_id, index)
-    refined_srt = svc.stage6_refined_srt_path(root, task_id, project_id, index)
+    refined_srt = svc.stage5_refined_srt_path(root, task_id, project_id, index)
     result = _run_funasr_extract(
         input_video=coarse_mp4, output_srt=asr_srt,
         repo_root=root, model=model, lang=lang, timeout_sec=timeout_sec,
@@ -420,7 +420,7 @@ def save_stage6_refined(
     """
     root = Path(repo_root)
     project = svc.load_project(root, task_id, project_id)
-    refined_srt = svc.stage6_refined_srt_path(root, task_id, project_id, index)
+    refined_srt = svc.stage5_refined_srt_path(root, task_id, project_id, index)
 
     if srt_text is not None:
         text = srt_text

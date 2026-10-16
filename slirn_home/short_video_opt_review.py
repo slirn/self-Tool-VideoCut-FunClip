@@ -422,7 +422,7 @@ def run_optimize_one(repo_root: Path | str, task_id: str, project_id: str,
         lines=json.dumps(lines_payload, ensure_ascii=False, indent=2),
     )
     raw = revision_service._call_llm(  # noqa: SLF001 — 复用同款客户端
-        _OPTIMIZE_SYSTEM_PROMPT, user_prompt, timeout=timeout_sec,
+        _OPTIMIZE_SYSTEM_PROMPT, user_prompt,
     )
     occs = parse_occurrences(raw, entries)
     words = aggregate_words(occs)

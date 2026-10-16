@@ -11057,25 +11057,6 @@ def _register_slirn_api(
     async def short_video_stage5_run(body: dict = Body(default_factory=dict)):
         """REQ-20261003-098：Stage 5 优化字幕 — 重新 ASR 一条粗剪 mp4。"""
         from slirn_home import short_video_extract as _sv_extract
-        tid = (body.get("task_id") or "").strip()
-        pid = (body.get("project_id") or "").strip()
-        if not tid or not pid:
-            return _err("缺少 task_id 或 project_id")
-        try:
-            state = _sv_coarse.run_stage4(
-                repo_root, tid, pid,
-                start_ost_ms=int(body.get("start_ost") or 0),
-                end_ost_ms=int(body.get("end_ost") or 100),
-            )
-        except Exception as e:  # noqa: BLE001
-            log.exception("stage4 run failed")
-            return _err(f"Stage 4 执行失败: {e}")
-        return _ok(stage4=state, toast=f"Stage 4 {state.get('status', '')}")
-
-    @app.app.post("/slirn/api/short_video_stage5_run")
-    async def short_video_stage5_run(body: dict = Body(default_factory=dict)):
-        """REQ-20261003-098：Stage 5 优化字幕 — 重新 ASR 一条粗剪 mp4。"""
-        from slirn_home import short_video_extract as _sv_extract
 
         tid = (body.get("task_id") or "").strip()
         pid = (body.get("project_id") or "").strip()
