@@ -1879,7 +1879,8 @@
     var ctx = innerCtx(); if (!ctx) return;
     var index = parseInt(btn.getAttribute('data-clip-index') || '0', 10);
     if (!index) return;
-    toast('重新 ASR 中…');
+    // REQ-20261016-136：按钮名「重新 ASR」→「提取短视频字幕」，toast 同步
+    toast('提取短视频字幕 中…');
     postJSON(API + '/short_video_stage5_run', {
       task_id: ctx.taskId, project_id: ctx.projectId, index: index
     }).then(function(r) {
@@ -1897,7 +1898,7 @@
     stage6RebuildSrt(index);
     var ta = document.querySelector('.slirn-stage5-srt[data-clip-index="' + index + '"]');
     var srt = ta ? ta.value : '';
-    if (!srt.trim()) return toast('字幕为空，请先编辑或重新 ASR', 'error');
+    if (!srt.trim()) return toast('字幕为空，请先编辑或提取字幕', 'error');
     toast('保存字幕中…');
     postJSON(API + '/short_video_stage5_save', {
       task_id: ctx.taskId, project_id: ctx.projectId, index: index, srt_text: srt

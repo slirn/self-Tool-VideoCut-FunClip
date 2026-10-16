@@ -3,7 +3,7 @@
 覆盖：
 1. _render_stage6_srt_rows 解析 SRT → 每行 3 按钮
 2. _stage6_refine 渲染含 .slirn-stage6-srt-rows-wrap + 隐藏 textarea
-3. 缺 SRT 时显示「点「重新 ASR」生成字幕」占位
+3. 缺 SRT 时显示「点「提取短视频字幕」生成字幕」占位（REQ-136 按钮改名）
 4. JS 路由表里有 sv-stage6-line-edit / line-toggle / line-resplit / toggle-source
 5. JS 函数实现存在
 6. CSS 块有 per-row 样式（含 deleted 红删线）
@@ -61,7 +61,8 @@ def test_render_stage6_srt_rows_empty_shows_placeholder():
     from slirn_home import short_video_ui as ui
     html = ui._render_stage6_srt_rows("", 1)
     assert "暂无字幕行" in html
-    assert "点「重新 ASR」生成" in html
+    # REQ-20261016-136：按钮名「重新 ASR」→「提取短视频字幕」
+    assert "点「提取短视频字幕」生成" in html
 
 
 def test_render_stage6_srt_rows_preserves_text_and_time():
@@ -105,19 +106,19 @@ def test_stage6_panel_contains_per_row_editor_and_hidden_textarea():
 
 
 def test_stage6_panel_empty_highlights_shows_placeholder():
-    """无 SRT 文件时显示「点「重新 ASR」生成字幕」占位。"""
+    """无 SRT 文件时显示「点「提取短视频字幕」生成字幕」占位（REQ-136 改名）。"""
     html = _stage6_html({
         "stage5_coarse": {"highlights": [
             {"index": 1, "coarse_mp4": "x", "duration_sec": 1.0},
         ]},
         "stage6_refine": {"highlights": [
-            {"index": 1, "status": "pending"},  # 无 refined_srt
+            {"index": 1, "status": "pending"},  # 无 refined_srt / asr_srt
         ]},
     })
     s5_idx = html.find('data-stage="6"')
     s6_idx = html.find('data-stage="7"')
     s5_chunk = html[s5_idx:s6_idx] if s6_idx > s5_idx else html[s5_idx:]
-    assert "点「重新 ASR」生成字幕" in s5_chunk
+    assert "点「提取短视频字幕」生成字幕" in s5_chunk
 
 
 # ---------- 3. JS 路由 + 函数 ----------

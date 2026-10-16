@@ -1210,7 +1210,7 @@ def _render_stage6_srt_rows(srt_text: str, hl_index: int) -> str:
     entries = _parse_srt_entries(srt_text or "")
     if not entries:
         return ('<div class="slirn-sv-muted" data-empty="1">'
-                '（暂无字幕行 — 点「重新 ASR」生成）</div>')
+                '（暂无字幕行 — 点「提取短视频字幕」生成）</div>')
     out = []
     out.append(f'<div class="slirn-stage6-srt-rows" data-clip-index="{esc(str(hl_index))}">')
     for ent in entries:
@@ -1256,6 +1256,10 @@ def _stage6_refine(project: dict) -> str:
     REQ-20261016-135：改为 tab 化（仿 Stage 3 大按钮）+ 单 pane（仿 Stage 4 REQ-109）。
     每条 clip 一个 tab，pane 内保留 .slirn-stage5-clip 卡片（per-row 编辑不破）。
     每 pane 加「▶ 预览」按钮（用 REQ-132 可拖动 + 可调大小浮窗）。
+
+    REQ-20261016-136：「重新 ASR」按钮改名为「提取短视频字幕」；提取后的 ASR SRT
+    必须立即 inline 显示在按钮下方（per-row 编辑器可修改）。修复：老项目
+    `refined_srt` 字段为空时 fallback 读 `asr_srt`，避免「点完按钮只看到占位」的 bug。
     """
     task_id = str(project.get("task_id") or "")
     project_id = str(project.get("id") or "")
@@ -1300,7 +1304,8 @@ def _stage6_refine(project: dict) -> str:
             merged["asr_chars"] = int(merged.get("asr_chars") or 0)
         s5_highlights.append(merged)
     # REQ-20261016-133：SRT 为空时的占位（提到外面避免 f-string 嵌套反斜杠）
-    empty_srt6_div = '<div class="slirn-sv-muted">点「重新 ASR」生成字幕</div>'
+    # REQ-20261016-136：按钮名统一为「提取短视频字幕」
+    empty_srt6_div = '<div class="slirn-sv-muted">点「提取短视频字幕」生成字幕</div>'
     hl_tabs = []
     hl_panes = []
     for i, hl in enumerate(s5_highlights):
@@ -1323,11 +1328,14 @@ def _stage6_refine(project: dict) -> str:
         mp4_name = Path(str(raw_mp4)).name if raw_mp4 else ""
         mp4_url = _file_url(task_id, project_id, "stage4", mp4_name) if mp4_name else ""
         # 读 SRT 内容（如果有 refined）— 文件小直接 inline
+        # REQ-20261016-136：refined 缺失时 fallback 读 ASR SRT（兼容老项目 /
+        # refined_srt 写入失败场景）。两者都是 funasr 输出，结构相同。
         srt_inline = ""
         srt_rows_html = ""
-        if refined_name:
+        srt_source = refined_name or asr_name
+        if srt_source:
             srt_path = Path(__file__).resolve().parent.parent  # repo root
-            full_path = srt_path / "tasks" / task_id / "short_video" / project_id / "stage5" / refined_name
+            full_path = srt_path / "tasks" / task_id / "short_video" / project_id / "stage5" / srt_source
             if full_path.is_file():
                 try:
                     txt = full_path.read_text(encoding="utf-8", errors="replace")
@@ -1383,7 +1391,8 @@ def _stage6_refine(project: dict) -> str:
             f'{meta_html}'
             f'</div>'
             f'<div class="slirn-sv-card-actions">'
-            f'<button class="slirn-btn-mini" data-action="sv-stage5-asr" data-clip-index="{idx}">重新 ASR</button>'
+            # REQ-20261016-136：按钮名「重新 ASR」→「提取短视频字幕」
+            f'<button class="slirn-btn-mini" data-action="sv-stage5-asr" data-clip-index="{idx}">提取短视频字幕</button>'
             f'<button class="slirn-btn-mini" data-action="sv-stage5-save" data-clip-index="{idx}">保存修正</button>'
             f'<button class="slirn-btn-mini" data-action="sv-stage6-toggle-source" '
             f'data-clip-index="{idx}" title="在行编辑视图与 SRT 源文视图之间切换">📝 切换源</button>'
@@ -1400,7 +1409,7 @@ def _stage6_refine(project: dict) -> str:
             f'</div>'
             # 隐藏 textarea 作为 SRT 源（保存按钮从这里读）
             f'<textarea rows="6" class="slirn-stage5-srt" data-clip-index="{idx}" '
-            f'style="display:none;" placeholder="点「重新 ASR」后再编辑">{srt_inline}</textarea>'
+            f'style="display:none;" placeholder="点「提取短视频字幕」后再编辑">{srt_inline}</textarea>'
             f'{err_html}'
             f'</div>'
             f'</div>'
@@ -1410,7 +1419,7 @@ def _stage6_refine(project: dict) -> str:
     coarse_has_artifact = bool(
         (project.get("pipeline", {}).get("stage5_coarse") or {}).get("highlights"))
     empty_hint6_div = (
-        '<div class="slirn-sv-muted">尚无优化结果 — 每条 clip 依次「重新 ASR → ✨ LLM 优化」</div>'
+        '<div class="slirn-sv-muted">尚无优化结果 — 每条 clip 依次「提取短视频字幕 → ✨ LLM 优化」</div>'
         if coarse_has_artifact else
         '<div class="slirn-sv-muted">先完成 Stage 5 粗剪</div>'
     )
@@ -1421,7 +1430,7 @@ def _stage6_refine(project: dict) -> str:
     {_stage_badge(s5.get("status"))}
   </div>
   <div class="slirn-stage-body">
-    <div class="slirn-sv-muted">每条独立处理：先重新 ASR → LLM 优化 → 行级采纳/拒绝/编辑 → 保存</div>
+    <div class="slirn-sv-muted">每条独立处理：先提取短视频字幕 → LLM 优化 → 行级采纳/拒绝/编辑 → 保存</div>
     <div class="slirn-sv-card-actions" style="margin:10px 0; padding:8px; background:rgba(0,0,0,.04); border-radius:6px;">
       <strong>🔍 批量替换（按当前项目所有 clip）</strong>
       <input type="text" class="slirn-sv-batch-word" placeholder="搜索词" style="margin:0 6px; padding:4px 8px;">
